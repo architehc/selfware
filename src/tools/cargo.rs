@@ -32,6 +32,46 @@ pub(crate) fn cargo_program() -> std::path::PathBuf {
     std::path::PathBuf::from("cargo")
 }
 
+/// Marker naming the "no Cargo.toml here" refusal, so the verification
+/// accounting can tell a cargo tool that ran nothing from a failing check.
+pub(crate) const NO_CARGO_MANIFEST_MARKER: &str = "NO_CARGO_MANIFEST";
+
+/// Fail fast when the cargo tool would run where no Cargo.toml exists (the
+/// directory or any parent — where cargo itself looks).
+///
+/// 0.9.4 live finding: the final review of a Python project ran `cargo_check`
+/// and the run reported "verification FAILED". The call is refused with a
+/// typed error that names the project's actual languages, and the accounting
+/// (`tool_dispatch::verification_call_ran_nothing`) never counts it as a
+/// failing verification of the task.
+pub(crate) fn ensure_cargo_manifest(tool: &str) -> Result<()> {
+    let anchored = crate::tools::workspace_root::anchor_path(std::path::Path::new("."));
+    let dir: std::path::PathBuf = anchored.components().collect();
+    if crate::agent::verification_scope::cargo_project_root(&dir).is_some() {
+        return Ok(());
+    }
+    let languages: Vec<String> = crate::doctor::detect_project_languages(&dir)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let detected = if languages.is_empty() {
+        String::new()
+    } else {
+        format!(" This project is {}:", languages.join(" + "))
+    };
+    Err(crate::errors::ToolError::Execution {
+        name: tool.to_string(),
+        message: format!(
+            "{NO_CARGO_MANIFEST_MARKER}: no Cargo.toml in {} or any parent directory — this \
+             is not a Rust project, so `{tool}` does not apply and ran nothing (this is not a \
+             verification failure).{detected} verify with the project's own checks (e.g. \
+             `python3 -m pytest`, `npm test`, `go test ./...`).",
+            dir.display()
+        ),
+    }
+    .into())
+}
+
 /// Maximum output buffer size from a cargo command (16 MB).
 /// Prevents a runaway cargo process from consuming unlimited memory.
 const MAX_CARGO_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
@@ -207,6 +247,7 @@ impl Tool for CargoTest {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
@@ -343,6 +384,7 @@ impl Tool for CargoCheck {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
@@ -463,6 +505,7 @@ impl Tool for CargoClippy {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
@@ -576,6 +619,7 @@ impl Tool for CargoFmt {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();

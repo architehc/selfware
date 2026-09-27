@@ -967,3 +967,41 @@ fn plain_names_are_accepted_as_cargo_test_operands() {
     assert!(reject_flag_like_operand("cargo_test", "package", Some("hexyl")).is_ok());
     assert!(reject_flag_like_operand("cargo_test", "package", None).is_ok());
 }
+
+#[tokio::test]
+async fn cargo_tools_refuse_fast_without_a_manifest() {
+    // 0.9.4: `cargo_check` on a Python project reported "verification
+    // FAILED". Every cargo tool now refuses with a typed NO_CARGO_MANIFEST
+    // error naming the project's languages, before spawning cargo.
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(ws.path().to_path_buf());
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(CargoCheck),
+        Box::new(CargoTest),
+        Box::new(CargoClippy),
+        Box::new(CargoFmt),
+    ];
+    for tool in tools {
+        let err =
+            crate::tools::workspace_root::scope(root.clone(), tool.execute(serde_json::json!({})))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains(NO_CARGO_MANIFEST_MARKER),
+            "{}: {err}",
+            tool.name()
+        );
+        assert!(err.contains("Python"), "{}: {err}", tool.name());
+        assert!(err.contains("not a verification failure"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn verification_gate_cargo_checks_are_not_run_without_a_manifest() {
+    let ws = tempfile::tempdir().unwrap();
+    let result = crate::testing::verification::cargo_not_applicable_for_tests(ws.path());
+    assert!(result.not_run && result.passed, "{result:?}");
+    assert!(result.output.contains("no Cargo.toml"), "{}", result.output);
+}

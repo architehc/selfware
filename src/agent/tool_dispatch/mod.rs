@@ -80,6 +80,15 @@ pub(super) fn shell_exit_ran_nothing(code: i64) -> bool {
 pub(crate) fn verification_call_ran_nothing(name: &str, args_str: &str, result: &str) -> bool {
     Agent::shell_exit_code(result).is_some_and(shell_exit_ran_nothing)
         || crate::agent::runner_invocation::detect_for_call(name, args_str, result).is_some()
+        || cargo_found_no_manifest(result)
+}
+
+/// A cargo run with no manifest to run on: the cargo tools' typed refusal
+/// (`tools::cargo::ensure_cargo_manifest`) or cargo's own "could not find
+/// `Cargo.toml`" (a shell `cargo check` in a non-Rust project).
+pub(crate) fn cargo_found_no_manifest(result: &str) -> bool {
+    result.contains(crate::tools::cargo::NO_CARGO_MANIFEST_MARKER)
+        || result.contains("could not find `Cargo.toml`")
 }
 
 impl Agent {
@@ -171,8 +180,9 @@ impl Agent {
         // The model is told the right invocation once
         // (`runner_unavailable_note`).
         if !success
-            && crate::agent::runner_invocation::detect_for_call(name, args_str, result_str)
+            && (crate::agent::runner_invocation::detect_for_call(name, args_str, result_str)
                 .is_some()
+                || cargo_found_no_manifest(result_str))
         {
             debug!("{name}: the runner was never started; no check ran, so nothing is recorded");
             return None;

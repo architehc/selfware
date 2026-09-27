@@ -545,6 +545,64 @@ mod agent_lifecycle {
         );
     }
 
+    /// 0.9.4 live finding: the review of a Python project ran `cargo_check`
+    /// (no Cargo.toml anywhere) and the run summary reported "verification
+    /// FAILED (1 checks: cargo_check)". A cargo run with no manifest — the
+    /// cargo tools' typed refusal or cargo's own message from a shell — and a
+    /// runner the interpreter could not start ran no check: the credited
+    /// verification must not count them; a real failure still counts.
+    #[tokio::test]
+    async fn checks_that_ran_nothing_are_not_counted_as_failed_verification() {
+        let (mut agent, _dir) = agent().await;
+        let mut cp = crate::checkpoint::TaskCheckpoint::new("t".into(), "review".into());
+        let log = |name: &str, args: serde_json::Value, success: bool, result: &str| {
+            crate::checkpoint::ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: name.to_string(),
+                arguments: args.to_string(),
+                result: Some(result.to_string()),
+                success,
+                duration_ms: Some(1),
+            }
+        };
+        cp.log_tool_call(log(
+            "cargo_check",
+            json!({}),
+            false,
+            "Tool execution failed: NO_CARGO_MANIFEST: no Cargo.toml in /w or any parent directory",
+        ));
+        cp.log_tool_call(log(
+            "shell_exec",
+            json!({"command": "cargo check"}),
+            false,
+            r#"{"exit_code":101,"stdout":"","stderr":"error: could not find `Cargo.toml` in `/w` or any parent directory"}"#,
+        ));
+        cp.log_tool_call(log(
+            "shell_exec",
+            json!({"command": "python3 -m pytest"}),
+            false,
+            r#"{"exit_code":1,"stdout":"/usr/bin/python3: No module named pytest\n","stderr":""}"#,
+        ));
+        agent.current_checkpoint = Some(cp);
+        assert_eq!(
+            agent.credited_verification_summary(),
+            None,
+            "nothing ran, so nothing failed (and nothing passed)"
+        );
+        assert!(agent.verification_check_names().is_empty());
+
+        // A check that ran and failed is still counted.
+        if let Some(cp) = agent.current_checkpoint.as_mut() {
+            cp.log_tool_call(log(
+                "shell_exec",
+                json!({"command": "python3.12 -m pytest"}),
+                false,
+                r#"{"exit_code":1,"stdout":"FAILED tests/test_x.py::test_a\n1 failed","stderr":""}"#,
+            ));
+        }
+        assert_eq!(agent.credited_verification_summary(), Some((false, 1)));
+    }
+
     /// The model is told the right invocation ONCE, then a one-line reminder.
     #[tokio::test]
     async fn the_runner_correction_is_given_once() {

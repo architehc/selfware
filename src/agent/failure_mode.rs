@@ -107,6 +107,14 @@ pub(crate) const FINISH_STALL_ADVICE: &str = "the changes were made and verified
 pub(crate) const VERIFICATION_FAILED_NOTE: &str =
     "verification FAILED — no check the run ran passed on the final tree";
 
+/// Evidence note for a read-only run that changed nothing but whose model ran
+/// checks that did not pass: they concern the workspace, not a change (there
+/// is none to verify), so they are reported, never as "verification FAILED"
+/// (0.9.4 live finding: a Python review's stray `cargo_check` turned the
+/// verdict red). `cli_banner` keys its ℹ️ header on it.
+pub(crate) const VERIFICATION_INFORMATIONAL_NOTE: &str =
+    "did not pass — informational: no edits were made, so no change was verified";
+
 /// Evidence note for a completed edit run on which no verification check ran
 /// (every stage was not runnable, or none applied); `cli_banner` keys its
 /// non-✅ header on it (review C2, 0.9.1).
@@ -721,6 +729,15 @@ impl FailureMode {
                 "⚠️ Finished — no file changes made, and verification FAILED ({})",
                 self.kind.tag()
             )
+        } else if matches!(self.kind, FailureKind::NoChange)
+            && self.evidence.contains(VERIFICATION_INFORMATIONAL_NOTE)
+        {
+            // Read-only deliverable; checks the model ran did not pass, but
+            // nothing was changed, so nothing was being verified.
+            format!(
+                "ℹ️ Completed — no file changes made; checks run during the task did not pass (informational, not a verification failure) ({})",
+                self.kind.tag()
+            )
         } else if matches!(self.kind, FailureKind::NoChange) {
             // Completed, but made no edits — honest neutral banner, not a
             // "successfully (REAL_EDIT)" claim and not an abort.
@@ -782,8 +799,9 @@ fn safety_blocked_share(agent: &Agent) -> Option<(usize, usize)> {
 /// - `NoChange` on a task NOT classified read-only → `VerificationFailed`: the
 ///   run's own checks failed and nothing was changed to address them.
 /// - `NoChange` on a read-only task stays `NoChange` (the report is the
-///   deliverable; a failing check is a finding about the workspace), but the
-///   evidence names the failure so the banner is not ✅.
+///   deliverable; a failing check is a finding about the workspace). The
+///   evidence names the checks as INFORMATIONAL — nothing changed, so no
+///   change was verified (0.9.4) — and the banner is ℹ️, not ✅.
 ///
 /// - `Success` with no check at all (`None`) stays `Success` (exit 0) but
 ///   carries `VERIFICATION_NOT_PERFORMED_NOTE`, so the banner is not ✅.
@@ -825,9 +843,11 @@ pub(crate) fn with_verification_verdict(
             advice: "the run ended with failing checks and no edits — if the task needed changes, none landed".to_string(),
             restored_files: base.restored_files,
         },
+        // Read-only and nothing changed: the checks the model ran are
+        // findings about the workspace, not a verification of a change.
         FailureKind::NoChange => FailureMode {
             evidence: format!(
-                "{}; {VERIFICATION_FAILED_NOTE} ({checks} check(s))",
+                "{}; {checks} check(s) run during the task {VERIFICATION_INFORMATIONAL_NOTE}",
                 base.evidence
             ),
             ..base

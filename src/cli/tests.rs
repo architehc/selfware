@@ -1233,6 +1233,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         ],
         verification: Some((true, 4)),
         verification_checks: Vec::new(),
+        verification_informational: false,
         preexisting_failures: Vec::new(),
         vision_calls: None,
         total_tokens: 123_456,
@@ -3254,6 +3255,33 @@ fn render_run_summary_lists_workload_quotas_only_when_set() {
     );
     assert!(
         rendered.contains("  ! per-turn enable_thinking"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn read_only_no_edit_failed_checks_render_as_informational() {
+    // 0.9.4 live finding: a Python review's stray `cargo_check` printed
+    // "outcome: finished — verification FAILED". Nothing was changed, so
+    // nothing was being verified: the checks are informational.
+    let mut summary = sample_summary();
+    summary.files_changed.clear();
+    summary.verification = Some((false, 1));
+    summary.verification_checks = vec!["`python -m pytest`".to_string()];
+    summary.verification_informational = true;
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("verification FAILED"), "{rendered}");
+    assert!(rendered.contains("informational"), "{rendered}");
+    assert!(
+        rendered.contains("verification: informational — no edits to verify"),
+        "{rendered}"
+    );
+    // An edit run keeps the failure.
+    summary.verification_informational = false;
+    let rendered = render_run_summary(&summary, None);
+    assert!(rendered.contains("verification FAILED"), "{rendered}");
+    assert!(
+        rendered.contains("verification: failed (1 checks"),
         "{rendered}"
     );
 }

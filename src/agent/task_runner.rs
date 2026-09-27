@@ -541,6 +541,10 @@ pub struct RunSummary {
     /// and the verification commands the run executed), in order, deduped.
     /// A bare "passed (N checks)" named nothing (UX field test, 0.9.0).
     pub verification_checks: Vec<String>,
+    /// A read-only task that changed no file: `verification` describes
+    /// checks the model ran about the workspace, not a verification of a
+    /// change — rendered as informational, never "verification FAILED".
+    pub verification_informational: bool,
     /// Checks that fail on the final tree with errors that were ALL already
     /// reported on the tree the task started from — one line each
     /// ("`cargo check`: failing before the task too (pre-existing: …) — not
@@ -662,6 +666,8 @@ impl Agent {
             files_changed,
             verification: self.credited_verification_summary(),
             verification_checks: self.verification_check_names(),
+            verification_informational: self.current_task_is_read_only()
+                && self.file_tracker.stale_files.is_empty(),
             preexisting_failures: self.preexisting_failure_notes(),
             vision_calls: self.vision_call_outcomes(),
             total_tokens: task_usage.total_tokens,

@@ -269,6 +269,29 @@ fn check_not_run(check_type: CheckType, reason: &str) -> CheckResult {
     }
 }
 
+/// A cargo check where no Cargo.toml exists (the project root or any
+/// parent): NOT RUN, never a failure — a Python project with a stray `.rs`
+/// file has no cargo project to check (0.9.4: a cargo failure on a non-Rust
+/// repo read as "verification FAILED").
+fn cargo_not_applicable(check_type: CheckType, project_root: &Path) -> Option<CheckResult> {
+    if crate::agent::verification_scope::cargo_project_root(project_root).is_some() {
+        return None;
+    }
+    Some(check_not_run(
+        check_type,
+        &format!(
+            "no Cargo.toml in {} or any parent directory — not a Rust project",
+            project_root.display()
+        ),
+    ))
+}
+
+/// Test hook for [`cargo_not_applicable`] (the gate's cargo checks).
+#[cfg(test)]
+pub(crate) fn cargo_not_applicable_for_tests(project_root: &Path) -> CheckResult {
+    cargo_not_applicable(CheckType::TypeCheck, project_root).expect("no manifest here")
+}
+
 /// Verification result for a single check
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
@@ -1177,6 +1200,9 @@ impl VerificationGate {
 
     /// Run cargo check
     async fn run_cargo_check(&self) -> Result<CheckResult> {
+        if let Some(not_run) = cargo_not_applicable(CheckType::TypeCheck, &self.project_root) {
+            return Ok(not_run);
+        }
         let start = Instant::now();
 
         let output = match run_reaped(
@@ -1215,6 +1241,9 @@ impl VerificationGate {
 
     /// Run cargo fmt --check
     async fn run_cargo_fmt_check(&self) -> Result<CheckResult> {
+        if let Some(not_run) = cargo_not_applicable(CheckType::Format, &self.project_root) {
+            return Ok(not_run);
+        }
         let start = Instant::now();
 
         let output = match run_reaped(
@@ -1279,6 +1308,9 @@ impl VerificationGate {
 
     /// Run cargo test with timeout to prevent getting stuck
     async fn run_cargo_test(&self) -> Result<CheckResult> {
+        if let Some(not_run) = cargo_not_applicable(CheckType::Test, &self.project_root) {
+            return Ok(not_run);
+        }
         let start = Instant::now();
 
         // Apply timeout from config (default 5 minutes)
@@ -1340,6 +1372,9 @@ impl VerificationGate {
 
     /// Run cargo clippy
     async fn run_cargo_clippy(&self) -> Result<CheckResult> {
+        if let Some(not_run) = cargo_not_applicable(CheckType::Lint, &self.project_root) {
+            return Ok(not_run);
+        }
         let start = Instant::now();
 
         let output = match run_reaped(

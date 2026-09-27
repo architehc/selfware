@@ -7356,6 +7356,17 @@ fn render_run_summary_for(
             ),
             None => format!("outcome: failed — {}", without_task_failed_prefix(reason)),
         }),
+        // A read-only task that changed nothing: the checks the model ran
+        // are findings about the workspace, not a failed verification of a
+        // change (0.9.4). Still never a bare "completed" over them.
+        None if summary.verification_informational
+            && matches!(summary.verification, Some((false, _))) =>
+        {
+            lines.push(
+                "outcome: finished — no edits; checks run during the task did not pass (informational, not a verification failure)"
+                    .to_string(),
+            )
+        }
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines
             .push("outcome: finished — verification FAILED (not a verified result)".to_string()),
@@ -7501,6 +7512,10 @@ fn render_run_summary_for(
             summary.preexisting_failures.join("; ")
         ),
         Some((true, checks)) => format!("passed ({})", named(checks)),
+        Some((false, checks)) if summary.verification_informational => format!(
+            "informational — no edits to verify; checks run during the task did not pass ({})",
+            named(checks)
+        ),
         Some((false, checks)) => format!("failed ({})", named(checks)),
         None => "not performed".to_string(),
     };

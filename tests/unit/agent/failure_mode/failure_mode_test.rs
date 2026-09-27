@@ -782,21 +782,31 @@ fn failed_verification_on_a_non_read_only_no_change_is_a_failure() {
     assert!(!mode.kind.is_nonfailure());
 }
 
-/// A read-only report whose own check failed keeps its non-failure label
-/// (the report is the deliverable) but never renders the ✅ "Completed"
-/// banner.
+/// A read-only report whose model ran a check that failed keeps its
+/// non-failure label (the report is the deliverable) and never renders the ✅
+/// "Completed" banner. Nothing was changed, so nothing was being verified:
+/// the checks are reported as INFORMATIONAL, not "verification FAILED"
+/// (0.9.4 live finding: a Python review's stray `cargo_check` turned the
+/// verdict red).
 #[test]
 fn failed_verification_on_a_read_only_no_change_is_named_not_green() {
     let mode = with_verification_verdict(verdict(FailureKind::NoChange), Some((false, 1)), true);
     assert_eq!(mode.kind, FailureKind::NoChange);
     assert!(
-        mode.evidence.contains(VERIFICATION_FAILED_NOTE),
+        mode.evidence.contains(VERIFICATION_INFORMATIONAL_NOTE),
+        "{}",
+        mode.evidence
+    );
+    assert!(
+        !mode.evidence.contains(VERIFICATION_FAILED_NOTE),
         "{}",
         mode.evidence
     );
     let banner = mode.cli_banner();
     assert!(!banner.contains("✅"), "{banner}");
-    assert!(banner.contains("verification FAILED"), "{banner}");
+    assert!(!mode.is_clean_success(), "{banner}");
+    assert!(banner.contains("informational"), "{banner}");
+    assert!(!banner.contains("verification FAILED"), "{banner}");
 }
 
 #[test]
