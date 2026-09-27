@@ -209,7 +209,7 @@ Each phase is shippable alone:
   `InvalidTransition`, never a panic.
 - The task table is the Lean `step` function. `formal/task_table.json` is its
   export; the Rust test `rust_table_equals_the_lean_model_for_every_pair`
-  compares all 140 (state, event) pairs, refusals included.
+  compares all 150 (state, event) pairs, refusals included.
 - `scripts/check_formal.sh` re-checks both Lean files and the exported table
   (`--write` regenerates it; skipped with a message when `lean` is absent).
   It is not a CI job: CI would need a Lean toolchain installed per run.

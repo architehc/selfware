@@ -37,5 +37,6 @@
   ["paused", "interrupt", "interrupted"],
   ["paused", "cancel", "cancelled"],
   ["paused", "timeout", "failed"],
+  ["paused", "edit", "paused"],
   ["interrupted", "resume", "queued"]
 ]

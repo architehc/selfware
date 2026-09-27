@@ -64,6 +64,10 @@ pub enum TaskEvent {
     Cancel,
     /// any live state → failed (the state's deadline passed).
     Timeout,
+    /// paused → paused: the user changed the task's description or
+    /// constraints while it was paused (only a paused task is edited; a
+    /// finished task is forked into a new task instead).
+    Edit,
 }
 
 impl TaskState {
@@ -100,7 +104,7 @@ impl TaskState {
 
 impl TaskEvent {
     /// Every event, in the Lean model's `allEvents` order.
-    pub const ALL: [TaskEvent; 14] = [
+    pub const ALL: [TaskEvent; 15] = [
         TaskEvent::Start,
         TaskEvent::Planned,
         TaskEvent::NeedInput,
@@ -115,6 +119,7 @@ impl TaskEvent {
         TaskEvent::Interrupt,
         TaskEvent::Cancel,
         TaskEvent::Timeout,
+        TaskEvent::Edit,
     ];
 
     /// Parse a log / table name.
@@ -157,6 +162,7 @@ impl Label for TaskEvent {
             TaskEvent::Interrupt => "interrupt",
             TaskEvent::Cancel => "cancel",
             TaskEvent::Timeout => "timeout",
+            TaskEvent::Edit => "edit",
         }
     }
 }
@@ -189,6 +195,8 @@ fn step(s: TaskState, e: TaskEvent) -> Option<TaskState> {
         // choice; a later phase may remember the pre-pause state).
         (s, E::Pause) => (!s.is_terminal() && s != S::Paused).then_some(S::Paused),
         (S::Paused, E::Resume) => Some(S::Executing),
+        // The user edits a paused task; it stays paused until resumed.
+        (S::Paused, E::Edit) => Some(S::Paused),
         // An interrupted task resumes as a new segment of the same task.
         (S::Interrupted, E::Resume) => Some(S::Queued),
         // failure / interrupt / cancel from any live state
@@ -223,13 +231,19 @@ impl Machine for TaskMachine {
     }
 
     /// P1 (terminal states are sticky; only `interrupted --resume--> queued`
-    /// leaves one) and P2 (the reached state, if live, has a timeout exit to
-    /// `failed`).
+    /// leaves one), P2 (the reached state, if live, has a timeout exit to
+    /// `failed`) and P9 (an edit happens only while paused and keeps the
+    /// task paused).
     fn check_step(from: &TaskState, event: &TaskEvent, to: &TaskState) -> Result<(), String> {
         if from.is_terminal() && !(*from == TaskState::Interrupted && *event == TaskEvent::Resume) {
             return Err(format!(
                 "P1 violated: terminal state `{from}` left via `{}` to `{to}`",
                 event.label()
+            ));
+        }
+        if *event == TaskEvent::Edit && !(*from == TaskState::Paused && *to == TaskState::Paused) {
+            return Err(format!(
+                "P9 violated: edit applied in `{from}` leading to `{to}`"
             ));
         }
         if !to.is_terminal() && step(*to, TaskEvent::Timeout) != Some(TaskState::Failed) {

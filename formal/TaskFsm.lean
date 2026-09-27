@@ -16,6 +16,10 @@
     absorbing failures past its threshold.
   * P8 retry with backoff never runs past its wall-clock deadline, for any
     delay policy.
+  * P9 a task is only edited while paused, and an edit changes nothing but
+    the recorded description/constraints: the state stays `paused`, and
+    the task can still resume or be abandoned afterwards. A finished task
+    is never edited (it is forked into a new task instead).
 -/
 
 namespace Selfware
@@ -30,6 +34,7 @@ inductive TaskState where
 inductive TaskEvent where
   | start | planned | needInput | inputArrived | verify | verified | reject
   | pause | resume | succeed | fail | interrupt | cancel | timeout
+  | edit
   deriving DecidableEq, Repr
 
 def TaskState.terminal : TaskState → Bool
@@ -51,6 +56,9 @@ def step : TaskState → TaskEvent → Option TaskState
   -- implementation remembers the pre-pause state)
   | s,          .pause        => if s.terminal || s == .paused then none else some .paused
   | .paused,    .resume       => some .executing
+  -- the user edits a paused task (description / constraints); the task
+  -- stays paused until it is resumed
+  | .paused,    .edit         => some .paused
   -- an interrupted task resumes as a new segment of the same task
   | .interrupted, .resume     => some .queued
   -- failure / interrupt / cancel from any live state
@@ -67,7 +75,7 @@ def allStates : List TaskState :=
 
 def allEvents : List TaskEvent :=
   [.start, .planned, .needInput, .inputArrived, .verify, .verified, .reject,
-   .pause, .resume, .succeed, .fail, .interrupt, .cancel, .timeout]
+   .pause, .resume, .succeed, .fail, .interrupt, .cancel, .timeout, .edit]
 
 theorem allStates_complete (s : TaskState) : s ∈ allStates := by
   cases s <;> simp [allStates]
@@ -95,6 +103,25 @@ theorem timeout_exits_table :
 theorem no_state_hangs (s : TaskState) (h : s.terminal = false) :
     step s .timeout = some .failed :=
   timeout_exits_table s (allStates_complete s) h
+
+/-! ### P9 — edits happen only while paused and keep the task paused -/
+
+theorem edit_only_while_paused_table :
+    ∀ s ∈ allStates, ∀ t ∈ allStates, step s .edit = some t →
+      s = .paused ∧ t = .paused := by
+  decide
+
+theorem edit_only_while_paused (s t : TaskState) (h : step s .edit = some t) :
+    s = .paused ∧ t = .paused :=
+  edit_only_while_paused_table s (allStates_complete s) t (allStates_complete t) h
+
+/-- An edited task is not stuck: it can resume, and it can still be
+    cancelled or time out. -/
+theorem edited_task_can_leave :
+    step .paused .resume = some .executing ∧
+    step .paused .cancel = some .cancelled ∧
+    step .paused .timeout = some .failed := by
+  decide
 
 /-! ## Resources owned by tasks, with time -/
 
@@ -325,7 +352,7 @@ def TaskEvent.name : TaskEvent → String
   | .inputArrived => "input_arrived" | .verify => "verify" | .verified => "verified"
   | .reject => "reject" | .pause => "pause" | .resume => "resume"
   | .succeed => "succeed" | .fail => "fail" | .interrupt => "interrupt"
-  | .cancel => "cancel" | .timeout => "timeout"
+  | .cancel => "cancel" | .timeout => "timeout" | .edit => "edit"
 
 def exportTable : String :=
   let rows := allStates.foldr (fun s acc =>

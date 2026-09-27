@@ -203,3 +203,33 @@ fn runtime_oracle_trips_in_debug_builds() {
         Tracked::new("t-broken", TaskState::Completed, EventLog::disabled());
     let _ = t.apply(TaskEvent::Start, "should never be accepted");
 }
+
+#[test]
+fn p9_edit_is_accepted_only_while_paused_and_keeps_it_paused() {
+    for s in TaskState::ALL {
+        match TaskMachine::next(&s, &TaskEvent::Edit) {
+            Ok(t) => {
+                assert_eq!(s, TaskState::Paused, "edit accepted in {s}");
+                assert_eq!(t, TaskState::Paused);
+            }
+            Err(e) => {
+                assert_ne!(s, TaskState::Paused);
+                assert_eq!(e.event, "edit");
+            }
+        }
+    }
+    // An edited task can still leave paused.
+    assert_eq!(
+        TaskMachine::next(&TaskState::Paused, &TaskEvent::Resume),
+        Ok(TaskState::Executing)
+    );
+    assert!(
+        TaskMachine::check_step(&TaskState::Paused, &TaskEvent::Edit, &TaskState::Paused).is_ok()
+    );
+    assert!(TaskMachine::check_step(
+        &TaskState::Executing,
+        &TaskEvent::Edit,
+        &TaskState::Executing
+    )
+    .is_err());
+}
