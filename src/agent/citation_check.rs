@@ -1719,16 +1719,18 @@ impl super::Agent {
         status.citations_requested =
             super::task_policy::task_requests_citations(self.task_context_for_classification());
         status.code_report = is_read_only
-            && (report.total > 0 || {
-                let project_name = root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                super::task_policy::task_references_project_code(
-                    self.task_context_for_classification(),
-                    project_name,
-                )
-            });
+            && (report.total > 0
+                || super::task_policy::task_is_code_review(self.task_context_for_classification())
+                || {
+                    let project_name = root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    super::task_policy::task_references_project_code(
+                        self.task_context_for_classification(),
+                        project_name,
+                    )
+                });
         status.not_corrected = limit_step_aside
             .as_ref()
             .map(|w| w.cause.note_word().to_string());

@@ -85,6 +85,12 @@ pub(crate) fn task_is_read_only(task_context: &str) -> bool {
         "assess",
         "evaluat",
         "investigat",
+        "critiqu",
+        "inspect",
+        "for bugs",
+        "find bugs",
+        "bug hunt",
+        "code smell",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -215,7 +221,125 @@ pub(crate) fn task_requests_citations(task_context: &str) -> bool {
         "audit",
         "with references",
     ];
-    ASKS.iter().any(|w| lower.contains(w))
+    ASKS.iter().any(|w| lower.contains(w)) || task_is_code_review(task_context)
+}
+
+/// Phrases that ask for a review of code — the deliverable is findings about
+/// the workspace's code, grounded in files the run read. Lexical, like the
+/// classifiers around it; kept in one list so every review consumer (the
+/// coverage gate, citation demand, the code-report grounding standard) sees
+/// the same decision (AGENTS.md rule 5: live 0.9.3, "can you review the
+/// selfware core do not code" was not held to the review standard).
+const CODE_REVIEW_INTENT: &[&str] = &[
+    "review",
+    "audit",
+    "code quality",
+    "quality of the code",
+    "quality of this code",
+    "assess the code",
+    "assess the codebase",
+    "assess the repo",
+    "assess this repo",
+    "assess this code",
+    "assess the quality",
+    "evaluate the code",
+    "evaluate the codebase",
+    "evaluate this code",
+    "evaluate the repo",
+    "critique the",
+    "critique this",
+    "inspect the code",
+    "inspect the codebase",
+    "look over the code",
+    "look through the code",
+    "go through the code",
+    "find bugs",
+    "find the bugs",
+    "look for bugs",
+    "hunt for bugs",
+    "bug hunt",
+    "find issues in",
+    "look for issues in",
+    "code smell",
+];
+
+/// Reviews scoped to a change (a diff, a PR, a commit) or to non-code
+/// artifacts (docs, a README, a plan): not a review of the repository's code.
+const NOT_A_CODE_REVIEW: &[&str] = &[
+    "pull request",
+    "merge request",
+    "the pr",
+    "this pr",
+    "my pr",
+    "the diff",
+    "this diff",
+    "git diff",
+    "the commit",
+    "this commit",
+    "last commit",
+    "recent commit",
+    "the patch",
+    "this patch",
+    "staged",
+    "my changes",
+    "the changes",
+    "these changes",
+    "changeset",
+    "readme",
+    "documentation",
+    "the docs",
+    "changelog",
+    "the plan",
+    "this plan",
+    "the essay",
+    "this essay",
+    "the text",
+    "this text",
+];
+
+/// `phrase` occurs in `lower` as whole words ("this pr" is not in "this
+/// project").
+fn contains_phrase(lower: &str, phrase: &str) -> bool {
+    lower.match_indices(phrase).any(|(at, m)| {
+        let before = lower[..at].chars().next_back();
+        let after = lower[at + m.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// True when the task asks for a review of the workspace's code — a
+/// read-only task whose deliverable is findings about the repository (or a
+/// named part of it): "review this repository for bugs", "can you review the
+/// selfware core do not code", "audit src/api", "assess the code quality of
+/// the parser". Such a run gets the repository inventory at start, its
+/// file-coverage ledger and the review coverage gate
+/// (`agent::review_coverage`), and its answer is held to the code-report
+/// citation standard. Change reviews (diff / PR / commit) and reviews of
+/// non-code artifacts are excluded; so is any task that must edit.
+pub(crate) fn task_is_code_review(task_context: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    if !CODE_REVIEW_INTENT.iter().any(|w| lower.contains(w)) {
+        return false;
+    }
+    if NOT_A_CODE_REVIEW.iter().any(|w| contains_phrase(&lower, w)) {
+        return false;
+    }
+    // "review the pros and cons of event sourcing": general knowledge, not
+    // this workspace — the same workspace signal the grounding gate uses,
+    // plus the review-specific "core" / "project" wording.
+    let names_workspace = task_references_project_code(task_context, "")
+        || [
+            "core",
+            "project",
+            "this",
+            "our ",
+            "my code",
+            "the app",
+            "everything",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
+    names_workspace && task_is_read_only(task_context)
 }
 
 pub(crate) fn task_references_project_code(task_context: &str, project_name: &str) -> bool {
@@ -508,6 +632,43 @@ mod tests {
             !task_references_workspace_artifact(general, "selfware"),
             "the refusal predicate must not fire on vocabulary alone"
         );
+    }
+
+    #[test]
+    fn code_review_classifier_catches_review_phrasings() {
+        // Live 0.9.3 (review-core transcript): this phrasing was not held to
+        // the review standard.
+        for task in [
+            "can you review the selfware core do not code",
+            "review this repository for bugs, cite file:line",
+            "Review the code in src/agent/ and report findings. Do NOT edit any files.",
+            "audit the auth module and write a report. Read-only: make no changes.",
+            "can you audit this codebase?",
+            "assess the code quality of the parser",
+            "Please evaluate the codebase for security problems",
+            "look for bugs in src/api",
+            "critique this project's error handling",
+        ] {
+            assert!(task_is_code_review(task), "{task}");
+            assert!(task_requests_citations(task), "{task}");
+            assert!(task_is_read_only(task), "{task}");
+        }
+    }
+
+    #[test]
+    fn code_review_classifier_skips_changes_docs_edits_and_general_knowledge() {
+        for task in [
+            "review the diff and suggest improvements",
+            "review this PR",
+            "review my changes before I commit",
+            "review the README for typos",
+            "Review the pros and cons of event sourcing",
+            "review and fix the parser bug in src/parse.rs",
+            "Implement the retry logic in src/api/client.rs",
+            "what is 2+2",
+        ] {
+            assert!(!task_is_code_review(task), "{task}");
+        }
     }
 
     #[test]
