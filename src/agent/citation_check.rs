@@ -397,6 +397,14 @@ impl GroundingStatus {
     /// no citations, or none that could even be located. Nothing in
     /// it was checked against the files — not even that a cited line
     /// exists — so it must not read as grounded (0.8.2 live validation D4).
+    /// Whether the mid-run `[citations] …` marker line says anything: not
+    /// for an answer with no citations that is not a report about this
+    /// workspace's code ("hi" printed "0 checked: 0 verified, …"). The
+    /// status itself is still recorded and the progress event still sent.
+    pub fn marker_is_informative(&self) -> bool {
+        self.total > 0 || self.code_report
+    }
+
     pub fn none_checkable(&self) -> bool {
         self.code_report
             && self.checkable_count() == 0
@@ -1741,7 +1749,9 @@ impl super::Agent {
         state.last_eval = Some((key, result.clone()));
         drop(state);
 
-        crate::output::citation_check(&marker);
+        if status.marker_is_informative() {
+            crate::output::citation_check(&marker);
+        }
         self.emit_progress(super::progress::ProgressEvent::TurnDecision {
             decision: "citation_check".to_string(),
             detail: format!("{} — {}", status.grounding_line(), marker),

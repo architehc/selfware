@@ -371,6 +371,49 @@ const WRONG_ANSWER: &str = "Findings: `alpha_helper` (`src/agent/widget.rs:30-35
 const FIXED_ANSWER: &str = "Findings: `alpha_helper` (`src/agent/widget.rs:10`) \
     returns a u32; `BetaState` (`widget.rs:25`) holds state.";
 
+/// A greeting answered on a read-only run printed
+/// "[citations] 0 checked: 0 verified, …": no citations and no code report,
+/// so the marker line says nothing. The status is still recorded.
+#[tokio::test]
+async fn greeting_gets_no_citation_marker_but_a_code_report_does() {
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    agent.current_task_context = "hi".to_string();
+    answer(
+        &mut agent,
+        1,
+        "Hello! What would you like to work on today?",
+    );
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("status still recorded");
+    assert_eq!(status.total, 0);
+    assert!(!status.code_report);
+    assert!(!status.marker_is_informative(), "greeting: no marker line");
+
+    // A review about this workspace with no citations keeps its marker
+    // (it is the "none checkable" warning).
+    let mut agent = gate_agent(ws.path()).await;
+    answer(
+        &mut agent,
+        1,
+        "The agent module looks fine overall; nothing stands out.",
+    );
+    agent.citation_gate(true);
+    let status = agent.grounding_status().expect("status recorded");
+    assert!(status.code_report);
+    assert!(status.marker_is_informative());
+
+    // Any citation keeps the marker.
+    let mut agent = gate_agent(ws.path()).await;
+    agent.current_task_context = "hi".to_string();
+    answer(&mut agent, 1, FIXED_ANSWER);
+    agent.citation_gate(true);
+    assert!(agent
+        .grounding_status()
+        .expect("status recorded")
+        .marker_is_informative());
+}
+
 #[tokio::test]
 async fn gate_feeds_back_wrong_citations_and_accepts_the_fix() {
     let ws = workspace();
