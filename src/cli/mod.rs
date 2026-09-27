@@ -3136,25 +3136,6 @@ async fn run_multi_chat_one_shot(
     } else if !quiet {
         multiagent::print_agent_summary(&results);
 
-        let summary = multiagent::MultiAgentChat::aggregate_results(&results);
-        println!("\n{}", "Aggregated Result:".bright_cyan().bold());
-        // Truncate long summaries for display (UTF-8 safe), same as the
-        // interactive loop.
-        const MAX_AGGREGATE_DISPLAY_CHARS: usize = 2000;
-        let preview = if summary.len() > MAX_AGGREGATE_DISPLAY_CHARS {
-            let mut end = MAX_AGGREGATE_DISPLAY_CHARS;
-            while end > 0 && !summary.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!(
-                "{}...\n[{} more chars]",
-                &summary[..end],
-                summary.len() - end
-            )
-        } else {
-            summary
-        };
-        println!("{}", preview);
         println!(
             "\n{} Total time: {:.2}s",
             "⏱".bright_yellow(),

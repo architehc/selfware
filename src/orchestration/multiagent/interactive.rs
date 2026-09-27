@@ -422,28 +422,9 @@ impl MultiAgentChat {
                 }
             };
 
-            // Honest per-agent results, then the aggregated output.
+            // Honest per-agent results. Each agent's reply was already
+            // streamed under its tag, so it is not repeated here.
             print_agent_summary(&results);
-
-            // Print aggregated results (combines all agent outputs into a
-            // single coherent summary rather than disconnected previews).
-            let summary = Self::aggregate_results(&results);
-            println!("\n{}", "Aggregated Result:".bright_cyan().bold());
-            // Truncate long summaries for display (UTF-8 safe)
-            let preview = if summary.len() > 2000 {
-                let mut end = 2000;
-                while end > 0 && !summary.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!(
-                    "{}...\n[{} more chars]",
-                    &summary[..end],
-                    summary.len() - end
-                )
-            } else {
-                summary
-            };
-            println!("{}", preview);
 
             println!(
                 "\n{} Total time: {:.2}s",
@@ -687,26 +668,9 @@ impl MultiAgentChat {
                 swarm.fail_task(&task_id);
             }
 
-            // 8. Honest per-agent results (no fake consensus vote), then the
-            //    aggregated output.
+            // 8. Honest per-agent results (no fake consensus vote). Each
+            //    agent's reply was already streamed under its tag.
             print_agent_summary(&results);
-
-            let summary = Self::aggregate_results(&results);
-            println!("\n{}", "Aggregated Result:".bright_cyan().bold());
-            let preview = if summary.len() > 2000 {
-                let mut end = 2000;
-                while end > 0 && !summary.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!(
-                    "{}...\n[{} more chars]",
-                    &summary[..end],
-                    summary.len() - end
-                )
-            } else {
-                summary
-            };
-            println!("{}", preview);
 
             println!(
                 "\n  {} Total time: {:.2}s",
