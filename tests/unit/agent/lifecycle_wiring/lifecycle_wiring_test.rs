@@ -560,6 +560,10 @@ async fn a_run_without_the_teardown_effect_still_drains_and_the_leak_surfaces() 
         line.starts_with("resources: 0 released, 1 leaked (port 1: port resources are not stopped automatically)"),
         "{line}"
     );
+    // And in the headless result's counts.
+    let outcome = agent.resource_teardown.clone().unwrap();
+    assert_eq!((outcome.released, outcome.leaked, outcome.kept), (0, 1, 0));
+    assert_eq!(outcome.summary, line);
     // And in the event log, as the abandon that raised the alarm.
     let (records, _) = registry.event_log().read_all();
     let path: Vec<String> = records

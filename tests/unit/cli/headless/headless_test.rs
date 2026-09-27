@@ -56,6 +56,7 @@ fn test_session_result_round_trip() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -94,6 +95,7 @@ fn test_session_result_with_failure_mode() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -123,6 +125,7 @@ fn test_session_result_json_fields() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -377,6 +380,7 @@ fn test_emit_result_does_not_panic() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     emit_result(&result, None);
 }
@@ -405,6 +409,7 @@ fn test_session_result_serializes_final_answer() {
         answer: Some("Fixed the lint and verified with cargo test.".to_string()),
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -441,6 +446,7 @@ fn test_session_result_omits_answer_when_none() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1047,6 +1053,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1080,6 +1087,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         answer: None,
         requirements_audit: None,
         partial: None,
+        resources: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -1395,6 +1403,7 @@ fn grounding_result() -> SessionResult {
         answer: Some("review".to_string()),
         requirements_audit: None,
         partial: None,
+        resources: None,
     }
 }
 
@@ -1582,4 +1591,31 @@ fn session_result_new_fields_default_when_absent() {
     assert!(de.outcome.is_empty());
     assert_eq!(de.files_changed, 0);
     assert!(de.patch_baseline.is_empty());
+}
+
+#[test]
+fn the_result_reports_resource_teardown_only_when_the_task_owned_something() {
+    let mut result = grounding_result();
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(!json.contains("\"resources\""), "{json}");
+
+    result.resources = Some(crate::resources::teardown::TeardownOutcome {
+        released: 2,
+        leaked: 1,
+        kept: 0,
+        summary: "resources: 2 released, 1 leaked (pid 9: still running)".into(),
+    });
+    let value: serde_json::Value =
+        serde_json::from_str(&session_result_json(&result, None).unwrap()).unwrap();
+    assert_eq!(
+        value["resources"],
+        serde_json::json!({
+            "released": 2,
+            "leaked": 1,
+            "kept": 0,
+            "summary": "resources: 2 released, 1 leaked (pid 9: still running)"
+        })
+    );
+    let back: SessionResult = serde_json::from_value(value).unwrap();
+    assert_eq!(back.resources, result.resources);
 }

@@ -107,6 +107,13 @@ pub struct SessionResult {
     /// other run keeps the pre-existing shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial: Option<crate::agent::deadline::PartialProgress>,
+    /// What the run-end teardown did with the resources the task owned
+    /// (containers, background processes, PTYs, browsers…): `released`,
+    /// `leaked` (not confirmed gone — see `selfware resources`), `kept`
+    /// and the run-summary `summary` line. Omitted when the task owned
+    /// nothing, so such runs keep the pre-existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<crate::resources::teardown::TeardownOutcome>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

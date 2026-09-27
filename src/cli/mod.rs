@@ -2542,6 +2542,7 @@ fn build_session_result(
         answer,
         requirements_audit: agent.requirements_audit_status().map(|a| a.label()),
         partial: agent.partial_progress(run_result),
+        resources: agent.resource_teardown.clone(),
     }
 }
 

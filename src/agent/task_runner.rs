@@ -630,7 +630,7 @@ impl Agent {
             budgets: RunBudgets::from_config(&self.config.agent),
             hit_iteration_cap: self.loop_control.current_iteration()
                 >= self.loop_control.max_iterations(),
-            resources: self.resource_teardown_summary.clone(),
+            resources: self.resource_teardown.as_ref().map(|o| o.summary.clone()),
         }
     }
 
@@ -1040,7 +1040,7 @@ impl Agent {
     /// Drain everything the finished task owns (see `crate::resources`)
     /// and keep the summary line for the run summary.
     pub(crate) async fn teardown_task_resources(&mut self, owner: &crate::resources::Owner) {
-        self.resource_teardown_summary = None;
+        self.resource_teardown = None;
         let Some(task) = owner.task() else {
             return;
         };
@@ -1058,15 +1058,19 @@ impl Agent {
             policy,
         )
         .await;
-        if let Some(line) = report.summary_line() {
+        if let Some(outcome) = report.outcome() {
             if report.leaked.is_empty() {
-                tracing::info!("{line}");
+                tracing::info!("{}", outcome.summary);
             } else {
                 // Each resource that entered `leaked` raised LeakAlarm (the
                 // registry warned per resource); this is the task's total.
-                warn!("{line} [{} leak alarm(s)]", report.leak_alarms.len());
+                warn!(
+                    "{} [{} leak alarm(s)]",
+                    outcome.summary,
+                    report.leak_alarms.len()
+                );
             }
-            self.resource_teardown_summary = Some(line);
+            self.resource_teardown = Some(outcome);
         }
     }
 

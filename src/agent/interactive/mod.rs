@@ -1743,7 +1743,7 @@ impl Agent {
             self.esc_pause_ack_token(),
         );
         let result = self.run_task(task).await;
-        if let Some(line) = &self.resource_teardown_summary {
+        if let Some(line) = self.resource_teardown.as_ref().map(|o| &o.summary) {
             cli_println!("{}", line);
         }
         let queued = coalesce_pending_messages(esc_guard.stop().await);

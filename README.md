@@ -634,8 +634,11 @@ the text run summary), `usage`, `patch_bytes` / `patch_lines` /
 `files_changed` (this run's own changes: the diff from the working tree at
 task start, so edits already in the workspace are not counted;
 `patch_baseline` is `task_start`, or `head` when no start snapshot could be
-taken), and the final `answer` when there is one. Logs stay on stderr, so
-stdout is pure JSON.
+taken), the final `answer` when there is one, and — when the task started
+containers, background processes, PTYs or browsers — `resources`
+(`released`, `leaked`, `kept` and the run-summary `summary` line; a leaked
+resource is one teardown could not confirm gone, see `selfware resources`).
+Logs stay on stderr, so stdout is pure JSON.
 
 ---
 

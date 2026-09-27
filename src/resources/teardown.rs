@@ -104,6 +104,34 @@ impl DrainReport {
     }
 }
 
+/// A task's teardown outcome as reported outside the process (the headless
+/// JSON / stream-json result): counts plus the run-summary line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TeardownOutcome {
+    /// Confirmed gone.
+    pub released: usize,
+    /// Not confirmed gone (a `LeakAlarm` each).
+    pub leaked: usize,
+    /// `keep` resources handed to the session, still running.
+    pub kept: usize,
+    /// The run-summary line (`resources: N released, M leaked (…)`).
+    pub summary: String,
+}
+
+impl DrainReport {
+    /// The outcome to report, or `None` when the task owned nothing.
+    pub fn outcome(&self) -> Option<TeardownOutcome> {
+        let summary = self.summary_line()?;
+        let (released, leaked, kept) = self.counts();
+        Some(TeardownOutcome {
+            released,
+            leaked,
+            kept,
+            summary,
+        })
+    }
+}
+
 /// Drain everything `task` owns (see the module docs).
 pub async fn teardown_task(
     registry: &ResourceRegistry,
