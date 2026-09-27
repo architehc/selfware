@@ -1,7 +1,7 @@
 //! One tracked entity: its id, current state and the log its transitions go
 //! to.
 
-use super::{Effect, EventLog, InvalidTransition, Label, Machine, TransitionRecord};
+use super::{Effect, EventLog, InvalidTransition, Label, Machine, RecordedUsage, TransitionRecord};
 
 /// A live entity of machine `M`. [`Tracked::apply`] is the only way its state
 /// changes: it computes the next state, checks the machine's invariants as a
@@ -13,6 +13,8 @@ pub struct Tracked<M: Machine> {
     state: M::State,
     owner: Option<String>,
     task_type: Option<String>,
+    parent: Option<String>,
+    usage: Option<RecordedUsage>,
     log: EventLog,
 }
 
@@ -26,6 +28,8 @@ impl<M: Machine> Tracked<M> {
             state,
             owner: None,
             task_type: None,
+            parent: None,
+            usage: None,
             log,
         }
     }
@@ -41,6 +45,23 @@ impl<M: Machine> Tracked<M> {
     pub fn with_task_type(mut self, task_type: impl Into<String>) -> Self {
         self.task_type = Some(task_type.into());
         self
+    }
+
+    /// Set the task this one was forked from, written with every record.
+    pub fn with_parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = Some(parent.into());
+        self
+    }
+
+    /// The task this one was forked from, if any.
+    pub fn parent(&self) -> Option<&str> {
+        self.parent.as_deref()
+    }
+
+    /// Attach measured usage to the next record only (a terminal transition
+    /// or an edit); later records carry none until set again.
+    pub fn attach_usage(&mut self, usage: RecordedUsage) {
+        self.usage = Some(usage);
     }
 
     /// Record that the entity (or a new segment of it) now exists in its
@@ -96,6 +117,7 @@ impl<M: Machine> Tracked<M> {
             tracing::error!("lifecycle oracle: {violation} ({} {})", M::ENTITY, self.id);
         }
         let rec = self.record(Some(&next), Some(event.label()), cause);
+        self.usage = None;
         self.log.append(&rec, M::is_terminal(&next));
         self.state = next;
         Ok(M::on_enter(&self.state))
@@ -114,6 +136,8 @@ impl<M: Machine> Tracked<M> {
         let mut rec = TransitionRecord::now(M::ENTITY, &self.id, from, to, event, cause);
         rec.owner = self.owner.clone();
         rec.task_type = self.task_type.clone();
+        rec.parent = self.parent.clone();
+        rec.usage = self.usage;
         rec
     }
 }

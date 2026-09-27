@@ -5,6 +5,7 @@
 pub(crate) mod args;
 pub(crate) mod headless;
 pub(crate) mod init_wizard;
+mod task_cmd;
 
 #[cfg(feature = "tui")]
 use std::sync::mpsc;
@@ -1664,19 +1665,51 @@ pub async fn run() -> Result<()> {
     // The lifecycle views only read the event log: no configuration needed,
     // so they work even when the configuration is invalid.
     match &cli.command {
-        Some(Commands::Tasks { limit }) => {
+        Some(Commands::Tasks { limit, tree }) => {
             let log = crate::lifecycle::EventLog::default_location();
             print!(
                 "{}",
-                crate::lifecycle::projection::tasks_command_output(&log, *limit)
+                crate::lifecycle::projection::tasks_command_output(&log, *limit, *tree)
             );
             return Ok(());
         }
-        Some(Commands::Task {
-            command: args::TaskCommands::Show { id },
-        }) => {
+        Some(Commands::Task { command }) => {
             let log = crate::lifecycle::EventLog::default_location();
-            return match crate::lifecycle::projection::task_show_output(&log, id) {
+            let alive = |pid: u32| crate::supervision::run_registry::pid_alive(pid);
+            let verb = match command {
+                args::TaskCommands::Show { id } => {
+                    return match crate::lifecycle::projection::task_show_output(&log, id) {
+                        Ok(out) => {
+                            print!("{out}");
+                            Ok(())
+                        }
+                        Err(msg) => Err(anyhow::anyhow!(msg)),
+                    };
+                }
+                args::TaskCommands::Edit { id, description } => {
+                    let (records, _) = log.read_all();
+                    let description_of = |task_id: &str| {
+                        Agent::task_status(task_id).ok().map(|c| c.task_description)
+                    };
+                    let (task, original) =
+                        task_cmd::plan_edit(&records, &log, id, &description_of, &alive)
+                            .map_err(|m| anyhow::anyhow!(m))?;
+                    let new_description = match description {
+                        Some(d) => d.trim().to_string(),
+                        None => task_cmd::edit_in_editor(original.as_deref().unwrap_or(""))?,
+                    };
+                    if new_description.is_empty() {
+                        anyhow::bail!("empty description: edit cancelled, nothing recorded");
+                    }
+                    print!("{}", task_cmd::fork_instructions(&task, &new_description));
+                    return Ok(());
+                }
+                args::TaskCommands::Pause { id } => (id, task_cmd::ControlVerb::Pause),
+                args::TaskCommands::Resume { id } => (id, task_cmd::ControlVerb::Resume),
+                args::TaskCommands::Cancel { id } => (id, task_cmd::ControlVerb::Cancel),
+            };
+            let (records, _) = log.read_all();
+            return match task_cmd::control_output(&records, &log, verb.0, verb.1, &alive) {
                 Ok(out) => {
                     print!("{out}");
                     Ok(())
@@ -2568,6 +2601,9 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     // Shared cancellation token: the TUI latches it on Esc to abort the
     // running task; the bridge resets it before each new task below.
     let cancel_token = agent.cancel_token();
+    // Shared task control: the Tasks pane pauses, edits and cancels the
+    // running task through it (acted on between steps).
+    let task_control = agent.task_control();
 
     let shared_state = crate::ui::tui::SharedDashboardState::default();
     let model = config.model.clone();
@@ -2806,7 +2842,12 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                             match Agent::resume(agent.config().clone(), &task_id).await {
                                 Ok(resumed) => {
                                     let count = resumed.message_count();
-                                    agent = resumed;
+                                    // Keep the handles the TUI holds: Esc and
+                                    // the Tasks pane must reach the resumed
+                                    // agent, not the one it replaced.
+                                    agent = resumed
+                                        .with_cancel_token(agent.cancel_token())
+                                        .with_task_control(task_control.clone());
                                     log_line(format!(
                                         "resumed '{title}' ({count} messages) — continue chatting"
                                     ));
@@ -2862,6 +2903,11 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 // A stale latched cancel token (e.g. Esc pressed just as the
                 // previous run finished) must not abort the new task.
                 agent.reset_cancellation();
+                // A fork queued from the Tasks pane runs as a new task whose
+                // parent is the original.
+                if let Some(parent) = task_control.take_fork_for(&input) {
+                    agent.set_fork_parent(parent);
+                }
                 // @path attachments (claude/gemini parity): resolve `@file`
                 // tokens into context blocks appended to the task.
                 let attachments = expand_attachments(&input);
@@ -3266,8 +3312,21 @@ async fn handle_command(
             task,
             skill,
             preset,
+            fork_of,
         } => {
             crate::safety::killswitch::check_killswitch(None)?;
+            // `--fork-of`: resolve the finished task first, before any setup.
+            let fork_parent = match fork_of.as_deref() {
+                Some(query) => {
+                    let log = crate::lifecycle::EventLog::default_location();
+                    let (records, _) = log.read_all();
+                    Some(
+                        task_cmd::fork_parent(&records, &log, query)
+                            .map_err(|m| anyhow::anyhow!("--fork-of: {m}"))?,
+                    )
+                }
+                None => None,
+            };
             // Resolve the task: --preset <id> renders the preset's task +
             // invariants; otherwise the positional task is required (clap
             // enforces this via required_unless_present).
@@ -3383,6 +3442,9 @@ async fn handle_command(
             agent =
                 agent.with_event_emitter(answer_event_emitter(&answer_capture, jsonl.as_deref()));
             let baseline = patch_baseline_for(output_format);
+            if let Some(parent) = fork_parent {
+                agent.set_fork_parent(parent);
+            }
             let run_result = agent.run_task(&task).await;
             let duration_ms = start.elapsed().as_millis() as u64;
             if let Some(jsonl) = &jsonl {

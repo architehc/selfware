@@ -330,3 +330,173 @@ async fn a_live_task_left_behind_is_closed_honestly_by_the_next_task() {
     );
     server.stop().await;
 }
+
+// ---- pause / edit / resume / cancel through the task control (phase 5) ----
+
+async fn agent_with_live_task(log: &EventLog) -> Agent {
+    let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
+        .await
+        .unwrap();
+    agent.event_log = log.clone();
+    agent.lifecycle_begin_task("t-live", "add max_words to slugify()");
+    agent
+}
+
+#[tokio::test]
+async fn an_edit_pauses_at_the_safe_point_applies_and_resumes() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = agent_with_live_task(&log).await;
+    let control = agent.task_control();
+    let live = control.snapshot().expect("begin publishes the task");
+    assert_eq!(live.id, "t-live");
+    assert_eq!(live.agent, "main");
+    assert_eq!(live.constraints.max_turns, 8);
+
+    let mut edit = crate::lifecycle::control::TaskEdit::from_live(&live);
+    edit.description = "add max_words and max_len to slugify()".into();
+    edit.max_turns = 20;
+    edit.token_budget = Some(50_000);
+    control.submit_edit("t-live", edit).unwrap();
+    let before = agent.messages.len();
+
+    agent.task_control_safe_point().await;
+
+    let (records, _) = log.read_all();
+    let tail: Vec<_> = steps(&records).into_iter().skip(2).collect();
+    assert_eq!(
+        tail,
+        vec![
+            step(Some("planning"), "paused", Some("pause")),
+            step(Some("paused"), "paused", Some("edit")),
+            step(Some("paused"), "executing", Some("resume")),
+        ]
+    );
+    let edit_rec = &records[records.len() - 2];
+    assert!(
+        edit_rec.cause.contains("max turns 8 → 20"),
+        "{}",
+        edit_rec.cause
+    );
+    assert!(edit_rec.cause.contains("token budget unbounded → 50000"));
+    assert!(
+        edit_rec.usage.is_some(),
+        "an edit records the measured usage"
+    );
+    assert!(records.last().unwrap().usage.is_none(), "usage is one-shot");
+    // Delivered to the model as a user message.
+    assert_eq!(agent.messages.len(), before + 1);
+    let msg = agent.messages.last().unwrap().content.text();
+    assert!(msg.starts_with("Task updated: "), "{msg}");
+    assert!(msg.contains("add max_words and max_len"), "{msg}");
+    // Constraints took effect.
+    assert_eq!(agent.loop_control.max_iterations(), 20);
+    assert_eq!(agent.config.agent.max_budget_tokens, Some(50_000));
+    let after = control.snapshot().unwrap();
+    assert_eq!(after.state, TaskState::Executing);
+    assert_eq!(after.constraints.token_budget, Some(50_000));
+    assert!(!control.pause_requested());
+}
+
+#[tokio::test]
+async fn a_pause_waits_until_resumed_and_a_safe_point_without_requests_records_nothing() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = agent_with_live_task(&log).await;
+    let control = agent.task_control();
+
+    agent.task_control_safe_point().await;
+    assert_eq!(log.read_all().0.len(), 2, "no request, no record");
+
+    control.request_pause("t-live").unwrap();
+    let resumer = control.clone();
+    let handle = tokio::spawn(async move {
+        // Resume only once the agent is observably paused.
+        loop {
+            if resumer.snapshot().map(|l| l.state) == Some(TaskState::Paused) {
+                resumer.request_resume("t-live").unwrap();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    agent.task_control_safe_point().await;
+    handle.await.unwrap();
+    let (records, _) = log.read_all();
+    let events: Vec<_> = records.iter().filter_map(|r| r.event.clone()).collect();
+    assert_eq!(events, vec!["start", "pause", "resume"]);
+    assert_eq!(records.last().unwrap().cause, "resumed by the user");
+}
+
+#[tokio::test]
+async fn cancel_from_the_pane_ends_the_task_cancelled_not_interrupted() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = agent_with_live_task(&log).await;
+    let control = agent.task_control();
+    control.request_pause("t-live").unwrap();
+    let canceller = control.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            if canceller.snapshot().map(|l| l.state) == Some(TaskState::Paused) {
+                canceller.request_cancel("t-live").unwrap();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    agent.task_control_safe_point().await;
+    handle.await.unwrap();
+    assert!(agent.is_cancelled(), "cancel latches the agent's token");
+
+    let result: anyhow::Result<()> = Err(AgentError::Cancelled.into());
+    agent.lifecycle_finish(&result);
+    let (records, _) = log.read_all();
+    let last = records.last().unwrap();
+    assert_eq!(last.from.as_deref(), Some("paused"));
+    assert_eq!(last.to, "cancelled");
+    assert_eq!(last.event.as_deref(), Some("cancel"));
+    assert_eq!(last.cause, "cancelled by the user");
+    let usage = last.usage.expect("the terminal record carries the usage");
+    assert_eq!(
+        usage.main_tokens,
+        Some(0),
+        "no model call ran: measured zero"
+    );
+    assert_eq!(usage.cost_usd, None, "no cost reported → none recorded");
+    assert_eq!(control.snapshot().unwrap().state, TaskState::Cancelled);
+    agent.reset_cancellation();
+}
+
+#[tokio::test]
+async fn a_fork_is_a_new_task_whose_parent_is_the_original() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
+        .await
+        .unwrap();
+    agent.event_log = log.clone();
+    agent.set_fork_parent("orig-1");
+    agent.lifecycle_begin_task("fork-2", "do it better");
+    let (records, _) = log.read_all();
+    assert!(records.iter().all(|r| r.id == "fork-2"));
+    assert!(records
+        .iter()
+        .all(|r| r.parent.as_deref() == Some("orig-1")));
+    assert_eq!(records[0].cause, "forked from task orig-1");
+    assert_eq!(
+        agent.task_control().snapshot().unwrap().parent.as_deref(),
+        Some("orig-1")
+    );
+    // Consumed: the next task is not a fork.
+    agent.lifecycle_begin_task("next-3", "other");
+    let (records, _) = log.read_all();
+    assert!(records
+        .iter()
+        .filter(|r| r.id == "next-3")
+        .all(|r| r.parent.is_none()));
+}

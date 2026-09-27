@@ -2203,6 +2203,9 @@ impl Agent {
                 }
             }
             self.trim_message_history();
+            // Safe point for the Tasks pane: a requested pause/edit happens
+            // here, between steps, never inside a model or tool call.
+            self.task_control_safe_point().await;
 
             // Surface the current step in the live TUI status bar so a
             // converging run is distinguishable from a stalled one (the TUI had

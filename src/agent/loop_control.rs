@@ -452,6 +452,14 @@ impl AgentLoop {
         self.max_iterations
     }
 
+    /// Set the iteration cap to `cap` (a user edit of a paused task). It
+    /// becomes the base later adaptive extensions are computed from; the
+    /// extension ceiling already consumed is kept.
+    pub fn set_max_iterations(&mut self, cap: usize) {
+        self.max_iterations = cap;
+        self.original_max = cap;
+    }
+
     /// Whether any adaptive budget extension fired this task.
     pub fn extension_was_used(&self) -> bool {
         self.extensions_granted > 0

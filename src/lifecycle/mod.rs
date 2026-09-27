@@ -22,6 +22,7 @@
 //! the resource registry executes them.
 
 mod agent;
+pub mod control;
 mod log;
 pub mod projection;
 mod resource;
@@ -29,7 +30,9 @@ mod task;
 mod tracked;
 
 pub use agent::{AgentEvent, AgentMachine, AgentState};
-pub use log::{EventLog, TransitionRecord, EVENT_LOG_ENV, MAX_CAUSE_CHARS, MAX_LOG_BYTES};
+pub use log::{
+    EventLog, RecordedUsage, TransitionRecord, EVENT_LOG_ENV, MAX_CAUSE_CHARS, MAX_LOG_BYTES,
+};
 pub use resource::{ResourceEvent, ResourceKind, ResourceMachine, ResourceState};
 pub use task::{table as task_table, TaskEvent, TaskMachine, TaskState};
 pub use tracked::Tracked;

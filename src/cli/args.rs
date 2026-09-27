@@ -264,6 +264,10 @@ pub(crate) enum Commands {
         /// Run an evolve preset by id (its task + invariants become the prompt)
         #[arg(long)]
         preset: Option<String>,
+        /// Run this task as a fork of a finished task (see `selfware task
+        /// edit`): it gets a new task id recorded with that task as parent
+        #[arg(long, value_name = "TASK_ID")]
+        fork_of: Option<String>,
     },
 
     /// Resume a task from a journal entry
@@ -661,6 +665,9 @@ pub(crate) enum Commands {
         /// How many tasks to show, most recently active first
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Show forked tasks under the task they were forked from
+        #[arg(long)]
+        tree: bool,
     },
 
     /// Inspect one task's recorded lifecycle
@@ -677,6 +684,32 @@ pub(crate) enum TaskCommands {
     /// Show a task's recorded transitions (timeline)
     Show {
         /// The task id, or a unique prefix of it (see `selfware tasks`)
+        id: String,
+    },
+    /// Edit a task. A finished task is forked: the edit becomes a new task
+    /// whose parent is the original (its history is never rewritten).
+    /// A task running in another selfware process cannot be edited from
+    /// here yet — use that session's TUI Tasks pane (Ctrl+T).
+    Edit {
+        /// The task id, or a unique prefix of it
+        id: String,
+        /// The new task description (default: edit the original in $EDITOR)
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Pause a running task at its next step boundary (TUI only for now)
+    Pause {
+        /// The task id, or a unique prefix of it
+        id: String,
+    },
+    /// Resume a paused or interrupted task
+    Resume {
+        /// The task id, or a unique prefix of it
+        id: String,
+    },
+    /// Cancel a running task (TUI only for now)
+    Cancel {
+        /// The task id, or a unique prefix of it
         id: String,
     },
 }

@@ -2892,9 +2892,21 @@ fn failure_lines_do_not_repeat_the_task_failed_prefix() {
 fn parses_the_lifecycle_views() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "tasks", "--limit", "3"]).unwrap();
-    assert!(matches!(cli.command, Some(Commands::Tasks { limit: 3 })));
-    let cli = Cli::try_parse_from(["selfware", "tasks"]).unwrap();
-    assert!(matches!(cli.command, Some(Commands::Tasks { limit: 20 })));
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tasks {
+            limit: 3,
+            tree: false
+        })
+    ));
+    let cli = Cli::try_parse_from(["selfware", "tasks", "--tree"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tasks {
+            limit: 20,
+            tree: true
+        })
+    ));
     let cli = Cli::try_parse_from(["selfware", "task", "show", "abc"]).unwrap();
     match cli.command {
         Some(Commands::Task {
@@ -2903,6 +2915,33 @@ fn parses_the_lifecycle_views() {
         other => panic!("unexpected {other:?}"),
     }
     assert!(Cli::try_parse_from(["selfware", "task", "show"]).is_err());
+    for verb in ["pause", "resume", "cancel", "edit"] {
+        let cli = Cli::try_parse_from(["selfware", "task", verb, "abc"]).unwrap();
+        let id = match cli.command {
+            Some(Commands::Task { command }) => match command {
+                args::TaskCommands::Pause { id }
+                | args::TaskCommands::Resume { id }
+                | args::TaskCommands::Cancel { id }
+                | args::TaskCommands::Edit { id, .. } => id,
+                other => panic!("unexpected {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(id, "abc");
+    }
+    let cli =
+        Cli::try_parse_from(["selfware", "task", "edit", "abc", "--description", "new"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Task {
+            command: args::TaskCommands::Edit { description: Some(ref d), .. }
+        }) if d == "new"
+    ));
+    let cli = Cli::try_parse_from(["selfware", "run", "--fork-of", "abc", "do it"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Run { fork_of: Some(ref f), .. }) if f == "abc"
+    ));
 }
 
 // ── run bounds line (0.9.3): the iteration cap is the only default bound ──

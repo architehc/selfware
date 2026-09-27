@@ -2,7 +2,8 @@
 //!
 //! One JSON object per line, one line per transition:
 //! `{ts, entity, id, from, to, cause}` plus optional `event`, `owner`,
-//! `task_type` and `pid`. `from` is `null` when an entity (or a new segment of
+//! `task_type`, `pid`, `parent` (a forked task's original) and `usage`
+//! (measured token/cost usage at that moment). `from` is `null` when an entity (or a new segment of
 //! a task) is first recorded.
 //!
 //! Writing is best-effort and never fails the run: an I/O error is logged
@@ -55,7 +56,40 @@ pub struct TransitionRecord {
     /// The process that recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// The task this one was forked from (an edit of a finished task
+    /// creates a new task; the original's history is never rewritten).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The task's measured usage when this record was written (terminal
+    /// transitions and edits carry it). Absent means not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RecordedUsage>,
 }
+
+/// Token and cost usage as measured by the client (Rule 4): provider-reported
+/// token counts, split into the main agent loop and side calls (audits,
+/// summaries, classifiers), and the provider-reported cost when every call
+/// reported one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RecordedUsage {
+    /// All model calls of the task (main loop and side calls).
+    pub total_tokens: usize,
+    /// Main agent-loop calls; `None` when the split was not measured (a
+    /// resumed segment carries earlier segments' totals without it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_tokens: Option<usize>,
+    /// Side calls (`total_tokens - main_tokens`); `None` with `main_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_tokens: Option<usize>,
+    /// Provider-reported USD cost; `None` when no call reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Every call reported its cost (otherwise `cost_usd` is a lower bound).
+    #[serde(default)]
+    pub cost_complete: bool,
+}
+
+impl Eq for RecordedUsage {}
 
 impl TransitionRecord {
     /// A record stamped now, by this process. `cause` is scrubbed of
@@ -79,6 +113,8 @@ impl TransitionRecord {
             owner: None,
             task_type: None,
             pid: Some(std::process::id()),
+            parent: None,
+            usage: None,
         }
     }
 }

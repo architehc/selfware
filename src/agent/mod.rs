@@ -881,6 +881,16 @@ pub struct Agent {
     pub(crate) event_log: crate::lifecycle::EventLog,
     /// The current task on the typed lifecycle (see `lifecycle_wiring`).
     task_lifecycle: Option<crate::lifecycle::Tracked<crate::lifecycle::TaskMachine>>,
+    /// Shared with an in-process UI (the TUI Tasks pane): pause / resume /
+    /// cancel / edit requests, acted on between steps (see
+    /// `lifecycle_wiring`), and the live task snapshot the pane shows.
+    task_control: crate::lifecycle::control::TaskControl,
+    /// The session main-loop token counter when the current task started;
+    /// `None` when the main/side split is not measured (resumed segments).
+    task_main_loop_base: Option<u64>,
+    /// The finished task the next `run_task` forks (`run --fork-of`, or a
+    /// fork queued from the Tasks pane).
+    pending_fork_parent: Option<String>,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -1858,6 +1868,7 @@ To call a tool, use this EXACT XML structure:
         let tool_schema_in_prompt = !config.agent.native_function_calling;
         #[cfg(feature = "resilience")]
         let credential_origin_endpoint = config.endpoint.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
         let agent = Self {
             phi_activity,
             phi_activity_terminal_task: None,
@@ -1899,8 +1910,11 @@ To call a tool, use this EXACT XML structure:
             learning_data_dir: None,
             event_log: crate::lifecycle::EventLog::default_location(),
             task_lifecycle: None,
+            task_control: crate::lifecycle::control::TaskControl::new(Arc::clone(&cancelled)),
+            task_main_loop_base: None,
+            pending_fork_parent: None,
             chat_store,
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled,
             pending_messages: VecDeque::new(),
             // max_context_tokens calculated above to stay within token_budget
             // after accounting for safety_margin and tool definition tokens
@@ -2936,6 +2950,8 @@ To call a tool, use this EXACT XML structure:
 
     /// Share cancellation ownership with a supervisor before starting a task.
     pub(crate) fn with_cancel_token(mut self, cancel: Arc<AtomicBool>) -> Self {
+        // Cancel requests from the Tasks pane latch the same token.
+        self.task_control = crate::lifecycle::control::TaskControl::new(Arc::clone(&cancel));
         self.cancelled = cancel;
         self
     }
@@ -3452,13 +3468,21 @@ To call a tool, use this EXACT XML structure:
         let previous = self.config.model.clone();
         let mut config = self.config.clone();
         config.model = model.to_string();
+        self.install_config(config)?;
+        crate::token_count::set_configured_model(&self.config.model);
+        Ok(previous)
+    }
+
+    /// Replace the session configuration and rebuild the API client from it
+    /// (the usage ledger, wall-budget anchor and progress emitter carry
+    /// over), so limits the client enforces itself follow the change.
+    pub(crate) fn install_config(&mut self, config: Config) -> Result<()> {
         let client = self.client.rebuild(&config)?;
         self.config = config;
         self.install_api_client(client);
         self.client
             .with_progress_emitter(std::sync::Arc::clone(&self.progress_emitter));
-        crate::token_count::set_configured_model(&self.config.model);
-        Ok(previous)
+        Ok(())
     }
 
     /// Count of HTTP 400 "Assistant response prefill incompatible" responses.

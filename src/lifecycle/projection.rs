@@ -21,6 +21,12 @@ pub struct TaskSummary {
     pub task_type: Option<String>,
     /// Number of records for this task.
     pub records: usize,
+    /// The task this one was forked from, if recorded.
+    pub parent: Option<String>,
+    /// The owning agent, if recorded.
+    pub owner: Option<String>,
+    /// The last recorded usage, if any record carried one.
+    pub usage: Option<super::RecordedUsage>,
 }
 
 /// Every task in `records`, most recently active first.
@@ -34,6 +40,9 @@ pub fn task_summaries(records: &[TransitionRecord]) -> Vec<TaskSummary> {
             last_ts: r.ts.clone(),
             task_type: None,
             records: 0,
+            parent: None,
+            owner: None,
+            usage: None,
         });
         // Records are in append order; the last one wins.
         entry.state = r.to.clone();
@@ -41,6 +50,15 @@ pub fn task_summaries(records: &[TransitionRecord]) -> Vec<TaskSummary> {
         entry.records += 1;
         if r.task_type.is_some() {
             entry.task_type = r.task_type.clone();
+        }
+        if r.parent.is_some() {
+            entry.parent = r.parent.clone();
+        }
+        if r.owner.is_some() {
+            entry.owner = r.owner.clone();
+        }
+        if r.usage.is_some() {
+            entry.usage = r.usage;
         }
     }
     let mut out: Vec<TaskSummary> = by_id.into_values().collect();
@@ -114,6 +132,67 @@ pub fn render_task_list(summaries: &[TaskSummary], limit: usize) -> String {
     out
 }
 
+/// `selfware tasks --tree`: forks under the task they were forked from
+/// (most recently active roots first). A fork whose parent is not in the
+/// log is shown as a root.
+pub fn render_task_tree(summaries: &[TaskSummary], limit: usize) -> String {
+    let ids: std::collections::HashSet<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+    let is_root = |s: &TaskSummary| s.parent.as_deref().is_none_or(|p| !ids.contains(p));
+    let mut out = String::new();
+    fn walk(
+        out: &mut String,
+        all: &[TaskSummary],
+        s: &TaskSummary,
+        depth: usize,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        if !seen.insert(s.id.clone()) {
+            return; // a malformed log with a parent cycle
+        }
+        out.push_str(&format!(
+            "{}{}{}  {}  {}\n",
+            "  ".repeat(depth),
+            if depth > 0 { "└─ " } else { "" },
+            s.id,
+            s.state,
+            s.task_type.as_deref().unwrap_or("-")
+        ));
+        for child in all.iter().filter(|c| c.parent.as_deref() == Some(&s.id)) {
+            walk(out, all, child, depth + 1, seen);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let roots: Vec<&TaskSummary> = summaries.iter().filter(|s| is_root(s)).collect();
+    for root in roots.iter().take(limit) {
+        walk(&mut out, summaries, root, 0, &mut seen);
+    }
+    if roots.len() > limit {
+        out.push_str(&format!(
+            "({} more; use --limit to show them)\n",
+            roots.len() - limit
+        ));
+    }
+    out
+}
+
+/// One line of measured usage: `212000 tokens (main 177000 · side 35000)`,
+/// and the provider-reported cost or `cost not reported`.
+pub fn usage_line(usage: Option<&super::RecordedUsage>) -> (String, String) {
+    let Some(u) = usage else {
+        return ("not recorded".into(), "not reported".into());
+    };
+    let tokens = match (u.main_tokens, u.side_tokens) {
+        (Some(m), Some(sd)) => format!("{} (main {} · side {})", u.total_tokens, m, sd),
+        _ => format!("{} (main/side split not measured)", u.total_tokens),
+    };
+    let cost = match (u.cost_usd, u.cost_complete) {
+        (Some(c), true) => format!("${c:.4}"),
+        (Some(c), false) => format!("≥ ${c:.4} (some calls reported no cost)"),
+        (None, _) => "not reported".into(),
+    };
+    (tokens, cost)
+}
+
 fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(ts).ok()
 }
@@ -138,6 +217,13 @@ pub fn render_timeline(id: &str, timeline: &[&TransitionRecord]) -> String {
     }
     if let Some(last) = timeline.last() {
         out.push_str(&format!("  state: {} (at {})\n", last.to, last.ts));
+    }
+    if let Some(p) = timeline.iter().find_map(|r| r.parent.as_deref()) {
+        out.push_str(&format!("  forked from: {p}\n"));
+    }
+    if let Some(u) = timeline.iter().rev().find_map(|r| r.usage.as_ref()) {
+        let (tokens, cost) = usage_line(Some(u));
+        out.push_str(&format!("  tokens: {tokens}\n  cost: {cost}\n"));
     }
     out.push('\n');
     let mut prev: Option<chrono::DateTime<chrono::FixedOffset>> = None;
@@ -179,8 +265,8 @@ fn skipped_note(skipped: usize) -> String {
     }
 }
 
-/// Output of `selfware tasks [--limit N]`.
-pub fn tasks_command_output(log: &super::EventLog, limit: usize) -> String {
+/// Output of `selfware tasks [--limit N] [--tree]`.
+pub fn tasks_command_output(log: &super::EventLog, limit: usize, tree: bool) -> String {
     let (records, skipped) = log.read_all();
     let summaries = task_summaries(&records);
     let mut out = String::new();
@@ -190,7 +276,11 @@ pub fn tasks_command_output(log: &super::EventLog, limit: usize) -> String {
             log_location(log)
         ));
     } else {
-        out.push_str(&render_task_list(&summaries, limit));
+        if tree {
+            out.push_str(&render_task_tree(&summaries, limit));
+        } else {
+            out.push_str(&render_task_list(&summaries, limit));
+        }
         out.push_str(&format!("(from {})\n", log_location(log)));
     }
     out.push_str(&skipped_note(skipped));
@@ -205,6 +295,14 @@ pub fn task_show_output(log: &super::EventLog, query: &str) -> Result<String, St
         Ok(id) => {
             let timeline = task_timeline(&records, &id);
             let mut out = render_timeline(&id, &timeline);
+            let forks: Vec<String> = task_summaries(&records)
+                .into_iter()
+                .filter(|s| s.parent.as_deref() == Some(id.as_str()))
+                .map(|s| s.id)
+                .collect();
+            if !forks.is_empty() {
+                out.push_str(&format!("  forks: {}\n", forks.join(", ")));
+            }
             out.push_str(&skipped_note(skipped));
             Ok(out)
         }
