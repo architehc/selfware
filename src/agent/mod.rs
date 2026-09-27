@@ -2587,6 +2587,25 @@ To call a tool, use this EXACT XML structure:
     ///
     /// Builds a minimal prompt with just the task + gathered data, no tool
     /// definitions, no XML. Forces the model to produce text.
+    /// A cadence-driven side call (`reflection`, `synthesis`) just hit its
+    /// per-task failure cap (`MAX_SIDE_CALL_FAILURES_PER_TASK`) and is off
+    /// for the rest of the task: log it, say so once on screen and emit a
+    /// `<call>_disabled` turn decision — the same surfacing as the context
+    /// summary cap. Called on the transition only (the counter reaches the
+    /// cap once: no further call is made, so no success resets it).
+    pub(super) fn note_side_call_disabled(&mut self, call: &str, failures: usize, fallback: &str) {
+        let note = format!(
+            "{call} disabled for the rest of this task after {failures} failed {call} calls; \
+             {fallback}"
+        );
+        warn!("{note}");
+        cli_println!("{} {note}", colored::Colorize::bright_yellow("⚠️"));
+        self.emit_progress(progress::ProgressEvent::TurnDecision {
+            decision: format!("{call}_disabled"),
+            detail: note,
+        });
+    }
+
     pub(super) async fn synthesize_answer(&mut self, task: &str) -> Result<Option<String>> {
         if self.synthesis_failures >= MAX_SIDE_CALL_FAILURES_PER_TASK {
             anyhow::bail!(
@@ -2673,9 +2692,10 @@ To call a tool, use this EXACT XML structure:
                 self.sync_api_usage();
                 self.synthesis_failures += 1;
                 if self.synthesis_failures == MAX_SIDE_CALL_FAILURES_PER_TASK {
-                    warn!(
-                        "synthesis disabled for the rest of this task after {} failed calls",
-                        self.synthesis_failures
+                    self.note_side_call_disabled(
+                        "synthesis",
+                        self.synthesis_failures,
+                        "the normal agent loop continues without it",
                     );
                 }
                 return Err(e);

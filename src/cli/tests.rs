@@ -1243,6 +1243,8 @@ fn sample_summary() -> crate::agent::RunSummary {
         requirements_audit: None,
         grounding: None,
         context_summaries_disabled_after: None,
+        reflection_disabled_after: None,
+        synthesis_disabled_after: None,
         budgets: crate::agent::RunBudgets::default(),
         hit_iteration_cap: false,
         resources: None,
@@ -1293,6 +1295,25 @@ fn render_run_summary_names_disabled_context_summaries() {
     let rendered = render_run_summary(&summary, None);
     assert!(
         rendered.contains("context summaries: disabled after 3 failed summary calls"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn render_run_summary_names_disabled_reflection_and_synthesis() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("reflection:"), "{rendered}");
+    assert!(!rendered.contains("synthesis:"), "{rendered}");
+    let mut summary = sample_summary();
+    summary.reflection_disabled_after = Some(3);
+    summary.synthesis_disabled_after = Some(3);
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("reflection: disabled after 3 failed reflection calls"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("synthesis: disabled after 3 failed synthesis calls"),
         "{rendered}"
     );
 }

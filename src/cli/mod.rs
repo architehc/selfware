@@ -7501,6 +7501,18 @@ fn render_run_summary_for(
              (result compaction / hard compression used instead)"
         ));
     }
+    if let Some(failures) = summary.reflection_disabled_after {
+        lines.push(format!(
+            "reflection: disabled after {failures} failed reflection calls \
+             (the task continued without periodic self-reflection)"
+        ));
+    }
+    if let Some(failures) = summary.synthesis_disabled_after {
+        lines.push(format!(
+            "synthesis: disabled after {failures} failed synthesis calls \
+             (the task continued without answer synthesis)"
+        ));
+    }
     let cost = summary
         .cost_usd
         .map(|c| {

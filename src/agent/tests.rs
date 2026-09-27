@@ -2345,7 +2345,11 @@ async fn hard_compression_rebases_the_summary_backoff() {
     assert_eq!(agent.compressor.summary_failures(), 1);
 }
 
-async fn failing_side_call_agent() -> (Agent, MockLlmServer) {
+async fn failing_side_call_agent() -> (
+    Agent,
+    MockLlmServer,
+    Arc<super::progress::RecordingProgressEmitter>,
+) {
     use crate::testing::mock_api::MockResponse;
     let server = MockLlmServer::builder()
         .with_default_response(MockResponse::Error {
@@ -2360,9 +2364,24 @@ async fn failing_side_call_agent() -> (Agent, MockLlmServer) {
         base_delay_ms: 1,
         max_delay_ms: 1,
     };
-    let mut agent = Agent::new(config).await.unwrap();
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
     agent.messages = vec![Message::system("sys"), Message::user("Explain the loop.")];
-    (agent, server)
+    (agent, server, recorder)
+}
+
+/// How many `decision` turn decisions `recorder` saw.
+fn turn_decisions(recorder: &super::progress::RecordingProgressEmitter, decision: &str) -> usize {
+    recorder
+        .snapshot()
+        .into_iter()
+        .filter(|e| {
+            matches!(e, progress::ProgressEvent::TurnDecision { decision: d, .. } if d == decision)
+        })
+        .count()
 }
 
 /// Rule 5 sweep of the summary cap (0.9.3): the every-5-steps reflection
@@ -2373,11 +2392,16 @@ async fn failing_side_call_agent() -> (Agent, MockLlmServer) {
     ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
 )]
 async fn a_failing_reflection_is_tried_at_most_the_cap_per_task() {
-    let (mut agent, server) = failing_side_call_agent().await;
+    let (mut agent, server, recorder) = failing_side_call_agent().await;
     let mut rounds_with_a_call = Vec::new();
     for round in 0..6 {
         let seen = server.captured_request_bodies().await.len();
         agent.reflect_on_step((round + 1) * 5).await;
+        // Visible the moment the cap trips, not before.
+        assert_eq!(
+            turn_decisions(&recorder, "reflection_disabled"),
+            usize::from(round + 1 >= MAX_SIDE_CALL_FAILURES_PER_TASK)
+        );
         if server.captured_request_bodies().await.len() > seen {
             rounds_with_a_call.push(round);
         }
@@ -2386,6 +2410,17 @@ async fn a_failing_reflection_is_tried_at_most_the_cap_per_task() {
         rounds_with_a_call,
         (0..MAX_SIDE_CALL_FAILURES_PER_TASK).collect::<Vec<_>>()
     );
+    assert_eq!(
+        turn_decisions(&recorder, "reflection_disabled"),
+        1,
+        "announced once"
+    );
+    let summary = agent.run_summary();
+    assert_eq!(
+        summary.reflection_disabled_after,
+        Some(MAX_SIDE_CALL_FAILURES_PER_TASK)
+    );
+    assert_eq!(summary.synthesis_disabled_after, None);
     server.stop().await;
 }
 
@@ -2397,7 +2432,7 @@ async fn a_failing_reflection_is_tried_at_most_the_cap_per_task() {
     ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
 )]
 async fn a_failing_synthesis_is_tried_at_most_the_cap_per_task() {
-    let (mut agent, server) = failing_side_call_agent().await;
+    let (mut agent, server, recorder) = failing_side_call_agent().await;
     // Gathered data for a read-only question, so a synthesis call is made.
     agent.messages.push(Message::assistant("reading the loop"));
     agent.messages.push(Message::user(format!(
@@ -2419,6 +2454,17 @@ async fn a_failing_synthesis_is_tried_at_most_the_cap_per_task() {
         (0..MAX_SIDE_CALL_FAILURES_PER_TASK).collect::<Vec<_>>()
     );
     assert!(last_err.contains("synthesis disabled"), "{last_err}");
+    assert_eq!(
+        turn_decisions(&recorder, "synthesis_disabled"),
+        1,
+        "announced once"
+    );
+    let summary = agent.run_summary();
+    assert_eq!(
+        summary.synthesis_disabled_after,
+        Some(MAX_SIDE_CALL_FAILURES_PER_TASK)
+    );
+    assert_eq!(summary.reflection_disabled_after, None);
     server.stop().await;
 }
 

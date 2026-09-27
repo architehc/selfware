@@ -572,6 +572,12 @@ pub struct RunSummary {
     /// Failed summary calls after which context summaries were disabled
     /// for the rest of the task; `None` when they were not disabled.
     pub context_summaries_disabled_after: Option<usize>,
+    /// Failed reflection side calls after which periodic reflection was
+    /// disabled for the rest of the task; `None` when it was not.
+    pub reflection_disabled_after: Option<usize>,
+    /// Failed synthesis side calls after which answer synthesis was
+    /// disabled for the rest of the task; `None` when it was not.
+    pub synthesis_disabled_after: Option<usize>,
     /// The hard budgets this run was held to (`[agent] max_budget_tokens`,
     /// `max_wall_secs`, `max_cost_usd`); all `None` by default, when the
     /// iteration cap is the only bound.
@@ -652,6 +658,12 @@ impl Agent {
                 .compressor
                 .summaries_disabled()
                 .then(|| self.compressor.summary_failures()),
+            reflection_disabled_after: (self.reflection_failures
+                >= super::MAX_SIDE_CALL_FAILURES_PER_TASK)
+                .then_some(self.reflection_failures),
+            synthesis_disabled_after: (self.synthesis_failures
+                >= super::MAX_SIDE_CALL_FAILURES_PER_TASK)
+                .then_some(self.synthesis_failures),
             budgets: RunBudgets::from_config(&self.config.agent),
             hit_iteration_cap: self.loop_control.current_iteration()
                 >= self.loop_control.max_iterations(),

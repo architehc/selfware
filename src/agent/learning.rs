@@ -450,6 +450,13 @@ impl Agent {
                     self.reflection_failures,
                     super::MAX_SIDE_CALL_FAILURES_PER_TASK
                 );
+                if self.reflection_failures == super::MAX_SIDE_CALL_FAILURES_PER_TASK {
+                    self.note_side_call_disabled(
+                        "reflection",
+                        self.reflection_failures,
+                        "the task continues without periodic self-reflection",
+                    );
+                }
             }
             if let Ok(response) = reflection {
                 self.reflection_failures = 0;
