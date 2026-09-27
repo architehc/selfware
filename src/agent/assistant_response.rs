@@ -137,6 +137,8 @@ impl Agent {
         // drop them (trim_message_history and the compressors observe too).
         self.compressor.begin_ledger_turn(self.current_task_text());
         self.compressor.observe_work(&self.messages);
+        // Review findings the model wrote last turn, before trim/compaction.
+        self.observe_review_messages();
 
         // Hard-truncate message history to stay within context window before
         // any API call.  This prevents exceeding the model's context limit when
@@ -315,6 +317,11 @@ impl Agent {
 
         let mut request_messages = self.messages.clone();
         let mut turn_hints = Vec::new();
+        // Review status first: hints are truncated from the end, and the
+        // coverage / next files / recorded findings must survive.
+        if let Some(review_note) = self.review_turn_note() {
+            turn_hints.push(review_note);
+        }
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
             turn_hints.push(learning_hint);
         }

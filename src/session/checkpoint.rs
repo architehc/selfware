@@ -356,6 +356,11 @@ pub struct GuardCounters {
     /// re-forecast from the fallbacks.
     #[serde(default)]
     pub forecast: ForecastMeasurements,
+    /// A code review's file-coverage ledger and recorded findings
+    /// (`agent::review_coverage`), so a resumed review continues from the
+    /// files it already read. Absent outside reviews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_coverage: Option<serde_json::Value>,
 }
 
 /// Upper bound on the call shapes a checkpoint carries (see

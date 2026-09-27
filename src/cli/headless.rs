@@ -118,6 +118,12 @@ pub struct SessionResult {
     /// omitted otherwise, so every other run keeps the pre-existing shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_edited: Option<crate::lifecycle::control::EditedDescription>,
+    /// A code review's coverage: the inventory line, relevant files/lines,
+    /// how many were read (delivered `file_read` line ranges), what was not
+    /// read, and the summary `line` (`coverage: …` / `⚠️ coverage: PARTIAL
+    /// …`). Omitted for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_coverage: Option<crate::agent::ReviewCoverageReport>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

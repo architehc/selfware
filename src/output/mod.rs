@@ -1116,6 +1116,20 @@ pub(crate) fn citation_check(detail: &str) {
     io::stdout().flush().ok();
 }
 
+/// Print the repository inventory a review starts from (text modes only;
+/// stream-json carries it as a `review_inventory` turn decision).
+pub(crate) fn review_inventory(text: &str) {
+    if is_tui_active() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!(
+        "{}",
+        hyperlink::linkify_for_terminal(&format!("📚 {text}").bright_cyan().to_string())
+    );
+    io::stdout().flush().ok();
+}
+
 /// Whether prose (streamed answers, the final answer) is rendered from
 /// Markdown to terminal styling: a terminal with colour allowed. Plain mode
 /// (non-tty), `--no-color` and `NO_COLOR` keep the raw text.

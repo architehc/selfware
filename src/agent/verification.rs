@@ -3222,6 +3222,15 @@ impl Agent {
             }
         }
 
+        // Review coverage (deterministic, no model call): a code review is
+        // not concluded while relevant files of its reading plan remain
+        // unread. Keyed on delivered file_read line ranges, never on step
+        // counts; bounded (no-progress refusals, iteration reserve, deadline /
+        // budget step-aside), after which the run reports PARTIAL coverage.
+        if let Some(directive) = self.review_coverage_gate() {
+            return Some(directive);
+        }
+
         // Citation check (deterministic, no model call): `path:line`
         // citations in the final answer and in written deliverables must
         // match the files. Wrong ones are fed back for a bounded number of

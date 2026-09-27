@@ -601,6 +601,9 @@ pub struct RunSummary {
     /// What the finish-stall handling did (directive, refusals, withheld
     /// budget extension); `None` when it never engaged.
     pub finish_stall_detail: Option<String>,
+    /// Review coverage (inventory line, files/lines read of the relevant
+    /// set, what was not read); `None` when the task was not a code review.
+    pub review_coverage: Option<super::ReviewCoverageReport>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -672,6 +675,7 @@ impl Agent {
             edited_task: self.edited_task_description(),
             finish_stall_outcome: self.finish_stall.outcome_clause(),
             finish_stall_detail: self.finish_stall.summary_detail(),
+            review_coverage: self.review_coverage(),
         }
     }
 
@@ -1571,6 +1575,11 @@ impl Agent {
             )));
         }
 
+        // A code review starts from the deterministic repository inventory
+        // (shown to the user, compact version in context) and runs under the
+        // coverage ledger + gate. No-op for any other task.
+        self.begin_review_session().await;
+
         self.run_execution_loop(&task_description, LoopMode::NewTask)
             .await
     }
@@ -1854,6 +1863,9 @@ impl Agent {
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.start_learning_session(&learning_session_id, &task_description);
+        // A resumed review rebuilds its inventory and restores the
+        // checkpointed coverage + findings (queued by `resume`).
+        self.begin_review_session().await;
         if self.cognitive_state.active_tactical_plan.is_none() {
             self.cognitive_state.set_active_tactical_plan(
                 format!("tactical-{}", learning_session_id),

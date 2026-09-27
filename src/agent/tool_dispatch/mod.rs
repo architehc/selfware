@@ -4728,6 +4728,11 @@ impl Agent {
             self.tool_error_feedback(tool_name, &result_to_store)
         };
 
+        // Review coverage: the lines this read actually delivered (the
+        // chunk, not the whole file; a spilled summary delivers none).
+        if success && tool_name == "file_read" && !spilled {
+            self.review_record_file_read(args_str, result);
+        }
         if use_native_fc {
             let result_json = if success {
                 result_to_store

@@ -1252,6 +1252,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         edited_task: None,
         finish_stall_outcome: None,
         finish_stall_detail: None,
+        review_coverage: None,
     }
 }
 

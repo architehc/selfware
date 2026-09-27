@@ -2583,6 +2583,7 @@ fn build_session_result(
         partial: agent.partial_progress(run_result),
         resources: agent.resource_teardown.clone(),
         task_edited: agent.edited_task_description(),
+        review_coverage: agent.review_coverage(),
     }
 }
 
@@ -7394,6 +7395,17 @@ fn render_run_summary_for(
                 "outcome: completed — {open} requirements-audit finding(s) still OPEN (ledger stepped aside)"
             ))
         }
+        // A review that ended with relevant files unread: finished, never a
+        // completed review (the coverage line below says how much was read).
+        None if summary
+            .review_coverage
+            .as_ref()
+            .is_some_and(|c| !c.complete) =>
+        {
+            lines.push(
+                "outcome: completed — review coverage PARTIAL (see coverage below)".to_string(),
+            )
+        }
         // Allowed with a warning: the citation gate stepped aside with
         // citations that still do not match the files.
         None if summary
@@ -7508,6 +7520,18 @@ fn render_run_summary_for(
     }
     if let Some(audit) = &summary.requirements_audit {
         lines.push(format!("requirements audit: {}", audit.label()));
+    }
+    // A review names the repository it inventoried and how much of the
+    // relevant code it actually read (file_read line ranges, measured).
+    if let Some(coverage) = &summary.review_coverage {
+        lines.push(format!("review inventory: {}", coverage.inventory));
+        lines.push(coverage.line.clone());
+        if coverage.findings_recorded > 0 {
+            lines.push(format!(
+                "findings recorded while reading: {}",
+                coverage.findings_recorded
+            ));
+        }
     }
     // The citation result appears ONCE: the warning note when the answer is
     // not fully grounded (it carries the unverified count, the breakdown and

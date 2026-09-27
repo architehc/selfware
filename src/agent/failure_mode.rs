@@ -321,19 +321,22 @@ impl FailureMode {
                         advice: "-".to_string(),
                     }
                 })();
-                with_citation_status(
-                    with_audit_status(
-                        with_preexisting_failures(
-                            with_verification_verdict(
-                                base,
-                                agent.credited_verification_summary(),
-                                read_only,
+                super::review_coverage::with_review_coverage(
+                    with_citation_status(
+                        with_audit_status(
+                            with_preexisting_failures(
+                                with_verification_verdict(
+                                    base,
+                                    agent.credited_verification_summary(),
+                                    read_only,
+                                ),
+                                &agent.preexisting_failure_notes(),
                             ),
-                            &agent.preexisting_failure_notes(),
+                            agent.requirements_audit_status().as_ref(),
                         ),
-                        agent.requirements_audit_status().as_ref(),
+                        agent.grounding_status().as_ref(),
                     ),
-                    agent.grounding_status().as_ref(),
+                    agent.review_coverage().as_ref(),
                 )
             }
             RunOutcome::Failed { reason } => {
@@ -628,7 +631,31 @@ impl FailureMode {
     }
 
     fn banner_header(&self) -> String {
-        if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
+        if self.kind.is_nonfailure()
+            && self
+                .evidence
+                .contains(super::review_coverage::REVIEW_COVERAGE_PARTIAL_NOTE)
+        {
+            // A review that ended with relevant files unread (budget, or the
+            // model stopped reading): finished, never a completed review.
+            let detail = self
+                .evidence
+                .split(super::review_coverage::REVIEW_COVERAGE_PARTIAL_NOTE)
+                .nth(1)
+                .map(|d| {
+                    d.trim_start_matches([' ', '—'])
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!(
+                "⚠️ Review finished with PARTIAL coverage ({}) — {detail}",
+                self.kind.tag()
+            )
+        } else if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
             // Allowed with an explicit warning: the audit infrastructure
             // failed, so the result was never audited — no clean ✅ claim.
             format!(

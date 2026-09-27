@@ -52,6 +52,7 @@ fn test_session_result_round_trip() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -92,6 +93,7 @@ fn test_session_result_with_failure_mode() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -123,6 +125,7 @@ fn test_session_result_json_fields() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -379,6 +382,7 @@ fn test_emit_result_does_not_panic() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     emit_result(&result, None);
 }
@@ -409,6 +413,7 @@ fn test_session_result_serializes_final_answer() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -447,6 +452,7 @@ fn test_session_result_omits_answer_when_none() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1055,6 +1061,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1090,6 +1097,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -1407,6 +1415,7 @@ fn grounding_result() -> SessionResult {
         partial: None,
         resources: None,
         task_edited: None,
+        review_coverage: None,
     }
 }
 

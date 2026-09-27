@@ -572,6 +572,7 @@ impl Agent {
         // have consistent read-only / mutation awareness across resume.
         agent.current_task_context = checkpoint.task_description.clone();
         agent.classify_task_policy();
+        agent.queue_review_restore(checkpoint.guard_counters.review_coverage.clone());
 
         info!("Agent resumed from checkpoint with cognitive state in Do phase");
 
@@ -1070,6 +1071,7 @@ impl Agent {
                     .unwrap_or_else(|e| e.into_inner())
                     .draft_completion_tokens,
             ),
+            review_coverage: self.review_snapshot(),
         }
     }
 

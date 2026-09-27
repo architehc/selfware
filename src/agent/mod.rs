@@ -124,6 +124,7 @@ pub mod prompt_builder;
 mod protocol_stall;
 mod recovery;
 pub(crate) mod result_compaction;
+pub mod review_coverage;
 pub mod session_log;
 pub(crate) mod session_usage;
 mod streaming;
@@ -137,6 +138,7 @@ pub mod tui_events;
 pub mod turn_artifacts;
 pub(crate) mod verification_scope;
 
+pub use review_coverage::{ReviewCoverageReport, ReviewPhase};
 pub use task_runner::{RequirementsAuditStatus, RunBudgets, RunSummary};
 mod verification;
 
@@ -1016,6 +1018,10 @@ pub struct Agent {
     /// Deterministic citation gate state: bounded correction rounds and the
     /// grounding outcome for the run summary, banner and JSON result.
     citation_gate: std::sync::Mutex<citation_check::CitationGateState>,
+    /// Review coverage state (inventory plan, per-file line coverage,
+    /// recorded findings, gate counters) for a task classified as a code
+    /// review; see `review_coverage`.
+    review: std::sync::Mutex<review_coverage::ReviewState>,
     /// Whether the initial system prompt already embeds XML tool schemas.
     tool_schema_in_prompt: bool,
     /// The endpoint authorized to use the session-wide SELFWARE_API_KEY source.
@@ -1979,6 +1985,7 @@ To call a tool, use this EXACT XML structure:
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
             requirements_audit_status: std::sync::Mutex::new(None),
             citation_gate: std::sync::Mutex::new(Default::default()),
+            review: std::sync::Mutex::new(Default::default()),
             tool_schema_in_prompt,
             #[cfg(feature = "resilience")]
             credential_origin_endpoint,
