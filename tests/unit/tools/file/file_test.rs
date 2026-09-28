@@ -2299,3 +2299,34 @@ fn display_artifact_guard_ignores_non_marker_redaction_text() {
         assert!(refuse_display_artifacts("file_write", "a.py", None, "", text).is_err());
     }
 }
+
+/// Review 2026-09-27: a slice ending on a blank line joined to "…\n",
+/// `lines()` counted one short and the blank line was never numbered — the
+/// review ledger saw a one-line hole, and a file's final blank line could
+/// never be read.
+#[tokio::test]
+async fn file_read_line_range_counts_a_trailing_blank_line() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("blank.rs");
+    fs::write(&file_path, "fn a() {}\n\nfn b() {}\n\n").unwrap();
+    let tool = FileRead::with_safety_config(permissive_safety_config());
+    for (numbers, content) in [(true, "1\tfn a() {}\n2\t"), (false, "fn a() {}\n")] {
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "line_range": [1, 2],
+                "line_numbers": numbers,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["lines_returned"], 2, "numbers={numbers}");
+        assert_eq!(result["content"].as_str().unwrap(), content);
+    }
+    // The last (blank) line of the file is readable and counted.
+    let result = tool
+        .execute(serde_json::json!({"path": file_path.to_str().unwrap(), "line_range": [4, 4]}))
+        .await
+        .unwrap();
+    assert_eq!(result["lines_returned"], 1);
+    assert_eq!(result["content"].as_str().unwrap(), "4\t");
+}

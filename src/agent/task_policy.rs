@@ -217,11 +217,12 @@ pub(crate) fn task_requests_citations(task_context: &str) -> bool {
         "path:line",
         "line number",
         "with line",
-        "review",
-        "audit",
         "with references",
     ];
-    ASKS.iter().any(|w| lower.contains(w)) || task_is_code_review(task_context)
+    // Whole words: "preview" and "audit log" ask for no citations.
+    ASKS.iter().any(|w| lower.contains(w))
+        || ["review", "audit"].iter().any(|w| contains_word(&lower, w))
+        || task_is_code_review(task_context)
 }
 
 /// Phrases that ask for a review of code — the deliverable is findings about
@@ -317,29 +318,161 @@ fn contains_phrase(lower: &str, phrase: &str) -> bool {
 /// citation standard. Change reviews (diff / PR / commit) and reviews of
 /// non-code artifacts are excluded; so is any task that must edit.
 pub(crate) fn task_is_code_review(task_context: &str) -> bool {
-    let lower = task_context.to_lowercase();
-    if !CODE_REVIEW_INTENT.iter().any(|w| lower.contains(w)) {
+    // Pasted code is the object of a snippet review, never a request to
+    // review the repository (review 2026-09-27: "can you review this?" +
+    // a pasted block became a whole-repository review).
+    let prose = without_pasted_code(task_context);
+    let lower = prose.to_lowercase();
+    if !CODE_REVIEW_INTENT.iter().any(|w| contains_word(&lower, w)) {
         return false;
     }
     if NOT_A_CODE_REVIEW.iter().any(|w| contains_phrase(&lower, w)) {
         return false;
     }
     // "review the pros and cons of event sourcing": general knowledge, not
-    // this workspace — the same workspace signal the grounding gate uses,
-    // plus the review-specific "core" / "project" wording.
-    let names_workspace = task_references_project_code(task_context, "")
-        || [
-            "core",
-            "project",
-            "this",
-            "our ",
-            "my code",
-            "the app",
-            "everything",
-        ]
-        .iter()
-        .any(|w| lower.contains(w));
-    names_workspace && task_is_read_only(task_context)
+    // this workspace. The task must name the workspace (a workspace noun)
+    // or a path in it; a bare "this" does not (it is the pasted snippet
+    // or the previous message as often as the repository).
+    let pasted = prose.len() < task_context.len();
+    names_review_target(&lower, pasted) && task_is_read_only(&prose)
+}
+
+/// `word` occurs in `lower` starting at a word boundary and ending at one,
+/// or followed by an inflection ("review" matches "reviewing", "reviews";
+/// never "preview"). "audit" used as a noun for a log ("audit log", "audit
+/// trail") is not a request to audit.
+fn contains_word(lower: &str, word: &str) -> bool {
+    lower.match_indices(word).any(|(at, m)| {
+        let before = lower[..at].chars().next_back();
+        if before.is_some_and(char::is_alphanumeric) {
+            return false;
+        }
+        let rest = &lower[at + m.len()..];
+        let word_end = rest
+            .find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(rest.len());
+        if !matches!(&rest[..word_end], "" | "s" | "ed" | "ing" | "er" | "ers") {
+            return false;
+        }
+        if word == "audit" {
+            let next = rest[word_end..].trim_start();
+            const NOUN_USE: &[&str] = &["log", "trail", "event", "record", "entr", "table"];
+            if word_end == 0 && NOUN_USE.iter().any(|n| next.starts_with(n)) {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+/// The task with pasted code removed: fenced blocks (```), and runs of
+/// three or more lines that read as code (ending in `;`, `{`, `}` or a
+/// `def …:` / `class …:` header).
+fn without_pasted_code(task: &str) -> String {
+    let mut out = String::with_capacity(task.len());
+    let mut in_fence = false;
+    let mut run: Vec<&str> = Vec::new();
+    let flush = |run: &mut Vec<&str>, out: &mut String| {
+        if run.len() < 3 {
+            for line in run.iter() {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        run.clear();
+    };
+    for line in task.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            flush(&mut run, &mut out);
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let looks_like_code = t.ends_with(';')
+            || t.ends_with('{')
+            || t == "}"
+            || t.ends_with("};")
+            || ((t.starts_with("def ") || t.starts_with("class ")) && t.ends_with(':'));
+        if looks_like_code {
+            run.push(line);
+        } else {
+            flush(&mut run, &mut out);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    flush(&mut run, &mut out);
+    if !task.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Whether a review task names the workspace or a part of it: a
+/// workspace noun, or a path / source file. With pasted code, only the
+/// repository-level nouns and paths count ("this code" is the paste).
+fn names_review_target(lower: &str, pasted: bool) -> bool {
+    let has_path = lower.split_whitespace().any(|token| {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.');
+        let slash = token.find('/').is_some_and(|i| {
+            token[..i]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+                || token[i + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric)
+        }) && !token.contains("://");
+        let source_file = token.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && crate::analysis::repo_inventory::is_code_language(
+                    crate::analysis::repo_inventory::language_of(&format!("x.{ext}")),
+                )
+        });
+        slash || source_file
+    });
+    if has_path {
+        return true;
+    }
+    const REPOSITORY_NOUNS: &[&str] = &[
+        "repo",
+        "repository",
+        "codebase",
+        "code base",
+        "project",
+        "workspace",
+        "crate",
+        "monorepo",
+    ];
+    if REPOSITORY_NOUNS.iter().any(|n| contains_word(lower, n)) {
+        return true;
+    }
+    if pasted {
+        return false;
+    }
+    const PART_NOUNS: &[&str] = &[
+        "code",
+        "source",
+        "src",
+        "module",
+        "package",
+        "core",
+        "directory",
+        "dir",
+        "folder",
+        "subsystem",
+        "component",
+        "library",
+        "service",
+        "app",
+        "application",
+        "everything",
+    ];
+    PART_NOUNS.iter().any(|n| contains_word(lower, n))
 }
 
 pub(crate) fn task_references_project_code(task_context: &str, project_name: &str) -> bool {
@@ -648,6 +781,8 @@ mod tests {
             "Please evaluate the codebase for security problems",
             "look for bugs in src/api",
             "critique this project's error handling",
+            "reviewing the codebase for dead code, read-only",
+            "review safety/audit.rs for bugs",
         ] {
             assert!(task_is_code_review(task), "{task}");
             assert!(task_requests_citations(task), "{task}");
@@ -666,9 +801,23 @@ mod tests {
             "review and fix the parser bug in src/parse.rs",
             "Implement the retry logic in src/api/client.rs",
             "what is 2+2",
+            // Review 2026-09-27: substring intent and a bare "this".
+            "can you preview this layout?",
+            "explain what the audit log in this project records",
+            "can you review this?",
+            "can you review this?\n```rust\nfn ratio(x: u32, n: u32) -> u32 { x / n }\n```",
+            "review this code:\n```python\ndef f(x):\n    return 1 / x\n```",
+            "review this function\nfn f(x: u32) -> u32 {\n    let y = x * 2;\n    y / 0;\n}",
         ] {
             assert!(!task_is_code_review(task), "{task}");
         }
+    }
+
+    #[test]
+    fn citations_are_not_demanded_by_substrings() {
+        assert!(!task_requests_citations("show a preview of the page"));
+        assert!(!task_requests_citations("add an audit log entry"));
+        assert!(task_requests_citations("audit the parser"));
     }
 
     #[test]

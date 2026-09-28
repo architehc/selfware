@@ -3301,3 +3301,36 @@ fn read_only_no_edit_preexisting_failures_render_as_informational() {
     assert!(!rendered.contains("verification FAILED"), "{rendered}");
     assert!(!rendered.contains("passed"), "{rendered}");
 }
+
+/// Review 2026-09-27: a review that ended with files unread printed
+/// "outcome: completed — review coverage PARTIAL" under a banner saying the
+/// review was never completed. Both now say "finished".
+#[test]
+fn render_run_summary_never_calls_a_partial_review_completed() {
+    let mut summary = sample_summary();
+    summary.verification = None;
+    summary.review_coverage = Some(crate::agent::review_coverage::ReviewCoverageReport {
+        scope: "whole repository".to_string(),
+        inventory: "3 files".to_string(),
+        relevant_files: 3,
+        read_files: 1,
+        partially_read_files: 0,
+        relevant_lines: 30,
+        read_lines: 10,
+        percent_lines: 33,
+        complete: false,
+        not_read: vec!["b.rs".to_string()],
+        not_read_count: 2,
+        findings_recorded: 0,
+        stopped: Some("iteration budget".to_string()),
+        cited_unread: Vec::new(),
+        unreadable: Vec::new(),
+        line: "coverage: PARTIAL".to_string(),
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("outcome: completed"), "{rendered}");
+    assert!(
+        rendered.contains("outcome: finished — review coverage PARTIAL"),
+        "{rendered}"
+    );
+}

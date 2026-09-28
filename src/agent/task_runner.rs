@@ -1922,9 +1922,10 @@ impl Agent {
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.start_learning_session(&learning_session_id, &task_description);
-        // A resumed review rebuilds its inventory and restores the
-        // checkpointed coverage + findings (queued by `resume`).
-        self.begin_review_session().await;
+        // An auto-continued review keeps its session; a resumed one
+        // rebuilds its inventory and restores the checkpointed coverage,
+        // findings and gate state (queued by `resume`).
+        self.continue_review_session().await;
         if self.cognitive_state.active_tactical_plan.is_none() {
             self.cognitive_state.set_active_tactical_plan(
                 format!("tactical-{}", learning_session_id),

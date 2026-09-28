@@ -319,7 +319,7 @@ impl Agent {
         let mut turn_hints = Vec::new();
         // Review status first: hints are truncated from the end, and the
         // coverage / next files / recorded findings must survive.
-        if let Some(review_note) = self.review_turn_note() {
+        if let Some(review_note) = self.review_turn_note_for(&request_messages) {
             turn_hints.push(review_note);
         }
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
@@ -443,6 +443,10 @@ impl Agent {
             &compressor.path_keys(),
         )?;
 
+        // Review coverage: the file_read ranges this request delivers,
+        // committed once the model has received it.
+        let delivered_reads = self.review_reads_delivered(&request_messages);
+
         let workload = self.next_turn_workload();
         let StepCompletion {
             content,
@@ -455,6 +459,7 @@ impl Agent {
             .request_step_completion_for_workload(request_messages, workload, turn_start)
             .await?;
         let mut native_tool_calls = step_native_tool_calls;
+        self.review_commit_reads(&delivered_reads);
 
         // Tag-free abliterated models: the qwen3 reasoning parser can
         // classify the ENTIRE response as reasoning_content, leaving content

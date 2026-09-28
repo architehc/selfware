@@ -87,6 +87,12 @@ pub struct InventoryFile {
     /// Distinct files importing this one (see [`CENTRALITY_METRIC`]).
     pub in_degree: usize,
     pub entry_point: bool,
+    /// A code file whose text could not be read (why: "read failed: …",
+    /// "over 4 MB"). It is not counted as code — its lines are unknown — but
+    /// it is never silently dropped: the inventory, the review plan and the
+    /// coverage line name it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
 }
 
 /// Files / lines / bytes.
@@ -133,6 +139,10 @@ pub struct RepoInventory {
     pub totals: Totals,
     /// Of `totals`: binary files (counted by bytes, never read).
     pub binary_files: usize,
+    /// Code files that could not be read, as `path (why)`: excluded from
+    /// every count of code, and named.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     /// Code files of every role (production, tests, examples, generated).
     pub code: Totals,
     pub languages: Vec<LanguageStats>,
@@ -159,6 +169,10 @@ pub struct ReviewScope {
     pub core: bool,
     pub include_tests: bool,
     pub include_examples: bool,
+    /// Paths / named parts the task gave that match nothing in the
+    /// inventory. Never silently dropped: the label names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
 }
 
 impl ReviewScope {
@@ -170,17 +184,24 @@ impl ReviewScope {
             core: false,
             include_tests: false,
             include_examples: false,
+            unresolved: Vec::new(),
         }
     }
 
     fn contains(&self, file: &InventoryFile) -> bool {
+        file.code && !file.binary && self.covers(file)
+    }
+
+    /// Whether `file` falls in this scope by role and path, whether or not
+    /// it could be read.
+    fn covers(&self, file: &InventoryFile) -> bool {
         let role_ok = match file.role {
             FileRole::Production => true,
             FileRole::Test => self.include_tests,
             FileRole::Example => self.include_examples,
             FileRole::Generated => false,
         };
-        if !file.code || file.binary || !role_ok {
+        if file.binary || !role_ok {
             return false;
         }
         if self.core && !is_core_path(&file.path) {
@@ -218,6 +239,10 @@ pub struct ReviewPlan {
     pub scope: ReviewScope,
     pub relevant: Totals,
     pub plan: Vec<PlanEntry>,
+    /// In-scope code files that could not be read (`path (why)`): not in
+    /// the plan or its line count, and reported as such.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +274,9 @@ impl RepoInventory {
             let rel = slash_path(path.strip_prefix(&root).unwrap_or(path));
             let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let language = language_of(&rel);
+            let mut unreadable: Option<String> = None;
             let (text, binary) = if bytes > MAX_TEXT_BYTES {
+                unreadable = Some(format!("over {}", human_bytes(MAX_TEXT_BYTES)));
                 (None, false)
             } else {
                 match std::fs::read(path) {
@@ -261,9 +288,16 @@ impl RepoInventory {
                             (Some(String::from_utf8_lossy(&raw).into_owned()), false)
                         }
                     }
-                    Err(_) => (None, false),
+                    Err(e) => {
+                        unreadable = Some(format!("read failed: {}", e.kind()));
+                        (None, false)
+                    }
                 }
             };
+            // Only code matters to the review denominator (Review 2026-09-27,
+            // F3: a read failure silently became `code: false` and left
+            // the scope).
+            let unreadable = unreadable.filter(|_| is_code_language(language) && !binary);
             let lines = text.as_deref().map(|t| t.lines().count()).unwrap_or(0);
             let generated = text.as_deref().is_some_and(|t| is_generated(&rel, t));
             files.push(InventoryFile {
@@ -280,6 +314,7 @@ impl RepoInventory {
                 binary,
                 in_degree: 0,
                 entry_point: false,
+                unreadable,
             });
             contents.push(text);
         }
@@ -378,11 +413,20 @@ impl RepoInventory {
         // Library/binary roots first, then shallow before deep.
         entry_points.sort_by_key(|p| (entry_rank(p), p.matches('/').count(), p.clone()));
 
+        let unreadable: Vec<String> = files
+            .iter()
+            .filter_map(|f| {
+                f.unreadable
+                    .as_ref()
+                    .map(|why| format!("{} ({why})", f.path))
+            })
+            .collect();
         Ok(Self {
             root: root.display().to_string(),
             gitignore,
             totals,
             binary_files,
+            unreadable,
             code,
             languages,
             largest_code_files,
@@ -440,10 +484,21 @@ impl RepoInventory {
                 plan.push(entry(f, PlanReason::Remaining));
             }
         }
+        let unreadable = self
+            .files
+            .iter()
+            .filter(|f| scope.covers(f))
+            .filter_map(|f| {
+                f.unreadable
+                    .as_ref()
+                    .map(|why| format!("{} ({why})", f.path))
+            })
+            .collect();
         ReviewPlan {
             scope,
             relevant: totals,
             plan,
+            unreadable,
         }
     }
 
@@ -531,6 +586,13 @@ impl RepoInventory {
                 group(plan.relevant.lines),
                 excluded_note(&plan.scope)
             ));
+            if !plan.unreadable.is_empty() {
+                out.push(format!(
+                    "  unreadable, not counted: {} code files — {}",
+                    group(plan.unreadable.len()),
+                    list_with_more(&plan.unreadable, 8)
+                ));
+            }
             let shown: Vec<String> = plan
                 .plan
                 .iter()
@@ -569,6 +631,13 @@ impl RepoInventory {
             group(plan.relevant.lines),
             excluded_note(&plan.scope),
         )];
+        if !plan.unreadable.is_empty() {
+            head.push(format!(
+                "Unreadable, not counted ({} code files in scope): {}.",
+                plan.unreadable.len(),
+                list_with_more(&plan.unreadable, 5)
+            ));
+        }
         let langs: Vec<String> = self
             .languages
             .iter()
@@ -920,97 +989,207 @@ const SCOPE_STOPWORDS: &[&str] = &[
     "examples",
 ];
 
+/// Nouns that make the word before them name a part of the repository
+/// ("the memory module", "the parser package").
+const SCOPE_PART_NOUNS: &[&str] = &[
+    "module",
+    "modules",
+    "dir",
+    "directory",
+    "folder",
+    "package",
+    "crate",
+    "subsystem",
+    "component",
+    "layer",
+];
+
 /// Map the task text to a review scope over this inventory:
 ///
-/// 1. explicit paths / directory names that exist (`src/agent`, `agent`,
-///    `parser.rs`) → those prefixes;
-/// 2. "core" with no directory of that name → selfware's core (production
-///    code under `src/` minus the tooling modules);
+/// 1. explicit paths (`src/agent`, `Sources/App`, `/abs/repo/src/x.rs`, a
+///    suffix such as `safety/audit.rs`), file names (`MyService.java`) and
+///    named parts (`the memory module`, `agent/`) that exist → those
+///    prefixes, matched case-insensitively;
+/// 2. "core" with no part of that name → selfware's core (production code
+///    under `src/` minus the tooling modules);
 /// 3. otherwise the whole repository.
+///
+/// A path or named part that matches nothing is listed in
+/// [`ReviewScope::unresolved`] and in the label — never silently widened
+/// to the whole repository. A bare word narrows only as a noun phrase:
+/// "memory safety issues" is not `src/memory` + `src/safety`.
 ///
 /// Tests are in scope only when the task mentions them; examples likewise.
 pub fn resolve_review_scope(task: &str, inventory: &RepoInventory) -> ReviewScope {
-    let lower = task.to_lowercase();
-    let words: Vec<&str> = lower
+    let tokens: Vec<&str> = task
         .split(|c: char| {
             c.is_whitespace()
                 || matches!(
                     c,
-                    ',' | ';' | ':' | '(' | ')' | '"' | '\'' | '`' | '?' | '!'
+                    ',' | ';' | ':' | '(' | ')' | '"' | '\'' | '`' | '?' | '!' | '[' | ']'
                 )
         })
-        .map(|w| w.trim_end_matches(['.', ',']))
+        .map(|w| w.trim_end_matches(['.', ',', ':']))
         .filter(|w| !w.is_empty())
         .collect();
-    let include_tests = words
+    let words: Vec<String> = tokens.iter().map(|w| w.to_lowercase()).collect();
+    let include_tests = words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "test" | "tests" | "testing" | "test-suite" | "specs"
+        )
+    });
+    let include_examples = words
         .iter()
-        .any(|w| matches!(*w, "test" | "tests" | "testing" | "test-suite" | "specs"));
-    let include_examples = words.iter().any(|w| matches!(*w, "example" | "examples"));
+        .any(|w| matches!(w.as_str(), "example" | "examples"));
 
-    // Directory set (every ancestor of every file) and file paths.
-    let mut dirs: HashSet<String> = HashSet::new();
-    for f in &inventory.files {
-        let mut acc = String::new();
-        let parts: Vec<&str> = f.path.split('/').collect();
-        for part in &parts[..parts.len().saturating_sub(1)] {
-            if !acc.is_empty() {
-                acc.push('/');
+    // Directory set (every ancestor of every file), lowercased → as stored.
+    let mut dirs: Vec<(String, String)> = Vec::new();
+    {
+        let mut seen: HashSet<String> = HashSet::new();
+        for f in &inventory.files {
+            let parts: Vec<&str> = f.path.split('/').collect();
+            let mut acc = String::new();
+            for part in &parts[..parts.len().saturating_sub(1)] {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                if seen.insert(acc.clone()) {
+                    dirs.push((acc.to_lowercase(), acc.clone()));
+                }
             }
-            acc.push_str(part);
-            dirs.insert(acc.clone());
         }
     }
+    let files: Vec<(String, &str)> = inventory
+        .files
+        .iter()
+        .map(|f| (f.path.to_lowercase(), f.path.as_str()))
+        .collect();
+    let root_lower = inventory.root.to_lowercase();
+
     let mut prefixes: Vec<String> = Vec::new();
-    let push = |p: String, prefixes: &mut Vec<String>| {
-        if !prefixes.contains(&p) {
-            prefixes.push(p);
+    let mut unresolved: Vec<String> = Vec::new();
+    let push = |p: &str, prefixes: &mut Vec<String>| {
+        if !prefixes.iter().any(|q| q == p) {
+            prefixes.push(p.to_string());
         }
     };
-    for raw in &words {
-        let w = raw.trim_start_matches("./").trim_end_matches('/');
-        if w.len() < 3 || SCOPE_STOPWORDS.contains(&w) {
+    // Exact (repo-relative) or suffix (`safety/audit.rs` →
+    // `src/safety/audit.rs`) matches of a lowercased path.
+    let resolve_path = |w: &str, prefixes: &mut Vec<String>| -> bool {
+        let suffix = format!("/{w}");
+        let mut found = false;
+        for (lower, path) in dirs
+            .iter()
+            .map(|(l, p)| (l.as_str(), p.as_str()))
+            .chain(files.iter().map(|(l, p)| (l.as_str(), *p)))
+        {
+            if lower == w {
+                push(path, prefixes);
+                found = true;
+            }
+        }
+        if !found {
+            for (lower, path) in dirs
+                .iter()
+                .map(|(l, p)| (l.as_str(), p.as_str()))
+                .chain(files.iter().map(|(l, p)| (l.as_str(), *p)))
+            {
+                if lower.ends_with(&suffix) {
+                    push(path, prefixes);
+                    found = true;
+                }
+            }
+        }
+        found
+    };
+    for (i, (token, word)) in tokens.iter().zip(&words).enumerate() {
+        // An absolute path inside the repository is its relative path.
+        let mut w = word.as_str();
+        if !root_lower.is_empty() {
+            if let Some(rest) = w.strip_prefix(&root_lower) {
+                w = rest;
+            }
+        }
+        let names_dir = w.ends_with('/');
+        let w = w.trim_start_matches("./").trim_matches('/');
+        if w.is_empty() || word.starts_with("//") {
             continue;
         }
         if w.contains('/') {
-            if dirs.contains(w) || inventory.files.iter().any(|f| f.path == w) {
-                push(w.to_string(), &mut prefixes);
+            if !resolve_path(w, &mut prefixes) {
+                unresolved.push(token.to_string());
             }
             continue;
         }
-        if w.contains('.') {
-            for f in &inventory.files {
-                if f.path == w || f.path.ends_with(&format!("/{w}")) {
-                    push(f.path.clone(), &mut prefixes);
+        let is_file_name = w.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && !ext.is_empty() && language_of(w) != "Other"
+        });
+        if is_file_name {
+            if !resolve_path(w, &mut prefixes) {
+                unresolved.push(token.to_string());
+            }
+            continue;
+        }
+        // A bare word names a part only as a noun phrase: "the X module",
+        // "module X", or "X/".
+        let next_is_noun = words
+            .get(i + 1)
+            .is_some_and(|n| SCOPE_PART_NOUNS.contains(&n.as_str()));
+        let prev_is_noun = i > 0 && SCOPE_PART_NOUNS.contains(&words[i - 1].as_str());
+        if !(names_dir || next_is_noun || prev_is_noun)
+            || w.len() < 3
+            || SCOPE_STOPWORDS.contains(&w)
+            || SCOPE_PART_NOUNS.contains(&w)
+        {
+            continue;
+        }
+        // Directories with that basename (shallowest first).
+        let mut matched: Vec<&(String, String)> = dirs
+            .iter()
+            .filter(|(lower, _)| lower.rsplit('/').next() == Some(w))
+            .collect();
+        matched.sort_by_key(|(lower, _)| (lower.matches('/').count(), lower.clone()));
+        match matched.first().map(|(l, _)| l.matches('/').count()) {
+            Some(depth) => {
+                for (_, d) in matched
+                    .into_iter()
+                    .filter(|(l, _)| l.matches('/').count() == depth)
+                {
+                    push(d, &mut prefixes);
                 }
             }
-            continue;
-        }
-        // A bare word: directories with that basename (shallowest first).
-        let mut matched: Vec<&String> = dirs
-            .iter()
-            .filter(|d| d.rsplit('/').next() == Some(w))
-            .collect();
-        matched.sort_by_key(|d| (d.matches('/').count(), (*d).clone()));
-        if let Some(depth) = matched.first().map(|d| d.matches('/').count()) {
-            for d in matched
-                .into_iter()
-                .filter(|d| d.matches('/').count() == depth)
-            {
-                push(d.clone(), &mut prefixes);
+            None if !matches!(w, "core" | "kernel") => {
+                let phrase = if next_is_noun {
+                    format!("{token} {}", tokens[i + 1])
+                } else {
+                    token.to_string()
+                };
+                unresolved.push(phrase);
             }
+            None => {}
         }
     }
+    let not_resolved = if unresolved.is_empty() {
+        String::new()
+    } else {
+        format!(" (scope not resolved: {})", unresolved.join(", "))
+    };
     if !prefixes.is_empty() {
         prefixes.sort();
         return ReviewScope {
-            label: prefixes.join(", "),
+            label: format!("{}{not_resolved}", prefixes.join(", ")),
             prefixes,
             core: false,
             include_tests,
             include_examples,
+            unresolved,
         };
     }
-    let asks_core = words.iter().any(|w| matches!(*w, "core" | "kernel"));
+    let asks_core = words
+        .iter()
+        .any(|w| matches!(w.as_str(), "core" | "kernel"));
     if asks_core
         && inventory
             .files
@@ -1018,17 +1197,29 @@ pub fn resolve_review_scope(task: &str, inventory: &RepoInventory) -> ReviewScop
             .any(|f| f.code && is_core_path(&f.path))
     {
         return ReviewScope {
-            label: "core: production code under src/ minus tooling modules (ui, output, testing, bin, …)"
-                .to_string(),
+            label: format!(
+                "core: production code under src/ minus tooling modules (ui, output, testing, \
+                 bin, …){not_resolved}"
+            ),
             prefixes: Vec::new(),
             core: true,
             include_tests,
             include_examples,
+            unresolved,
         };
     }
     ReviewScope {
+        label: if unresolved.is_empty() {
+            "whole repository".to_string()
+        } else {
+            format!(
+                "whole repository — scope not resolved: {} (no such path in the inventory)",
+                unresolved.join(", ")
+            )
+        },
         include_tests,
         include_examples,
+        unresolved,
         ..ReviewScope::whole_repository()
     }
 }
@@ -1777,12 +1968,90 @@ mod tests {
             0,
             "len<3 ignored"
         );
+        // Case-insensitive, suffix and absolute paths (review 2026-09-27).
+        assert_eq!(
+            resolve_review_scope("review SRC/B for bugs", &inv).prefixes,
+            vec!["src/b".to_string()]
+        );
+        assert_eq!(
+            resolve_review_scope("audit b/mod.rs", &inv).prefixes,
+            vec!["src/b/mod.rs".to_string()]
+        );
+        let abs = format!("review {}/src/util.rs please", inv.root);
+        assert_eq!(
+            resolve_review_scope(&abs, &inv).prefixes,
+            vec!["src/util.rs".to_string()]
+        );
+        // A bare word narrows only as a noun phrase.
+        write(dir.path(), "src/memory/store.rs", "pub fn s() {}\n");
+        write(dir.path(), "src/safety/check.rs", "pub fn c() {}\n");
+        let inv = RepoInventory::scan(dir.path()).unwrap();
+        assert_eq!(
+            resolve_review_scope("review the code for memory safety issues", &inv),
+            ReviewScope::whole_repository()
+        );
+        assert_eq!(
+            resolve_review_scope("review the memory module", &inv).prefixes,
+            vec!["src/memory".to_string()]
+        );
+        assert_eq!(
+            resolve_review_scope("audit safety/ for panics", &inv).prefixes,
+            vec!["src/safety".to_string()]
+        );
+        let missing = resolve_review_scope("review the ledger module", &inv);
+        assert_eq!(missing.unresolved, vec!["ledger module".to_string()]);
+        // A named scope that matches nothing is said, not widened silently.
+        let missing = resolve_review_scope("review src/nope for bugs", &inv);
+        assert!(missing.prefixes.is_empty());
+        assert_eq!(missing.unresolved, vec!["src/nope".to_string()]);
+        assert!(
+            missing.label.contains("scope not resolved: src/nope"),
+            "{}",
+            missing.label
+        );
         let core = resolve_review_scope("can you review the demo core do not code", &inv);
         assert!(core.core);
         assert_eq!(
             resolve_review_scope("review this repository", &inv),
             ReviewScope::whole_repository()
         );
+    }
+
+    /// Review 2026-09-27 (F3): a code file that cannot be read left the
+    /// scope silently (`code: false`), shrinking the denominator the review
+    /// gate measures against. It is named instead.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_code_files_are_named_not_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = rust_fixture();
+        let locked = dir.path().join("src/locked.rs");
+        std::fs::write(&locked, "pub fn hidden() {}\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&locked).is_ok() {
+            return; // running as root: permissions do not bite
+        }
+        let inv = RepoInventory::scan(dir.path()).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            inv.unreadable
+                .iter()
+                .any(|u| u.starts_with("src/locked.rs (read failed")),
+            "{:?}",
+            inv.unreadable
+        );
+        let plan = inv.review_plan(ReviewScope::whole_repository());
+        assert!(plan.plan.iter().all(|e| e.path != "src/locked.rs"));
+        assert_eq!(plan.unreadable.len(), 1, "{:?}", plan.unreadable);
+        assert!(inv
+            .render_text(Some(&plan))
+            .contains("unreadable, not counted: 1 code files"));
+        assert!(inv
+            .render_compact(&plan, 2_000)
+            .contains("Unreadable, not counted"));
+        // Out of scope: not reported for that scope.
+        let scoped = inv.review_plan(resolve_review_scope("review src/b", &inv));
+        assert!(scoped.unreadable.is_empty());
     }
 
     #[test]

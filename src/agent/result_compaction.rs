@@ -150,6 +150,19 @@ pub(crate) fn paired_tool_results(messages: &[Message]) -> Vec<PairedResult> {
     out
 }
 
+/// Every `file_read` result in `messages` as `(call arguments, payload)`,
+/// the payload exactly as the model receives it (XML envelope opened, XML
+/// error results skipped). What review coverage counts as delivered.
+pub(crate) fn file_read_payloads(messages: &[Message]) -> Vec<(String, String)> {
+    paired_tool_results(messages)
+        .into_iter()
+        .filter(|r| r.name == "file_read")
+        .filter_map(|r| {
+            open_envelope(messages[r.idx].content.text(), r.xml).map(|env| (r.args, env.payload))
+        })
+        .collect()
+}
+
 /// The (unescaped) payload of a tool-result message and the text around the
 /// `<tool_result>` envelope (XML mode). `None` for an XML error result.
 struct Envelope {
@@ -256,6 +269,21 @@ pub(crate) fn compact_reference_overviews(messages: &mut [Message]) -> usize {
         removed += 1;
     }
     removed
+}
+
+/// The lines of a `file_read` result's `content`. A ranged read reports
+/// `lines_returned` and joins its lines with `\n`, so a slice ending on a
+/// blank line ends in "\n" — which `str::lines` drops (review 2026-09-27:
+/// a cut or stub then named one line fewer than the read delivered). The
+/// reported count wins; a whole-file read's text is split as text.
+fn result_lines<'a>(parsed: Option<&Value>, content: &'a str) -> Vec<&'a str> {
+    match parsed
+        .and_then(|v| v.get("lines_returned"))
+        .and_then(Value::as_u64)
+    {
+        Some(n) => content.split('\n').take(n as usize).collect(),
+        None => content.lines().collect(),
+    }
 }
 
 /// Whether a result payload was already compacted by this module.
@@ -595,7 +623,7 @@ pub(crate) fn build_stub(
                 .and_then(|v| v.get("total_lines"))
                 .and_then(|t| t.as_u64());
             let first_line = range.map_or(1, |r| r.0.max(1));
-            let lines_in_result = content.lines().count();
+            let lines_in_result = result_lines(parsed.as_ref(), content).len();
             // A chunk's (or a truncated head's) own index covers lines its
             // content does not show: keep it.
             let symbols = merged_symbols(parsed.as_ref(), content, first_line);
@@ -997,7 +1025,7 @@ fn truncate_result_with(
         {
             let path = arg_path(&args_v).unwrap_or_else(|| "?".to_string());
             let first_line = shown_range(&args_v, parsed.as_ref()).map_or(1, |r| r.0.max(1));
-            let lines: Vec<&str> = content.lines().collect();
+            let lines: Vec<&str> = result_lines(parsed.as_ref(), content);
             let last_line = first_line + lines.len().saturating_sub(1);
             let total_lines = parsed
                 .as_ref()

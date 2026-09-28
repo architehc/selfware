@@ -587,6 +587,14 @@ impl Agent {
         // (incomplete-action / exact-target / capability-disclaimer checks),
         // so point it at the candidate answer before asking.
         self.last_assistant_response = clean.clone();
+        // A review with its reading plan still open is never answered from
+        // the planning turn — and asking the gate would count a refusal the
+        // model never sees (review 2026-09-27: the discarded planning
+        // refusal used up one of the two no-progress refusals, so only one
+        // was ever shown).
+        if self.review_phase() == Some(super::review_coverage::ReviewPhase::Reading) {
+            return None;
+        }
         Box::pin(self.attribute_blocking_failures()).await;
         if self.check_completion_gate().await.is_some() {
             return None;

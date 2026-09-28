@@ -53,6 +53,9 @@ pub(crate) const REVIEW_ITERATION_RESERVE: usize = 3;
 /// Evidence / banner marker of a review that ended with files unread.
 pub(crate) const REVIEW_COVERAGE_PARTIAL_NOTE: &str = "review coverage: PARTIAL";
 
+/// Opening tag of the inventory note injected at review start.
+const REVIEW_INVENTORY_NOTE_MARKER: &str = "<selfware_context_note kind=review_inventory>";
+
 /// Measured cap of the inventory context note injected at review start.
 const INVENTORY_CONTEXT_TOKENS: usize = 1_500;
 
@@ -109,9 +112,16 @@ pub struct ReviewCoverageReport {
     /// code the run did not read (first 10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cited_unread: Vec<String>,
+    /// In-scope code files that could not be read (`path (why)`): outside
+    /// the relevant counts above, and named in `line`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     /// The summary line (`coverage: …`).
     pub line: String,
 }
+
+/// `(repository-relative path, delivered 1-based line range)` pairs.
+pub(crate) type DeliveredReads = Vec<(String, (usize, usize))>;
 
 /// The per-task review state held by the agent.
 #[derive(Debug, Default)]
@@ -120,6 +130,10 @@ pub(crate) struct ReviewState {
     /// Coverage + findings restored from a checkpoint, applied when the
     /// resumed task rebuilds its session.
     pending_restore: Option<serde_json::Value>,
+    /// The current task's review start already ran (inventory built and
+    /// injected, or the task classified as no review). An in-process
+    /// auto-continue segment keeps the session instead of starting over.
+    started: bool,
 }
 
 #[derive(Debug)]
@@ -129,6 +143,7 @@ pub(crate) struct ReviewSession {
     inventory_line: String,
     scope_label: String,
     plan: Vec<PlanEntry>,
+    unreadable: Vec<String>,
     relevant_lines: usize,
     /// Relevant path → merged, 1-based inclusive line ranges delivered.
     coverage: HashMap<String, Vec<(usize, usize)>>,
@@ -215,6 +230,13 @@ pub(crate) fn delivered_range(args: &serde_json::Value, payload: &str) -> Option
     {
         return None;
     }
+    // A compacted result delivers only what a truncated head still shows
+    // (its `shown_line_range`); a stub delivers nothing.
+    if let Some(state) = v.get(super::result_compaction::COMPACTED_RESULT_KEY) {
+        if state.as_str() != Some("truncated") {
+            return None;
+        }
+    }
     let pair = |value: &serde_json::Value| -> Option<(usize, usize)> {
         let arr = value.as_array()?;
         Some((
@@ -244,7 +266,7 @@ impl ReviewSession {
     ) -> Self {
         let plan_entries: Vec<PlanEntry> = plan.plan.into_iter().filter(|e| e.lines > 0).collect();
         let relevant_lines = plan_entries.iter().map(|e| e.lines).sum();
-        let inventory_line = format!(
+        let mut inventory_line = format!(
             "{} files ({} code), {} lines, {}; scope: {} → {} relevant files, {} lines",
             group(inventory.totals.files),
             group(inventory.code.files),
@@ -254,11 +276,18 @@ impl ReviewSession {
             group(plan_entries.len()),
             group(relevant_lines),
         );
+        if !plan.unreadable.is_empty() {
+            inventory_line.push_str(&format!(
+                "; {} in-scope files unreadable, not counted",
+                group(plan.unreadable.len())
+            ));
+        }
         Self {
             root: PathBuf::from(&inventory.root),
             inventory_line,
             scope_label: plan.scope.label,
             plan: plan_entries,
+            unreadable: plan.unreadable,
             relevant_lines,
             coverage: HashMap::new(),
             findings: Vec::new(),
@@ -386,6 +415,17 @@ impl ReviewSession {
                     .unwrap_or_default()
             )
         };
+        // Unreadable in-scope files are outside every count above: say so,
+        // complete or not (review 2026-09-27, F3).
+        let line = if self.unreadable.is_empty() {
+            line
+        } else {
+            format!(
+                "{line}; {} in-scope file(s) unreadable, not counted: {}",
+                self.unreadable.len(),
+                list_first(&self.unreadable, 5)
+            )
+        };
         let line = if self.cited_unread.is_empty() {
             line
         } else {
@@ -409,6 +449,7 @@ impl ReviewSession {
             not_read_count: unread.len(),
             findings_recorded: self.findings.len(),
             stopped: self.stopped.clone(),
+            unreadable: self.unreadable.clone(),
             cited_unread: self.cited_unread.clone(),
             line,
         }
@@ -700,6 +741,10 @@ impl ReviewSession {
             "coverage": coverage,
             "findings": self.findings,
             "stopped": self.stopped,
+            "refusals": self.refusals,
+            "no_progress_refusals": self.no_progress_refusals,
+            "covered_at_last_refusal": self.covered_at_last_refusal,
+            "citation_nudged": self.citation_nudged,
         })
     }
 
@@ -725,7 +770,32 @@ impl ReviewSession {
         {
             self.absorb_text(&format!("FINDING: {f}"), false);
         }
+        // The gate's state too (review 2026-09-27: a resumed review forgot
+        // that reading had been stopped and how often it had refused, so it
+        // refused again from zero).
+        let count = |k: &str| snapshot.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
+        if let Some(stopped) = snapshot.get("stopped").and_then(|v| v.as_str()) {
+            self.stopped = Some(stopped.to_string());
+        }
+        self.refusals = count("refusals").unwrap_or(self.refusals);
+        self.no_progress_refusals =
+            count("no_progress_refusals").unwrap_or(self.no_progress_refusals);
+        if let Some(n) = count("covered_at_last_refusal") {
+            self.covered_at_last_refusal = Some(n);
+        }
+        if snapshot.get("citation_nudged").and_then(|v| v.as_bool()) == Some(true) {
+            self.citation_nudged = true;
+        }
     }
+}
+
+/// The first `n` of `items`, joined, with a "+N more" tail.
+fn list_first(items: &[String], n: usize) -> String {
+    let mut out = items.iter().take(n).cloned().collect::<Vec<_>>().join(", ");
+    if items.len() > n {
+        out.push_str(&format!(", … (+{})", items.len() - n));
+    }
+    out
 }
 
 /// First line of `1..=total` not covered by `ranges`.
@@ -768,12 +838,45 @@ impl Agent {
             .is_some()
     }
 
-    /// Start (or clear) the review session for the current task: build the
-    /// inventory, show it, inject the compact version into the context.
-    /// No-op (session cleared) for any task that is not a code review.
+    /// Start (or clear) the review session for a NEW task (`run_task`):
+    /// build the inventory, show it, inject the compact version into the
+    /// context. No-op (session cleared) for any task that is not a code
+    /// review.
     pub(super) async fn begin_review_session(&mut self) {
+        {
+            let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
+            state.session = None;
+            state.pending_restore = None;
+            state.started = false;
+        }
+        self.start_review_session(true).await;
+    }
+
+    /// Continue the review of a task being continued: an in-process
+    /// auto-continue segment keeps the running session — coverage,
+    /// findings, refusal counts — and neither re-runs the inventory nor
+    /// injects its note again (review 2026-09-27: `begin_review_session`
+    /// here wiped coverage and findings on every auto-continue). A resumed
+    /// agent (fresh process) rebuilds the session and applies the
+    /// checkpointed snapshot `resume` queued.
+    pub(super) async fn continue_review_session(&mut self) {
+        if self
+            .review
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .started
+        {
+            return;
+        }
+        self.start_review_session(false).await;
+    }
+
+    /// `new_task`: the inventory note is always injected; when resuming, a
+    /// history that already carries it keeps its one copy.
+    async fn start_review_session(&mut self, new_task: bool) {
         let pending = {
             let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
+            state.started = true;
             state.session = None;
             state.pending_restore.take()
         };
@@ -815,8 +918,23 @@ impl Agent {
             // Nothing in scope to read: no gate, and the summary says so.
             tracing::info!("review scope has no relevant code files — coverage gate off");
         }
+        // A resumed history already carries the inventory note from the
+        // original run: one copy only.
+        let has_note = !new_task
+            && self
+                .messages
+                .iter()
+                .any(|m| m.content.text().contains(REVIEW_INVENTORY_NOTE_MARKER));
+        if !has_note {
+            self.push_review_inventory_note(&compact);
+        }
+        let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
+        state.session = (!session.plan.is_empty()).then_some(session);
+    }
+
+    fn push_review_inventory_note(&mut self, compact: &str) {
         self.messages.push(Message::user(format!(
-            "<selfware_context_note kind=review_inventory>\n\
+            "{REVIEW_INVENTORY_NOTE_MARKER}\n\
              This is a REVIEW. The harness inventoried the repository deterministically:\n{compact}\n\n\
              How this review works: read every file in the reading plan with file_read (whole file, \
              or consecutive line_range chunks for large files); outlines, directory listings and grep \
@@ -827,29 +945,78 @@ impl Agent {
              path:line for every finding.\n\
              </selfware_context_note>"
         )));
-        let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
-        state.session = (!session.plan.is_empty()).then_some(session);
     }
 
-    /// Record the line range a delivered `file_read` result showed the model.
-    /// `delivered` is the payload that went into the message (post-chunk).
-    pub(super) fn review_record_file_read(&self, args_str: &str, delivered: &str) {
+    /// The `file_read` ranges `messages` deliver to the model, as
+    /// repository-relative keys: what a request built from them shows (a
+    /// stubbed result delivers nothing, a cut one its shown head). Empty
+    /// outside a review.
+    ///
+    /// Review 2026-09-27 (on v0.9.4): coverage was recorded when the tool
+    /// RETURNED, and the hard-budget trim (`compact_tool_results_logged`
+    /// with `protect_unseen = false`) could stub or cut that result before
+    /// any request carried it — the ledger counted lines the model never
+    /// saw. Coverage is now committed from the request actually sent.
+    pub(super) fn review_reads_delivered(&self, messages: &[Message]) -> DeliveredReads {
+        if !self.review_session_active() {
+            return Vec::new();
+        }
         let workspace = self.tools.workspace_root().path();
-        self.with_review(|session| {
-            let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
-            let Some(arg_path) = ["path", "file_path", "file"]
+        let root = match self
+            .review
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session
+            .as_ref()
+        {
+            Some(session) => session.root.clone(),
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (args_str, payload) in super::result_compaction::file_read_payloads(messages) {
+            let args: serde_json::Value = serde_json::from_str(&args_str).unwrap_or_default();
+            let Some(arg_path) = ["path", "file_path", "file", "filepath"]
                 .iter()
                 .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
             else {
-                return;
+                continue;
             };
-            let Some(range) = delivered_range(&args, delivered) else {
-                return;
+            let Some(range) = delivered_range(&args, &payload) else {
+                continue;
             };
-            if let Some(rel) = relative_key(&session.root, &workspace, arg_path) {
-                session.record(&rel, range);
+            if let Some(rel) = relative_key(&root, &workspace, arg_path) {
+                out.push((rel, range));
+            }
+        }
+        out
+    }
+
+    /// Commit ranges a sent request delivered (see
+    /// [`Agent::review_reads_delivered`]).
+    pub(super) fn review_commit_reads(&self, reads: &[(String, (usize, usize))]) {
+        self.with_review(|session| {
+            for (rel, range) in reads {
+                session.record(rel, *range);
             }
         });
+    }
+
+    /// The turn note for a request about to carry `messages`: computed as
+    /// if their reads were delivered (so it never sends the model back to a
+    /// file it is being shown), without committing them — the ledger only
+    /// takes what the sent request carried.
+    pub(super) fn review_turn_note_for(&self, messages: &[Message]) -> Option<String> {
+        if !self.review_session_active() {
+            return None;
+        }
+        let pending = self.review_reads_delivered(messages);
+        let saved = self.with_review(|session| session.coverage.clone());
+        self.review_commit_reads(&pending);
+        let note = self.review_turn_note();
+        if let Some(saved) = saved {
+            self.with_review(|session| session.coverage = saved);
+        }
+        note
     }
 
     /// Absorb `FINDING:` lines from assistant messages not seen before
@@ -953,10 +1120,11 @@ impl Agent {
 
     /// Queue a checkpointed snapshot for the resumed task's session.
     pub(super) fn queue_review_restore(&self, snapshot: Option<serde_json::Value>) {
-        self.review
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending_restore = snapshot;
+        let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending_restore = snapshot;
+        // The resumed task starts its review again (and applies the
+        // snapshot) even on an agent that ran another task before.
+        state.started = false;
     }
 }
 
@@ -997,12 +1165,14 @@ mod tests {
                     reason: PlanReason::Remaining,
                 })
                 .collect(),
+            unreadable: Vec::new(),
         };
         let inventory = RepoInventory {
             root: "/repo".to_string(),
             gitignore: crate::analysis::repo_inventory::GitignoreStatus::Applied,
             totals: Totals::default(),
             binary_files: 0,
+            unreadable: Vec::new(),
             code: Totals::default(),
             languages: Vec::new(),
             largest_code_files: Vec::new(),
@@ -1044,6 +1214,22 @@ mod tests {
             "{}",
             r.line
         );
+    }
+
+    #[test]
+    fn unreadable_in_scope_files_are_named_in_the_coverage_line() {
+        let mut s = session(&[("a.rs", 10)]);
+        s.unreadable = vec!["big.rs (over 4.0 MB)".to_string()];
+        s.record("a.rs", (1, 10));
+        let r = s.report();
+        assert!(r.complete);
+        assert!(
+            r.line
+                .contains("1 in-scope file(s) unreadable, not counted: big.rs (over 4.0 MB)"),
+            "{}",
+            r.line
+        );
+        assert_eq!(r.unreadable.len(), 1);
     }
 
     #[test]
@@ -1272,6 +1458,189 @@ mod tests {
         assert!(s.report().cited_unread.is_empty());
     }
 
+    /// Review 2026-09-27: ranged reads overflowing a 32k context. The
+    /// hard-budget pass (`protect_unseen = false`, the trim path) stubs or
+    /// cuts results the model has not seen yet; coverage must count only
+    /// what the compacted history still delivers — never the ranges the
+    /// tool returned.
+    #[test]
+    fn coverage_counts_only_what_the_compacted_request_delivers() {
+        use crate::agent::result_compaction as rc;
+        use crate::api::types::{ToolCall, ToolFunction};
+        let call = |id: &str, path: &str| ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({"path": path, "line_range": [1, 400]}).to_string(),
+            },
+        };
+        let payload = || {
+            let lines: Vec<String> = (0..400)
+                .map(|i| format!("    let value_{i} = compute_something(input, {i}) + offset;"))
+                .collect();
+            serde_json::json!({
+                "content": crate::tools::line_numbers::number_line_list(&lines, 1),
+                "line_numbers": true,
+                "lines_returned": 400,
+                "total_lines": null,
+                "has_more": true,
+                "truncated": true,
+            })
+            .to_string()
+        };
+        let mut messages = vec![
+            Message::system("You are a reviewer."),
+            Message::user("review this repository for bugs"),
+        ];
+        // Five reads the model saw, one turn each…
+        for i in 0..5 {
+            let mut a = Message::assistant("");
+            a.tool_calls = Some(vec![call(&format!("c{i}"), &format!("src/f{i}.rs"))]);
+            messages.push(a);
+            messages.push(Message::tool(payload(), format!("c{i}")));
+        }
+        // …then three parallel reads it has not seen yet.
+        let mut a = Message::assistant("");
+        a.tool_calls = Some(
+            (5..8)
+                .map(|i| call(&format!("c{i}"), &format!("src/f{i}.rs")))
+                .collect(),
+        );
+        messages.push(a);
+        for i in 5..8 {
+            messages.push(Message::tool(payload(), format!("c{i}")));
+        }
+        let returned: usize = rc::file_read_payloads(&messages)
+            .iter()
+            .filter_map(|(args, p)| {
+                delivered_range(&serde_json::from_str(args).unwrap(), p).map(|(a, b)| b - a + 1)
+            })
+            .sum();
+        assert_eq!(returned, 8 * 400, "what the tool returned");
+
+        // The history budget a 32k context leaves after output + tail.
+        rc::compact_tool_results_to_budget_opts(
+            &mut messages,
+            12_000,
+            rc::RECENT_RESULTS_KEPT_INTACT,
+            rc::stub_token_budget(32_768),
+            &|_| None,
+            false,
+            &crate::agent::context::PathKeys::default(),
+        )
+        .expect("the history was over budget");
+        let delivered: Vec<(String, (usize, usize))> = rc::file_read_payloads(&messages)
+            .iter()
+            .filter_map(|(args, p)| {
+                let args: serde_json::Value = serde_json::from_str(args).unwrap();
+                let path = args["path"].as_str()?.to_string();
+                delivered_range(&args, p).map(|r| (path, r))
+            })
+            .collect();
+        let delivered_lines: usize = delivered.iter().map(|(_, (a, b))| b - a + 1).sum();
+        let unseen_delivered: usize = delivered
+            .iter()
+            .filter(|(p, _)| ["src/f5.rs", "src/f6.rs", "src/f7.rs"].contains(&p.as_str()))
+            .map(|(_, (a, b))| b - a + 1)
+            .sum();
+        assert!(
+            unseen_delivered < 3 * 400,
+            "unseen reads were stubbed or cut; only what survived counts: {delivered:?}"
+        );
+        // The ledger takes exactly what the compacted history carries.
+        let names: Vec<String> = (0..8).map(|i| format!("src/f{i}.rs")).collect();
+        let files: Vec<(&str, usize)> = names.iter().map(|n| (n.as_str(), 400)).collect();
+        let mut s = session(&files);
+        for (path, range) in &delivered {
+            s.record(path, *range);
+        }
+        assert_eq!(s.covered_lines(), delivered_lines);
+        assert!(!s.complete());
+    }
+
+    #[test]
+    fn gate_state_survives_a_snapshot_round_trip() {
+        let mut s = session(&[("a.rs", 50), ("b.rs", 50)]);
+        s.record("a.rs", (1, 50));
+        assert!(s.gate(1, "draft a.rs:1", None).is_some());
+        assert!(s.gate(2, "draft again a.rs:1", None).is_some());
+        assert_eq!(s.gate(3, "and again a.rs:1", None), None, "stepped aside");
+        assert!(s.stopped.is_some());
+        let snap = s.snapshot();
+        let mut resumed = session(&[("a.rs", 50), ("b.rs", 50)]);
+        resumed.restore(&snap);
+        assert_eq!(resumed.stopped, s.stopped, "a stopped review stays stopped");
+        assert_eq!(resumed.refusals, s.refusals);
+        assert_eq!(resumed.no_progress_refusals, s.no_progress_refusals);
+        assert_eq!(resumed.gate(9, "final a.rs:1", None), None);
+    }
+
+    /// Review 2026-09-27: an in-process auto-continue went through
+    /// `begin_review_session`, which dropped the session — coverage and
+    /// findings gone mid-review — and re-injected the inventory note.
+    #[tokio::test]
+    async fn auto_continue_keeps_the_review_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/a.py"), "def a():\n    return 1\n").unwrap();
+        std::fs::write(root.join("pkg/b.py"), "def b():\n    return 2\n").unwrap();
+        let _cwd = crate::test_support::CwdGuard::enter(root);
+        let config = crate::test_support::mock_agent_config("http://127.0.0.1:9/v1");
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "review this repository for bugs".to_string();
+        agent.classify_task_policy();
+        agent.begin_review_session().await;
+        assert!(agent.review_session_active());
+        agent.review_commit_reads(&[("pkg/a.py".to_string(), (1, 2))]);
+        agent.with_review(|s| s.absorb_text("FINDING: pkg/a.py:2 — returns a constant", false));
+        let notes = |agent: &Agent| {
+            agent
+                .messages
+                .iter()
+                .filter(|m| m.content.text().contains(REVIEW_INVENTORY_NOTE_MARKER))
+                .count()
+        };
+        assert_eq!(notes(&agent), 1);
+
+        agent.continue_review_session().await;
+        let report = agent.review_coverage().expect("session kept");
+        assert_eq!(report.read_files, 1, "{report:?}");
+        assert_eq!(report.findings_recorded, 1);
+        assert_eq!(notes(&agent), 1, "no second inventory note");
+
+        // A resume (queued snapshot) rebuilds and restores — still one note.
+        let snap = agent.review_snapshot();
+        agent.queue_review_restore(snap);
+        agent.continue_review_session().await;
+        let report = agent.review_coverage().expect("session rebuilt");
+        assert_eq!((report.read_files, report.findings_recorded), (1, 1));
+        assert_eq!(notes(&agent), 1);
+
+        // A new task starts over.
+        agent.begin_review_session().await;
+        assert_eq!(agent.review_coverage().unwrap().read_files, 0);
+    }
+
+    #[test]
+    fn a_ranged_read_ending_on_a_blank_line_leaves_no_hole() {
+        let mut s = session(&[("a.rs", 4)]);
+        let args = serde_json::json!({"path": "a.rs", "line_range": [1, 2]});
+        let payload = serde_json::json!({"content": "1\tfn a() {}\n2\t", "lines_returned": 2});
+        s.record(
+            "a.rs",
+            delivered_range(&args, &payload.to_string()).unwrap(),
+        );
+        let args = serde_json::json!({"path": "a.rs", "line_range": [3, 4]});
+        let payload = serde_json::json!({"content": "3\tfn b() {}\n4\t", "lines_returned": 2});
+        s.record(
+            "a.rs",
+            delivered_range(&args, &payload.to_string()).unwrap(),
+        );
+        assert!(s.complete(), "{:?}", s.coverage);
+    }
+
     fn xml_read(path: &str) -> String {
         format!("<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{path}\"}}</arguments>\n</tool>")
     }
@@ -1342,5 +1711,58 @@ mod tests {
         );
         assert_eq!(agent.review_phase(), Some(ReviewPhase::Synthesis));
         assert!(agent.last_assistant_response.contains("Final review"));
+    }
+
+    /// Review 2026-09-27: the planning reply went through the completion
+    /// gate and its refusal was discarded, but the session counted it — so
+    /// the model saw one refusal before the gate stepped aside. Every
+    /// counted refusal must be one the model was shown.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+    )]
+    async fn every_counted_refusal_is_shown() {
+        use crate::testing::mock_api::MockLlmServer;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/__init__.py"), "from .a import ratio\n").unwrap();
+        std::fs::write(
+            root.join("pkg/a.py"),
+            "def ratio(x, n):\n    return x / n\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("pkg/b.py"), "def show(v):\n    print(v)\n").unwrap();
+        let _cwd = crate::test_support::CwdGuard::enter(root);
+        let draft = "Review: FINDING: pkg/a.py:2 — ratio divides by n without a zero check.";
+        let server = MockLlmServer::builder()
+            .with_response(draft)
+            .with_response(xml_read("pkg/a.py"))
+            .with_response(draft)
+            .with_response(xml_read("pkg/__init__.py"))
+            .with_response(xml_read("pkg/b.py"))
+            .with_response(
+                "Final review. pkg/a.py:2 — ratio divides by n without a zero check. \
+                 pkg/b.py:2 — show prints; fine.",
+            )
+            .build()
+            .await;
+        let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        let result = agent
+            .run_task("review this repository for bugs, cite file:line")
+            .await;
+        server.stop().await;
+        assert!(result.is_ok(), "{:?}", result.err());
+        let shown = agent
+            .messages
+            .iter()
+            .filter(|m| m.content.text().contains("REVIEW COVERAGE INCOMPLETE"))
+            .count();
+        let counted = agent.with_review(|s| s.refusals).unwrap();
+        assert_eq!(counted, shown, "counted refusals must all be shown");
+        let coverage = agent.review_coverage().unwrap();
+        assert!(coverage.complete, "{coverage:?}");
     }
 }

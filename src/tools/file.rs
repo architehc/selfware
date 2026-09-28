@@ -431,15 +431,20 @@ impl Tool for FileRead {
                 crate::tools::workspace_root::spawn_blocking(move || open_checked_regular(&p, &cfg))
                     .await??
             };
-            let (selected_content, lines_scanned, lossy, reached_eof) =
+            let (selected, lines_scanned, lossy, reached_eof) =
                 read_line_slice(file, start, end).await?;
-            let lines_returned = selected_content.lines().count();
+            // Counted on the lines, not on their joined text: a slice ending
+            // on a blank line joins to "…\n", which `str::lines` counts one
+            // short — the review ledger then saw a one-line hole and a final
+            // blank line could never be read (review 2026-09-27).
+            let lines_returned = selected.len();
             // Absolute numbering: the first returned line is `start` (the
             // slice begins there; an empty slice has nothing to number).
+            // Every returned line is numbered, a trailing blank one included.
             let selected_content = if numbered {
-                number_lines(&selected_content, start.max(1))
+                crate::tools::line_numbers::number_line_list(&selected, start.max(1))
             } else {
-                selected_content
+                selected.join("\n")
             };
             if reached_eof {
                 // The scan consumed the whole file, so lines_scanned is the
@@ -1410,7 +1415,7 @@ async fn read_line_slice(
     file: std::fs::File,
     start: usize,
     end: usize,
-) -> Result<(String, usize, bool, bool)> {
+) -> Result<(Vec<String>, usize, bool, bool)> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     // Preserve the legacy contract that an inverted range (end < start) yields
     // the single line at `start`.
@@ -1447,7 +1452,7 @@ async fn read_line_slice(
             break; // stop early — don't read the rest of a huge file
         }
     }
-    Ok((selected.join("\n"), lineno, lossy, reached_eof))
+    Ok((selected, lineno, lossy, reached_eof))
 }
 
 /// Result note when an edit's line-number prefixes were removed.

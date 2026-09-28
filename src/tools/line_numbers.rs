@@ -48,6 +48,22 @@ pub fn number_lines(content: &str, first_line: usize) -> String {
     out
 }
 
+/// Number a list of lines (no terminators) starting at `first_line` and
+/// join them with `\n`. Unlike [`number_lines`] on their joined text, a
+/// trailing blank line is numbered too.
+pub fn number_line_list(lines: &[String], first_line: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let width = (first_line + lines.len() - 1).to_string().len();
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>width$}\t{line}", first_line + i))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Byte length of a leading line-number prefix (`^\s*\d+\t`) on `line`, or
 /// `None` when the line does not start with one. Only horizontal whitespace
 /// counts as the leading `\s*` (a line never contains `\n`).

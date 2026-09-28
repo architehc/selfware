@@ -677,7 +677,12 @@ fn discover_test_sources(src_root: &Path, source_files: &[PathBuf]) -> Result<Te
         if !is_rust_source(source) {
             continue;
         }
-        let content = std::fs::read_to_string(source)?;
+        // An unreadable (or non-UTF-8) source contributes no module edges;
+        // it must not fail the whole partition — the repository inventory
+        // names such files instead (review 2026-09-27, F3).
+        let Ok(content) = std::fs::read_to_string(source) else {
+            continue;
+        };
         let Ok(file) = syn::parse_file(&content) else {
             continue;
         };

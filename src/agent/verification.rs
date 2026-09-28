@@ -2901,8 +2901,13 @@ impl Agent {
                 }
             }
             if readback.artifact_only {
-                // Written deliverables (REVIEW.md, ...) still get their
-                // citations checked before the artifact-only acceptance.
+                // A review written to a file (REVIEW.md) is still held to its
+                // reading plan (review 2026-09-27: this early return skipped
+                // the coverage gate), and its citations are checked before
+                // the artifact-only acceptance.
+                if let Some(directive) = self.review_coverage_gate() {
+                    return Some(directive);
+                }
                 let read_only = self.current_task_is_read_only();
                 return self.citation_gate(read_only);
             }

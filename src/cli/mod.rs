@@ -7414,14 +7414,19 @@ fn render_run_summary_for(
             ))
         }
         // A review that ended with relevant files unread: finished, never a
-        // completed review (the coverage line below says how much was read).
+        // completed review — the same verdict as the banner ("⚠️ Review
+        // finished with PARTIAL coverage"; review 2026-09-27: this line said
+        // "completed" under a banner that said it was not). The coverage line
+        // below says how much was read.
         None if summary
             .review_coverage
             .as_ref()
             .is_some_and(|c| !c.complete) =>
         {
             lines.push(
-                "outcome: completed — review coverage PARTIAL (see coverage below)".to_string(),
+                "outcome: finished — review coverage PARTIAL (not a completed review; see \
+                 coverage below)"
+                    .to_string(),
             )
         }
         // Allowed with a warning: the citation gate stepped aside with
