@@ -84,11 +84,61 @@ pub(crate) fn verification_call_ran_nothing(name: &str, args_str: &str, result: 
 }
 
 /// A cargo run with no manifest to run on: the cargo tools' typed refusal
-/// (`tools::cargo::ensure_cargo_manifest`) or cargo's own "could not find
-/// `Cargo.toml`" (a shell `cargo check` in a non-Rust project).
+/// (`tools::cargo::ensure_cargo_manifest`) or cargo's own top-level
+/// "error: could not find `Cargo.toml`" (a shell `cargo check` in a
+/// non-Rust project).
+///
+/// Review 2026-09-27: this matched either string ANYWHERE in the result, so
+/// a real failing `cargo test` whose output merely contained it (a test
+/// asserting on that message — this repository has such tests) was dropped
+/// from the ledger, and an earlier pass then read "passed". Only the typed
+/// error itself, or cargo's own error line in output that shows no build or
+/// test run, counts.
 pub(crate) fn cargo_found_no_manifest(result: &str) -> bool {
-    result.contains(crate::tools::cargo::NO_CARGO_MANIFEST_MARKER)
-        || result.contains("could not find `Cargo.toml`")
+    use crate::tools::cargo::NO_CARGO_MANIFEST_MARKER;
+    // The typed refusal is the whole error message (behind the dispatcher's
+    // "Tool execution failed:" prefix, or in an `{"error": …}` envelope).
+    let error_text = serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+    let head = error_text.as_deref().unwrap_or(result).trim_start();
+    let head = head
+        .strip_prefix("Tool execution failed:")
+        .unwrap_or(head)
+        .trim_start();
+    if head.starts_with(NO_CARGO_MANIFEST_MARKER) {
+        return true;
+    }
+    // Cargo's own refusal: its top-level error line, in output that shows
+    // no compilation and no test run.
+    let (stdout, stderr) = match serde_json::from_str::<serde_json::Value>(result) {
+        Ok(v) => (
+            v.get("stdout")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            v.get("stderr")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        Err(_) => (String::new(), result.to_string()),
+    };
+    let output = format!("{stdout}\n{stderr}");
+    let refused = output.lines().any(|l| {
+        l.trim_start()
+            .starts_with("error: could not find `Cargo.toml`")
+    });
+    let ran_something = output.lines().any(|l| {
+        let l = l.trim_start();
+        l.starts_with("Compiling ")
+            || l.starts_with("Checking ")
+            || l.starts_with("Running ")
+            || l.starts_with("running ")
+            || l.starts_with("test result:")
+            || l.starts_with("Finished ")
+    });
+    refused && !ran_something
 }
 
 impl Agent {
@@ -942,6 +992,21 @@ impl Agent {
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// Whether this task changed no file by any route: no file-tool write
+    /// (the full mutating set — `file_multi_edit`, `patch_apply`, … —
+    /// `written_paths`), no write-shaped shell command, and nothing in the
+    /// stale-file tracker. The same evidence the outcome classifier
+    /// (`FailureMode`) uses for NO_CHANGES. Review 2026-09-27: the run
+    /// summary keyed "no edits … informational" on the tracker alone, which
+    /// only `file_write`/`file_edit` feed, so a read-only-classified task
+    /// that edited via `patch_apply` or the shell had its failing checks
+    /// rendered informational.
+    pub(crate) fn made_no_edits(&self) -> bool {
+        self.file_tracker.stale_files.is_empty()
+            && self.written_paths().is_empty()
+            && !self.shell_write_evidence()
     }
 
     /// Stagnation accounting (loop 13d): count consecutive tool calls that

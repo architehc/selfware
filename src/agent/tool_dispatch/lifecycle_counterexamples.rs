@@ -545,6 +545,72 @@ mod agent_lifecycle {
         );
     }
 
+    /// Review 2026-09-27: `cargo_found_no_manifest` matched the strings
+    /// anywhere, so a real failing test run that quoted them was dropped
+    /// from the ledger.
+    #[test]
+    fn a_failing_test_run_that_mentions_the_manifest_error_is_a_failure() {
+        use super::super::cargo_found_no_manifest;
+        // The refusals themselves.
+        assert!(cargo_found_no_manifest(
+            "Tool execution failed: NO_CARGO_MANIFEST: no Cargo.toml in /w or any parent directory"
+        ));
+        assert!(cargo_found_no_manifest(
+            r#"{"exit_code":101,"stdout":"","stderr":"error: could not find `Cargo.toml` in `/w` or any parent directory"}"#
+        ));
+        // A real `cargo test` failure whose output quotes the messages.
+        let failing = r#"{"exit_code":101,"stdout":"running 3 tests\ntest t ... FAILED\n---- t stdout ----\nerror: could not find `Cargo.toml` in `/tmp/x`\nleft: NO_CARGO_MANIFEST: no Cargo.toml\ntest result: FAILED. 2 passed; 1 failed","stderr":"   Compiling demo v0.1.0\nerror: test failed"}"#;
+        assert!(!cargo_found_no_manifest(failing));
+        assert!(!super::super::verification_call_ran_nothing(
+            "shell_exec",
+            r#"{"command":"cargo test"}"#,
+            failing
+        ));
+        assert!(!cargo_found_no_manifest(
+            "Tool execution failed: cargo test exited 101\nrunning 2 tests\nNO_CARGO_MANIFEST: quoted"
+        ));
+    }
+
+    /// Review 2026-09-27: a read-only-classified task that edited through
+    /// `file_multi_edit` / `patch_apply` / a shell redirect is not a "no
+    /// edits" run — its failing checks are not informational.
+    #[tokio::test]
+    async fn edits_outside_file_write_are_not_a_no_edit_run() {
+        let (mut agent, _dir) = agent().await;
+        agent.current_task_context = "review src/lib.rs and report findings, read-only".to_string();
+        agent.classify_task_policy();
+        assert!(agent.current_task_is_read_only());
+        assert!(agent.run_summary().verification_informational);
+        assert!(agent.made_no_edits());
+        for (tool, args) in [
+            (
+                "file_multi_edit",
+                json!({"edits": [{"path": "src/lib.rs", "old_str": "a", "new_str": "b"}]}),
+            ),
+            (
+                "patch_apply",
+                json!({"diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-a\n+b\n"}),
+            ),
+            ("shell_exec", json!({"command": "echo x > src/lib.rs"})),
+        ] {
+            let mut cp = TaskCheckpoint::new("t".into(), "review".into());
+            cp.log_tool_call(crate::checkpoint::ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: tool.to_string(),
+                arguments: args.to_string(),
+                result: Some("{}".to_string()),
+                success: true,
+                duration_ms: Some(1),
+            });
+            agent.current_checkpoint = Some(cp);
+            assert!(!agent.made_no_edits(), "{tool}");
+            assert!(
+                !agent.run_summary().verification_informational,
+                "{tool}: an edit run's checks are not informational"
+            );
+        }
+    }
+
     /// 0.9.4 live finding: the review of a Python project ran `cargo_check`
     /// (no Cargo.toml anywhere) and the run summary reported "verification
     /// FAILED (1 checks: cargo_check)". A cargo run with no manifest — the

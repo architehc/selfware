@@ -101,6 +101,15 @@ fn cant_open_re() -> &'static Regex {
     })
 }
 
+/// Whether the missing module `missing` is `runner` or one of the packages
+/// it lives in (`a` or `a.b` for `a.b.c`).
+fn module_on_runner_path(missing: &str, runner: &str) -> bool {
+    runner == missing
+        || runner
+            .strip_prefix(missing)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
 fn no_module_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -188,10 +197,14 @@ pub(crate) fn detect(command: &str, result: &str) -> Option<RunnerUnavailable> {
                 runner: basename(runner).to_string(),
             });
         }
-        let top = runner.split('.').next().unwrap_or(runner);
+        // The runner module itself (or a package on its path) is missing —
+        // not a module the runner imported once it had started: `python3 -m
+        // tests` failing on `No module named 'tests.helpers'` ran the tests
+        // and is a real failure (review 2026-09-27: only the top-level
+        // package was compared).
         let missing = no_module_re()
             .captures_iter(&output)
-            .any(|c| c[1].split('.').next() == Some(top));
+            .any(|c| module_on_runner_path(&c[1], runner));
         return missing.then(|| RunnerUnavailable {
             kind: RunnerUnavailableKind::ModuleNotInstalled,
             interpreter: first.to_string(),
@@ -223,7 +236,7 @@ pub(crate) fn detect(command: &str, result: &str) -> Option<RunnerUnavailable> {
     let missing = output.contains("ModuleNotFoundError")
         && no_module_re()
             .captures_iter(&output)
-            .any(|c| c[1].split('.').next() == Some(package));
+            .any(|c| &c[1] == package);
     missing.then(|| RunnerUnavailable {
         kind: RunnerUnavailableKind::ModuleNotInstalled,
         interpreter: launcher.to_string(),

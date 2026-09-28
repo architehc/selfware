@@ -666,8 +666,7 @@ impl Agent {
             files_changed,
             verification: self.credited_verification_summary(),
             verification_checks: self.verification_check_names(),
-            verification_informational: self.current_task_is_read_only()
-                && self.file_tracker.stale_files.is_empty(),
+            verification_informational: self.current_task_is_read_only() && self.made_no_edits(),
             preexisting_failures: self.preexisting_failure_notes(),
             vision_calls: self.vision_call_outcomes(),
             total_tokens: task_usage.total_tokens,

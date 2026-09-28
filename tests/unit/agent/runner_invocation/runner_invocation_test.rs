@@ -94,3 +94,33 @@ fn detect_for_call_reads_shell_arguments_only() {
     assert!(detect_for_call("pty_shell", &args, &result).is_some());
     assert!(detect_for_call("cargo_test", &args, &result).is_none());
 }
+
+/// Review 2026-09-27: only the top-level package was compared, so a runner
+/// that started and failed on its own submodule import was "RUNNER NOT
+/// STARTED".
+#[test]
+fn a_started_runner_failing_on_its_own_submodule_is_a_real_failure() {
+    let result = shell(
+        "",
+        "Traceback (most recent call last):\n  File \"/w/tests/__main__.py\", line 1\n\
+         ModuleNotFoundError: No module named 'tests.helpers'\n",
+        1,
+    );
+    assert!(detect("python3 -m tests", &result).is_none());
+    // The runner (or its package) itself missing is still not started.
+    let missing = shell("", "/usr/bin/python3: No module named tests\n", 1);
+    assert!(detect("python3 -m tests", &missing).is_some());
+    let package = shell(
+        "",
+        "Error while finding module specification for 'tools.run' (ModuleNotFoundError: No module named 'tools')\n",
+        1,
+    );
+    assert!(detect("python3 -m tools.run", &package).is_some());
+    // pytest importing a broken plugin of its own ran.
+    let plugin = shell(
+        "",
+        "ModuleNotFoundError: No module named 'pytest_cov.plugin'\n",
+        1,
+    );
+    assert!(detect("pytest", &plugin).is_none());
+}
