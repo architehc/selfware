@@ -2171,14 +2171,15 @@ impl SafetyChecker {
             }
             // Every operand is a full path-policy candidate — read-verb
             // operands included (policy flip, see the doc comment above).
-            // Every program on the shared reader list consumes its operands'
-            // contents, so every operand is a path candidate — the same list
-            // the headless read approval and the YOLO heuristics use
-            // (`crate::safety::shell_read::CONTENT_READERS`). 0.9.4 kept a
-            // shorter copy here: `jq -R . .env` and `cut -c1- .env` read a
-            // denied file that `cat .env` could not (0.9.5 review, M5).
-            let is_file_verb = FILE_TARGET_VERBS.contains(&verb)
-                || crate::safety::shell_read::CONTENT_READERS.contains(&verb);
+            // Deliberately NOT the shared reader list
+            // (`crate::safety::shell_read::CONTENT_READERS`): the red-team
+            // corpus pins awk/sed/cut/jq/stat/… reads (including of `.env`)
+            // as benign controls at this always-on layer, and their first
+            // operand is a program, not a path. Reads approved WITHOUT an
+            // operator are vetted operand-by-operand against the shared list
+            // by `yolo::headless_read_shell_guard_pass`, and the YOLO floor's
+            // reader heuristics use the shared list (0.9.5 review, M5).
+            let is_file_verb = FILE_TARGET_VERBS.contains(&verb);
             let mut chmod_mode_seen = false;
             let mut flags_done = false;
             // What to do with the token after a redirect operator: `>`

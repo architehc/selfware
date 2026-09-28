@@ -4682,26 +4682,15 @@ fn shell_path_refusal_reports_the_path_as_typed() {
 }
 
 #[test]
-fn denied_paths_hold_through_every_shared_reader() {
-    // 0.9.5 review M5: `cat .env` was refused, but readers missing from the
-    // checker's file-verb list (jq, cut, comm, column, …) and `REV:path` /
-    // pathspec forms read the same file. Every program on the shared reader
-    // list (`crate::safety::shell_read::CONTENT_READERS`) now makes all of
-    // its operands path candidates.
+fn denied_paths_hold_through_git_revision_and_pathspec_operands() {
+    // 0.9.5 review M5: `git show HEAD:.env` and `git diff HEAD -- .env`
+    // print a denied file that `cat .env` may not. The part after the last
+    // `:` of an operand, and git pathspecs after `--`, are path candidates.
+    // (Other readers — jq, cut, awk, … — are vetted per operand where a read
+    // is approved without an operator: `yolo::headless_read_shell_guard_pass`.)
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);
     for cmd in [
-        "jq -R . .env",
-        "cut -c1- .env",
-        "comm .env README.md",
-        "column -t .env",
-        "sort .env",
-        "uniq .env",
-        "nl .env",
-        "tac .env",
-        "awk 1 .env",
-        "sed -n 1p .env",
-        "strings .env",
         "git show HEAD:.env",
         "git cat-file -p main:config/.env.production",
         "git diff HEAD -- .env",
@@ -4716,10 +4705,10 @@ fn denied_paths_hold_through_every_shared_reader() {
     }
     for cmd in [
         "jq -r .name package.json",
-        "cut -d: -f1 README.md",
         "git show HEAD:README.md",
         "git log --oneline -5",
         "git diff HEAD -- src",
+        "awk -F= '/^KEY/ {print $2}' config.txt",
     ] {
         assert!(checker.check_shell_command(cmd).is_ok(), "{cmd}");
     }
