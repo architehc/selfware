@@ -1398,6 +1398,22 @@ impl ApiClient {
                 max_tokens: self.config.workloads.get(kind).max_tokens,
                 ..crate::config::WorkloadQuota::default()
             },
+            ThinkingMode::Chat => {
+                let planning = self
+                    .config
+                    .workloads
+                    .get(crate::config::TurnWorkload::Planning);
+                let takes_kwargs = planning.enable_thinking.is_some()
+                    || self
+                        .config
+                        .extra_body
+                        .as_ref()
+                        .is_some_and(|b| b.contains_key("chat_template_kwargs"));
+                crate::config::WorkloadQuota {
+                    max_tokens: planning.max_tokens,
+                    enable_thinking: takes_kwargs.then_some(false),
+                }
+            }
             _ => crate::config::WorkloadQuota::default(),
         };
         let max_tokens = quota

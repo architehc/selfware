@@ -23,6 +23,22 @@ impl Agent {
         let turn_start = std::time::Instant::now();
         self.log_turn_start_event("planning", false, self.messages.len());
         self.trim_message_history();
+        // A pure conversational turn ("hi", "thanks", "what can you do?") is
+        // answered without tools, workspace context or thinking
+        // (`chat_turn`). `requested_thinking` is kept for the fallback when
+        // the reply shows the classification was wrong.
+        let chat = self.chat_turn_applies();
+        if chat {
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "chat_turn".to_string(),
+                detail: "conversational message: answered without tools, workspace context \
+                         or thinking"
+                    .to_string(),
+            });
+        }
+        let requested_thinking = thinking;
+        let thinking = if chat { ThinkingMode::Chat } else { thinking };
+        let request_tools = if chat { None } else { self.api_tools() };
         // Same request assembly as the execution path (assistant_response.rs):
         // per-turn content (the learning hint, the work ledger) travels in the
         // `<selfware_context_note kind=turn_context>` tail at the END of the
@@ -41,14 +57,18 @@ impl Agent {
             .collect();
         self.sync_path_key_root();
         let compressor = &self.compressor;
-        let request_messages = Self::finish_request_with_tail_and_ledger(
-            self.messages.clone(),
-            turn_hints,
-            &|history, cap| compressor.render_work_ledger_for(cap, history),
-            self.max_context_tokens,
-            self.current_checkpoint.as_ref(),
-            &compressor.path_keys(),
-        )?;
+        let request_messages = if chat {
+            self.chat_request_messages()
+        } else {
+            Self::finish_request_with_tail_and_ledger(
+                self.messages.clone(),
+                turn_hints,
+                &|history, cap| compressor.render_work_ledger_for(cap, history),
+                self.max_context_tokens,
+                self.current_checkpoint.as_ref(),
+                &compressor.path_keys(),
+            )?
+        };
         // Capture per-call metadata so the planning step also gets a
         // turn_NNNN.json artifact under <workdir>/.selfware/turns/.
         let mut plan_meta = crate::api::types::ChatMetadata::default();
@@ -71,7 +91,7 @@ impl Agent {
             match self
                 .chat_streaming(
                     request_messages.clone(),
-                    self.api_tools(),
+                    request_tools.clone(),
                     thinking,
                     Some(&mut plan_meta),
                 )
@@ -120,7 +140,7 @@ impl Agent {
                     let fallback = self
                         .await_nonstreaming_llm(self.client.chat_with_meta(
                             request_messages,
-                            self.api_tools(),
+                            request_tools.clone(),
                             thinking,
                         ))
                         .await
@@ -160,7 +180,7 @@ impl Agent {
             let response = self
                 .await_nonstreaming_llm(self.client.chat_with_meta(
                     request_messages,
-                    self.api_tools(),
+                    request_tools.clone(),
                     thinking,
                 ))
                 .await;
@@ -266,6 +286,38 @@ impl Agent {
                 detail,
             });
             return Box::pin(self.plan_with_thinking(ThinkingMode::Workload(escalate_to))).await;
+        }
+
+        // A chat reply that calls a tool (or is empty) means the message was
+        // not pure chat after all: plan it as a task. Nothing from this
+        // reply has entered the history.
+        if chat && !self.is_cancelled() {
+            let text = super::recovery::strip_think_blocks(assistant_msg.content.text());
+            let calls_tools = !crate::api::tool_calling::extract_tool_calls(
+                &assistant_msg,
+                self.effective_native_fc(),
+            )
+            .is_empty()
+                || crate::tool_parser::text_opens_tool_call(
+                    &crate::tool_parser::outside_markdown_code(text.trim()),
+                );
+            if calls_tools || text.trim().is_empty() {
+                self.task_is_chat = false;
+                let detail = format!(
+                    "chat turn {} — planning the message as a task",
+                    if calls_tools {
+                        "reply called a tool"
+                    } else {
+                        "reply was empty"
+                    }
+                );
+                info!("{detail}");
+                self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                    decision: "chat_fallback".to_string(),
+                    detail,
+                });
+                return Box::pin(self.plan_with_thinking(requested_thinking)).await;
+            }
         }
 
         let content = &assistant_msg.content;
@@ -544,6 +596,10 @@ impl Agent {
         if self.plan_mode || self.current_task_requires_mutation() {
             return None;
         }
+        // A chat turn's reply is the answer: no grounding demand (nothing in
+        // the workspace was asked about) and no minimum length ("Hi! What
+        // are we working on?" is a complete reply).
+        let chat = self.task_is_chat && self.total_tool_call_count() == 0;
         // Read-only alone is not enough to demand grounding: a general-knowledge
         // answer ("explain how a hash map works") is still accepted from the
         // planning turn in one request. The gate applies when the task asks
@@ -553,7 +609,7 @@ impl Agent {
         // tasks classified read-only: a task in between ("Read README.md and
         // …") skipped this guard and was answered from the prompt (review,
         // 0.9.2).
-        if self.total_tool_call_count() == 0 && self.task_is_workspace_question() {
+        if !chat && self.total_tool_call_count() == 0 && self.task_is_workspace_question() {
             self.push_ungrounded_answer_nudge_once();
             return None;
         }
@@ -566,7 +622,8 @@ impl Agent {
         let clean = super::recovery::strip_think_blocks(&content)
             .trim()
             .to_string();
-        if clean.len() < 40
+        if (!chat && clean.len() < 40)
+            || clean.is_empty()
             || super::verification::is_confused_response(&content)
             || super::verification::is_incomplete_action_response(&content)
         {

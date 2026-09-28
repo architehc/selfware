@@ -390,6 +390,12 @@ pub enum ThinkingMode {
     /// the matched model profile) sets this request's
     /// `chat_template_kwargs.enable_thinking` and `max_tokens`.
     Workload(crate::config::TurnWorkload),
+    /// A pure conversational turn (`agent::chat_turn`): the planning
+    /// quota's `max_tokens`, with thinking switched off
+    /// (`chat_template_kwargs.enable_thinking = false`) where the endpoint
+    /// takes chat-template kwargs (the config or the planning quota already
+    /// sends them); elsewhere thinking is left as configured.
+    Chat,
 }
 
 #[cfg(test)]

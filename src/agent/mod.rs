@@ -94,6 +94,7 @@ macro_rules! cli_prompt {
 mod assistant_response;
 pub mod best_snapshot;
 pub mod call_forecast;
+mod chat_turn;
 mod checkpointing;
 pub mod citation_check;
 pub mod compression;
@@ -1352,6 +1353,9 @@ pub struct Agent {
     /// the NoSourceEdit / has_written_any_file completion-gate demands are
     /// suppressed — a review/analysis task's deliverable is the report.
     task_is_read_only: bool,
+    /// The task is a pure conversational turn (`chat_turn::is_pure_chat`),
+    /// classified with `task_is_read_only` at task start.
+    task_is_chat: bool,
     /// Monotonic sequence incremented after every successful state-changing tool.
     mutation_sequence: usize,
     /// Mutation sequence number covered by the most recent successful verification.
@@ -2156,6 +2160,7 @@ To call a tool, use this EXACT XML structure:
             files_checklist_seen: false,
             force_mutation_pending: false,
             task_is_read_only: false,
+            task_is_chat: false,
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
@@ -3864,6 +3869,7 @@ To call a tool, use this EXACT XML structure:
     /// gates them all consistently.
     pub fn current_task_requires_mutation(&self) -> bool {
         !self.current_task_is_read_only()
+            && !self.task_is_chat
             && tool_dispatch::task_requires_mutation(self.task_context_for_classification())
     }
 
@@ -3883,6 +3889,10 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn classify_task_policy(&mut self) {
         self.task_is_read_only =
             task_policy::task_is_read_only(self.task_context_for_classification());
+        // The whole learning context, not the classification text: a task
+        // that names tools it must call ("This task explicitly requires
+        // these tools ...") is never chat.
+        self.task_is_chat = chat_turn::is_pure_chat(self.learning_context());
     }
 
     /// Reset all per-task failure-mode counters. Called when starting or
