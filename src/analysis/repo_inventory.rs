@@ -714,7 +714,7 @@ fn slash_path(path: &Path) -> String {
 /// Files git would show for `root` (tracked + untracked-not-ignored), as
 /// root-relative `/` paths; `None` outside a git work tree or when git
 /// fails. Spawned with the sanitized environment (AGENTS.md rule 5).
-fn git_visible_files(root: &Path) -> Option<HashSet<String>> {
+pub(crate) fn git_visible_files(root: &Path) -> Option<HashSet<String>> {
     use crate::safety::process_env::SanitizedEnvExt;
     let output = std::process::Command::new("git")
         .sanitized_env()

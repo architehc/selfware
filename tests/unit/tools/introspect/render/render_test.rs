@@ -38,15 +38,6 @@ fn test_render_flat() {
     assert!(result.contains("1000 tokens"));
 }
 
-#[test]
-fn test_truncate_output() {
-    let long_text = "a".repeat(10000);
-    let truncated = truncate_output(&long_text, 100); // ~400 chars
-
-    assert!(truncated.len() < long_text.len());
-    assert!(truncated.contains("truncated"));
-}
-
 /// Every file entry in the rendered tree is exactly its `file_block` — the
 /// text a per-file token count is measured on — including the truncation
 /// marker for a budget-cut file.

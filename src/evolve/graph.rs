@@ -552,7 +552,7 @@ pub(crate) fn retain_outside_python_environments(entry: &walkdir::DirEntry) -> b
     entry.depth() == 0 || !entry.file_type().is_dir() || !entry.path().join("pyvenv.cfg").is_file()
 }
 
-fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
     let name = name.to_str().unwrap_or_default();
     // Cargo-style build output under any name (`target`, `sw_auto_target`,
     // `.fingerprint`): measured 2026-08-29, the evolve graph's single largest

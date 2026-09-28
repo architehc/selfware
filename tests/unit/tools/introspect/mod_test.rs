@@ -591,3 +591,202 @@ async fn introspect_counts_directories_below_the_walk_bound() {
         result.suggestions
     );
 }
+
+// ── One walk for every introspection tool (review 2026-09-27, on v0.9.4) ──
+//
+// The skip list only ran inside the recursive helper, so the target's own
+// node_modules/.venv/target were walked; symlinked directories were
+// followed with no visited set; graph output claimed symbols it never
+// rendered and did not pay for its edges.
+
+fn write_file(root: &Path, rel: &str, body: &str) {
+    let p = root.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, body).unwrap();
+}
+
+fn dependency_tree_fixture() -> (tempfile::TempDir, CodeIntrospect) {
+    let (dir, tool) = walk_fixture();
+    let root = dir.path();
+    write_file(root, "src/lib.rs", "pub fn real() {}\n");
+    // Top-level dependency / build / environment trees.
+    write_file(
+        root,
+        "node_modules/left-pad/index.js",
+        "function pad() {}\n",
+    );
+    write_file(root, "target/debug/build/gen.rs", "fn gen() {}\n");
+    write_file(root, ".venv/pyvenv.cfg", "home = /usr\n");
+    write_file(
+        root,
+        ".venv/lib/python3.12/site-packages/requests/api.py",
+        "def get(): pass\n",
+    );
+    // A virtualenv under any name is recognised by its pyvenv.cfg.
+    write_file(root, "env/pyvenv.cfg", "home = /usr\n");
+    write_file(root, "env/lib/site-packages/six.py", "def f(): pass\n");
+    write_file(root, "scratchpad/copy/src/lib.rs", "pub fn dup() {}\n");
+    (dir, tool)
+}
+
+#[tokio::test]
+async fn introspect_skips_dependency_trees_at_the_top_level() {
+    let (dir, tool) = dependency_tree_fixture();
+    let result = introspect(
+        &tool,
+        json!({"target": dir.path().to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    let paths: Vec<&str> = result
+        .files_included
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(
+        result.coverage.files_total, 1,
+        "only src/lib.rs is project code, got {paths:?}"
+    );
+    assert!(paths[0].ends_with("src/lib.rs"));
+    assert!(!result.coverage.gitignore_applied, "not a git work tree");
+}
+
+#[tokio::test]
+async fn code_query_uses_the_same_skips() {
+    let (dir, _) = dependency_tree_fixture();
+    let config = scoped_config(format!("{}/**", dir.path().to_string_lossy()), vec![]);
+    let tool = CodeQuery::with_safety_config(config);
+    let out = tool
+        .execute(
+            json!({"query": "get pad gen real dup six", "scope": dir.path().to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let results = serde_json::to_string(&out["results"]).unwrap();
+    assert!(results.contains("real"), "{results}");
+    for foreign in ["pad", "\"get\"", "gen", "dup", "six"] {
+        assert!(
+            !results.contains(foreign),
+            "{foreign} comes from a skipped tree: {results}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn introspect_walks_a_symlink_cycle_once() {
+    let (dir, tool) = walk_fixture();
+    let root = dir.path();
+    write_file(root, "src/lib.rs", "pub fn alpha_walk() {}\n");
+    write_file(root, "src/nested/b.rs", "pub fn beta_walk() {}\n");
+    // src/nested/up -> .. (src): a cycle inside the workspace.
+    std::os::unix::fs::symlink("..", root.join("src/nested/up")).unwrap();
+    // A second link to the same tree.
+    std::os::unix::fs::symlink("src", root.join("alias")).unwrap();
+    let result = introspect(
+        &tool,
+        json!({"target": root.to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    assert_eq!(
+        result.coverage.files_total,
+        2,
+        "each file once: {:?}",
+        result
+            .files_included
+            .iter()
+            .map(|f| &f.path)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.coverage.dirs_not_walked, 0);
+
+    let config = scoped_config(format!("{}/**", root.to_string_lossy()), vec![]);
+    let out = CodeQuery::with_safety_config(config)
+        .execute(json!({"query": "alpha_walk beta_walk", "scope": root.to_string_lossy()}))
+        .await
+        .unwrap();
+    assert_eq!(out["total_matches"], 2, "code_query terminates and dedups");
+}
+
+#[tokio::test]
+async fn introspect_respects_gitignore_in_a_git_work_tree() {
+    let (dir, tool) = walk_fixture();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+    };
+    match git(&["init", "-q"]) {
+        Ok(o) if o.status.success() => {}
+        _ => return, // git unavailable: nothing to assert
+    }
+    write_file(root, ".gitignore", "generated/\n");
+    write_file(root, "src/lib.rs", "pub fn a() {}\n");
+    write_file(root, "generated/big.rs", "pub fn g() {}\n");
+    let result = introspect(
+        &tool,
+        json!({"target": root.to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    assert_eq!(result.coverage.files_total, 1);
+    assert!(result.coverage.gitignore_applied);
+}
+
+#[tokio::test]
+async fn graph_view_claims_no_symbols_and_pays_for_its_edges() {
+    let files: Vec<(String, String)> =
+        std::iter::once(("mod.rs".to_string(), rust_source("hub", 3)))
+            .chain((0..30).map(|i| (format!("m{i:02}.rs"), rust_source(&format!("m{i}"), 20))))
+            .collect();
+    let refs: Vec<(&str, String)> = files.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+    let (_dir, target, tool) = fixture(&refs);
+
+    let roomy = introspect(
+        &tool,
+        json!({"target": target, "format": "graph", "max_tokens": 20000}),
+    )
+    .await;
+    assert_eq!(roomy.coverage.files_included, 31);
+    assert_eq!(roomy.coverage.symbols_included, 0, "the graph renders none");
+    assert_eq!(roomy.coverage.symbols_total, 0);
+    assert!(!roomy.coverage.is_partial());
+    assert!(roomy.files_included.iter().all(|f| f.symbols.is_empty()));
+    assert!(roomy.content.contains(" --> "), "edges rendered");
+    assert!(roomy.content.contains("no symbols rendered"));
+
+    // Tight: the edges are charged, so the limit holds and whole files drop.
+    for limit in [180, 260, 400] {
+        let tight = introspect(
+            &tool,
+            json!({"target": target, "format": "graph", "max_tokens": limit}),
+        )
+        .await;
+        assert!(tight.tokens_used <= limit);
+        assert_eq!(tight.tokens_used, estimate_content_tokens(&tight.content));
+        assert!(tight.coverage.files_included < 31);
+        assert_eq!(tight.coverage.symbols_included, 0);
+    }
+}
+
+/// Review 2026-09-27 (F1): code_plan's planner had its own walker with no
+/// per-path validation. It now uses the shared walk with the tool's policy:
+/// a denied file under an allowed root is refused, not read.
+#[tokio::test]
+async fn code_plan_walk_validates_every_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "src/lib.rs", "pub fn ok() {}\n");
+    write_file(root, "src/secret/keys.rs", "pub const K: &str = \"x\";\n");
+    write_file(root, ".venv/pyvenv.cfg", "home = /usr\n");
+    write_file(root, ".venv/lib/site-packages/dep.py", "def f(): pass\n");
+    let config = scoped_config(
+        format!("{}/**", root.to_string_lossy()),
+        vec![format!("{}/src/secret/**", root.to_string_lossy())],
+    );
+    let err = CodePlan::with_safety_config(config)
+        .execute(json!({"goal": "improve ok", "codebase_root": root.to_string_lossy()}))
+        .await
+        .unwrap_err();
+    assert!(is_path_policy_error(&err.to_string()), "{err}");
+}

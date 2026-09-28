@@ -159,6 +159,44 @@ impl OutputRenderer {
         out
     }
 
+    /// Whether this format lists symbols. The graph renders files and
+    /// their edges only, so nothing about symbols may be claimed for it.
+    pub fn renders_symbols(&self) -> bool {
+        !matches!(self.format, OutputFormat::Graph)
+    }
+
+    /// Graph view: the edge lines the LAST file of `files` adds, i.e. its
+    /// edges to every earlier file (a directory's `mod.rs` / `lib.rs` /
+    /// `__init__.py` points at its siblings). Charged when the file is
+    /// packed; empty for the other formats.
+    pub fn graph_edges_for(&self, files: &[FileInfo]) -> String {
+        if !matches!(self.format, OutputFormat::Graph) || files.is_empty() {
+            return String::new();
+        }
+        let is_hub = |f: &FileInfo| {
+            matches!(
+                file_name_of(&f.path).as_str(),
+                "mod.rs" | "lib.rs" | "__init__.py"
+            )
+        };
+        let n = files.len() - 1;
+        let new = &files[n];
+        let new_dir = dir_of(&new.path);
+        let mut out = String::new();
+        for (j, other) in files[..n].iter().enumerate() {
+            if dir_of(&other.path) != new_dir {
+                continue;
+            }
+            if is_hub(other) {
+                out.push_str(&format!("    F{} --> F{}\n", j, n));
+            }
+            if is_hub(new) {
+                out.push_str(&format!("    F{} --> F{}\n", n, j));
+            }
+        }
+        out
+    }
+
     /// Text the output adds once per directory group (tree view only):
     /// charged when a file opens a new group.
     pub fn group_header(&self, file: &FileInfo) -> Option<String> {
@@ -233,37 +271,10 @@ impl OutputRenderer {
             output.push_str(&self.file_block(file, i, false));
         }
 
-        // Add edges based on common directory structure
-        for (i, file) in files.iter().enumerate() {
-            let path = std::path::Path::new(&file.path);
-            if let Some(parent) = path.parent() {
-                let parent_str = parent.to_string_lossy().to_string();
-
-                // Find parent file (mod.rs, lib.rs, etc.)
-                for (j, other) in files.iter().enumerate() {
-                    if i != j {
-                        let other_path = std::path::Path::new(&other.path);
-                        let other_parent = other_path
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default();
-
-                        if other_parent == parent_str {
-                            let other_name = other_path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
-
-                            if other_name == "mod.rs"
-                                || other_name == "lib.rs"
-                                || other_name == "__init__.py"
-                            {
-                                output.push_str(&format!("    F{} --> F{}\n", j, i));
-                            }
-                        }
-                    }
-                }
-            }
+        // Edges, in the order files were added: each file's edges to the
+        // files before it — exactly what `graph_edges_for` charged.
+        for i in 0..files.len() {
+            output.push_str(&self.graph_edges_for(&files[..=i]));
         }
 
         output.push_str("```\n");
@@ -290,23 +301,6 @@ impl OutputRenderer {
              Files: {}/{} ({:.1}%)\n\
              Tokens: {} used, {} remaining\n",
             files_included, files_total, coverage, tokens_used, tokens_remaining
-        )
-    }
-}
-
-/// Truncate output to fit within token budget
-pub fn truncate_output(output: &str, max_tokens: usize) -> String {
-    // Rough estimate: 4 chars per token
-    let max_chars = max_tokens * 4;
-
-    if output.len() <= max_chars {
-        output.to_string()
-    } else {
-        let truncated = &output[..max_chars];
-        format!(
-            "{}\n\n[... truncated, {} total characters]",
-            truncated,
-            output.len()
         )
     }
 }

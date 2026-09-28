@@ -7,7 +7,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::budget::PlanBudget;
 use super::query::{extract_keywords, find_related_symbols};
@@ -113,6 +113,9 @@ pub struct EvolutionPlanner {
     goal: String,
     budget: PlanBudget,
     codebase_root: PathBuf,
+    /// Workspace path policy for every file and directory the walk reaches
+    /// (`None`: no per-path validation, library callers only).
+    safety: Option<crate::config::SafetyConfig>,
 }
 
 impl EvolutionPlanner {
@@ -127,7 +130,15 @@ impl EvolutionPlanner {
             goal,
             budget: PlanBudget::new(max_iterations, max_tokens),
             codebase_root,
+            safety: None,
         }
+    }
+
+    /// Validate every path the walk reaches against `safety` (the same
+    /// policy `code_introspect` / `code_query` enforce).
+    pub fn with_safety_config(mut self, safety: crate::config::SafetyConfig) -> Self {
+        self.safety = Some(safety);
+        self
     }
 
     /// Generate an evolution plan
@@ -200,31 +211,19 @@ impl EvolutionPlanner {
 
     /// Find files relevant to the goal
     async fn find_relevant_files(&self, keywords: &[String]) -> Result<Vec<PathBuf>> {
-        let mut files = Vec::new();
-
-        // Walk the codebase
-        let mut entries = tokio::fs::read_dir(&self.codebase_root).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            // Skip non-source directories
-            if let Some(name) = path.file_name() {
-                let name = name.to_string_lossy();
-                if matches!(
-                    name.as_ref(),
-                    "target" | "node_modules" | ".git" | "__pycache__" | "scratchpad"
-                ) {
-                    continue;
-                }
-            }
-
-            if path.is_file() && Self::is_source_file(&path) {
-                files.push(path);
-            } else if path.is_dir() {
-                files.extend(self.collect_source_files(&path).await?);
-            }
-        }
+        // The shared introspection walk (review 2026-09-27: this planner
+        // had its own duplicate walker — no per-path validation, no depth
+        // bound, no `.venv` skip, read errors swallowed). One
+        // implementation: same skips, symlink cycles walked once,
+        // `.gitignore` respected, every path validated against the
+        // workspace policy, errors surfaced.
+        let root = self.codebase_root.clone();
+        let safety = self.safety.clone();
+        let files = tokio::task::spawn_blocking(move || {
+            super::walk::source_files(&root, safety.as_ref(), super::MAX_WALK_DEPTH)
+        })
+        .await??
+        .files;
 
         // If we have keywords, try to find most relevant files
         if !keywords.is_empty() {
@@ -250,44 +249,10 @@ impl EvolutionPlanner {
         Ok(files)
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn collect_source_files<'a>(
-        &'a self,
-        dir: &'a Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut files = Vec::new();
-
-            if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-
-                    if let Some(name) = path.file_name() {
-                        let name = name.to_string_lossy();
-                        if matches!(
-                            name.as_ref(),
-                            "target" | "node_modules" | ".git" | "__pycache__" | "scratchpad"
-                        ) {
-                            continue;
-                        }
-                    }
-
-                    if path.is_file() && Self::is_source_file(&path) {
-                        files.push(path);
-                    } else if path.is_dir() {
-                        files.extend(self.collect_source_files(&path).await?);
-                    }
-                }
-            }
-
-            Ok(files)
-        })
-    }
-
     /// Same language table as `code_introspect` and the repository
     /// inventory (one source of truth).
-    fn is_source_file(path: &Path) -> bool {
+    #[cfg(test)]
+    fn is_source_file(path: &std::path::Path) -> bool {
         super::CodeIntrospect::is_source_file(path)
     }
 

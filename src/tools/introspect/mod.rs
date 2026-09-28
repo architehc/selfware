@@ -16,6 +16,7 @@ pub mod parser;
 pub mod planner;
 pub mod query;
 pub mod render;
+pub(crate) mod walk;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -88,6 +89,10 @@ pub struct CoverageStats {
     /// the output, so a nonzero value makes the coverage partial.
     #[serde(default)]
     pub dirs_not_walked: usize,
+    /// Whether `.gitignore` filtered the walk (the target is inside a git
+    /// work tree). `false` means only the built-in directory skips ran.
+    #[serde(default)]
+    pub gitignore_applied: bool,
 }
 
 impl CoverageStats {
@@ -182,13 +187,14 @@ fn coverage_of(
             (symbols_included as f64 / symbols_total as f64) * 100.0
         },
         dirs_not_walked: 0,
+        gitignore_applied: false,
     }
 }
 
 /// The coverage line closing `content`. It states what the output is — an
 /// outline — so a reader (or a review ledger) never mistakes it for a read
 /// of the files.
-fn coverage_footer(stats: &CoverageStats, depth: &Depth) -> String {
+fn coverage_footer(stats: &CoverageStats, depth: &Depth, renders_symbols: bool) -> String {
     let mut line = format!(
         "Coverage: {}/{} files, {}/{} symbols at depth '{}'",
         stats.files_included, stats.files_total, stats.symbols_included, stats.symbols_total, depth
@@ -198,6 +204,9 @@ fn coverage_footer(stats: &CoverageStats, depth: &Depth) -> String {
     }
     if stats.files_unreadable > 0 {
         line.push_str(&format!(", {} unreadable", stats.files_unreadable));
+    }
+    if !renders_symbols {
+        line.push_str(" (graph view: files and edges only, no symbols rendered)");
     }
     line.push_str(
         ".\nOutline only (signatures/names, no bodies): this is not a read of the files' contents.\n",
@@ -222,9 +231,16 @@ fn pack(
     files_total: usize,
 ) -> Result<Packed> {
     let files_unreadable = files_total - candidates.len();
+    // The graph view renders files and edges, never symbols: it claims
+    // none (review 2026-09-27: it reported symbols it did not render, and
+    // the final trim shed those invisible symbols one pass at a time).
+    let renders_symbols = renderer.renders_symbols();
     let per_file: Vec<(Vec<String>, Vec<String>)> = candidates
         .iter()
         .map(|c| {
+            if !renders_symbols {
+                return (Vec::new(), Vec::new());
+            }
             let symbols = parser::extract_at_depth(&c.parsed, depth);
             let names = symbols.iter().map(|s| s.name.clone()).collect();
             let lines = symbols
@@ -246,8 +262,9 @@ fn pack(
         symbols_included: symbols_total,
         ..widest
     };
-    let frame =
-        estimate_content_tokens(&(renderer.render(&[])? + &coverage_footer(&widest, depth)));
+    let frame = estimate_content_tokens(
+        &(renderer.render(&[])? + &coverage_footer(&widest, depth, renders_symbols)),
+    );
     if !budget.try_allocate(frame) {
         anyhow::bail!(
             "max_tokens {limit} is below the fixed cost of the result frame ({frame} tokens); \
@@ -277,9 +294,27 @@ fn pack(
             continue;
         }
         let full = measure_block(renderer, &mut info, index, true);
-        if budget.try_allocate(full + header_cost) {
+        // Graph view: the file's edges to the files already packed are
+        // paid with its node.
+        let edge_cost = if renders_symbols {
+            0
+        } else {
+            included.push(info.clone());
+            let edges = renderer.graph_edges_for(&included);
+            included.pop();
+            if edges.is_empty() {
+                0
+            } else {
+                estimate_content_tokens(&edges)
+            }
+        };
+        if budget.try_allocate(full + header_cost + edge_cost) {
             groups_opened.extend(header);
             included.push(info);
+            continue;
+        }
+        if !renders_symbols {
+            // Nothing to truncate in a symbol-less entry.
             continue;
         }
 
@@ -320,7 +355,8 @@ fn pack(
     loop {
         finalize_blocks(renderer, &mut included);
         let coverage = coverage_of(&included, files_total, files_unreadable, symbols_total);
-        let content = renderer.render(&included)? + &coverage_footer(&coverage, depth);
+        let content =
+            renderer.render(&included)? + &coverage_footer(&coverage, depth, renders_symbols);
         let tokens_used = estimate_content_tokens(&content);
         if tokens_used <= limit {
             return Ok(Packed {
@@ -331,9 +367,10 @@ fn pack(
             });
         }
         // Over by a few tokens (counts are not additive): shed the tail
-        // one symbol at a time, then whole files.
+        // one symbol at a time, then whole files (graph view: whole files
+        // only — its entries carry no symbols).
         if let Some(last) = included.last_mut() {
-            if last.rendered_lines.len() >= 2 {
+            if renders_symbols && last.rendered_lines.len() >= 2 {
                 last.rendered_lines.pop();
                 last.symbols.pop();
                 last.symbols_omitted += 1;
@@ -409,12 +446,9 @@ impl CodeIntrospect {
         // 1. Collect every candidate first (validated against the path
         //    policy before it is read); sorted so the order without a query
         //    is deterministic rather than directory-listing order.
-        let not_walked = std::sync::atomic::AtomicUsize::new(0);
-        let mut files = self
-            .collect_files(&target_path, &safety, &not_walked)
-            .await?;
-        files.sort();
-        let dirs_not_walked = not_walked.load(std::sync::atomic::Ordering::Relaxed);
+        let walked = self.collect_files(&target_path, &safety).await?;
+        let files = walked.files;
+        let dirs_not_walked = walked.dirs_not_walked;
         let files_total = files.len();
 
         // 2. Rank by the query. `rank_files` recomputes a BM25 score per file
@@ -480,6 +514,7 @@ impl CodeIntrospect {
 
         let mut packed = packed;
         packed.coverage.dirs_not_walked = dirs_not_walked;
+        packed.coverage.gitignore_applied = walked.gitignore_applied;
         let suggestions = self.generate_suggestions(&packed.coverage, &depth, args.query.is_some());
 
         Ok(IntrospectResult {
@@ -492,103 +527,22 @@ impl CodeIntrospect {
         })
     }
 
+    /// Every code file under `target`, through the shared introspection
+    /// walk (`walk::source_files`): one skip list at every level, symlinked
+    /// directories walked once, `.gitignore` respected in a git work tree.
+    /// Every file the tool will READ and every directory before descent is
+    /// validated against the workspace path policy (2026-09-21 review P2).
     async fn collect_files(
         &self,
         target: &Path,
         safety: &SafetyConfig,
-        not_walked: &std::sync::atomic::AtomicUsize,
-    ) -> Result<Vec<PathBuf>> {
-        let mut files = Vec::new();
-
-        if target.is_file() {
-            files.push(target.to_path_buf());
-        } else if target.is_dir() {
-            let mut entries = tokio::fs::read_dir(target).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                // Every candidate that the walk will actually READ is
-                // validated against the same workspace path policy as the
-                // target itself (containment + symlink resolution, via
-                // `validate_tool_path`) BEFORE the read happens
-                // (2026-09-21 review P2: only the ROOT target was
-                // validated; a denied source file nested inside an allowed
-                // directory, or a symlink escaping the workspace, was read
-                // unvalidated). Directories are validated before descent so
-                // an escaping symlink directory is refused at the boundary;
-                // non-source files are never read and need no validation
-                // (skipping them keeps a `.env.example` from breaking the
-                // walk).
-                if path.is_file() && Self::is_source_file(&path) {
-                    validate_tool_path(&path.to_string_lossy(), safety)?;
-                    files.push(path);
-                } else if path.is_dir() {
-                    validate_tool_path(&path.to_string_lossy(), safety)?;
-                    // Recursively collect. The bound only stops runaway
-                    // nesting (e.g. a symlink cycle inside the workspace);
-                    // real layouts (src/main/java/com/…, packages/*/src/…)
-                    // sit far below it, and a directory it does cut off is
-                    // counted, never silently dropped (review 2026-09-27: a
-                    // depth of 3 hid most of a Java or monorepo tree while
-                    // coverage read 100%).
-                    files.extend(
-                        self.collect_files_recursive(&path, MAX_WALK_DEPTH, safety, not_walked)
-                            .await?,
-                    );
-                }
-            }
-        }
-
-        Ok(files)
-    }
-
-    #[allow(clippy::only_used_in_recursion)]
-    fn collect_files_recursive<'a>(
-        &'a self,
-        dir: &'a Path,
-        depth: usize,
-        safety: &'a SafetyConfig,
-        not_walked: &'a std::sync::atomic::AtomicUsize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            if depth == 0 {
-                not_walked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Ok(Vec::new());
-            }
-
-            let mut files = Vec::new();
-            let mut entries = tokio::fs::read_dir(dir).await?;
-
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-
-                // Skip common non-source directories
-                if let Some(name) = path.file_name() {
-                    let name = name.to_string_lossy();
-                    if matches!(
-                        name.as_ref(),
-                        "target" | "node_modules" | ".git" | "__pycache__" | ".venv" | "scratchpad"
-                    ) {
-                        continue;
-                    }
-                }
-
-                // Validate each candidate the walk will read, exactly as in
-                // `collect_files` (see the comment there).
-                if path.is_file() && Self::is_source_file(&path) {
-                    validate_tool_path(&path.to_string_lossy(), safety)?;
-                    files.push(path);
-                } else if path.is_dir() {
-                    validate_tool_path(&path.to_string_lossy(), safety)?;
-                    files.extend(
-                        self.collect_files_recursive(&path, depth - 1, safety, not_walked)
-                            .await?,
-                    );
-                }
-            }
-
-            Ok(files)
+    ) -> Result<walk::SourceWalk> {
+        let target = target.to_path_buf();
+        let safety = safety.clone();
+        tokio::task::spawn_blocking(move || {
+            walk::source_files(&target, Some(&safety), MAX_WALK_DEPTH)
         })
+        .await?
     }
 
     /// A code file by the same language table the repository inventory
@@ -827,10 +781,8 @@ impl Tool for CodeQuery {
 
         // Collect files in scope (every discovered candidate is validated
         // against the same path policy before it is read).
-        let mut files = Vec::new();
-        Self::collect_files(&scope_path, &mut files, &safety).await?;
-        // Deterministic tie order for equal relevance.
-        files.sort();
+        // Sorted: deterministic tie order for equal relevance.
+        let files = Self::collect_files(&scope_path, &safety).await?;
 
         // Build query engine and search
         let mut engine = CodeQueryEngine::new();
@@ -869,45 +821,16 @@ impl Tool for CodeQuery {
 }
 
 impl CodeQuery {
-    async fn collect_files(
-        dir: &Path,
-        files: &mut Vec<PathBuf>,
-        safety: &SafetyConfig,
-    ) -> Result<()> {
-        if !dir.is_dir() {
-            if dir.is_file() && CodeIntrospect::is_source_file(dir) {
-                validate_tool_path(&dir.to_string_lossy(), safety)?;
-                files.push(dir.to_path_buf());
-            }
-            return Ok(());
-        }
-
-        let mut entries = tokio::fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-
-            if let Some(name) = path.file_name() {
-                let name = name.to_string_lossy();
-                if matches!(
-                    name.as_ref(),
-                    "target" | "node_modules" | ".git" | "__pycache__" | "scratchpad"
-                ) {
-                    continue;
-                }
-            }
-
-            // Validate each candidate the walk will read (see the
-            // `CodeIntrospect::collect_files` comment for the rationale).
-            if path.is_file() && CodeIntrospect::is_source_file(&path) {
-                validate_tool_path(&path.to_string_lossy(), safety)?;
-                files.push(path);
-            } else if path.is_dir() {
-                validate_tool_path(&path.to_string_lossy(), safety)?;
-                Box::pin(Self::collect_files(&path, files, safety)).await?;
-            }
-        }
-
-        Ok(())
+    /// The shared introspection walk (`walk::source_files`), with the same
+    /// path-policy validation as `code_introspect`.
+    async fn collect_files(dir: &Path, safety: &SafetyConfig) -> Result<Vec<PathBuf>> {
+        let dir = dir.to_path_buf();
+        let safety = safety.clone();
+        let walked = tokio::task::spawn_blocking(move || {
+            walk::source_files(&dir, Some(&safety), MAX_WALK_DEPTH)
+        })
+        .await??;
+        Ok(walked.files)
     }
 }
 
@@ -1023,7 +946,8 @@ impl Tool for CodePlan {
             args.budget_iterations,
             args.budget_tokens,
             root,
-        );
+        )
+        .with_safety_config(safety);
 
         let plan = planner.generate_plan().await?;
 
