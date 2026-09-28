@@ -159,6 +159,8 @@ pub(crate) struct ReviewSession {
     coverage: HashMap<String, Vec<(usize, usize)>>,
     findings: Vec<String>,
     finding_keys: HashSet<String>,
+    /// First `path:line` of every recorded finding.
+    finding_locations: HashSet<String>,
     seen_messages: HashSet<u64>,
     refusals: usize,
     no_progress_refusals: usize,
@@ -308,6 +310,7 @@ impl ReviewSession {
             coverage: HashMap::new(),
             findings: Vec::new(),
             finding_keys: HashSet::new(),
+            finding_locations: HashSet::new(),
             seen_messages: HashSet::new(),
             refusals: 0,
             no_progress_refusals: 0,
@@ -668,7 +671,26 @@ impl ReviewSession {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
+            let cited = CITATION
+                .find(&finding)
+                .map(|m| m.as_str().trim_start_matches("./").to_string());
+            // A draft's cited line that restates an already recorded
+            // finding at the same `path:line` (the final answer repeating a
+            // shard finding in other words) is the same finding: counting it
+            // again inflated "findings recorded" (0.9.5 live run: 7 findings,
+            // 14 recorded). Explicit FINDING lines keep text-level dedup —
+            // two defects on one line are possible.
+            let restated = !FINDING_LINE.is_match(line)
+                && cited
+                    .as_ref()
+                    .is_some_and(|c| self.finding_locations.contains(c));
+            if restated {
+                continue;
+            }
             if self.findings.len() < MAX_FINDINGS && self.finding_keys.insert(key) {
+                if let Some(c) = cited {
+                    self.finding_locations.insert(c);
+                }
                 self.findings.push(finding);
             }
         }
@@ -1673,6 +1695,28 @@ mod tests {
             estimate_content_tokens(&tight)
         );
         assert!(tight.contains("earlier findings not shown"), "{tight}");
+    }
+
+    #[test]
+    fn a_draft_restating_a_recorded_finding_is_not_counted_twice() {
+        let mut s = session(&[("pkg/a.py", 10)]);
+        s.absorb_text(
+            "FINDING: pkg/a.py:2 `return x / n` — [high] ZeroDivisionError when n is 0",
+            false,
+        );
+        // The final answer restates it in other words, and adds a new one.
+        s.absorb_text(
+            "- **pkg/a.py:2** `return x / n` — divides by n without a zero check\n\
+             - pkg/a.py:7 — the loop skips the last element",
+            true,
+        );
+        assert_eq!(s.findings.len(), 2, "{:?}", s.findings);
+        // Two explicit findings on one line stay two.
+        s.absorb_text(
+            "FINDING: pkg/a.py:2 — n is also never validated as an int",
+            false,
+        );
+        assert_eq!(s.findings.len(), 3, "{:?}", s.findings);
     }
 
     /// "Claims about a module require a recorded read of that module": a
