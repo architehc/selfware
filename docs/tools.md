@@ -157,6 +157,15 @@ Show diff of changes. Can diff working tree, staged, or between commits.
 
 Stage files and create a commit. Use conventional commit format.
 
+Git runs hardened: a program named by the repository's own `.git/config`
+(fsmonitor, clean/smudge filters, textconv, diff/merge drivers, credential
+helper, pager) never runs, and the repository's hooks (`.git/hooks`,
+`core.hooksPath`) run only when the repository is trusted with
+`selfware trust`. The result's `repository_hooks` field says which happened.
+The same applies to `git_checkpoint`, `git_push`, `patch_apply` and
+`enter_worktree`; selfware's own internal git calls never run repository
+programs or hooks.
+
 **Parameters:**
 - `message` (string, required) -- commit message
 - `files` (array of strings) -- files to stage (empty = all changes)

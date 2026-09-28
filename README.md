@@ -403,7 +403,7 @@ max_delay_ms = 60000
 > budget set`. A separate per-call cap, `agent.max_call_secs`, fails one stuck
 > model call (also unset by default).
 
-> **Repo trust:** privileged sections in a checkout-local `selfware.toml` — `[safety]` path lists, `[hooks]`, `[mcp]`, `[agent] post_edit_test_command`, `[yolo]` — only take effect after you run `selfware trust` in that directory; untrusted checkouts run with the built-in safety defaults (`selfware init` trusts the config it writes automatically).
+> **Repo trust:** privileged sections in a checkout-local `selfware.toml` — `[safety]` path lists, `[hooks]`, `[mcp]`, `[agent] post_edit_test_command`, `[yolo]` — only take effect after you run `selfware trust` in that directory; untrusted checkouts run with the built-in safety defaults (`selfware init` trusts the config it writes automatically). Trust also decides whether the repository's own git hooks and git-config programs (filters, fsmonitor, textconv) run for the git operations its tools perform (`git_commit`, `patch_apply`, …): only in a trusted repository. selfware's internal git calls never run them; `selfware evolve`'s promotion commit runs the repository's commit hooks (its pre-commit gate) but no other repository program.
 
 Or use the setup wizard:
 

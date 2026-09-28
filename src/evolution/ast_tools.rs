@@ -5,11 +5,11 @@
 //! the compiler acts as the "laws of physics" that prune invalid mutations
 //! before they waste context windows or evaluation cycles.
 
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::evolve::diagnostics::CompilerDiagnostic;
-use crate::safety::process_env::SanitizedEnvExt;
 
 /// Result of an AST mutation attempt
 #[derive(Debug)]
@@ -94,7 +94,7 @@ pub fn create_shadow_worktree_named_at(
     let target_ref = commit_or_ref.unwrap_or("HEAD");
 
     let output = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(repo_root, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "add", "--detach"])
         .arg(&worktree_path)
@@ -175,7 +175,7 @@ pub fn resolve_parent_base_commit(attempts_file: &Path, parent_id: Option<&str>)
 /// Returns the current git HEAD commit hash of the repository.
 pub fn get_git_head_commit(repo_root: &Path) -> Option<String> {
     let output = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(repo_root, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
@@ -197,7 +197,7 @@ pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wo
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf());
     let output = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(repo_root, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "remove", "--force"])
         .arg(worktree_path)
@@ -209,7 +209,7 @@ pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wo
         // Force cleanup if normal removal fails
         let _ = std::fs::remove_dir_all(worktree_path);
         let _ = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(repo_root, GitScope::Internal)
             .env_remove("GIT_INDEX_FILE")
             .args(["worktree", "prune"])
             .current_dir(repo_root)
@@ -266,7 +266,7 @@ pub fn apply_strict_patch(dir: &Path, patch: &str) -> bool {
         return false;
     }
     let status = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(dir, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
         .args(["apply", "--whitespace=nowarn"])
         .arg(&patch_file)
@@ -296,7 +296,7 @@ pub fn restore_worktree_parent_state(
     if worktree.join(".git").exists() {
         if let Some(ref bc) = resolve_parent_base_commit(attempts_file, parent_id) {
             let out = Command::new("git")
-                .sanitized_env()
+                .sanitized_git(worktree, GitScope::Internal)
                 .env_remove("GIT_INDEX_FILE")
                 .args(["checkout", "--detach", bc])
                 .current_dir(worktree)
@@ -395,7 +395,7 @@ pub fn restore_worktree_parent_state(
         && parent_node.diff_sha256.len() == 64
     {
         let add_out = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(worktree, GitScope::Internal)
             .env_remove("GIT_INDEX_FILE")
             .args(["add", "-A"])
             .current_dir(worktree)
@@ -408,7 +408,7 @@ pub fn restore_worktree_parent_state(
         }
 
         let diff_out = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(worktree, GitScope::Internal)
             .env_remove("GIT_INDEX_FILE")
             .args(["diff", "--cached", "--binary", "HEAD"])
             .current_dir(worktree)
@@ -459,7 +459,7 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
     let temp_patch = dir.join(format!(".test-check-{}.patch", uuid_short()));
     if std::fs::write(&temp_patch, patch).is_ok() {
         let status = std::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(dir, GitScope::Internal)
             .env_remove("GIT_INDEX_FILE")
             .args(["apply", "-R", "--check"])
             .arg(&temp_patch)

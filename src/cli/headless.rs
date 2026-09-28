@@ -4,6 +4,7 @@
 //! CLI emits JSON to stdout instead of human-readable text.  Diagnostics and
 //! logs continue to go to stderr so stdout stays pure JSON.
 
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
@@ -13,7 +14,6 @@ use crate::agent::progress::{ProgressEmitter, ProgressEvent};
 use crate::agent::tui_events::{AgentEvent, EventEmitter};
 use crate::config::ExecutionMode;
 use crate::observability::dashboard::TokenUsage;
-use crate::safety::process_env::SanitizedEnvExt;
 
 /// One-line notice for a headless run in `Normal` mode, or `None` when the
 /// run is interactive or in another mode.
@@ -377,7 +377,7 @@ impl EventEmitter for AnswerCaptureEmitter {
 /// from a genuine seeding failure.
 fn head_exists() -> bool {
     std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(".", GitScope::Internal)
         .args(["rev-parse", "--verify", "HEAD"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -415,7 +415,7 @@ fn snapshot_worktree_tree() -> anyhow::Result<String> {
     // tracked-ignored file stays unchanged and only real working-tree edits
     // (modifications, new files, genuine deletions) appear in the patch.
     let read_tree = std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(".", GitScope::Internal)
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["read-tree", "HEAD"])
         .stdout(std::process::Stdio::null())
@@ -431,7 +431,7 @@ fn snapshot_worktree_tree() -> anyhow::Result<String> {
     }
 
     let add_status = std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(".", GitScope::Internal)
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["add", "-A"])
         .stdout(std::process::Stdio::null())
@@ -442,7 +442,7 @@ fn snapshot_worktree_tree() -> anyhow::Result<String> {
     }
 
     let out = std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(".", GitScope::Internal)
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["write-tree"])
         .output()
@@ -546,7 +546,7 @@ pub fn capture_patch_since(baseline_tree: Option<&str>) -> anyhow::Result<String
         None => EMPTY_TREE,
     };
     let out = std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(".", GitScope::Internal)
         .args([
             "diff",
             "--binary",

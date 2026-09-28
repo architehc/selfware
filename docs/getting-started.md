@@ -247,12 +247,21 @@ This checks:
 | `daemon` | Permanent YOLO mode, runs autonomously |
 
 Headless (`-p`, `run`, stdin not a terminal) in `normal` mode runs the
-read-only tools and read-only shell commands (`ls`, `wc`, `grep`/`rg`,
-`find` without `-exec`/`-delete`, `git status/log/diff/show`,
-`cargo metadata/tree`; the same classifier headless `auto-edit` uses) and
-stops at the first call that would need a confirmation — a write, a build or
-test run (`cargo test`/`check`/`clippy`, `pytest`, `npm test`, scripts), an
-option that writes or runs a program, network — before it executes: the run fails with exit code `6`
+read-only tools and plain read-only shell commands (`ls`, `wc`, `grep`/`rg`,
+`find` without `-exec`/`-delete`, `git status/log/diff/show`; the same
+classifier headless `auto-edit` uses) and stops at the first call that would
+need a confirmation — a write, a build or test run (`cargo test`/`check`/
+`clippy`, `cargo tree`/`metadata`, `pytest`, `npm test`, scripts), an option
+that writes or runs a program, network — before it executes. A "plain" read
+has no command or process substitution (`$(…)`, backticks, `<(…)`), no
+environment assignment that steers a program (`GIT_EXTERNAL_DIFF=…`,
+`PAGER=…`; only locale/colour/terminal variables are allowed), no redirection
+that writes a file, and never names a denied or credential path through any
+reader (`jq . .env`, `git show HEAD:.env`). A `git` read runs only in a
+repository whose own `.git/config` names no program (fsmonitor, textconv,
+filters, pager) or that you trusted with `selfware trust`. If you set
+`safety.require_confirmation` yourself and list `shell_exec`, every shell
+call stops headless, reads included. A stopped run fails with exit code `6`
 (`PERMISSION_REQUIRED` in `--output-format json` / `stream-json`) and the
 message names the tool and the fix (`-m auto-edit` or `-m yolo`). A read-only
 review therefore works headless without granting writes.

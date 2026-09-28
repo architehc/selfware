@@ -7,6 +7,7 @@
 //! 2. **Event Log**: Recent commits, git diff summaries, and environmental events.
 //! 3. **Executive Guide (`.theseus.md`)**: Top-level orientation artifact for agent context.
 
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,6 @@ use tracing::info;
 
 use crate::evolve::module_graph::from_lib_rs;
 use crate::evolve::symbols::extract_pub_symbols;
-use crate::safety::process_env::SanitizedEnvExt;
 
 /// AST symbol entry in the Collection Map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +157,7 @@ impl TheseusScaffold {
 
         // Attempt git log execution
         let output = std::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(root, GitScope::Internal)
             .args([
                 "log",
                 &format!("-n{}", max_commits),

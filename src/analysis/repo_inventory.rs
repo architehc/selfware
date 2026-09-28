@@ -23,6 +23,7 @@
 //! partition) and is gitignore-aware through `git ls-files` when the root is
 //! inside a git work tree. Binary files are counted by size only.
 
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -784,9 +785,8 @@ fn slash_path(path: &Path) -> String {
 /// root-relative `/` paths; `None` outside a git work tree or when git
 /// fails. Spawned with the sanitized environment (AGENTS.md rule 5).
 pub(crate) fn git_visible_files(root: &Path) -> Option<HashSet<String>> {
-    use crate::safety::process_env::SanitizedEnvExt;
     let output = std::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(root, GitScope::Internal)
         .args([
             "-c",
             "core.quotepath=off",
@@ -2108,6 +2108,50 @@ mod tests {
         assert_eq!(inv.gitignore, GitignoreStatus::Applied);
         assert!(inv.files.iter().any(|f| f.path == "keep.py"));
         assert!(inv.files.iter().all(|f| f.path != "ignored/skip.py"));
+    }
+
+    /// 0.9.5 review G1: a reviewed repository's `core.fsmonitor=./hook.sh`
+    /// (and a clean filter) ran during the inventory's `git ls-files`. The
+    /// hardened spawn must run neither.
+    #[cfg(unix)]
+    #[test]
+    fn inventory_git_runs_no_repository_configured_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(r)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // git unavailable: nothing to assert
+        }
+        let marker = r.join("MARKER");
+        let hook = r.join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho ran >> '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write(r, ".gitattributes", "*.py filter=evil\n");
+        write(r, "keep.py", "x = 1\n");
+        let hook_s = hook.to_str().unwrap();
+        assert!(git(&["config", "core.fsmonitor", hook_s]).status.success());
+        assert!(git(&["config", "filter.evil.clean", hook_s])
+            .status
+            .success());
+
+        let inv = RepoInventory::scan(r).unwrap();
+        assert_eq!(inv.gitignore, GitignoreStatus::Applied);
+        assert!(inv.files.iter().any(|f| f.path == "keep.py"));
+        assert!(
+            !marker.exists(),
+            "inventory git ran a repository-configured program"
+        );
     }
 
     #[test]

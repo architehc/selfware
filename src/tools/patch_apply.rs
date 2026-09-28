@@ -184,16 +184,19 @@ fn strip_numbered_diff(diff: &str) -> Option<String> {
     changed.then_some(out)
 }
 
-/// Build a sanitized `git apply` invocation: the tool applies
+/// Build a sanitized, hardened `git apply` invocation: the tool applies
 /// project-controlled diffs, so the child must not inherit host credentials
-/// (see `safety::process_env`). Callers run it with `output_grouped`, so a
-/// dropped future (or early return) kills its whole process group and cannot
-/// leave a child holding repo locks.
+/// (see `safety::process_env`), and the repository's own config cannot run
+/// a smudge filter or merge driver unless the repository is trusted
+/// (`safety::git_exec`). Callers run it with `output_grouped` (own process
+/// group + kill-on-drop), so a dropped future (or early return) kills its
+/// whole process group and cannot leave a child holding repo locks.
 fn git_apply_command(args: &[&str]) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let mut cmd = crate::safety::git_exec::git_command_async(
+        crate::tools::workspace_root::current().path(),
+        crate::safety::git_exec::GitScope::UserOperation,
+    );
     cmd.in_workspace_root();
-    cmd.kill_on_drop(true);
     cmd.args(args);
     cmd
 }

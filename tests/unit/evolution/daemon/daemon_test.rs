@@ -4570,7 +4570,19 @@ fn evolution_git_command_sanitizes_env() {
     let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_DAEMON_GIT_MARKER"]);
     _env.set("SELFWARE_DAEMON_GIT_MARKER", "synthetic-leak-marker");
 
-    let cmd = evolution_git_command();
+    let tmp = tempfile::tempdir().unwrap();
+    let cmd = evolution_git_command(tmp.path());
+    // G1 (0.9.5): the spawn is also hardened against repo-configured
+    // programs — fsmonitor off, hooks pointed at nothing.
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(args.iter().any(|a| a == "core.fsmonitor=false"), "{args:?}");
+    assert!(
+        args.iter().any(|a| a.starts_with("core.hooksPath=")),
+        "{args:?}"
+    );
     let envs: Vec<_> = cmd
         .get_envs()
         .map(|(k, _)| k.to_string_lossy().into_owned())

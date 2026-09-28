@@ -1,3 +1,4 @@
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use chrono::Utc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -9,7 +10,6 @@ use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
-use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::process_guard::GroupedOutputExt;
 
 /// Result of visual verification including whether it should hard-gate execution.
@@ -1457,7 +1457,7 @@ impl Agent {
         // Async process spawn — this runs inside the async check_completion_gate,
         // so a blocking std::process::Command would stall a tokio worker thread.
         let output = tokio::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&root, GitScope::Internal)
             .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(&root)
             .output_grouped()
@@ -1481,7 +1481,7 @@ impl Agent {
         // files created during the run count as changes. Use -z so filenames with
         // spaces or unusual characters are safely parsed.
         if let Ok(untracked) = tokio::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&root, GitScope::Internal)
             .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&root)
             .output_grouped()
@@ -1593,7 +1593,7 @@ impl Agent {
             }
             // Async process spawn — see diff_paths_for_completion_gate.
             let output = tokio::process::Command::new("git")
-                .sanitized_env()
+                .sanitized_git(&root, GitScope::Internal)
                 .args(["diff", "HEAD", "--", path])
                 .current_dir(&root)
                 .output_grouped()
@@ -5011,7 +5011,7 @@ async fn audit_file_evidence(
     let diff = tokio::time::timeout(
         time_left,
         tokio::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(root, GitScope::Internal)
             .args(["diff", "--no-color", "--no-ext-diff", "-U3", base, "--"])
             .arg(anchored)
             .current_dir(root)
@@ -5240,7 +5240,7 @@ pub(crate) async fn committed_paths_since_baseline(
     }
     // Async process spawn -- see diff_paths_for_completion_gate.
     let output = tokio::process::Command::new("git")
-        .sanitized_env()
+        .sanitized_git(root, GitScope::Internal)
         .args([
             "log",
             "-z",

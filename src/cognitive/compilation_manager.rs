@@ -1,3 +1,4 @@
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
@@ -61,7 +62,7 @@ impl CompilationSandbox {
         // absolute targets are rewritten to sandbox-relative paths so they evaluate
         // against sandbox copies rather than host repository files.
         let status = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&original_dir, GitScope::Internal)
             .arg("clone")
             .arg("--no-hardlinks")
             .arg(&original_dir)
@@ -79,7 +80,7 @@ impl CompilationSandbox {
         // Carry over uncommitted changes (staged + unstaged) so the sandbox
         // reflects the exact working tree, not just the last commit.
         let diff_output = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&original_dir, GitScope::Internal)
             .args(["diff", "HEAD", "--binary"])
             .current_dir(&original_dir)
             .output()
@@ -94,7 +95,7 @@ impl CompilationSandbox {
 
         if !diff_output.stdout.is_empty() {
             let mut apply = Command::new("git")
-                .sanitized_env()
+                .sanitized_git(&work_dir, GitScope::Internal)
                 .args(["apply", "--allow-empty"])
                 .current_dir(&work_dir)
                 .stdin(std::process::Stdio::piped())
@@ -124,7 +125,7 @@ impl CompilationSandbox {
         // tree are part of the evaluated sandbox snapshot. Use NUL-delimited output
         // so filenames with spaces, quotes, or special characters are safely preserved.
         let untracked_output = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&original_dir, GitScope::Internal)
             .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&original_dir)
             .output()

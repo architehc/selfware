@@ -39,7 +39,7 @@ pub use animation::{
     Animation, AnimationManager,
 };
 
-use crate::safety::process_env::SanitizedEnvExt;
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::Result;
 use crossterm::{
     cursor::Show as ShowCursor,
@@ -1223,7 +1223,7 @@ pub fn run_tui_dashboard_with_events(
                                     let tx = git_cmd_tx.clone();
                                     std::thread::spawn(move || {
                                         let msg = match std::process::Command::new("git")
-                                            .sanitized_env()
+                                            .sanitized_git(".", GitScope::Internal)
                                             .args(["diff", "--stat"])
                                             .output()
                                         {
@@ -1256,7 +1256,7 @@ pub fn run_tui_dashboard_with_events(
                                     let tx = git_cmd_tx.clone();
                                     std::thread::spawn(move || {
                                         let msg = match std::process::Command::new("git")
-                                            .sanitized_env()
+                                            .sanitized_git(".", GitScope::Internal)
                                             .args(["status", "--short", "--branch"])
                                             .output()
                                         {

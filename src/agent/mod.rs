@@ -26,6 +26,7 @@
 //!    text response with no tool calls, the iteration limit is reached, or the
 //!    user cancels via Ctrl+C. Checkpoints are persisted for resumption.
 
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
@@ -49,7 +50,6 @@ use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::memory::AgentMemory;
 use crate::output;
-use crate::safety::process_env::SanitizedEnvExt;
 use crate::safety::SafetyChecker;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
@@ -3884,7 +3884,7 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn capture_baseline_dirty_paths(&self) {
         let root = self::current_project_root();
         let output = std::process::Command::new("git")
-            .sanitized_env()
+            .sanitized_git(&root, GitScope::Internal)
             .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(root)
             .output();

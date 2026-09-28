@@ -454,3 +454,147 @@ fn no_new_unsanitized_spawns_in_src() {
         violations.join("\n")
     );
 }
+
+/// Non-test `.rs` sources under `src/` as (repo-relative path, lines before
+/// the file's `#[cfg(test)] mod`), for the source-scanning guards below.
+fn src_files_non_test() -> Vec<(String, Vec<String>)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut stack = vec![root.join("src")];
+    let mut out = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let lines: Vec<String> = text.lines().map(str::to_string).collect();
+            let test_start = lines
+                .windows(2)
+                .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].contains("mod "))
+                .unwrap_or(lines.len());
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, lines[..test_start].to_vec()));
+        }
+    }
+    out
+}
+
+/// Rule 5 guard for G1 (0.9.5): every non-test `git` spawn goes through the
+/// hardened helper in `crate::safety::git_exec` (`sanitized_git`,
+/// `git_command*`, or `hardening_args` for env-keeping bench fixtures), so a
+/// repository's own config cannot run a program (fsmonitor, textconv,
+/// filters, hooks). Allowlisted files set up repositories the harness itself
+/// created or cloned before any agent touched them. Counts may only go DOWN.
+#[test]
+fn every_git_spawn_is_hardened() {
+    const WINDOW: usize = 4;
+    const ALLOWED: &[(&str, usize, &str)] = &[
+        (
+            "src/bench_harness/long_running/project.rs",
+            10,
+            "operator bench: init/add/commit of a scaffold it just wrote",
+        ),
+        (
+            "src/bench_harness/swebench_pro/harness.rs",
+            6,
+            "operator bench: init/fetch/clone/checkout before the agent runs",
+        ),
+        (
+            "src/safety/git_exec.rs",
+            1,
+            "`git config --list` (runs no program) inside the helper itself",
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (rel, lines) in src_files_non_test() {
+        let mut bare = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("Command::new(\"git\")") {
+                continue;
+            }
+            let end = (i + WINDOW).min(lines.len());
+            let hardened = lines[i..end]
+                .iter()
+                .any(|l| l.contains("sanitized_git") || l.contains("hardening_args"));
+            if !hardened {
+                bare += 1;
+            }
+        }
+        let allowed = ALLOWED
+            .iter()
+            .find(|(f, _, _)| *f == rel)
+            .map_or(0, |(_, n, _)| *n);
+        if bare > allowed {
+            violations.push(format!("{rel}: {bare} bare git spawns (allowed {allowed})"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "git spawns bypassing crate::safety::git_exec (repo config can run \
+         programs):\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Rule 5 guard (0.9.5): a `kill_on_drop(true)` spawn kills only the direct
+/// child, so every one must also run in its own process group with a group
+/// kill on drop — `process_group(0)` + `ProcessGroupGuard`, or one of the
+/// shared helpers (`output_grouped`, `output_in_process_group`,
+/// `run_command_bounded`, `run_cancellable_subprocess`) — within the
+/// surrounding lines. Exceptions are long-lived servers the session owns.
+#[test]
+fn kill_on_drop_spawns_use_a_process_group() {
+    const BEFORE: usize = 30;
+    const AFTER: usize = 45;
+    const ALLOWED: &[(&str, usize, &str)] = &[(
+        "src/lsp/client.rs",
+        1,
+        "long-lived language server owned by the session",
+    )];
+    let mut violations = Vec::new();
+    for (rel, lines) in src_files_non_test() {
+        let mut ungrouped = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("kill_on_drop(true)") {
+                continue;
+            }
+            let start = i.saturating_sub(BEFORE);
+            let end = (i + AFTER).min(lines.len());
+            let grouped = lines[start..end].iter().any(|l| {
+                l.contains("process_group(")
+                    || l.contains("output_grouped")
+                    || l.contains("output_in_process_group")
+                    || l.contains("run_command_bounded")
+                    || l.contains("run_cancellable_subprocess")
+                    || l.contains("ProcessGroupGuard")
+            });
+            if !grouped {
+                ungrouped += 1;
+            }
+        }
+        let allowed = ALLOWED
+            .iter()
+            .find(|(f, _, _)| *f == rel)
+            .map_or(0, |(_, n, _)| *n);
+        if ungrouped > allowed {
+            violations.push(format!(
+                "{rel}: {ungrouped} kill_on_drop spawns without a process group (allowed {allowed})"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "kill_on_drop alone leaves grandchildren running; use \
+         crate::tools::process_guard:\n{}",
+        violations.join("\n")
+    );
+}

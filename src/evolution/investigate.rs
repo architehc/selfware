@@ -9,7 +9,6 @@ use super::tree_log::{compute_sha256, AttemptNode, AttemptStatus, FailureClass};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 
 /// Maximum-power citation linking directly to exact file, line range, and content hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,11 +327,13 @@ pub fn read_file_content_at_revision(
         let trimmed_rev = rev.trim();
         if !trimmed_rev.is_empty() {
             let spec = format!("{trimmed_rev}:{file_path}");
-            let mut cmd = Command::new("git");
             // Sanitized env: git identity/proxy passthrough only (see
             // safety::process_env); no inherited credentials, no operator
             // GIT_* index overrides (env_remove retained for clarity).
-            crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+            let mut cmd = crate::safety::git_exec::git_command(
+                repo_root,
+                crate::safety::git_exec::GitScope::Internal,
+            );
             let out = cmd
                 .env_remove("GIT_INDEX_FILE")
                 .args(["show", &spec])
@@ -462,10 +463,12 @@ pub fn scan_patch_for_opaque_structures(
                 let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
                 let snapshot_file = snapshot_dir.join(file_path);
 
-                let mut cmd = Command::new("git");
                 // Sanitized env (see safety::process_env): snapshot export
                 // must not inherit host credentials or operator GIT_* state.
-                crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+                let mut cmd = crate::safety::git_exec::git_command(
+                    repo_root,
+                    crate::safety::git_exec::GitScope::Internal,
+                );
                 cmd.env_remove("GIT_INDEX_FILE");
                 cmd.args(["show", &format!("{commit}:{file_path}")]);
                 cmd.current_dir(repo_root);
@@ -1515,9 +1518,11 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
 
     let merkle_tree_equality = match (&node.git_tree_id, &node.committed_commit) {
         (Some(eval_tree), Some(commit)) => {
-            let mut git_cmd = Command::new("git");
             // Sanitized env (see safety::process_env).
-            crate::safety::process_env::sanitize_std_command_env_preserve(&mut git_cmd, &[]);
+            let mut git_cmd = crate::safety::git_exec::git_command(
+                repo_root,
+                crate::safety::git_exec::GitScope::Internal,
+            );
             let commit_tree = git_cmd
                 .env_remove("GIT_INDEX_FILE")
                 .args(["rev-parse", &format!("{commit}^{{tree}}")])

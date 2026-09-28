@@ -398,7 +398,13 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .join(".git")
         .join(format!("selfware-tmp-index-{}", std::process::id()));
 
+    // After the agent ran, the workdir's `.git/config` is agent-writable:
+    // neutralise repo-configured programs (filters, fsmonitor, textconv).
     let _ = Command::new("git")
+        .args(crate::safety::git_exec::hardening_args(
+            workdir,
+            crate::safety::git_exec::GitScope::Internal,
+        ))
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["-C"])
         .arg(workdir)
@@ -408,6 +414,10 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .status();
 
     let out = Command::new("git")
+        .args(crate::safety::git_exec::hardening_args(
+            workdir,
+            crate::safety::git_exec::GitScope::Internal,
+        ))
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["-C"])
         .arg(workdir)

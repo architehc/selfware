@@ -1,6 +1,7 @@
 use super::*;
 use crate::evolution::tree_log::{compute_sha256, AttemptNode, AttemptStatus};
 use std::path::Path;
+use std::process::Command;
 
 fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
     let (metrics, sab_report_path) = if status == AttemptStatus::Evaluated {

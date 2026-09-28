@@ -38,8 +38,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::safety::process_env::SanitizedEnvExt;
-
 use super::Agent;
 
 /// Upper bound on one pre-task re-run of a check.
@@ -511,8 +509,9 @@ pub(crate) fn attribute(current: &DiagnosticCounts, baseline: &BaselineRun) -> A
 // ---------------------------------------------------------------------------
 
 fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.sanitized_env().current_dir(dir).args(args);
+    let mut cmd =
+        crate::safety::git_exec::git_command(dir, crate::safety::git_exec::GitScope::Internal);
+    cmd.args(args);
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }

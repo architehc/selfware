@@ -358,9 +358,11 @@ fn diff_name_status_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
 /// git repo or has an unborn HEAD. Used by the improve gate to sweep
 /// changes the agent COMMITTED (they vanish from `git status --porcelain`).
 async fn current_head_sha(project_root: &std::path::Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(["rev-parse", "HEAD"]).current_dir(project_root);
-    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let mut cmd = crate::safety::git_exec::git_command_async(
+        project_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
+    cmd.args(["rev-parse", "HEAD"]);
     let output = cmd.output().await.ok()?;
     if !output.status.success() {
         return None;
@@ -404,13 +406,24 @@ async fn run_gate_command(
     project_root: &std::path::Path,
     within: std::time::Duration,
 ) -> anyhow::Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new(program);
+    // git runs after the agent had the repository to itself: its
+    // `.git/config` may now name an fsmonitor, filter or textconv program.
+    // The hardened spawn (`safety::git_exec`) neutralises them.
+    let mut cmd = if program == "git" {
+        crate::safety::git_exec::git_command_async(
+            project_root,
+            crate::safety::git_exec::GitScope::Internal,
+        )
+    } else {
+        let mut cmd = tokio::process::Command::new(program);
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd
+    };
     cmd.args(args)
         .current_dir(project_root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);

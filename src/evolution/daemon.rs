@@ -159,10 +159,11 @@ fn evolution_cargo_command() -> tokio::process::Command {
 /// touches a candidate worktree, so an unsanitized child would inherit every
 /// credential on the box. Callers keep appending their args and any
 /// task-specific env AFTER the sanitize.
-fn evolution_git_command() -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
-    crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
-    cmd
+fn evolution_git_command(dir: &Path) -> std::process::Command {
+    // Hardened spawn (safety::git_exec): sanitized environment plus
+    // command-line config that keeps the worktree's own git config from
+    // running programs (fsmonitor, filters, textconv, hooks).
+    crate::safety::git_exec::git_command(dir, crate::safety::git_exec::GitScope::Internal)
 }
 
 fn first_usize(s: &str) -> usize {
@@ -1714,9 +1715,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }),
     );
     let baseline_tree_id = {
-        let mut git_cmd = Command::new("git");
-        // Sanitized env (see safety::process_env): git identity/proxy only.
-        crate::safety::process_env::sanitize_std_command_env_preserve(&mut git_cmd, &[]);
+        let mut git_cmd = evolution_git_command(repo_root);
         git_cmd
             .env_remove("GIT_INDEX_FILE")
             .args(["rev-parse", "HEAD^{tree}"])
@@ -3733,12 +3732,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
-                        let mut git_cmd = Command::new("git");
-                        // Sanitized env (see safety::process_env).
-                        crate::safety::process_env::sanitize_std_command_env_preserve(
-                            &mut git_cmd,
-                            &[],
-                        );
+                        let mut git_cmd = evolution_git_command(repo_root);
                         let _ = git_cmd
                             .env_remove("GIT_INDEX_FILE")
                             .args(["tag", &tag])
@@ -4089,9 +4083,11 @@ fn extract_function_signatures(source: &str) -> Vec<String> {
 
 /// Get recent git changes for context
 fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String> {
-    let mut git_cmd = std::process::Command::new("git");
     // Sanitized env (see safety::process_env): git identity/proxy only.
-    crate::safety::process_env::sanitize_std_command_env_preserve(&mut git_cmd, &[]);
+    let mut git_cmd = crate::safety::git_exec::git_command(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let output = git_cmd
         .env_remove("GIT_INDEX_FILE")
         .args(["log", "--oneline", "--no-merges"])
@@ -5027,7 +5023,7 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
     }
 
     // Strategy 1: strict git apply
-    let strict = evolution_git_command()
+    let strict = evolution_git_command(dir)
         .env_remove("GIT_INDEX_FILE")
         .args(["apply", ".evolution-patch"])
         .current_dir(dir)
@@ -5038,7 +5034,7 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
     }
 
     // Strategy 2: git apply with relaxed whitespace and reduced context
-    let relaxed = evolution_git_command()
+    let relaxed = evolution_git_command(dir)
         .env_remove("GIT_INDEX_FILE")
         .args(["apply", "--ignore-whitespace", "-C1", ".evolution-patch"])
         .current_dir(dir)
@@ -5103,7 +5099,7 @@ fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
 fn capture_tested_diff(worktree: &Path) -> Option<String> {
     // Sanitized git (see evolution_git_command): this runs in the candidate
     // worktree whose files are model/project-controlled.
-    let add = evolution_git_command()
+    let add = evolution_git_command(worktree)
         .env_remove("GIT_INDEX_FILE")
         .args(["add", "-A"])
         .current_dir(worktree)
@@ -5118,7 +5114,7 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
     // standard empty-tree object instead, so a zero-commit repo reports its
     // staged files as additions — mirroring `cli::headless::capture_patch`. A
     // genuine diff failure with a real HEAD still returns None.
-    let head_ok = evolution_git_command()
+    let head_ok = evolution_git_command(worktree)
         .env_remove("GIT_INDEX_FILE")
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(worktree)
@@ -5132,7 +5128,7 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
     } else {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     };
-    let diff = evolution_git_command()
+    let diff = evolution_git_command(worktree)
         .env_remove("GIT_INDEX_FILE")
         .args(["diff", "--cached", "--binary", diff_base])
         .current_dir(worktree)
@@ -5148,7 +5144,7 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
 pub(crate) fn capture_worktree_tree_id(worktree: &Path) -> Option<String> {
     // Sanitized git (see evolution_git_command): same worktree-content class
     // as capture_tested_diff.
-    let output = evolution_git_command()
+    let output = evolution_git_command(worktree)
         .env_remove("GIT_INDEX_FILE")
         .args(["write-tree"])
         .current_dir(worktree)
@@ -5241,7 +5237,7 @@ fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
     if std::fs::write(&patch_file, tested_diff).is_err() {
         return false;
     }
-    let applied = evolution_git_command()
+    let applied = evolution_git_command(repo_root)
         .env_remove("GIT_INDEX_FILE")
         .args(["apply", ".evolution-tested.patch"])
         .current_dir(repo_root)
@@ -5270,7 +5266,7 @@ fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
     if std::fs::write(&patch_file, tested_diff).is_err() {
         return;
     }
-    let _ = evolution_git_command()
+    let _ = evolution_git_command(repo_root)
         .env_remove("GIT_INDEX_FILE")
         .args(["apply", "-R", ".evolution-tested.patch"])
         .current_dir(repo_root)
@@ -5282,7 +5278,7 @@ fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
 /// UNRELATED to the winner patch. They are left uncommitted — the evolution
 /// commit only ever stages the paths the tested diff edits.
 fn warn_unrelated_dirty_paths(repo_root: &Path, edited: &[PathBuf]) {
-    let status = evolution_git_command()
+    let status = evolution_git_command(repo_root)
         .env_remove("GIT_INDEX_FILE")
         .args(["status", "--porcelain"])
         .current_dir(repo_root)
@@ -5480,7 +5476,7 @@ pub(crate) fn cleanup_stale_staging_artifacts(repo_root: &Path) {
             }
         }
     }
-    if let Ok(output) = evolution_git_command()
+    if let Ok(output) = evolution_git_command(repo_root)
         .args([
             "for-each-ref",
             "--format=%(refname)",
@@ -5492,7 +5488,7 @@ pub(crate) fn cleanup_stale_staging_artifacts(repo_root: &Path) {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let refname = line.trim();
             if !refname.is_empty() {
-                let _ = evolution_git_command()
+                let _ = evolution_git_command(repo_root)
                     .args(["update-ref", "-d", refname])
                     .current_dir(repo_root)
                     .output();
@@ -5532,12 +5528,14 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let guard = IsolatedIndexGuard::new(repo_root);
 
     // 1. Initialize isolated index with the tree of HEAD
-    let mut read_tree = tokio::process::Command::new("git");
     // Sanitized env (see evolution_git_command): the patch content and
     // worktree state are project-controlled; the isolated index + any
     // credential-free git env like GIT_INDEX_FILE is re-added after the
     // clear. The sanitizer runs BEFORE the .env() additions below.
-    crate::safety::process_env::sanitize_command_env(&mut read_tree);
+    let mut read_tree = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let read_tree = read_tree
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["read-tree", "HEAD"])
@@ -5553,8 +5551,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     }
 
     // 2. Stage ONLY the specified paths into the isolated index
-    let mut add = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut add);
+    let mut add = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     add.env("GIT_INDEX_FILE", &guard.index_path);
     add.arg("add").arg("-A").arg("--");
     for p in paths {
@@ -5573,8 +5573,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     }
 
     // 3. Write and capture the tree from the isolated index
-    let mut write_tree = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut write_tree);
+    let mut write_tree = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let write_tree = write_tree
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["write-tree"])
@@ -5616,8 +5618,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
 
     cleanup_stale_staging_artifacts(repo_root);
 
-    let mut head_before_out = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut head_before_out);
+    let mut head_before_out = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let head_before_out = head_before_out
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
@@ -5637,8 +5641,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
         return Err("git rev-parse HEAD returned empty commit SHA".to_string());
     }
 
-    let mut symref_out = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut symref_out);
+    let mut symref_out = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let symref_out = symref_out
         .args(["symbolic-ref", "-q", "HEAD"])
         .current_dir(repo_root)
@@ -5667,8 +5673,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let worktree_name = format!("staging-commit-{}", uuid::Uuid::new_v4().simple());
     let worktree_path = worktrees_dir.join(&worktree_name);
 
-    let mut add_wt = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut add_wt);
+    let mut add_wt = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let add_wt = add_wt
         .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "add", "--detach"])
@@ -5716,8 +5724,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
         }
     }
 
-    let mut wt_add = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut wt_add);
+    let mut wt_add = crate::safety::git_exec::git_command_async(
+        &worktree_path,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     wt_add.env_remove("GIT_INDEX_FILE");
     wt_add.arg("add").arg("-A").arg("--");
     for p in paths {
@@ -5735,8 +5745,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
         ));
     }
 
-    let mut wt_tree_out = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut wt_tree_out);
+    let mut wt_tree_out = crate::safety::git_exec::git_command_async(
+        &worktree_path,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let wt_tree_out = wt_tree_out
         .env_remove("GIT_INDEX_FILE")
         .args(["write-tree"])
@@ -5759,8 +5771,13 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
         ));
     }
 
-    let mut commit_cmd = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut commit_cmd);
+    // The promotion commit keeps the repository's commit hooks (its
+    // pre-commit gate is part of the promotion contract); every other
+    // repository-configured program is neutralised (`GitScope::CommitGate`).
+    let mut commit_cmd = crate::safety::git_exec::git_command_async(
+        &worktree_path,
+        crate::safety::git_exec::GitScope::CommitGate,
+    );
     commit_cmd
         .env_remove("GIT_INDEX_FILE")
         .args(["commit", "-m", commit_msg])
@@ -5779,8 +5796,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
 
     let commit_res = run_cancellable_subprocess(commit_cmd, timeout_dur).await;
 
-    let mut staging_commit_after = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut staging_commit_after);
+    let mut staging_commit_after = crate::safety::git_exec::git_command_async(
+        &worktree_path,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let staging_commit_after = staging_commit_after
         .env_remove("GIT_INDEX_FILE")
         .args(["rev-parse", "HEAD"])
@@ -5801,8 +5820,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let mut parent_matches = false;
     if let Some(ref new_commit) = staging_commit_after {
         if new_commit != &head_before {
-            let mut head_tree = tokio::process::Command::new("git");
-            crate::safety::process_env::sanitize_command_env(&mut head_tree);
+            let mut head_tree = crate::safety::git_exec::git_command_async(
+                &worktree_path,
+                crate::safety::git_exec::GitScope::Internal,
+            );
             let head_tree = head_tree
                 .env_remove("GIT_INDEX_FILE")
                 .args(["rev-parse", "HEAD^{tree}"])
@@ -5818,8 +5839,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
                     }
                 });
 
-            let mut head_parent = tokio::process::Command::new("git");
-            crate::safety::process_env::sanitize_command_env(&mut head_parent);
+            let mut head_parent = crate::safety::git_exec::git_command_async(
+                &worktree_path,
+                crate::safety::git_exec::GitScope::Internal,
+            );
             let head_parent = head_parent
                 .env_remove("GIT_INDEX_FILE")
                 .args(["rev-parse", "HEAD^"])
@@ -5898,8 +5921,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let commit_sha =
         staging_commit_after.ok_or_else(|| "No staging commit was created".to_string())?;
     if let Some(ref dest_branch) = original_symref {
-        let mut update_dest = tokio::process::Command::new("git");
-        crate::safety::process_env::sanitize_command_env(&mut update_dest);
+        let mut update_dest = crate::safety::git_exec::git_command_async(
+            repo_root,
+            crate::safety::git_exec::GitScope::Internal,
+        );
         update_dest.args(["update-ref", dest_branch, &commit_sha, &head_before]);
         let update_res = update_dest
             .current_dir(repo_root)
@@ -5913,8 +5938,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
             ));
         }
     } else {
-        let mut update_head = tokio::process::Command::new("git");
-        crate::safety::process_env::sanitize_command_env(&mut update_head);
+        let mut update_head = crate::safety::git_exec::git_command_async(
+            repo_root,
+            crate::safety::git_exec::GitScope::Internal,
+        );
         update_head.args([
             "update-ref",
             "--no-deref",
@@ -5937,8 +5964,10 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
 
     // 6. Synchronize main repository index for the committed paths so working copy status is clean,
     // without disturbing any unrelated staged changes.
-    let mut reset = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut reset);
+    let mut reset = crate::safety::git_exec::git_command_async(
+        repo_root,
+        crate::safety::git_exec::GitScope::Internal,
+    );
     reset.env_remove("GIT_INDEX_FILE");
     reset.args(["reset", "HEAD", "--"]);
     for p in paths {

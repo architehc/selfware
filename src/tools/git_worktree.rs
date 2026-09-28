@@ -50,8 +50,10 @@ fn generate_worktree_name() -> String {
 
 /// Find the git repository root containing the workspace root `root`.
 async fn find_git_root(root: &WorkspaceRoot) -> Result<PathBuf> {
-    let mut cmd = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let mut cmd = crate::safety::git_exec::git_command_async(
+        root.path(),
+        crate::safety::git_exec::GitScope::Internal,
+    );
     let output = cmd
         .in_root(root)
         .args(["rev-parse", "--show-toplevel"])
@@ -77,12 +79,16 @@ const PRUNE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// selfware's after the directory is gone.
 const CREATED_LEDGER: &str = "selfware-created-worktrees";
 
-/// Run a housekeeping git command in `dir` with a sanitized environment and a
-/// bounded timeout (its whole process group is killed if the timeout fires).
+/// Run a housekeeping git command in `dir` with a sanitized environment, the
+/// hardened git spawn (`safety::git_exec`) and a bounded timeout. It runs via
+/// `output_grouped` (own process group + kill-on-drop), so the timeout drops
+/// the future and the whole process group is killed.
 async fn run_git_bounded(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new("git");
-    crate::safety::process_env::sanitize_command_env(&mut cmd);
-    cmd.current_dir(dir).args(args).kill_on_drop(true);
+    let mut cmd = crate::safety::git_exec::git_command_async(
+        dir,
+        crate::safety::git_exec::GitScope::Internal,
+    );
+    cmd.args(args);
     match tokio::time::timeout(PRUNE_GIT_TIMEOUT, cmd.output_grouped()).await {
         Ok(out) => out.with_context(|| format!("Failed to execute git {}", args.join(" "))),
         Err(_) => anyhow::bail!(
@@ -445,9 +451,13 @@ impl Tool for EnterWorktreeTool {
 
         info!("Creating worktree at: {}", worktree_path.display());
 
-        // Build git worktree add command
-        let mut cmd = tokio::process::Command::new("git");
-        crate::safety::process_env::sanitize_command_env(&mut cmd);
+        // Build git worktree add command. A requested worktree checkout runs
+        // the repository's post-checkout hook and smudge filters only when
+        // the repository is trusted (`safety::git_exec`).
+        let mut cmd = crate::safety::git_exec::git_command_async(
+            &git_root,
+            crate::safety::git_exec::GitScope::UserOperation,
+        );
         cmd.arg("worktree").arg("add");
 
         if branch_arg.is_none() {
@@ -559,8 +569,10 @@ impl Tool for ExitWorktreeTool {
                 let registered_path = worktree_path
                     .canonicalize()
                     .unwrap_or_else(|_| worktree_path.clone());
-                let mut cmd = tokio::process::Command::new("git");
-                crate::safety::process_env::sanitize_command_env(&mut cmd);
+                let mut cmd = crate::safety::git_exec::git_command_async(
+                    &restored_path,
+                    crate::safety::git_exec::GitScope::UserOperation,
+                );
                 let output = cmd
                     .current_dir(&restored_path)
                     .args(["worktree", "remove", &worktree_path.to_string_lossy()])
@@ -624,8 +636,10 @@ impl Tool for ListWorktreesTool {
 
     async fn execute(&self, _args: Value) -> Result<Value> {
         let root = workspace_root::current();
-        let mut cmd = tokio::process::Command::new("git");
-        crate::safety::process_env::sanitize_command_env(&mut cmd);
+        let mut cmd = crate::safety::git_exec::git_command_async(
+            root.path(),
+            crate::safety::git_exec::GitScope::Internal,
+        );
         let output = cmd
             .in_root(&root)
             .args(["worktree", "list", "--porcelain"])

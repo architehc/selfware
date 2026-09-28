@@ -1,3 +1,4 @@
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::Result;
 use colored::*;
 use std::sync::Arc;
@@ -6,7 +7,6 @@ use std::time::Instant;
 use crate::tools::workspace_root::CommandRootExt;
 
 use super::*;
-use crate::safety::process_env::SanitizedEnvExt;
 
 mod helpers;
 pub(crate) use helpers::*;
@@ -461,7 +461,7 @@ impl Agent {
 
             if input == "/diff" {
                 match tokio::process::Command::new("git")
-                    .sanitized_env()
+                    .sanitized_git(self.tools.workspace_root().path(), GitScope::Internal)
                     .in_root(self.tools.workspace_root())
                     .args(["diff", "--stat"])
                     .output()
@@ -482,7 +482,7 @@ impl Agent {
 
             if input == "/git" {
                 match tokio::process::Command::new("git")
-                    .sanitized_env()
+                    .sanitized_git(self.tools.workspace_root().path(), GitScope::Internal)
                     .in_root(self.tools.workspace_root())
                     .args(["status", "--short", "--branch"])
                     .output()
@@ -2091,7 +2091,7 @@ impl Agent {
         if args.is_empty() || args == "list" {
             // List worktrees
             match tokio::process::Command::new("git")
-                .sanitized_env()
+                .sanitized_git(self.tools.workspace_root().path(), GitScope::Internal)
                 .in_root(self.tools.workspace_root())
                 .args(["worktree", "list", "--porcelain"])
                 .output()
@@ -2178,7 +2178,7 @@ impl Agent {
 
             // Get git root
             let git_root = match tokio::process::Command::new("git")
-                .sanitized_env()
+                .sanitized_git(self.tools.workspace_root().path(), GitScope::Internal)
                 .in_root(self.tools.workspace_root())
                 .args(["rev-parse", "--show-toplevel"])
                 .output()
@@ -2224,7 +2224,7 @@ impl Agent {
             );
 
             match tokio::process::Command::new("git")
-                .sanitized_env()
+                .sanitized_git(self.tools.workspace_root().path(), GitScope::UserOperation)
                 .in_root(self.tools.workspace_root())
                 .args(&cmd_args)
                 .output()
