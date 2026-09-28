@@ -198,6 +198,22 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         return true;
     }
 
+    // A short status stub in which ANY prose sentence announces the agent's
+    // next read ("The project has multiple crates. Let me check the
+    // Cargo.toml dependencies. That will reveal the structure.") is a
+    // progress note: the lead-in / final-sentence checks miss a mid-reply
+    // announcement, and the structural guard only covers read-only analysis
+    // before its read floor. Held to the same read vocabulary as that guard
+    // (discourse verbs need a file/path object), and only for stubs: an
+    // explanation long enough to be an answer is judged by the checks above.
+    if is_short_stub(&lower)
+        && prose_sentences(&lower)
+            .iter()
+            .any(|s| announces_read_of_object(s))
+    {
+        return true;
+    }
+
     let strong_prefixes = [
         "i need to ",
         "first i need to ",
@@ -415,6 +431,12 @@ const READ_VERBS: &[&str] = &[
 /// reading the files"). Review 2026-09-27: real explanations were refused.
 const WEAK_READ_VERBS: &[&str] = &["take a look", "look", "start", "begin", "check"];
 
+/// Manifest / config / doc extensions that name a file to read ("check
+/// the Cargo.toml") although they are not a programming language.
+const READ_OBJECT_EXTENSIONS: &[&str] = &[
+    "toml", "json", "yaml", "yml", "lock", "md", "txt", "cfg", "ini", "xml",
+];
+
 /// Whether `object` (what follows a weak read verb) names a file, a path or
 /// another read.
 fn names_read_object(object: &str) -> bool {
@@ -423,9 +445,9 @@ fn names_read_object(object: &str) -> bool {
         w.contains('/')
             || w.rsplit_once('.').is_some_and(|(stem, ext)| {
                 !stem.is_empty()
-                    && crate::analysis::repo_inventory::is_code_language(
+                    && (crate::analysis::repo_inventory::is_code_language(
                         crate::analysis::repo_inventory::language_of(&format!("x.{ext}")),
-                    )
+                    ) || READ_OBJECT_EXTENSIONS.contains(&ext))
             })
             || matches!(
                 w,
@@ -542,7 +564,11 @@ fn is_intent_sentence(sentence: &str, verbs: &[&str]) -> bool {
 /// A reply whose final sentence announces the agent's next action and that
 /// delivers no substantive answer before it.
 fn ends_with_next_action_announcement(lower: &str) -> bool {
-    let (before, last, is_question) = split_final_sentence(lower);
+    // Fenced code is not prose: a `# Let's check the output` comment closing
+    // a code block is not the reply's final sentence (the 0.9.5 fix to
+    // `announces_further_reading`, swept here).
+    let prose = without_fenced_code(lower);
+    let (before, last, is_question) = split_final_sentence(&prose);
     if is_question || last.is_empty() {
         return false;
     }
@@ -595,6 +621,67 @@ fn announces_read(sentence: &str) -> bool {
         return true;
     }
     // The discourse verbs: only with a read object.
+    if !is_intent_sentence(sentence, WEAK_READ_VERBS) {
+        return false;
+    }
+    let object = WEAK_READ_VERBS
+        .iter()
+        .find_map(|v| sentence.find(v).map(|at| &sentence[at + v.len()..]))
+        .unwrap_or("");
+    names_read_object(object)
+}
+
+/// A reply too short to be an answer that merely mentions a next read:
+/// under [`STUB_MAX_CHARS`] characters, or under
+/// [`STUB_UNCITED_MAX_CHARS`] with no `path:line` citation.
+fn is_short_stub(lower: &str) -> bool {
+    let chars = lower.chars().count();
+    chars < STUB_MAX_CHARS
+        || (chars < STUB_UNCITED_MAX_CHARS
+            && super::citation_check::parse_citations(lower).is_empty())
+}
+
+/// See [`is_short_stub`].
+const STUB_MAX_CHARS: usize = 250;
+/// See [`is_short_stub`].
+const STUB_UNCITED_MAX_CHARS: usize = 400;
+
+/// Every prose sentence of `text` (fenced code removed), markdown stripped.
+/// A sentence ends at `.`/`!`/`?`/`;` followed by whitespace (so
+/// `Cargo.toml` and `main.rs` stay whole) or at a line break; fragments of
+/// one or two words are skipped.
+fn prose_sentences(text: &str) -> Vec<String> {
+    let prose = without_fenced_code(text);
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut chars = prose.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next_is_space = chars.peek().is_none_or(|(_, n)| n.is_whitespace());
+        let end = c == '\n' || (matches!(c, '.' | '!' | '?' | ';') && next_is_space);
+        if end {
+            sentences.push(plain_sentence(&prose[start..i]));
+            start = i + c.len_utf8();
+        }
+    }
+    sentences.push(plain_sentence(&prose[start..]));
+    sentences
+        .into_iter()
+        .filter(|s| s.split_whitespace().count() >= 3)
+        .collect()
+}
+
+/// [`announces_read`] for a sentence anywhere in a reply: "look" is a
+/// discourse verb there too ("Let's look at each stage: …"), so it needs a
+/// file / path object like the other [`WEAK_READ_VERBS`].
+fn announces_read_of_object(sentence: &str) -> bool {
+    let strong: Vec<&str> = READ_VERBS
+        .iter()
+        .copied()
+        .filter(|v| *v != "look")
+        .collect();
+    if is_intent_sentence(sentence, &strong) {
+        return true;
+    }
     if !is_intent_sentence(sentence, WEAK_READ_VERBS) {
         return false;
     }

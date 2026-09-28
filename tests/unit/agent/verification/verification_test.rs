@@ -56,6 +56,107 @@ fn trailing_next_action_sentence_is_a_progress_note() {
 }
 
 #[test]
+fn incomplete_action_response_catches_multi_sentence_first_person_cues() {
+    // a) Multi-sentence replies with "let me read" in the first sentence
+    let first_sentence_cue = "Let me read the key structural files in src/agent/ first. \
+        The core is concentrated in verification.rs and execution.rs. \
+        This will provide the context needed for review.";
+    assert!(is_incomplete_action_response(first_sentence_cue));
+
+    // Multi-sentence reply with "let me read" in the middle sentence
+    let middle_sentence_cue = "The repository is a Rust codebase with several modules. \
+        Let me read src/agent/verification.rs to understand the gate logic. \
+        I will report my findings once done.";
+    assert!(is_incomplete_action_response(middle_sentence_cue));
+
+    // Substring matching for all first-person action cues anywhere in the reply
+    let cue_cases = [
+        "The project has multiple crates. Let me check the Cargo.toml dependencies. That will reveal the structure.",
+        "Module structure identified. Let me inspect the parser implementation. Detailed breakdown follows.",
+        "Initial scan complete. Let me examine the test suite fixtures. Report will follow.",
+        "Overview done. Let me look at the entry point in main.rs. Full details below.",
+        "Starting the analysis. I will read the configuration loader next. Results will be posted.",
+        "Found the relevant files. I will check the trait definitions in lib.rs. Please hold on.",
+        "Stage 1 finished. I'll inspect the execution loop next. More later.",
+        "Architecture overview complete. I'll read the agent runner logic. Continued below.",
+    ];
+    for reply in cue_cases {
+        assert!(
+            is_incomplete_action_response(reply),
+            "cue in multi-sentence reply must be caught: {reply}"
+        );
+    }
+
+    // Whitelist exceptions remain intact
+    let whitelist_cases = [
+        (
+            "Let me summarize: parse_port now returns Result<u16, String> and main exits on error.",
+            true,
+        ),
+        (
+            "Let me recap: all 3 defects have been identified and resolved.",
+            true,
+        ),
+        (
+            "Let me explain: the agent loop uses bounded retries to prevent runaway execution.",
+            true,
+        ),
+        (
+            "Let me describe the architecture: there is an execution loop and a planning path.",
+            true,
+        ),
+        (
+            "To summarize, the parser was rewritten to handle edge cases.",
+            true,
+        ),
+        ("In summary, no defects were found in the parser.", true),
+        ("Here is a summary of the test results.", true),
+        ("Here's a summary of the findings.", true),
+        (
+            "Let me know if you would like me to fix any of these issues.",
+            true,
+        ),
+        ("Let me know if you want further analysis.", true),
+    ];
+    for (reply, should_be_allowed) in whitelist_cases {
+        assert_eq!(
+            !is_incomplete_action_response(reply),
+            should_be_allowed,
+            "whitelist exception should be allowed as final answer: {reply}"
+        );
+    }
+
+    // Substantive explanation (>400 chars) that mentions "i will check" or "let me inspect"
+    // in passing is a complete answer, not an incomplete progress stub (prevents deadlocks).
+    let substantive_long_answer = "The architecture of the selfware system is built around several interlocking components: \
+        1. The agent runtime manages turns, budget allocations, and lifecycle transitions. \
+        2. The safety subsystem verifies path boundaries and sandbox execution leases. \
+        3. The tool dispatch mechanism invokes filesystem and command execution routines safely. \
+        In a future optimization pass, I will check whether the KV cache allocation can be tightened further. \
+        Overall, the current design provides solid isolation, robust state transitions, and clean error reporting.";
+    assert!(
+        !is_incomplete_action_response(substantive_long_answer),
+        "substantive answers must not be flagged as incomplete stubs just because of passing intent phrases"
+    );
+
+    // The 0.9.5 answer-guard explanations stay answers under the stub rule:
+    // discourse verbs without a file/path object, and fenced code, are not
+    // read announcements.
+    for explanation in [
+        "The pipeline has three stages. Let's look at each stage: parse, plan, run. \
+         Parsing turns text into tokens; planning orders them; running executes them.",
+        "Here is how to inspect it:\n```bash\ncargo run\n# Let's check the output\n```",
+        "The fix is in place and the tests pass. Let me note that the parser still \
+         accepts trailing commas.",
+    ] {
+        assert!(
+            !is_incomplete_action_response(explanation),
+            "an explanation, not a progress note: {explanation:?}"
+        );
+    }
+}
+
+#[test]
 fn progress_note_sentence_table() {
     // (reply, is a progress note)
     let cases: &[(&str, bool)] = &[
@@ -1321,13 +1422,16 @@ mod completion_gate_tests {
         ));
         cp.log_tool_call(checkpoint_call("cycles", json!({}), true));
         agent.current_checkpoint = Some(cp);
-        // Wording the sentence-level check does not catch on its own (the
-        // announcement is mid-reply), so only the structural guard fires.
+        // The sentence-level check now catches this short stub on its own
+        // too (a read announced in any sentence of a reply under 250
+        // characters); until 0.9.6 only the structural guard fired here.
+        // Rule 2 note: this assertion was `!is_incomplete_action_response`
+        // — it documented the old limitation; the gate outcome is unchanged.
         agent.last_assistant_response = "I'll read the agent loop and the CLI to ground the \
              review. The core is concentrated in src/agent/ and src/cli/, which dominate the \
              line count and hold the orchestration logic for every entry point."
             .to_string();
-        assert!(!is_incomplete_action_response(
+        assert!(is_incomplete_action_response(
             &agent.last_assistant_response
         ));
         assert_eq!(
@@ -1366,7 +1470,9 @@ mod completion_gate_tests {
         agent.last_assistant_response = "I'll read src/config/loader.rs to confirm. It \
              loads the TOML file, merges environment overrides and validates the result."
             .to_string();
-        assert!(!is_incomplete_action_response(
+        // Rule 2 note: was `!is_incomplete_action_response` (the old
+        // sentence-level limitation); the short-stub rule catches it now.
+        assert!(is_incomplete_action_response(
             &agent.last_assistant_response
         ));
         assert!(agent.analysis_progress_note_without_reads());
@@ -1388,6 +1494,25 @@ mod completion_gate_tests {
         agent.last_assistant_response =
             "The parser is fine; no issues. Let me know if you want me to read more.".to_string();
         assert!(!agent.analysis_progress_note_without_reads());
+    }
+
+    // A review the code-vocabulary test misses (`.go` is not in its
+    // extension list, no path separator) is still a question about this
+    // workspace: the nudge, the planning fast path and the structural guard
+    // share `task_is_workspace_question`.
+    #[tokio::test]
+    async fn code_review_without_workspace_vocabulary_is_a_workspace_question() {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        let task = "review main.go for error handling bugs";
+        agent.current_task_context = task.to_string();
+        assert!(!crate::agent::task_policy::task_references_project_code(
+            task, "fx-none"
+        ));
+        assert!(crate::agent::task_policy::task_is_code_review(task));
+        assert!(agent.task_is_workspace_question());
+        // General knowledge stays general knowledge.
+        agent.current_task_context = "review the pros and cons of event sourcing".to_string();
+        assert!(!agent.task_is_workspace_question());
     }
 
     // Contrast: the same unwritten-code answer on a MUTATION task must still
@@ -2943,6 +3068,7 @@ mod completion_gate_tests {
             "the rejection demands verification: {gate}"
         );
     }
+
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---

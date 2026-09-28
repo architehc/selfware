@@ -895,3 +895,52 @@ async fn read_only_task_never_auto_writes_code_quoted_next_to_a_tool_call() {
         "a read-only task must not auto-write quoted code"
     );
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn workspace_question_answered_with_zero_reads_is_nudged_once_then_judged() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+
+    let answer = "The config loader in src/config/loader.rs loads TOML, merges environment overrides and validates.";
+    let server = MockLlmServer::builder()
+        .with_response(answer)
+        .with_response(answer)
+        .build()
+        .await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "how does the config loader in src/config work?".to_string();
+    agent.classify_task_policy();
+    assert!(agent.task_is_workspace_question());
+    assert_eq!(agent.content_read_count(), 0);
+
+    // Step 1: a final answer with zero reads gets the one-time nudge.
+    let done_step1 = agent.execute_step_internal(false).await.unwrap();
+    assert!(
+        !done_step1,
+        "step 1 must not complete; ungrounded nudge is pushed"
+    );
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains(crate::agent::plan_step::UNGROUNDED_REASON)),
+        "first nudge must be pushed to messages"
+    );
+
+    // Step 2: the same answer after the single nudge is judged normally and
+    // completes — the nudge is bounded to once per task (no deadlock).
+    let done_step2 = agent.execute_step_internal(false).await.unwrap();
+    server.stop().await;
+
+    assert!(
+        done_step2,
+        "step 2 must complete cleanly once nudged; substantial answers must not deadlock"
+    );
+    assert_eq!(agent.last_assistant_response, answer);
+}

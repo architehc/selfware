@@ -665,21 +665,28 @@ pub(super) const UNGROUNDED_REASON: &str = "read-only report without any read";
 
 impl Agent {
     /// A non-mutation task that asks about THIS workspace's code (see
-    /// `task_policy::task_references_project_code`), where an answer produced
+    /// `task_policy::task_references_project_code`) or is a review of it
+    /// (`task_policy::task_is_code_review`), where an answer produced
     /// without opening anything came from the prompt, not the code.
+    ///
+    /// The code-review arm covers reviews the vocabulary test misses
+    /// ("review main.go for error handling", "audit the project"): the
+    /// planning fast path, the execution-path nudge and the structural
+    /// progress-note guard all key on this one predicate.
     pub(super) fn task_is_workspace_question(&self) -> bool {
         if self.current_task_requires_mutation() {
             return false;
+        }
+        let task = self.task_context_for_classification();
+        if super::task_policy::task_is_code_review(task) {
+            return true;
         }
         let project_name = super::current_project_root()
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
-        super::task_policy::task_references_project_code(
-            self.task_context_for_classification(),
-            &project_name,
-        )
+        super::task_policy::task_references_project_code(task, &project_name)
     }
 
     /// Push the "read before you report" gate envelope unless it already
