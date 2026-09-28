@@ -369,7 +369,9 @@ impl ReviewSession {
             })
             .count();
         let read_lines = self.covered_lines();
-        let complete = read_files == self.plan.len();
+        // A scope with a file the run could not read is not fully covered,
+        // however much of the rest was read (AGENTS.md rule 3): PARTIAL.
+        let complete = read_files == self.plan.len() && self.unreadable.is_empty();
         let mut percent = (read_lines * 100)
             .checked_div(self.relevant_lines)
             .unwrap_or(100);
@@ -388,6 +390,16 @@ impl ReviewSession {
                 group(read_files),
                 group(self.plan.len()),
                 group(self.relevant_lines)
+            )
+        } else if unread.is_empty() {
+            // Every readable file was read; only unreadable ones are missing
+            // (named below).
+            format!(
+                "⚠️ coverage: PARTIAL — read all {} readable relevant files ({} lines), but {} \
+                 in-scope file(s) could not be read",
+                group(read_files),
+                group(self.relevant_lines),
+                self.unreadable.len()
             )
         } else {
             let shown: Vec<&str> = unread.iter().take(5).map(|e| e.path.as_str()).collect();
@@ -561,11 +573,21 @@ impl ReviewSession {
                 );
             }
             ReviewPhase::Synthesis => {
+                let unreadable_only = !report.complete && report.not_read_count == 0;
                 if report.complete {
                     out.push(format!(
                         "Coverage complete: all {} relevant files read ({} lines). Write the final review now.",
                         report.relevant_files,
                         group(report.relevant_lines)
+                    ));
+                } else if unreadable_only {
+                    out.push(format!(
+                        "Reading has ended: all {} readable relevant files read, but {} in-scope \
+                         file(s) could not be read ({}). Write the final review now, and state \
+                         plainly that coverage is partial and those files were not reviewed.",
+                        report.read_files,
+                        self.unreadable.len(),
+                        list_first(&self.unreadable, 5)
                     ));
                 } else {
                     out.push(format!(
@@ -632,6 +654,17 @@ impl ReviewSession {
                 continue;
             };
             let path = path.trim_start_matches("./");
+            // An in-scope file the run could not read: nothing in it was read.
+            if let Some(bad) = self.unreadable.iter().find_map(|u| {
+                let p = u.split(" (").next().unwrap_or(u);
+                (p == path || p.ends_with(&format!("/{path}"))).then_some(p)
+            }) {
+                let cite = format!("{bad}:{line}");
+                if !out.contains(&cite) && out.len() < 10 {
+                    out.push(cite);
+                }
+                continue;
+            }
             let Some(entry) = self
                 .plan
                 .iter()
@@ -1138,8 +1171,16 @@ pub(crate) fn with_review_coverage(
     match coverage {
         Some(c) if !c.complete && base.kind.is_nonfailure() => super::failure_mode::FailureMode {
             evidence: format!(
-                "{}; {REVIEW_COVERAGE_PARTIAL_NOTE} — read {} of {} relevant files ({}% of lines)",
-                base.evidence, c.read_files, c.relevant_files, c.percent_lines
+                "{}; {REVIEW_COVERAGE_PARTIAL_NOTE} — read {} of {} relevant files ({}% of lines){}",
+                base.evidence,
+                c.read_files,
+                c.relevant_files,
+                c.percent_lines,
+                if c.unreadable.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {} in-scope file(s) unreadable", c.unreadable.len())
+                }
             ),
             ..base
         },
@@ -1222,7 +1263,11 @@ mod tests {
         s.unreadable = vec!["big.rs (over 4.0 MB)".to_string()];
         s.record("a.rs", (1, 10));
         let r = s.report();
-        assert!(r.complete);
+        // Rule 3: a scope with an unreadable file is never "complete".
+        assert!(!r.complete);
+        assert!(r.line.starts_with("⚠️ coverage: PARTIAL"), "{}", r.line);
+        assert!(!r.line.contains("— complete"), "{}", r.line);
+        assert!(r.percent_lines < 100, "{}", r.percent_lines);
         assert!(
             r.line
                 .contains("1 in-scope file(s) unreadable, not counted: big.rs (over 4.0 MB)"),
@@ -1230,6 +1275,40 @@ mod tests {
             r.line
         );
         assert_eq!(r.unreadable.len(), 1);
+        // Reading is over (nothing readable is left), so the gate accepts a
+        // final answer — which is folded in as PARTIAL, and a citation into
+        // the unreadable file counts as a claim about unread code.
+        assert!(s.complete());
+        assert!(s
+            .gate(1, "FINDING: a.rs:3 — x; big.rs:7 — y", None)
+            .is_none());
+        let r = s.report();
+        assert!(
+            r.cited_unread.contains(&"big.rs:7".to_string()),
+            "{:?}",
+            r.cited_unread
+        );
+        let note = s.turn_note(ReviewPhase::Synthesis, None, 2_000);
+        assert!(note.contains("could not be read"), "{note}");
+        assert!(!note.contains("Coverage complete"), "{note}");
+        let base = super::super::failure_mode::FailureMode {
+            restored_files: Vec::new(),
+            kind: super::super::failure_mode::FailureKind::NoChange,
+            evidence: "completed naturally".to_string(),
+            advice: "-".to_string(),
+        };
+        let folded = with_review_coverage(base, Some(&r));
+        assert!(
+            folded.evidence.contains(REVIEW_COVERAGE_PARTIAL_NOTE),
+            "{}",
+            folded.evidence
+        );
+        assert!(
+            folded.evidence.contains("1 in-scope file(s) unreadable"),
+            "{}",
+            folded.evidence
+        );
+        assert!(!folded.is_clean_success(), "{}", folded.evidence);
     }
 
     #[test]
