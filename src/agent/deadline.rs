@@ -546,6 +546,13 @@ impl Agent {
             decision: decision.to_string(),
             detail: window.detail,
         });
+        // One cheap "are you done?" before the next turn (see
+        // `done_check`): a verified DONE finishes inside the window the
+        // wrap-up measured, instead of hoping the next turn is the answer.
+        if self.done_check_may_fire(super::done_check::DoneTrigger::WrapUp) {
+            self.done_check
+                .request(super::done_check::DoneTrigger::WrapUp, None);
+        }
     }
 
     /// Which limit's wrap-up was issued this task, if any.
@@ -604,6 +611,39 @@ impl Agent {
                 return Some((
                     WrapUpCause::CostBudget,
                     format!("${remaining:.4} left < forecast final answer ${need:.4}"),
+                ));
+            }
+        }
+        None
+    }
+
+    /// Why a side call of `prompt_tokens` + `completion_tokens` does not fit
+    /// the remaining wall time or token budget at this run's measured rates
+    /// (`None` when it fits or no limit is set). The done-check uses this
+    /// instead of the final-answer forecast, which assumes a 6,526-token
+    /// report: live c24 (fab5b706) skipped a ~500-token check with 261 s
+    /// left because a full report was forecast at 375 s.
+    pub(super) fn side_call_no_fit(
+        &self,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    ) -> Option<String> {
+        let (wall, tokens, _) = self.remaining_limits();
+        if let Some((remaining, _)) = wall {
+            let need = self
+                .call_forecast()
+                .side_call_secs(prompt_tokens, completion_tokens);
+            if remaining < need {
+                return Some(format!(
+                    "deadline: {remaining}s left < forecast side call {need}s"
+                ));
+            }
+        }
+        if let Some((remaining, _)) = tokens {
+            let need = prompt_tokens + completion_tokens;
+            if remaining < need {
+                return Some(format!(
+                    "token budget: {remaining} tokens left < side call {need} tokens"
                 ));
             }
         }

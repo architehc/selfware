@@ -125,6 +125,11 @@ pub struct SessionResult {
     /// …`). Omitted for every other run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_coverage: Option<crate::agent::ReviewCoverageReport>,
+    /// Done-checks this run (`agent::done_check`): how many were asked, each
+    /// one's turn, trigger and verified verdict, the turn a verified DONE
+    /// ended the run at, and the summary `line`. Omitted when none ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_check: Option<crate::agent::DoneCheckReport>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

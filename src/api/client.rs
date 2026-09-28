@@ -143,6 +143,12 @@ pub struct SideCall {
     /// Wall-time cap for the whole side call (headers, body, one retry).
     /// A configured `agent.max_call_secs` tightens it, never loosens it.
     pub time_cap_secs: u64,
+    /// Take `chat_template_kwargs.enable_thinking` from this workload's
+    /// quota (`[workloads.<kind>]`, filled from the model profile) instead
+    /// of the session's `extra_body`. `None` keeps the session setting
+    /// (every side call before the done-check). Only the thinking toggle is
+    /// taken: the side call's own `max_tokens` bound still applies.
+    pub thinking_workload: Option<crate::config::TurnWorkload>,
 }
 
 impl SideCall {
@@ -160,7 +166,15 @@ impl SideCall {
             purpose,
             max_tokens: Self::DEFAULT_MAX_TOKENS,
             time_cap_secs: Self::DEFAULT_TIME_CAP_SECS,
+            thinking_workload: None,
         }
+    }
+
+    /// Send with the thinking toggle of `kind`'s quota (see
+    /// [`SideCall::thinking_workload`]).
+    pub fn thinking_from(mut self, kind: crate::config::TurnWorkload) -> Self {
+        self.thinking_workload = Some(kind);
+        self
     }
 
     pub fn max_tokens(mut self, max_tokens: usize) -> Self {
@@ -1528,6 +1542,12 @@ impl ApiClient {
         let mut body = self.build_chat_body(messages, None, ThinkingMode::Disabled, true)?;
         let mut max_tokens = spec.max_tokens;
         apply_side_call_bounds(&mut body, max_tokens);
+        if let Some(enable) = spec
+            .thinking_workload
+            .and_then(|kind| self.config.workloads.get(kind).enable_thinking)
+        {
+            set_enable_thinking(&mut body, enable);
+        }
         maybe_log_request_body(&self.config.debug, &body, spec.purpose);
         let timeout_err = |started: Instant| -> anyhow::Error {
             SideCallTimeout {

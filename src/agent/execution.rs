@@ -538,6 +538,16 @@ impl Agent {
         &mut self,
         _task_description: &str,
     ) -> Result<bool> {
+        // Done-check before the model turn (only when switched on, see
+        // `done_check`): a requested (finish-stall / wrap-up) or near-cap
+        // check whose verified DONE answer clears the completion gate
+        // completes the step with that answer — the loop's normal completion
+        // path finalizes it (and enforces the hard budgets after the step).
+        if Box::pin(self.done_check_before_turn()).await
+            == Some(super::done_check::DoneResolution::Complete)
+        {
+            return Ok(true);
+        }
         self.execute_step_internal(false).await
     }
 

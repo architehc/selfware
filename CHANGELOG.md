@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Done-check** (`src/agent/done_check.rs`), **off by default**
+  (`[agent] done_check = true` turns it on; off, a run behaves exactly as in
+  0.9.5). Live c24 runs showed honest verdicts but no pass-rate gain, so it
+  ships for measurement. When on: when the finish stall is detected, in the
+  last 3 iterations of a budget of at least 12, at the deadline/budget
+  wrap-up and at the iteration cap, the agent asks the model "are you done?" in one short side
+  request (thinking off, the `planning` quota's toggle) and gets a JSON
+  verdict per requirement (the task's numbered/bulleted steps, else the
+  whole task). The verdict is never trusted: each requirement marked met
+  needs evidence the harness recorded itself (a file a successful call
+  changed, a check that passed after the last change, a file read, the
+  final answer), and DONE is not verified while no file changed, a check
+  fails on the current tree or audit findings are open. A verified DONE
+  ends the run with the checked answer once it clears the completion gate;
+  otherwise one message names the unverified claims or the remaining work.
+  At most 3 per task, 3 turns apart. The run summary prints
+  `done-check: N asked (…); verified DONE at turn X …` and the headless
+  result carries `done_check`; every check is a `done_check` turn decision.
+  The check's prompt goes through the model-facing redactor.
+- **Live harness config variants**: a scenario can `extend` another with a
+  `config_set` (`c24-done-check`, `edit-tests-done-check` turn the
+  done-check on; the loop rotates them next to the plain scenarios, the
+  release gate skips them via `"gate": false`), and `run.py run
+  --config-set agent.done_check=true` does the same ad hoc under the name
+  `<scenario>+agent.done_check=true`. Records carry `config_set`; the
+  report counts done-checks as interventions (`done_checks`).
+
 ## [0.9.5] - 2026-09-28
 
 A security and correctness release. An adversarial review of 0.9.4 found

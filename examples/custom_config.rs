@@ -77,6 +77,7 @@ fn build_custom_config() -> Config {
             max_iterations: 100,
             step_timeout_secs: 300, // 5 minutes
             verify_after_edit: None,
+            done_check: false,
             stream_stall_timeout_secs: None,
             token_budget: 500000,
             token_safety_margin: 50000,

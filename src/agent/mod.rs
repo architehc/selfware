@@ -103,6 +103,7 @@ mod context_files;
 mod context_management;
 pub mod context_map;
 pub mod deadline;
+mod done_check;
 pub mod evolution_events;
 mod execution;
 pub mod failure_mode;
@@ -141,6 +142,7 @@ pub mod turn_artifacts;
 pub mod turn_workload;
 pub(crate) mod verification_scope;
 
+pub use done_check::{DoneCheckEntry, DoneCheckReport};
 pub use review_coverage::{ReviewCoverageReport, ReviewPhase};
 pub use task_runner::{RequirementsAuditStatus, RunBudgets, RunSummary};
 mod verification;
@@ -1050,6 +1052,9 @@ pub struct Agent {
     /// Turns that only re-read a verified, unchanged tree without giving
     /// the final answer: directive, then refusal (see `finish_stall`).
     finish_stall: finish_stall::FinishStall,
+    /// Structured "are you done?" side call and its verification (see
+    /// `done_check`): triggers, cooldown, per-task cap, verdicts.
+    done_check: done_check::DoneCheckState,
     /// Malformed native tool calls dropped before the history push (their
     /// unpaired ids would 400 the next request). Reported to the model as
     /// rejected calls by the next dispatch instead of vanishing.
@@ -2047,6 +2052,7 @@ To call a tool, use this EXACT XML structure:
             length_truncation_retries: 0,
             protocol_stall: protocol_stall::ProtocolStallWindow::default(),
             finish_stall: finish_stall::FinishStall::default(),
+            done_check: done_check::DoneCheckState::default(),
             pending_native_rejections: Vec::new(),
             mutation_gate_rejections: 0,
             consecutive_stale_verification: 0,
@@ -3838,6 +3844,7 @@ To call a tool, use this EXACT XML structure:
         self.length_truncation_retries = 0;
         self.protocol_stall.clear();
         self.finish_stall.clear();
+        self.done_check.clear();
         self.pending_native_rejections.clear();
         self.consecutive_empty_responses = 0;
         self.pending_failure_hint = None;

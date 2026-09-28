@@ -31,6 +31,15 @@ pub struct AgentConfig {
     /// for proof/Lean/TB profiles where the write->build->fix loop pays.
     #[serde(default)]
     pub verify_after_edit: Option<bool>,
+    /// Structured "are you done?" self-check (`agent::done_check`): a short
+    /// side call whose DONE claim is verified against what the harness
+    /// recorded, fired on the finish stall, near/at the iteration cap and at
+    /// the deadline/budget wrap-up. OFF by default: live c24 (0.9.5 cycle)
+    /// showed honest verdicts but no pass-rate gain, so it ships for
+    /// measurement only. Off, the run behaves exactly as without it (the
+    /// finish-stall directive fires as before).
+    #[serde(default)]
+    pub done_check: bool,
     /// Cancel a streaming request that produces NO chunks for this many
     /// seconds (no-progress watchdog). `None` keeps the legacy behavior
     /// (`max(step_timeout_secs, 30)`). Tune per endpoint: slow local boxes
@@ -145,6 +154,7 @@ impl Default for AgentConfig {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
             verify_after_edit: None,
+            done_check: false,
             stream_stall_timeout_secs: None,
             token_budget: super::default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
             token_safety_margin: default_token_safety_margin(),

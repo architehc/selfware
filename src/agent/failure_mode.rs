@@ -486,6 +486,11 @@ impl FailureMode {
                             fm.advice = FINISH_STALL_ADVICE.to_string();
                         }
                     }
+                    // The last done-check's verdict with its verified /
+                    // unverified breakdown (see `agent::done_check`).
+                    if let Some(clause) = agent.done_check_failure_clause() {
+                        fm.evidence = format!("{}; {clause}", fm.evidence);
+                    }
                     return fm;
                 }
                 // Per-call cap (`agent.max_call_secs`): one call was aborted.

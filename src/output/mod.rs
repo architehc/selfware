@@ -1097,6 +1097,22 @@ pub(crate) fn audit_verdict(verdict: &str) {
     io::stdout().flush().ok();
 }
 
+/// Format the one-line marker for a done-check verdict (`agent::done_check`).
+pub(crate) fn done_check_verdict_line(verdict: &str) -> String {
+    format!("[done-check] {verdict}")
+}
+
+/// Print a done-check verdict as a single visible line (same mode-gating as
+/// the other run-mode intervention markers).
+pub(crate) fn done_check_verdict(verdict: &str) {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", done_check_verdict_line(verdict).bright_yellow());
+    io::stdout().flush().ok();
+}
+
 /// Format the one-line marker for the deterministic citation check.
 pub(crate) fn citation_check_line(detail: &str) -> String {
     format!("[citations] {detail}")

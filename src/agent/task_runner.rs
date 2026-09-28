@@ -605,6 +605,9 @@ pub struct RunSummary {
     /// What the finish-stall handling did (directive, refusals, withheld
     /// budget extension); `None` when it never engaged.
     pub finish_stall_detail: Option<String>,
+    /// Done-checks this run ("done-check: N asked (…); verified DONE at
+    /// turn X …"); `None` when none ran.
+    pub done_check: Option<String>,
     /// Review coverage (inventory line, files/lines read of the relevant
     /// set, what was not read); `None` when the task was not a code review.
     pub review_coverage: Option<super::ReviewCoverageReport>,
@@ -697,6 +700,7 @@ impl Agent {
             edited_task: self.edited_task_description(),
             finish_stall_outcome: self.finish_stall.outcome_clause(),
             finish_stall_detail: self.finish_stall.summary_detail(),
+            done_check: self.done_check.summary_line(),
             review_coverage: self.review_coverage(),
             workloads: self.workload_summary_lines(),
         }
@@ -2066,6 +2070,48 @@ impl Agent {
         Some(AgentState::Executing { step })
     }
 
+    /// The cap tripped. First a done-check at the cap (only when switched
+    /// on, see `done_check`): a verified DONE whose answer clears the
+    /// completion gate ends the run completed with that answer. Then the cap
+    /// completion gate (e2e lowcap: the cap tripped right after a green
+    /// verification that covers every edit — the work is done and verified,
+    /// so the SAME completion gate a completion claim runs decides, and the
+    /// run finishes naturally if it accepts; no further model turn is
+    /// granted). True when the run completed (finalized and checkpointed).
+    /// Steps run in the order the loop ran them in 0.9.5.
+    fn complete_at_cap_boxed<'a>(
+        &'a mut self,
+        task_description: &'a str,
+        progress: Option<&'a mut output::TaskProgress>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let done_check = Box::pin(self.done_check_at_cap()).await;
+            if !done_check {
+                if !(self.cap_hit_with_fresh_green_verification()
+                    && self.check_completion_gate().await.is_none())
+                {
+                    return false;
+                }
+                self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                    decision: "cap_completion_gate".to_string(),
+                    detail: format!(
+                        "iteration cap {} reached right after a green verification covering every edit; completion gate accepted",
+                        self.loop_control.max_iterations()
+                    ),
+                });
+            }
+            record_state_transition("Failed", "Completed");
+            if let Some(progress) = progress {
+                progress.finish_all();
+            }
+            self.finalize_natural_completion(task_description).await;
+            if let Err(e) = self.complete_checkpoint() {
+                warn!("Failed to save completed checkpoint: {}", e);
+            }
+            true
+        })
+    }
+
     /// Auto-checkpoint-and-continue (long-task caps, USER-APPROVED policy):
     /// the iteration cap was just tripped on a run still showing real forward
     /// progress, and the +25%×4 adaptive-extension ceiling is already spent.
@@ -3372,25 +3418,19 @@ impl Agent {
                     // run the SAME completion gate a completion claim runs,
                     // and finish naturally if it accepts. The cap itself is
                     // not loosened: no further model turn is granted.
+                    // The cap tripped: a done-check (when switched on, see
+                    // `done_check`) or the cap completion gate may still end
+                    // the run completed. One boxed call keeps the run-loop
+                    // future small (it recurses under auto-continue and sits
+                    // within ~10 % of the 2 MiB debug test stack).
                     if reason == super::loop_control::MAX_ITERATIONS_STOP_REASON
-                        && self.cap_hit_with_fresh_green_verification()
-                        && self.check_completion_gate().await.is_none()
+                        && self
+                            .complete_at_cap_boxed(
+                                task_description,
+                                (mode == LoopMode::NewTask).then_some(&mut progress),
+                            )
+                            .await
                     {
-                        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
-                            decision: "cap_completion_gate".to_string(),
-                            detail: format!(
-                                "iteration cap {} reached right after a green verification covering every edit; completion gate accepted",
-                                self.loop_control.max_iterations()
-                            ),
-                        });
-                        record_state_transition("Failed", "Completed");
-                        if mode == LoopMode::NewTask {
-                            progress.finish_all();
-                        }
-                        self.finalize_natural_completion(task_description).await;
-                        if let Err(e) = self.complete_checkpoint() {
-                            warn!("Failed to save completed checkpoint: {}", e);
-                        }
                         return Ok(());
                     }
                     if reason == "Max iterations exceeded" {

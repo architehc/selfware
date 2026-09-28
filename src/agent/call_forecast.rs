@@ -129,6 +129,14 @@ impl CallForecast {
             + completion as f64 / self.decode_tok_per_sec
     }
 
+    /// Predicted wall seconds of a separate call with its own prompt size
+    /// (a side call such as the done-check), at this run's measured rates.
+    pub(crate) fn side_call_secs(&self, prompt_tokens: u64, completion: u64) -> u64 {
+        (prompt_tokens as f64 * self.prefill_ms_per_token / 1000.0
+            + completion as f64 / self.decode_tok_per_sec)
+            .ceil() as u64
+    }
+
     /// Predicted seconds of the next ordinary (exploration) call.
     pub(crate) fn next_call_secs(&self) -> u64 {
         self.call_secs(self.next_completion_tokens).ceil() as u64

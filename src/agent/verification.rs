@@ -3596,7 +3596,7 @@ impl Agent {
     /// `REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS` by `bound_audit_evidence`.
     /// Every cut is marked "not shown" so the auditor can tell an absent
     /// line from an omitted one.
-    async fn requirements_audit_evidence(&self, files_changed: &[String]) -> String {
+    pub(super) async fn requirements_audit_evidence(&self, files_changed: &[String]) -> String {
         let workspace = self.tools.workspace_root();
         let root = workspace.path();
         let task_start = self

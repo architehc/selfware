@@ -2597,6 +2597,7 @@ fn build_session_result(
         resources: agent.resource_teardown.clone(),
         task_edited: agent.edited_task_description(),
         review_coverage: agent.review_coverage(),
+        done_check: agent.done_check_report(),
     }
 }
 
@@ -7471,6 +7472,9 @@ fn render_run_summary_for(
     ));
     if let Some(detail) = &summary.finish_stall_detail {
         lines.push(detail.clone());
+    }
+    if let Some(line) = &summary.done_check {
+        lines.push(line.clone());
     }
     if let Some(bounds) = run_bounds_line(summary, crate::output::is_verbose()) {
         lines.push(bounds);

@@ -135,3 +135,18 @@ fn empty_run_uses_the_measured_fallbacks() {
     assert_eq!(f.prefill_ms_per_token, PREFILL_MS_PER_TOKEN_FALLBACK);
     assert_eq!(f.answer_secs(), (6_526.0f64 / 15.0).ceil() as u64);
 }
+
+#[test]
+fn side_call_secs_uses_its_own_prompt_and_reply_size() {
+    let f = CallForecast {
+        prompt_tokens: 9_340,
+        decode_tok_per_sec: 18.2,
+        prefill_ms_per_token: 2.275,
+        next_completion_tokens: 200,
+        answer_completion_tokens: ANSWER_COMPLETION_FLOOR,
+    };
+    // Live c24 (fab5b706): a ~1.3k-token done-check with a 1,024-token
+    // reply budget is ~60 s, where the final-answer forecast is ~380 s.
+    assert_eq!(f.side_call_secs(1_345, 1_024), 60);
+    assert!(f.answer_secs() > 370);
+}

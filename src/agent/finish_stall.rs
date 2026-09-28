@@ -127,6 +127,9 @@ pub(crate) struct FinishStall {
     /// Number of the last closed turn.
     last_turn: usize,
     nudged_at: Option<usize>,
+    /// The nudge went to a done-check instead of the directive (the
+    /// directive is pushed only when that check gives no verdict).
+    nudge_via_done_check: bool,
     refusing_from: Option<usize>,
     refused: usize,
     /// Set when an adaptive extension / auto-continue was withheld because
@@ -383,6 +386,7 @@ impl FinishStall {
         self.turns_since_green = 0;
         self.last_turn_stalled = false;
         self.nudged_at = None;
+        self.nudge_via_done_check = false;
         self.refusing_from = None;
         self.refused = 0;
     }
@@ -406,6 +410,11 @@ impl FinishStall {
         let first = self.extension_withheld_at.is_none();
         self.extension_withheld_at.get_or_insert(self.last_turn);
         first
+    }
+
+    /// The nudge for this green point was handed to a done-check.
+    pub(crate) fn note_nudge_via_done_check(&mut self) {
+        self.nudge_via_done_check = true;
     }
 
     /// Consecutive stall turns in the current phase (tests, logs).
@@ -472,7 +481,11 @@ impl FinishStall {
             self.stall_turns, self.turns_since_green
         )];
         if let Some(turn) = self.nudged_at {
-            parts.push(format!("told to give the final answer after turn {turn}"));
+            parts.push(if self.nudge_via_done_check {
+                format!("done-check asked after turn {turn}")
+            } else {
+                format!("told to give the final answer after turn {turn}")
+            });
         }
         if let Some(turn) = self.refusing_from {
             parts.push(format!(
@@ -613,6 +626,17 @@ impl super::Agent {
                     })
                     .collect();
                 let directive = self.finish_stall.directive(&files);
+                // Ask "are you done?" first (see `done_check`); the directive
+                // is its fallback when no verdict comes back.
+                if self.done_check_may_fire(super::done_check::DoneTrigger::FinishStall) {
+                    tracing::info!(
+                        "finish stall: {FINISH_STALL_TURNS} turns re-read seen content on a verified tree — running a done-check before the next turn"
+                    );
+                    self.finish_stall.note_nudge_via_done_check();
+                    self.done_check
+                        .request(super::done_check::DoneTrigger::FinishStall, Some(directive));
+                    return;
+                }
                 tracing::info!(
                     "finish stall: {FINISH_STALL_TURNS} turns re-read seen content on a verified tree — pushing the finish directive"
                 );

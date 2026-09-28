@@ -175,6 +175,13 @@ streaming = true
 # Default: 3
 min_completion_steps = 3
 
+# Done-check: ask the model "are you done?" in a short side call on the
+# finish stall, near/at the iteration cap and at the deadline wrap-up, and
+# accept DONE only with evidence the harness recorded (changed files, checks
+# after the last change, reads). Off by default (measurement only).
+# Default: false
+done_check = false
+
 # Require at least one verification (cargo_check/cargo_test/cargo_clippy)
 # before accepting task completion. A test run that executes zero tests, or
 # whose output is piped/redirected, does not count.
