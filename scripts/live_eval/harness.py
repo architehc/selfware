@@ -105,12 +105,98 @@ def work_root(results_dir):
 
 
 def load_scenarios():
-    out = {}
+    """Every scenario spec by name. A spec with `"extends": "<base>"` is the
+    base spec with the variant's own keys on top (its `config_set` merged
+    into the base's); prompt files still resolve against the base's dir. That
+    is how a config switch is A/B-tested continuously: `c24-done-check` is
+    `c24` with `[agent] done_check = true`, scored by the same scorer."""
+    raw = {}
     for spec_path in sorted(SCENARIO_DIR.glob("*/scenario.json")):
         spec = json.loads(spec_path.read_text())
         spec["_dir"] = str(spec_path.parent)
-        out[spec["name"]] = spec
+        raw[spec["name"]] = spec
+    out = {}
+    for name, spec in raw.items():
+        base_name = spec.get("extends")
+        if base_name:
+            base = raw.get(base_name)
+            if base is None or base.get("extends"):
+                raise SetupError(f"scenario {name}: extends unknown or nested base {base_name}")
+            merged = json.loads(json.dumps(base))
+            merged.update({k: v for k, v in spec.items() if k not in ("config_set", "_dir")})
+            merged["config_set"] = {**base.get("config_set", {}), **spec.get("config_set", {})}
+            spec = merged
+        out[name] = spec
     return out
+
+
+def with_config_set(spec, sets):
+    """A copy of `spec` with extra `config_set` entries (`run --config-set`),
+    renamed `<name>+key=value,...` so its records never mix with the plain
+    scenario's in reports."""
+    if not sets:
+        return spec
+    out = json.loads(json.dumps(spec))
+    out["config_set"] = {**spec.get("config_set", {}), **sets}
+    out["name"] = spec["name"] + "+" + ",".join(
+        f"{k}={json.dumps(v)}" for k, v in sorted(sets.items())
+    )
+    return out
+
+
+def parse_config_set(items):
+    """`KEY=VALUE` strings (`agent.done_check=true`) to a dict; VALUE is
+    TOML-ish: true/false, integers, floats, else a string."""
+    out = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or "." not in key:
+            raise SystemExit(f"--config-set wants SECTION.KEY=VALUE, got {item!r}")
+        low = value.strip().lower()
+        if low in ("true", "false"):
+            out[key.strip()] = low == "true"
+        else:
+            try:
+                out[key.strip()] = int(value)
+            except ValueError:
+                try:
+                    out[key.strip()] = float(value)
+                except ValueError:
+                    out[key.strip()] = value
+    return out
+
+
+def _toml_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(str(value))
+
+
+def apply_config_set(text, sets):
+    """Set `section.key = value` in a TOML config text: replace the key inside
+    its `[section]` table when present, else add it at the top of that table,
+    else append the table. Only one level (`agent.done_check`)."""
+    for dotted, value in sorted((sets or {}).items()):
+        section, _, key = dotted.rpartition(".")
+        line = f"{key} = {_toml_value(value)}"
+        lines = text.split("\n")
+        header = f"[{section}]"
+        start = next((i for i, l in enumerate(lines) if l.strip() == header), None)
+        if start is None:
+            text = text.rstrip("\n") + f"\n\n{header}\n{line}\n"
+            continue
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].lstrip().startswith("[")), len(lines))
+        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        hit = next((i for i in range(start + 1, end) if key_re.match(lines[i])), None)
+        if hit is None:
+            lines.insert(start + 1, line)
+        else:
+            lines[hit] = line
+        text = "\n".join(lines)
+    return text
 
 
 def expand(value):
@@ -323,6 +409,8 @@ def prepare_config(spec, binary, run_dir, endpoint_override=None):
             r'^(\s*endpoint\s*=\s*)"[^"]*"', rf'\g<1>"{endpoint_override}"', text, count=1,
             flags=re.M,
         )
+    if spec.get("config_set"):
+        text = apply_config_set(text, spec["config_set"])
     dest = Path(run_dir) / "cfg.toml"
     dest.write_text(text)
     return dest, text, str(src)
@@ -708,6 +796,10 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         spec, binary, run_id, state["record"]["started_at"], endpoint, model
     )
     record["config_source"] = cfg_src
+    if spec.get("config_set"):
+        record["config_set"] = dict(spec["config_set"])
+    if spec.get("extends"):
+        record["extends"] = spec["extends"]
     record["config_sha256"] = hashlib.sha256(cfg_text.encode()).hexdigest()
     record["artifacts"] = str(run_dir)
     # Re-set on the rebuilt record (5357f06e set it on the placeholder only,

@@ -24,6 +24,18 @@ and the long-running `run.py loop` on a developer machine.
 | `interrupt` | SIGINT to the process group 4 s into a streaming answer | exit 130, outcome `interrupted`, exit within 30 s, nothing left in `selfware resources --json` |
 | `review-core-long` | "can you review the selfware core do not code" on a snapshot of the binary's own commit, 4 h cap | completed, coverage reported and >= 50 %, 0 wrong citations, no edits; reports files/hour |
 
+### Config variants (A/B a switch continuously)
+
+A scenario can extend another and set config keys: `c24-done-check` and
+`edit-tests-done-check` are `c24` / `edit-tests` with
+`[agent] done_check = true` (`{"extends": "c24", "config_set":
+{"agent.done_check": true}, "gate": false}`), scored by the same scorer.
+The loop rotates them with the other quick scenarios, so every commit gets
+both arms; `report` groups them apart by name; `gate` skips `"gate":
+false` variants. Ad hoc, `run.py run --config-set agent.done_check=true`
+applies a key to every scenario of that run and records it as
+`<scenario>+agent.done_check=true`. Records carry `config_set`.
+
 Every run: isolated `HOME` (no response cache, checkpoint or global config
 carries over), an explicit `-c <cfg>` copied from the tracked
 `selfware-llm-selfware-design.toml` at the binary's commit (c24 uses its own
@@ -33,8 +45,9 @@ every metric and one boolean per criterion. Interventions are counted from
 the stream's `turn_decision` events: nudges (`nudge_injected`), refusals
 (`refused`, `rejected_tools`, `stopped_before_dispatch`, `retry_suppressed`),
 gate blocks (citation correction rounds, `cap_completion_gate`,
-`*_accept_draft`); `no_tool_call` is counted apart because every plain
-final answer emits it.
+`done_check_gate_refused`, `*_accept_draft`) and done-checks (`done_check`,
+also reported as `done_checks`); `finish_stall_nudge` counts as a nudge.
+`no_tool_call` is counted apart because every plain final answer emits it.
 
 An unreachable endpoint, a fixture that cannot be set up, a harness timeout,
 a missing result object or an exception inside the harness

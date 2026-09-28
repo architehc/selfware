@@ -55,7 +55,7 @@ def log_to(path):
     return log
 
 
-def pick_scenarios(names, tier=None, hermetic_only=False):
+def pick_scenarios(names, tier=None, hermetic_only=False, gate_only=False):
     specs = harness.load_scenarios()
     if names:
         unknown = [n for n in names if n not in specs]
@@ -63,6 +63,10 @@ def pick_scenarios(names, tier=None, hermetic_only=False):
             raise SystemExit(f"unknown scenario(s): {', '.join(unknown)}; see `run.py list`")
         return [specs[n] for n in names]
     out = [s for s in specs.values() if tier is None or s.get("tier") == tier]
+    if gate_only:
+        # A config-switch variant (`"gate": false`) is measured by the loop
+        # and `run`, never a release floor.
+        out = [s for s in out if s.get("gate", True)]
     if hermetic_only:
         out = [s for s in out if s.get("hermetic_fixture")]
     return out
@@ -140,6 +144,8 @@ def cmd_run(args):
     results_dir.mkdir(parents=True, exist_ok=True)
     log = log_to(results_dir / "run.log")
     specs = pick_scenarios(args.scenarios, tier=args.tier, hermetic_only=args.hermetic_only)
+    sets = harness.parse_config_set(args.config_set)
+    specs = [harness.with_config_set(s, sets) for s in specs]
     binary = binary_from_args(args, results_dir, log)
     records = run_batch(
         specs, binary, results_dir, args.samples, args.concurrency, log, endpoint=args.endpoint
@@ -190,7 +196,8 @@ def cmd_gate(args):
     results_dir = harness.default_results_dir(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     log = log_to(results_dir / "gate.log")
-    specs = pick_scenarios(args.scenarios, tier="quick", hermetic_only=args.hermetic_only)
+    specs = pick_scenarios(args.scenarios, tier="quick", hermetic_only=args.hermetic_only,
+                           gate_only=True)
     try:
         binary = binary_from_args(args, results_dir, log)
     except builder.BuildError as exc:
@@ -543,6 +550,9 @@ def main(argv=None):
     sp = sub.add_parser("run")
     binary_opts(sp)
     sp.add_argument("--samples", type=int, default=1)
+    sp.add_argument("--config-set", action="append", metavar="SECTION.KEY=VALUE",
+                    help="set a config key for every scenario of this run (repeatable), e.g. "
+                         "agent.done_check=true; records go under `<scenario>+key=value`")
     sp.add_argument("--tier", choices=["quick", "long"], default="quick",
                     help="tier to run when --scenarios is not given")
     sp.set_defaults(fn=cmd_run)

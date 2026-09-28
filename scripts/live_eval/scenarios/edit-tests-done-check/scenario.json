@@ -1,0 +1,7 @@
+{
+  "name": "edit-tests-done-check",
+  "extends": "edit-tests",
+  "gate": false,
+  "config_set": {"agent.done_check": true},
+  "description": "edit-tests with the done-check on ([agent] done_check = true): false-positive watch on a run that normally answers by itself"
+}

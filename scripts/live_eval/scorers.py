@@ -21,14 +21,18 @@ PROBLEM_KINDS = ("wrong_line", "symbol_not_found", "missing_file", "out_of_range
 # had to steer is a worse run even when it ends green.
 # `no_tool_call` is NOT a nudge: a plain final answer is a turn without tool
 # calls too (0.9.3 live: every "hi" run emits it), so it is counted apart.
-NUDGE_DECISIONS = {"nudge_injected"}
+NUDGE_DECISIONS = {"nudge_injected", "finish_stall_nudge"}
+# The done-check (src/agent/done_check.rs): each "are you done?" side call is
+# an intervention, whatever its verdict; `done_check_completed` is its
+# outcome, not another intervention.
+DONE_CHECK_DECISIONS = {"done_check"}
 REFUSAL_DECISIONS = {
     "refused",
     "rejected_tools",
     "stopped_before_dispatch",
     "retry_suppressed",
 }
-GATE_DECISIONS = {"cap_completion_gate"}
+GATE_DECISIONS = {"cap_completion_gate", "done_check_gate_refused"}
 WRAP_UP_DECISIONS = {
     "deadline_wrap_up",
     "budget_wrap_up",
@@ -128,8 +132,9 @@ def event_metrics(events):
         n for d, n in decisions.items() if d in GATE_DECISIONS or d.endswith("_accept_draft")
     )
     wrap_ups = sum(n for d, n in decisions.items() if d in WRAP_UP_DECISIONS)
+    done_checks = sum(n for d, n in decisions.items() if d in DONE_CHECK_DECISIONS)
     turns = len(steps)
-    interventions = nudges + refusals + gate_blocks
+    interventions = nudges + refusals + gate_blocks + done_checks
     return {
         "event_turns": turns,
         "tool_calls": tool_calls,
@@ -147,6 +152,8 @@ def event_metrics(events):
         "refusals": refusals,
         "gate_blocks": gate_blocks,
         "wrap_ups": wrap_ups,
+        "done_checks": done_checks,
+        "done_check_completed": decisions.get("done_check_completed", 0),
         "interventions": interventions,
         "intervention_rate": round(interventions / turns, 4) if turns else 0.0,
     }

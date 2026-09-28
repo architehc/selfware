@@ -210,6 +210,7 @@ def summarize(records):
         "fixture_citations_wrong_mean": mean(metric("fixture_citations_wrong")),
         "intervention_rate_mean": mean(metric("intervention_rate")),
         "interventions_mean": mean(metric("interventions")),
+        "done_checks_mean": mean(metric("done_checks")),
         "files_per_hour_mean": mean(metric("files_per_hour")),
         "contaminated": sum(1 for r in ran if r["metrics"].get("contamination_hits")),
         "failed_criteria": failed,
@@ -480,6 +481,11 @@ def render(report):
             f"wrong-citation rate {_fmt(cs['wrong_citation_rate_mean'], 3)} "
             f"(independent wrong {_fmt(cs['fixture_citations_wrong_mean'])})  "
             f"interventions/turn {_fmt(cs['intervention_rate_mean'], 3)}"
+            + (
+                f"  done-checks {_fmt(cs['done_checks_mean'])}"
+                if cs["done_checks_mean"] is not None
+                else ""
+            )
             + (
                 f"  files/hour {_fmt(cs['files_per_hour_mean'])}"
                 if cs["files_per_hour_mean"] is not None

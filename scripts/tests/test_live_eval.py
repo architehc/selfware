@@ -136,6 +136,9 @@ class StreamParsingTest(unittest.TestCase):
             {"event": "turn_decision", "decision": "refused", "detail": "x"},
             {"event": "turn_decision", "decision": "citation_check",
              "detail": "2 of 44 wrong — correction round 1/2"},
+            {"event": "turn_decision", "decision": "done_check",
+             "detail": "turn 2 (finish stall): VERIFIED DONE (1/1)"},
+            {"event": "turn_decision", "decision": "done_check_completed"},
         ) + "\nnot json\n" + result_line()
         inp = scorers.ScoreInput(0, stdout)
         m = inp.metrics
@@ -147,8 +150,9 @@ class StreamParsingTest(unittest.TestCase):
         self.assertEqual((m["llm_secs"], m["decode_tok_s"]), (4.0, 25.0))
         self.assertEqual((m["nudges"], m["refusals"], m["gate_blocks"]), (1, 1, 1))
         self.assertEqual(m["no_tool_call_turns"], 1)
-        self.assertEqual(m["interventions"], 3)
-        self.assertEqual(m["intervention_rate"], 1.5)
+        self.assertEqual((m["done_checks"], m["done_check_completed"]), (1, 1))
+        self.assertEqual(m["interventions"], 4)
+        self.assertEqual(m["intervention_rate"], 2.0)
         self.assertEqual(m["citations_verified"], 3)
         self.assertEqual(m["citations_wrong"], 0)
 
@@ -812,3 +816,50 @@ class HarnessHardeningTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigSwitchVariantTest(unittest.TestCase):
+    """A config switch (the done-check) is A/B-tested as a scenario variant."""
+
+    def test_variant_extends_its_base_and_turns_the_switch_on(self):
+        specs = harness.load_scenarios()
+        base, variant = specs["c24"], specs["c24-done-check"]
+        self.assertEqual(variant["scorer"], base["scorer"])
+        self.assertEqual(variant["prompt_file"], base["prompt_file"])
+        self.assertEqual(variant["_dir"], base["_dir"])
+        self.assertEqual(variant["config_set"], {"agent.done_check": True})
+        self.assertFalse(variant["gate"])
+        self.assertNotIn("config_set", base)
+        self.assertEqual(specs["edit-tests-done-check"]["config_set"], {"agent.done_check": True})
+
+    def test_apply_config_set_replaces_inserts_or_appends(self):
+        text = '[agent]\nmax_iterations = 40\ndone_check = false\n\n[retry]\nmax_retries = 3\n'
+        out = harness.apply_config_set(text, {"agent.done_check": True})
+        self.assertIn("done_check = true", out)
+        self.assertNotIn("done_check = false", out)
+        self.assertIn("max_retries = 3", out)
+        out = harness.apply_config_set("[agent]\nmax_iterations = 40\n", {"agent.done_check": True})
+        self.assertEqual(out, "[agent]\ndone_check = true\nmax_iterations = 40\n")
+        out = harness.apply_config_set('model = "m"\n', {"agent.done_check": True})
+        self.assertTrue(out.endswith("[agent]\ndone_check = true\n"), out)
+        # A key in another table is never touched.
+        out = harness.apply_config_set("[retry]\ndone_check = 1\n[agent]\n", {"agent.done_check": True})
+        self.assertIn("[retry]\ndone_check = 1", out)
+
+    def test_config_set_flag_renames_the_scenario(self):
+        sets = harness.parse_config_set(["agent.done_check=true", "agent.max_iterations=50"])
+        self.assertEqual(sets, {"agent.done_check": True, "agent.max_iterations": 50})
+        spec = harness.with_config_set({"name": "c24", "scorer": "c24"}, sets)
+        self.assertEqual(spec["name"], "c24+agent.done_check=true,agent.max_iterations=50")
+        self.assertEqual(spec["config_set"], sets)
+        self.assertIs(harness.with_config_set(spec, {}), spec)
+
+    def test_prepare_config_writes_the_switch(self):
+        spec = dict(harness.load_scenarios()["c24-done-check"])
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "base.toml"
+            cfg.write_text('model = "m"\n[agent]\nmax_iterations = 40\n')
+            spec["config"] = {"kind": "file", "default": str(cfg)}
+            _dest, text, _src = harness.prepare_config(spec, None, d)
+            self.assertIn("done_check = true", text)
+            self.assertIn("done_check = true", (Path(d) / "cfg.toml").read_text())

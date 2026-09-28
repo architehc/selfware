@@ -1,0 +1,7 @@
+{
+  "name": "c24-done-check",
+  "extends": "c24",
+  "gate": false,
+  "config_set": {"agent.done_check": true},
+  "description": "c24 with the done-check on ([agent] done_check = true): the A/B arm the loop rotates next to plain c24"
+}
