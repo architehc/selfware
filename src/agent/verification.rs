@@ -407,11 +407,43 @@ const READ_VERBS: &[&str] = &[
     "load",
     "browse",
     "go through",
-    "take a look",
-    "check",
-    "start",
-    "begin",
 ];
+
+/// Read verbs that are also plain discourse ("Let's look at each stage:",
+/// "Let's start with the entry point"): they announce a READ only when
+/// their object names a file or path ("look at src/main.rs", "start by
+/// reading the files"). Review 2026-09-27: real explanations were refused.
+const WEAK_READ_VERBS: &[&str] = &["take a look", "look", "start", "begin", "check"];
+
+/// Whether `object` (what follows a weak read verb) names a file, a path or
+/// another read.
+fn names_read_object(object: &str) -> bool {
+    object.split_whitespace().any(|w| {
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_');
+        w.contains('/')
+            || w.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && crate::analysis::repo_inventory::is_code_language(
+                        crate::analysis::repo_inventory::language_of(&format!("x.{ext}")),
+                    )
+            })
+            || matches!(
+                w,
+                "file"
+                    | "files"
+                    | "source"
+                    | "sources"
+                    | "module"
+                    | "modules"
+                    | "reading"
+                    | "codebase"
+                    | "code"
+                    | "implementation"
+                    | "directory"
+                    | "repo"
+            )
+    })
+}
 
 /// Strip markdown emphasis/list markers from a sentence.
 fn plain_sentence(sentence: &str) -> String {
@@ -525,16 +557,69 @@ fn ends_with_next_action_announcement(lower: &str) -> bool {
     !substantive
 }
 
-/// Whether any sentence of `text` announces further reading/inspection by
-/// the agent ("Let me read the key structural files …", "I'll now inspect
-/// …"). Used by the review-task structural guard, where position and
-/// substance do not matter: the answer has no citations yet.
+/// Whether the opening or the final prose sentence of `text` announces
+/// further reading / inspection by the agent ("Let me read the key
+/// structural files …", "I'll read the agent loop … to ground the review.
+/// The core is …"). Used by the review-task structural guard (the answer
+/// has no citations yet).
+///
+/// Review 2026-09-27: every sentence was checked, and "look" / "start" /
+/// "begin" / "check" counted on their own, so an explanation walking
+/// through stages ("… Let's look at each stage: …", "Let's start with the
+/// entry point") was refused as a progress note — and a fenced code block
+/// ending in `# Let's check the output` triggered it too. Now only the
+/// reply's lead-in and its final sentence count (a mid-reply sentence is
+/// part of an explanation); fenced code is not prose; the discourse verbs
+/// need a file / path object.
 pub(super) fn announces_further_reading(text: &str) -> bool {
-    let lower = super::recovery::strip_think_blocks(text).to_lowercase();
-    lower
-        .split(['\n', '.', '!', ';'])
+    let clean = super::recovery::strip_think_blocks(text);
+    let prose = without_fenced_code(&clean).to_lowercase();
+    let sentences: Vec<String> = prose
+        .split(['\n', '.', '!', ';', '?'])
         .map(plain_sentence)
-        .any(|s| is_intent_sentence(&s, READ_VERBS))
+        // A fragment of one or two words ("More later.") is not a sentence.
+        .filter(|s| s.split_whitespace().count() >= 3)
+        .collect();
+    let (Some(first), Some(last)) = (sentences.first(), sentences.last()) else {
+        return false;
+    };
+    // A question to the user closes the reply.
+    if prose.trim_end().ends_with('?') && first != last {
+        return announces_read(first);
+    }
+    announces_read(first) || announces_read(last)
+}
+
+fn announces_read(sentence: &str) -> bool {
+    if is_intent_sentence(sentence, READ_VERBS) {
+        return true;
+    }
+    // The discourse verbs: only with a read object.
+    if !is_intent_sentence(sentence, WEAK_READ_VERBS) {
+        return false;
+    }
+    let object = WEAK_READ_VERBS
+        .iter()
+        .find_map(|v| sentence.find(v).map(|at| &sentence[at + v.len()..]))
+        .unwrap_or("");
+    names_read_object(object)
+}
+
+/// `text` without its fenced (```) code blocks.
+fn without_fenced_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn truncate_visual_note(input: &str, max_chars: usize) -> String {
@@ -2775,28 +2860,65 @@ impl Agent {
     pub(super) const REVIEW_MIN_READS: usize = 3;
 
     /// Tools that read workspace content a review can cite (a listing such
-    /// as `directory_tree` shows names, not code).
+    /// as `directory_tree` shows names, not code). Every `lsp_*` tool reads
+    /// code too (see [`Self::is_content_read`]).
     const CONTENT_READ_TOOLS: &'static [&'static str] = &[
         "file_read",
         "context_bulk_read",
         "context_load_skeleton",
         "grep_search",
         "symbol_search",
+        "code_introspect",
+        "code_query",
         "git_diff",
-        "lsp_goto_definition",
-        "lsp_find_references",
-        "lsp_document_symbols",
-        "lsp_hover",
+        "git_log",
+        "git_show",
     ];
 
-    /// Successful content reads this task (see [`Self::CONTENT_READ_TOOLS`]).
+    /// Whether a successful call read workspace content: a content-read
+    /// tool, any `lsp_*` tool, or a shell command that prints file content
+    /// (`cat`, `sed -n`, `head`, `tail`, `grep`, `rg`, `less`, `nl`, `git
+    /// show`, `git log -p`). Review 2026-09-27 (Rule 5): the list missed
+    /// the introspection, LSP and git reads and every shell read, so the
+    /// execution-path nudge told a model that had read the code that
+    /// "nothing has been read yet".
+    fn is_content_read(tool_name: &str, arguments: &str) -> bool {
+        if Self::CONTENT_READ_TOOLS.contains(&tool_name) || tool_name.starts_with("lsp_") {
+            return true;
+        }
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return false;
+        }
+        let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+        let cmd = args
+            .get("command")
+            .or_else(|| args.get("cmd"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        cmd.split(['|', ';', '&']).map(str::trim).any(|segment| {
+            let mut words = segment.split_whitespace();
+            let first = words.next().unwrap_or("");
+            let first = first.rsplit('/').next().unwrap_or(first);
+            let second = words.next().unwrap_or("");
+            match first {
+                "cat" | "head" | "tail" | "less" | "more" | "nl" | "grep" | "rg" | "bat"
+                | "awk" => true,
+                "sed" => second == "-n" || segment.contains(" -n "),
+                "git" => {
+                    matches!(second, "show" | "blame" | "grep")
+                        || (second == "log" && segment.contains(" -p"))
+                }
+                _ => false,
+            }
+        })
+    }
+
+    /// Successful content reads this task (see [`Self::is_content_read`]).
     pub(super) fn content_read_count(&self) -> usize {
         self.current_checkpoint.as_ref().map_or(0, |cp| {
             cp.tool_calls
                 .iter()
-                .filter(|tc| {
-                    tc.success && Self::CONTENT_READ_TOOLS.contains(&tc.tool_name.as_str())
-                })
+                .filter(|tc| tc.success && Self::is_content_read(&tc.tool_name, &tc.arguments))
                 .count()
         })
     }

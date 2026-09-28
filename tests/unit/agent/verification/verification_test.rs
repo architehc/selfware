@@ -4839,3 +4839,60 @@ fn post_edit_verdict_stop_kind_never_greens_an_unrun_check() {
         StopKind::Error
     );
 }
+
+/// Review 2026-09-27: explanations were refused as progress notes — any mid-reply
+/// sentence counted, "look"/"start"/"begin" counted without an object, and
+/// a fenced code block's comment counted as prose.
+#[test]
+fn announces_further_reading_only_on_the_lead_in_or_final_sentence() {
+    for explanation in [
+        "The pipeline has three stages. Let's look at each stage: parse, plan, run. \
+         Parsing turns text into tokens; planning orders them; running executes them.",
+        "Let's start with the entry point. main() builds the config and calls run(). \
+         That is the whole flow.",
+        "Here is how to inspect it:\n```bash\ncargo run\n# Let's check the output\n```",
+        "The design is layered. Let's begin with the core",
+    ] {
+        assert!(
+            !announces_further_reading(explanation),
+            "an explanation, not a progress note: {explanation:?}"
+        );
+    }
+    for note in [
+        "Overview so far. Let me look at src/agent/mod.rs next.",
+        "I have the structure. Let me start by reading the core files.",
+        "Some context. I'll read the remaining modules now.",
+    ] {
+        assert!(announces_further_reading(note), "{note:?}");
+    }
+}
+
+/// Review 2026-09-27 (Rule 5): introspection, LSP, git and shell reads are
+/// reads — the "nothing has been read yet" nudge must not fire after them.
+#[test]
+fn content_reads_include_introspection_lsp_git_and_shell_reads() {
+    for (tool, args) in [
+        ("code_introspect", r#"{"target":"src"}"#),
+        ("code_query", r#"{"query":"parse"}"#),
+        ("lsp_workspace_symbols", r#"{"query":"Agent"}"#),
+        ("git_log", r#"{}"#),
+        ("shell_exec", r#"{"command":"cat src/main.rs"}"#),
+        ("shell_exec", r#"{"command":"sed -n '1,80p' src/lib.rs"}"#),
+        (
+            "shell_exec",
+            r#"{"command":"cd src && head -50 agent/mod.rs"}"#,
+        ),
+        ("pty_shell", r#"{"command":"rg -n unwrap src | head"}"#),
+        ("shell_exec", r#"{"command":"git show HEAD:src/lib.rs"}"#),
+    ] {
+        assert!(Agent::is_content_read(tool, args), "{tool} {args}");
+    }
+    for (tool, args) in [
+        ("directory_tree", r#"{"path":"."}"#),
+        ("shell_exec", r#"{"command":"ls -la src"}"#),
+        ("shell_exec", r#"{"command":"sed -i s/a/b/ src/lib.rs"}"#),
+        ("git_status", r#"{}"#),
+    ] {
+        assert!(!Agent::is_content_read(tool, args), "{tool} {args}");
+    }
+}
