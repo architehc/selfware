@@ -103,6 +103,24 @@ fn a_small_scope_is_spread_over_the_parallelism() {
     assert_eq!(balanced_shard_tokens(30_000, 6, 4_000), 4_000);
 }
 
+#[test]
+fn shards_stop_starting_while_the_synthesis_still_fits() {
+    // The live 2 h run: 396 s left when the phase ended — too late.
+    // 7,200 s budget: reserve 900 s synthesis + the longest shard (600 s).
+    assert!(wall_dispatch_stop(1_600, 7_200, 60, 600).is_none());
+    let why = wall_dispatch_stop(1_499, 7_200, 60, 600).expect("stop");
+    assert!(
+        why.contains("1499s of the wall budget left < 1500s"),
+        "{why}"
+    );
+    // A slower measured answer raises the reserve.
+    assert!(wall_dispatch_stop(1_600, 7_200, 1_200, 600).is_some());
+    // A small budget keeps a third for the answer, not 900 s: the first
+    // wave of a 1,800 s slugify review still starts.
+    assert!(wall_dispatch_stop(1_800, 1_800, 30, 0).is_none());
+    assert!(wall_dispatch_stop(599, 1_800, 30, 0).is_some());
+}
+
 // --------------------------------------------------------------- scheduler
 
 #[tokio::test]

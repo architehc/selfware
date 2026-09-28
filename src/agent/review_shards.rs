@@ -193,6 +193,38 @@ pub(crate) fn balanced_shard_tokens(total: usize, parallelism: usize, budget: us
     even.max(MIN_BALANCED_SHARD_TOKENS).min(budget)
 }
 
+/// Wall seconds kept for the review's synthesis after the shard phase:
+/// the measured core-review synthesis took 858 s after its shard phase
+/// (abe4aa6b, 322 files, ~73k-token prompt at ~20 tok/s decode).
+pub(crate) const SHARD_SYNTHESIS_RESERVE_SECS: u64 = 900;
+
+/// Why no further shard may start under a wall budget, or `None`.
+///
+/// Live failure this answers (f063a326, review-core-long, 2 h cap): every
+/// shard succeeded, but the phase took 6,804 of the 7,200 s and the final
+/// answer was cut by the wall clock mid-stream — 100 % coverage and no
+/// review. The completion-gate reserve did not stop it: before any main
+/// turn its forecast has no call shapes. A shard may start only while the
+/// time left covers the synthesis reserve (the forecast answer, at least
+/// `SHARD_SYNTHESIS_RESERVE_SECS`, at most a third of the budget) plus the
+/// longest shard call seen so far (a call dispatched now may take that
+/// long; calls already in flight finish).
+pub(crate) fn wall_dispatch_stop(
+    remaining_secs: u64,
+    max_wall_secs: u64,
+    forecast_answer_secs: u64,
+    longest_shard_secs: u64,
+) -> Option<String> {
+    let synthesis = forecast_answer_secs.max(SHARD_SYNTHESIS_RESERVE_SECS.min(max_wall_secs / 3));
+    let need = synthesis + longest_shard_secs;
+    (remaining_secs < need).then(|| {
+        format!(
+            "{remaining_secs}s of the wall budget left < {need}s (synthesis reserve {synthesis}s + \
+             longest shard call so far {longest_shard_secs}s)"
+        )
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler (generic, so the concurrency cap and retry accounting are
 // testable without an endpoint)
@@ -586,6 +618,19 @@ impl ShardRunReport {
 // Agent integration
 // ---------------------------------------------------------------------------
 
+/// Records a shard call's wall time into the running maximum when the
+/// call ends (success, failure or drop).
+struct LongestGuard<'a>(&'a std::sync::atomic::AtomicU64, Instant);
+
+impl Drop for LongestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_max(
+            self.1.elapsed().as_secs(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 /// One delivered slice, ready for a shard prompt.
 #[derive(Debug, Clone)]
 struct Slice {
@@ -899,7 +944,7 @@ impl Agent {
         }
         // Nothing is fetched or measured when the budget already rules out
         // a shard call: the summary says why the shards did not run.
-        if let Dispatch::Stop(why) | Dispatch::Abort(why) = self.review_shard_dispatch() {
+        if let Dispatch::Stop(why) | Dispatch::Abort(why) = self.review_shard_dispatch(0) {
             let mut report = ShardRunReport {
                 files_targeted: targets.len(),
                 stopped: Some(format!("not started: {why}")),
@@ -975,6 +1020,9 @@ impl Agent {
         };
         let client = self.client.clone();
         let governor = std::sync::Arc::clone(&self.governor);
+        // Longest shard call so far (seconds), for the wall-budget reserve.
+        let longest_shard_secs = std::sync::atomic::AtomicU64::new(0);
+        let longest_ref = &longest_shard_secs;
         let max_tokens = cfg.shard_max_tokens.max(1024);
         let cap = cfg.shard_time_cap_secs.max(30);
         let call = |i: usize, attempt: u8| {
@@ -998,6 +1046,7 @@ impl Agent {
                 } else {
                     spec.thinking_off()
                 };
+                let _longest = LongestGuard(longest_ref, Instant::now());
                 let response = client
                     .side_chat(messages, spec)
                     .await
@@ -1030,7 +1079,9 @@ impl Agent {
             let report = &mut report;
             let all_unverified = &mut all_unverified;
             let completed = &mut completed;
-            let gate = || this.review_shard_dispatch();
+            let longest = &longest_shard_secs;
+            let gate =
+                || this.review_shard_dispatch(longest.load(std::sync::atomic::Ordering::Relaxed));
             let done = |i: usize, attempt: u8, result: &Result<ShardAnswer, String>| {
                 let refs: Vec<&Slice> = shards[i].iter().map(|&j| &slices[j]).collect();
                 let status = match result {
@@ -1149,12 +1200,19 @@ impl Agent {
     /// Whether another shard call may start: not after cancellation, a spent
     /// run budget, or once the remaining budget is the final answer's
     /// reserve (the same step-aside the completion gates use).
-    fn review_shard_dispatch(&self) -> Dispatch {
+    fn review_shard_dispatch(&self, longest_shard_secs: u64) -> Dispatch {
         if self.is_cancelled() {
             return Dispatch::Abort("cancelled".to_string());
         }
         if let Some(stop) = self.client.budget_stop() {
             return Dispatch::Stop(format!("{stop}"));
+        }
+        if let Some(max) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
+            let remaining = max.saturating_sub(self.budget_elapsed_secs());
+            let answer = self.call_forecast().answer_secs();
+            if let Some(why) = wall_dispatch_stop(remaining, max, answer, longest_shard_secs) {
+                return Dispatch::Stop(format!("{why} (kept for the final answer)"));
+            }
         }
         if let Some(aside) = self.completion_gate_step_aside() {
             return Dispatch::Stop(format!("{aside} (kept for the final answer)"));
