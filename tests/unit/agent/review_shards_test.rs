@@ -351,6 +351,15 @@ fn verify_answer_records_verified_and_names_the_rest() {
         "{:?}",
         out.unverified
     );
+    // Unverified claims carry no `path:line` an answer could copy as a
+    // citation.
+    assert!(
+        out.unverified
+            .iter()
+            .all(|u| !u.contains("a.py:2") && !u.contains("other.py:1")),
+        "{:?}",
+        out.unverified
+    );
 }
 
 // ------------------------------------------------------------ end to end
@@ -516,6 +525,8 @@ async fn a_failed_shard_credits_nothing_and_the_agent_reads_instead() {
     assert!(bodies.len() >= 2);
     assert!(!bodies[0].contains("DO NOT use <think> blocks"));
     assert!(bodies[1].contains("DO NOT use <think> blocks"));
+    // No workload table: the endpoint is not known to take the switch.
+    assert!(!bodies[1].contains("enable_thinking"));
     let coverage = agent.review_coverage().expect("review session");
     let shards = coverage.shards.clone().expect("shard report");
     assert_eq!((shards.succeeded, shards.failed, shards.retried), (0, 1, 1));

@@ -635,7 +635,6 @@ fn verify_answer(slices: &[&Slice], answer: &ShardAnswer) -> ShardOutcome {
         let title: String = title.chars().take(220).collect();
         let sev = normalize_severity(&f.severity);
         let line = f.line_number().unwrap_or(0);
-        let shown = format!("{}:{} — [{sev}] {title}", f.path.trim(), line);
         // Every slice of the cited file in this shard (a big file may come
         // as several ranges of one shard).
         let p = f.path.trim().trim_start_matches("./").replace('\\', "/");
@@ -648,8 +647,10 @@ fn verify_answer(slices: &[&Slice], answer: &ShardAnswer) -> ShardOutcome {
             })
             .collect();
         if file_slices.is_empty() {
-            out.unverified
-                .push(format!("{shown} (cites a file this shard did not read)"));
+            out.unverified.push(format!(
+                "{} — [{sev}] {title} (claimed at a line of a file this shard did not read)",
+                f.path.trim()
+            ));
             continue;
         }
         let path = file_slices[0].path.clone();
@@ -675,9 +676,12 @@ fn verify_answer(slices: &[&Slice], answer: &ShardAnswer) -> ShardOutcome {
                     "FINDING: {path}:{at} `{quote_short}` — [{sev}] {title}"
                 ));
             }
-            QuoteVerdict::Unverified(why) => out
-                .unverified
-                .push(format!("{path}:{line} — [{sev}] {title} ({why})")),
+            // No `path:line` here: an unverified claim must not read like a
+            // citation (0.9.5 live review: the answer copied one — a line
+            // past the end of the file — and it counted as a wrong citation).
+            QuoteVerdict::Unverified(why) => out.unverified.push(format!(
+                "{path} — [{sev}] {title} ({why}; claimed line not confirmed)"
+            )),
         }
     }
     out
@@ -967,11 +971,7 @@ impl Agent {
             let client = client.clone();
             let governor = std::sync::Arc::clone(&governor);
             let messages = prompts[i].clone();
-            let thinking = if attempt == 0 {
-                thinking_first
-            } else {
-                crate::api::ThinkingMode::Disabled
-            };
+            let first = attempt == 0;
             async move {
                 let _permit = governor
                     .acquire_stream()
@@ -979,8 +979,15 @@ impl Agent {
                     .map_err(|e| format!("concurrency governor: {e}"))?;
                 let spec = crate::api::client::SideCall::new("review_shard")
                     .max_tokens(max_tokens)
-                    .time_cap_secs(cap)
-                    .thinking(thinking);
+                    .time_cap_secs(cap);
+                // The retry goes with thinking switched off in the request:
+                // a first attempt that failed usually spent its whole budget
+                // reasoning.
+                let spec = if first {
+                    spec.thinking(thinking_first)
+                } else {
+                    spec.thinking_off()
+                };
                 let response = client
                     .side_chat(messages, spec)
                     .await

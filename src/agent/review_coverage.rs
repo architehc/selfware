@@ -405,8 +405,8 @@ impl ReviewSession {
             format!(
                 "{} finding(s) were verified against the cited lines (the evidence quote is on the \
                  line) and are recorded; they are listed below. {} finding(s) were NOT verified \
-                 (the quote did not match the cited lines) and are not recorded — check one with \
-                 file_read before using it.",
+                 (the quote did not match the cited lines) and are not recorded: do not cite them \
+                 in the review unless you confirm one with file_read first.",
                 report.findings_verified, report.findings_unverified
             ),
         ];
@@ -857,19 +857,33 @@ impl ReviewSession {
                 }
                 continue;
             }
-            let Some(entry) = self
-                .plan
-                .iter()
-                .find(|e| e.path == path || e.path.ends_with(&format!("/{path}")))
-            else {
+            // An exact path, else every planned file it is a suffix of: a
+            // bare `mod.rs:893` or `git.rs:530` names one of several files
+            // (0.9.5 live review: such citations were charged to whichever
+            // planned file came first, e.g. src/config/mod.rs, and reported
+            // as "never read" while the file meant was read).
+            let exact: Vec<&PlanEntry> = self.plan.iter().filter(|e| e.path == path).collect();
+            let candidates: Vec<&PlanEntry> = if exact.is_empty() {
+                let suffix = format!("/{path}");
+                self.plan
+                    .iter()
+                    .filter(|e| e.path.ends_with(&suffix))
+                    .collect()
+            } else {
+                exact
+            };
+            let covers = |e: &PlanEntry| {
+                self.coverage
+                    .get(&e.path)
+                    .is_some_and(|r| r.iter().any(|&(a, b)| a <= line && line <= b))
+            };
+            // Unread only when the file is unambiguous; an ambiguous name
+            // that none of its candidates covers cannot be charged to one.
+            let [entry] = candidates.as_slice() else {
                 continue;
             };
-            let read = self
-                .coverage
-                .get(&entry.path)
-                .is_some_and(|r| r.iter().any(|&(a, b)| a <= line && line <= b));
             let cite = format!("{}:{line}", entry.path);
-            if !read && !out.contains(&cite) && out.len() < 10 {
+            if !covers(entry) && !out.contains(&cite) && out.len() < 10 {
                 out.push(cite);
             }
         }
@@ -1695,6 +1709,25 @@ mod tests {
             estimate_content_tokens(&tight)
         );
         assert!(tight.contains("earlier findings not shown"), "{tight}");
+    }
+
+    #[test]
+    fn an_ambiguous_bare_file_name_is_not_charged_as_unread() {
+        let mut s = session(&[("src/config/mod.rs", 500), ("src/agent/mod.rs", 4000)]);
+        s.record("src/config/mod.rs", (1, 500));
+        s.record("src/agent/mod.rs", (1, 4000));
+        // `mod.rs:893` names one of two read files: not "never read".
+        assert!(s.unread_citations("see mod.rs:893 for the bug").is_empty());
+        // Unambiguous and past what was delivered: named.
+        assert_eq!(
+            s.unread_citations("src/config/mod.rs:893 is wrong"),
+            vec!["src/config/mod.rs:893"]
+        );
+        // A unique suffix still resolves.
+        let mut t = session(&[("src/tools/git.rs", 100)]);
+        assert_eq!(t.unread_citations("git.rs:50"), vec!["src/tools/git.rs:50"]);
+        t.record("src/tools/git.rs", (1, 100));
+        assert!(t.unread_citations("git.rs:50").is_empty());
     }
 
     #[test]

@@ -5655,6 +5655,74 @@ async fn side_chat_is_streamed_and_bounded_on_the_wire() {
     server.stop().await;
 }
 
+/// A review shard's retry must switch thinking off in the request where the
+/// endpoint takes the switch (a workload table sets `enable_thinking`), and
+/// never send the key to an endpoint that is not known to take it.
+#[tokio::test]
+async fn side_chat_thinking_off_is_sent_only_where_the_endpoint_takes_it() {
+    use crate::testing::mock_api::MockLlmServer;
+    async fn sent_body(
+        workloads: crate::config::WorkloadQuotas,
+        spec: client::SideCall,
+    ) -> serde_json::Value {
+        let server = MockLlmServer::builder().with_response("{}").build().await;
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            workloads,
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+        client
+            .side_chat(vec![Message::user("read this shard")], spec)
+            .await
+            .expect("side call should succeed");
+        let bodies = server.captured_request_bodies().await;
+        server.stop().await;
+        serde_json::from_str(&bodies[0]).unwrap()
+    }
+    let mut table = crate::config::WorkloadQuotas::default();
+    table
+        .get_mut(crate::config::TurnWorkload::Planning)
+        .enable_thinking = Some(false);
+
+    let off = sent_body(table, client::SideCall::new("review_shard").thinking_off()).await;
+    assert_eq!(
+        off["chat_template_kwargs"]["enable_thinking"], false,
+        "{off}"
+    );
+    // Unknown endpoint: no key it might reject.
+    let plain = sent_body(
+        crate::config::WorkloadQuotas::default(),
+        client::SideCall::new("review_shard").thinking_off(),
+    )
+    .await;
+    assert!(plain.get("chat_template_kwargs").is_none(), "{plain}");
+    // A workload toggle set on the same call (the done-check's
+    // `thinking_from`) cannot switch a thinking-off retry back on.
+    let mut table = crate::config::WorkloadQuotas::default();
+    table
+        .get_mut(crate::config::TurnWorkload::Synthesis)
+        .enable_thinking = Some(true);
+    let both = sent_body(
+        table,
+        client::SideCall::new("review_shard")
+            .thinking_from(crate::config::TurnWorkload::Synthesis)
+            .thinking_off(),
+    )
+    .await;
+    assert_eq!(
+        both["chat_template_kwargs"]["enable_thinking"], false,
+        "{both}"
+    );
+    // An ordinary side call is unchanged.
+    let mut table = crate::config::WorkloadQuotas::default();
+    table
+        .get_mut(crate::config::TurnWorkload::Planning)
+        .enable_thinking = Some(false);
+    let ordinary = sent_body(table, client::SideCall::new("requirements_audit")).await;
+    assert!(ordinary.get("chat_template_kwargs").is_none(), "{ordinary}");
+}
+
 #[tokio::test]
 async fn side_chat_silent_server_is_cut_at_the_cap_and_typed() {
     use crate::testing::mock_api::MockLlmServer;

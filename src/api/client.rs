@@ -154,6 +154,14 @@ pub struct SideCall {
     /// (`ThinkingMode::Workload`), whose `max_tokens` is then still clamped
     /// to [`Self::max_tokens`].
     pub thinking: ThinkingMode,
+    /// Also switch the model's thinking off in the request
+    /// (`chat_template_kwargs.enable_thinking = false`) where the session's
+    /// workload table shows the endpoint takes that switch. `Disabled` alone
+    /// only adds an instruction: a Qwen3.8 template keeps thinking on unless
+    /// the flag is sent (0.9.5 live review: 8 of 125 shard calls spent their
+    /// whole 12,288-token budget reasoning and answered nothing, and the
+    /// "thinking off" retry did the same for 2 of them).
+    pub thinking_off: bool,
 }
 
 impl SideCall {
@@ -173,6 +181,7 @@ impl SideCall {
             time_cap_secs: Self::DEFAULT_TIME_CAP_SECS,
             thinking_workload: None,
             thinking: ThinkingMode::Disabled,
+            thinking_off: false,
         }
     }
 
@@ -180,6 +189,13 @@ impl SideCall {
     /// [`SideCall::thinking_workload`]).
     pub fn thinking_from(mut self, kind: crate::config::TurnWorkload) -> Self {
         self.thinking_workload = Some(kind);
+        self
+    }
+
+    /// Thinking disabled in the request itself (see [`Self::thinking_off`]).
+    pub fn thinking_off(mut self) -> Self {
+        self.thinking = ThinkingMode::Disabled;
+        self.thinking_off = true;
         self
     }
 
@@ -1516,6 +1532,17 @@ impl ApiClient {
         Ok((stream, meta))
     }
 
+    /// Whether this endpoint is known to take the
+    /// `chat_template_kwargs.enable_thinking` switch: a workload quota (the
+    /// matched profile's measured table, or the user's `[workloads]`) sets
+    /// it. Other endpoints never get the key — one that never saw it may
+    /// reject the request.
+    pub(crate) fn endpoint_takes_thinking_switch(&self) -> bool {
+        crate::config::TurnWorkload::ALL
+            .iter()
+            .any(|k| self.config.workloads.get(*k).enable_thinking.is_some())
+    }
+
     /// Send a bounded auxiliary model call ([`SideCall`]) and collect it.
     ///
     /// Always streamed (the SSE bytes keep a proxy/tunnel connection alive,
@@ -1537,6 +1564,17 @@ impl ApiClient {
     /// and no token count is claimed (`tokens_source = none`); no spinner is
     /// updated from this layer.
     pub async fn side_chat(&self, messages: Vec<Message>, spec: SideCall) -> Result<ChatResponse> {
+        // Boxed: side calls are awaited inline from deep agent frames (the
+        // auto-continue chain runs test threads at the edge of their 2 MB
+        // stack); the caller's future then holds a pointer, not this body.
+        Box::pin(self.side_chat_inner(messages, spec)).await
+    }
+
+    async fn side_chat_inner(
+        &self,
+        messages: Vec<Message>,
+        spec: SideCall,
+    ) -> Result<ChatResponse> {
         use crate::agent::llm_wait::{await_with_phase_ticks, LlmWaitPhase, LlmWaitTicker};
         crate::safety::killswitch::check_killswitch(None)?;
         let cap_secs = spec.effective_cap_secs(self.config.agent.max_call_secs);
@@ -1558,6 +1596,11 @@ impl ApiClient {
             .and_then(|kind| self.config.workloads.get(kind).enable_thinking)
         {
             set_enable_thinking(&mut body, enable);
+        }
+        // Last: a thinking-off request (a review shard's retry) ends with
+        // enable_thinking=false even when a workload toggle was applied.
+        if spec.thinking_off && self.endpoint_takes_thinking_switch() {
+            set_enable_thinking(&mut body, false);
         }
         maybe_log_request_body(&self.config.debug, &body, spec.purpose);
         let timeout_err = |started: Instant| -> anyhow::Error {
