@@ -622,11 +622,20 @@ pub async fn analyze_impact(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // Walk codebase to find references
+    // Walk codebase to find references. A denied file (`.env`, …) is never
+    // read: "does it contain <symbol>" is an oracle on its content.
+    let safety = crate::tools::file::resolve_safety_config(None);
     let mut entries = tokio::fs::read_dir(codebase_root).await?;
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
+        let path_str = path.to_string_lossy();
+        if crate::safety::yolo::denied_glob_among(&[path_str.as_ref()], &safety.denied_paths)
+            .is_some()
+            || crate::safety::recursive_read::sensitive_component(&path_str, false).is_some()
+        {
+            continue;
+        }
 
         if path.is_file() && path != *target_file {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {

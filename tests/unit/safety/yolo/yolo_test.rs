@@ -885,6 +885,9 @@ fn headless_read_guard_checks_every_reader_not_a_short_list() {
         "cat *",
         "head -1 *.env",
         "cat .ss?/id_rsa",
+        // ripgrep skips the hidden `.env` but reads the non-hidden
+        // `db.env` below its root (0.9.6: recursive roots are walked).
+        "rg -n x .",
     ] {
         assert!(!headless_pass(cmd, dir), "`{cmd}` must not pass");
     }
@@ -893,7 +896,7 @@ fn headless_read_guard_checks_every_reader_not_a_short_list() {
         "wc -l a.txt",
         "ls -la",
         "cat *.txt",
-        "rg -n x .",
+        "rg -n x a.txt",
     ] {
         assert!(headless_pass(cmd, dir), "`{cmd}` should pass");
     }
@@ -924,4 +927,86 @@ fn reader_detection_uses_the_shared_list() {
     assert!(reads_sensitive_path("sh -c'cat .env'").is_some());
     // Listing is not reading.
     assert!(reads_sensitive_path("ls ~/.ssh/").is_none());
+}
+
+// ===== recursive readers (0.9.5 known issue) =====
+
+/// A root holding `.env`, `secrets/` and `.ssh/` next to ordinary code.
+fn recursive_fixture() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for dir in ["src", "secrets", ".ssh"] {
+        std::fs::create_dir_all(d.join(dir)).unwrap();
+    }
+    std::fs::write(d.join(".env"), "API_KEY=sk-live\n").unwrap();
+    std::fs::write(d.join("secrets/prod.txt"), "hunter2\n").unwrap();
+    std::fs::write(d.join(".ssh/id_rsa"), "-----BEGIN\n").unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    tmp
+}
+
+#[test]
+fn headless_read_guard_walks_recursive_search_roots() {
+    let tmp = recursive_fixture();
+    let dir = tmp.path();
+    for cmd in [
+        "grep -r KEY .",
+        "grep -rn KEY",
+        "grep -R hunter2 .",
+        "rg -uu KEY",
+        "rg --hidden KEY .",
+        "rg KEY",
+        "git grep KEY",
+        "diff -r . src",
+        "cat secrets/*",
+        "cd src && grep -r KEY ..",
+    ] {
+        assert!(!headless_pass(cmd, dir), "`{cmd}` must not pass");
+    }
+    for cmd in [
+        "grep -rn fn src",
+        "rg fn src",
+        "rg -uu fn src",
+        "find . -name '*.rs'",
+    ] {
+        assert!(headless_pass(cmd, dir), "`{cmd}` should pass");
+    }
+}
+
+#[test]
+fn yolo_floor_asks_before_a_recursive_read_of_a_denied_root() {
+    let tmp = recursive_fixture();
+    let dir = tmp.path().to_str().unwrap();
+    let mgr = YoloManager::new(YoloConfig {
+        enabled: true,
+        denied_paths: default_denied(),
+        ..Default::default()
+    });
+    for (tool, cmd) in [
+        ("shell_exec", "grep -r KEY ."),
+        ("shell_exec", "rg -uu token"),
+        ("shell_exec", "find . -type f -exec cat {} +"),
+        ("shell_exec", "find . -type f | xargs cat"),
+        ("shell_exec", "grep -r \"$PAT\" ."),
+        ("shell_exec", "bash -c 'rg --hidden KEY'"),
+        ("pty_shell", "grep -r KEY ."),
+    ] {
+        let args = serde_json::json!({ "action": "send", "command": cmd, "cwd": dir });
+        match mgr.should_auto_approve(tool, &args) {
+            YoloDecision::RequireConfirmation(why) => {
+                assert!(why.contains("Recursive read"), "{cmd}: {why}")
+            }
+            other => panic!("`{cmd}` via {tool} must ask: {other:?}"),
+        }
+    }
+    for cmd in ["grep -r fn src", "rg fn src", "ls -R"] {
+        let args = serde_json::json!({ "command": cmd, "cwd": dir });
+        assert!(
+            matches!(
+                mgr.should_auto_approve("shell_exec", &args),
+                YoloDecision::AutoApprove
+            ),
+            "`{cmd}` should auto-approve"
+        );
+    }
 }

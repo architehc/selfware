@@ -439,7 +439,8 @@ impl YoloManager {
         }
 
         // Check destructive shell commands + protected-path targets + sensitive-path reads.
-        if tool_name == "shell_exec" {
+        // `pty_shell` `send` runs a shell command exactly like `shell_exec`.
+        if matches!(tool_name, "shell_exec" | "pty_shell") {
             let cmd_str = crate::safety::checker::validation::command_arg_string(args);
             let cmd_to_check = if !cmd_str.is_empty() {
                 Some(cmd_str)
@@ -469,6 +470,25 @@ impl YoloManager {
                         return YoloDecision::RequireConfirmation(format!(
                             "Shell command reads a path matching a denied glob ('{pattern}') — \
                              requires confirmation."
+                        ));
+                    }
+                    // A recursive reader reads every file below its root:
+                    // vet what it would reach, not only the words it names.
+                    let base = match args.get("cwd").and_then(|c| c.as_str()) {
+                        Some(c) if !c.trim().is_empty() => {
+                            crate::tools::workspace_root::current_path().join(c)
+                        }
+                        _ => crate::tools::workspace_root::current_path(),
+                    };
+                    if let Some(why) = crate::safety::recursive_read::recursive_read_violation(
+                        &crate::safety::recursive_read::lenient_commands(cmd),
+                        &base,
+                        &self.config.denied_paths,
+                    ) {
+                        return YoloDecision::RequireConfirmation(format!(
+                            "Recursive read reaches a denied or sensitive path: {why} — \
+                             requires confirmation. Narrow the search root or use grep_search \
+                             (which skips denied paths)."
                         ));
                     }
                 }
@@ -1039,6 +1059,12 @@ fn denied_token_in(cmd: &str, denied_paths: &[String]) -> Option<String> {
     denied_among(&tokens, denied_paths)
 }
 
+/// The first `denied_paths` glob any of `paths` matches (basename match for
+/// filename-only patterns). Shared with `crate::safety::recursive_read`.
+pub(crate) fn denied_glob_among(paths: &[&str], denied_paths: &[String]) -> Option<String> {
+    denied_among(paths, denied_paths)
+}
+
 fn denied_among(tokens: &[&str], denied_paths: &[String]) -> Option<String> {
     for pattern in denied_paths {
         let compiled = match glob::Pattern::new(pattern) {
@@ -1235,11 +1261,24 @@ pub(crate) fn headless_read_shell_guard_pass(
             return false;
         }
         let trimmed = op.trim_start_matches("./");
+        // Per component too: `secrets/x` (from `cat secrets/*`) has no
+        // leading `/secrets/` for the substring list to see.
+        let is_dir = base.join(trimmed).is_dir();
+        if crate::safety::recursive_read::sensitive_component(trimmed, is_dir).is_some() {
+            return false;
+        }
         if denied_among(&[trimmed], denied_paths).is_some() {
             return false;
         }
     }
-    true
+    // A recursive reader (`grep -r`, `rg`, `git grep`, `diff -r`, …) reads
+    // every file below its operands, not only the operands.
+    let commands: Vec<crate::safety::recursive_read::Command> = segments
+        .iter()
+        .map(crate::safety::recursive_read::Command::from_segment)
+        .collect();
+    crate::safety::recursive_read::recursive_read_violation(&commands, &base, denied_paths)
+        .is_none()
 }
 
 /// Guard heuristics that a shell command must pass before the headless

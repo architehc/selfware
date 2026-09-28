@@ -13,6 +13,7 @@ pub mod killswitch;
 pub mod path_validator;
 pub mod permissions;
 pub mod process_env;
+pub mod recursive_read;
 pub mod redact;
 pub mod scanner;
 pub mod shell_read;

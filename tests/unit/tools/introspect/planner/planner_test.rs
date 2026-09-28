@@ -483,3 +483,25 @@ fn test_impact_analysis_serialization() {
     assert!(json.contains("my_fn"));
     assert!(json.contains("test_my_fn"));
 }
+
+/// The impact walk never reads a denied file: "contains <symbol>" would be
+/// an oracle on `.env`'s content.
+#[tokio::test]
+async fn impact_walk_skips_denied_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let target = root.join("target_mod.rs");
+    std::fs::write(&target, "pub fn t() {}\n").unwrap();
+    std::fs::write(root.join(".env"), "SECRET=sk-live-123\n").unwrap();
+    std::fs::write(root.join("user.rs"), "use target_mod; // sk-live-123\n").unwrap();
+    let analysis = analyze_impact(&target, Some("sk-live-123"), &root)
+        .await
+        .unwrap();
+    let files: Vec<&str> = analysis
+        .direct_callers
+        .iter()
+        .map(|c| c.file.as_str())
+        .collect();
+    assert!(files.iter().all(|f| !f.ends_with(".env")), "{files:?}");
+    assert!(files.iter().any(|f| f.ends_with("user.rs")), "{files:?}");
+}
