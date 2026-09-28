@@ -116,3 +116,27 @@ fn trust_blocked_body_is_the_typed_422_shape() {
     assert_eq!(body["error"], "context_trust_blocked");
     assert_eq!(body["findings"][0]["path"], "a.md");
 }
+
+/// 0.9.5: grounded-review evidence reaches the model with secret values
+/// redacted in place — lines (and so cited line numbers) unchanged, code
+/// untouched, the stored evidence unchanged.
+#[test]
+fn review_evidence_is_redacted_for_the_model_line_preserving() {
+    let excerpt = "DB_PASSWORD=Sup3rS3cret9\ntokens = text.split(SEP)\n";
+    let rust = "let password = \"hunter2secret\";\nlet api_key = get_key();\n";
+    let chunks = vec![
+        evidence("deploy/app.env", excerpt),
+        evidence("src/db.rs", rust),
+    ];
+    let sent = redacted_for_model(&chunks);
+    assert_eq!(
+        sent[0].excerpt,
+        "DB_PASSWORD=[REDACTED:password]\ntokens = text.split(SEP)\n"
+    );
+    assert_eq!(
+        sent[1].excerpt,
+        "let password = \"[REDACTED:password]\";\nlet api_key = get_key();\n"
+    );
+    assert_eq!(chunks[0].excerpt, excerpt, "stored evidence untouched");
+    assert_eq!(sent[0].id, chunks[0].id);
+}

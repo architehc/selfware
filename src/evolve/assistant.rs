@@ -223,6 +223,28 @@ fn trust_classification(path: &str) -> &'static str {
     }
 }
 
+/// The evidence as the model may see it: each excerpt through the
+/// model-facing redactor (`.rs` as Rust source), secret values replaced by
+/// inline `[REDACTED:<kind>]` markers, line structure intact.
+fn redacted_for_model(evidence: &[GroundingEvidence]) -> Vec<GroundingEvidence> {
+    use crate::safety::redact::{redact_for_model, RedactionContext};
+    evidence
+        .iter()
+        .map(|chunk| {
+            let context = if chunk.path.ends_with(".rs") {
+                RedactionContext::RustSource
+            } else {
+                RedactionContext::Generic
+            };
+            let redaction = redact_for_model(&chunk.excerpt, context);
+            GroundingEvidence {
+                excerpt: redaction.content,
+                ..chunk.clone()
+            }
+        })
+        .collect()
+}
+
 /// Scan what is about to reach the model. High-severity findings in content
 /// whose trust level is not `Trusted` block the send (the seed invariant:
 /// untrusted content never reaches the model unflagged). Trusted first-party
@@ -427,7 +449,11 @@ impl GroundedAssistant {
         // findings in non-trusted content refuse the send before any API call.
         let trust_gate = gate_evidence_trust(&evidence)?;
 
-        let evidence_json = serde_json::to_string_pretty(&evidence)?;
+        // Secret values never reach the model (0.9.5 Rule 5 sweep: this path
+        // sent workspace excerpts unredacted). Model-facing redaction keeps
+        // every line, so cited line numbers stay valid; the stored evidence
+        // (hashes, citation checks) is untouched.
+        let evidence_json = serde_json::to_string_pretty(&redacted_for_model(&evidence))?;
         let system = Message::system(
             "You are a code-review engine. Use only the supplied evidence for \
              claims. A `Workspace orientation` section may precede the question: \

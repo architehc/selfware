@@ -2038,3 +2038,47 @@ X-Custom = "custom-mcp-leak"
         assert!(!text.contains(leak), "{leak} leaked to MCP clients: {text}");
     }
 }
+
+/// 0.9.5 (Rule 5): resources/read of a project file is file content a
+/// client's model reads, so it gets the model-facing redactor — secret
+/// values replaced inline, ordinary code byte for byte (the log redactor
+/// used to rewrite `tokens = text.split(SEP)`).
+#[tokio::test]
+async fn test_resources_read_file_redacts_values_and_keeps_code() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let code = "tokens = text.split(DEFAULT_SEPARATOR)\npassword_field = form[\"password\"]\n";
+    std::fs::write(root.join("app.py"), code).unwrap();
+    std::fs::write(
+        root.join("deploy.cfg"),
+        "user=app\nDB_PASSWORD=Sup3rS3cret9 PATH=/bin\n",
+    )
+    .unwrap();
+    let server = McpServer::with_project_root_and_safety_config(
+        root.to_path_buf(),
+        crate::config::SafetyConfig::default(),
+    );
+    initialize_server(&server).await;
+    let read = |name: &str, id: i64| JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(id)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({"uri": format!("selfware://project/file/{name}")})),
+    };
+    let resp = server.handle_request(&read("app.py", 1)).await.unwrap();
+    let text = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(text, code);
+    let resp = server.handle_request(&read("deploy.cfg", 2)).await.unwrap();
+    let text = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("Sup3rS3cret9"), "{text}");
+    assert!(
+        text.contains("DB_PASSWORD=[REDACTED:password] PATH=/bin"),
+        "{text}"
+    );
+}

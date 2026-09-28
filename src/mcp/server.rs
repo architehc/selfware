@@ -1065,8 +1065,23 @@ impl McpServer {
 
                 // Config files can hold credentials (selfware.toml api_key,
                 // ~/.aws/credentials-style blocks): redact before the content
-                // leaves the process (verified leak, review round 6 #4).
-                let content = crate::safety::redact::redact_secrets(&content).into_owned();
+                // leaves the process (verified leak, review round 6 #4). The
+                // client's model reads this as file content, so it gets the
+                // model-facing redactor (secret values only, lines intact,
+                // inline markers) — the log redactor rewrote ordinary code
+                // (0.9.5 Rule 5 sweep of the 0.9.4 fidelity fix).
+                let redaction = crate::safety::redact::redact_for_model(
+                    &content,
+                    crate::safety::redact::RedactionContext::Generic,
+                );
+                let content = if redaction.redacted > 0 {
+                    crate::safety::source_context::with_redaction_note(
+                        &redaction.content,
+                        redaction.redacted,
+                    )
+                } else {
+                    redaction.content
+                };
 
                 (
                     Some(serde_json::json!({
