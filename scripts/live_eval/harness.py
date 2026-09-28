@@ -710,6 +710,9 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
     record["config_source"] = cfg_src
     record["config_sha256"] = hashlib.sha256(cfg_text.encode()).hexdigest()
     record["artifacts"] = str(run_dir)
+    # Re-set on the rebuilt record (5357f06e set it on the placeholder only,
+    # so the loop's first schema-2 records came out without it).
+    record["toolchain_isolation"] = dict(tc.isolation)
 
     def fail(reason, criteria, metrics=None):
         log(f"[{spec['name']}] FAIL {reason}")

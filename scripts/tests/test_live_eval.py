@@ -638,6 +638,23 @@ class HarnessHardeningTest(unittest.TestCase):
         self.assertEqual(
             [p.name for p in (Path(self.tmp.name) / "work").iterdir()], [])
 
+    def test_every_record_names_its_toolchain_isolation(self):
+        spec = harness.load_scenarios()["qa-greeting"]
+        binary = harness.Binary("/bin/false", "0" * 40, harness.REPO_ROOT, version="selfware x")
+        tc = self.fake_toolchain()
+        tc.isolation = {"rustup": "clone", "cargo_registry": "clone"}
+        saved = (harness.preflight, toolchain.ensure)
+        harness.preflight = lambda *_a, **_k: (False, "URLError: down")
+        toolchain.ensure = lambda *_a, **_k: tc
+        try:
+            rec = harness.run_scenario(spec, binary, self.results, log=lambda _m: None)
+        finally:
+            harness.preflight, toolchain.ensure = saved
+        self.assertTrue(rec["reason"].startswith("endpoint_unreachable"))
+        self.assertEqual(rec["toolchain_isolation"], tc.isolation)
+        stored = report.load_records(self.results / "results.jsonl")[0]
+        self.assertEqual(stored["toolchain_isolation"], tc.isolation)
+
     def test_work_root_must_not_overlap_results_or_repo(self):
         import os
 
