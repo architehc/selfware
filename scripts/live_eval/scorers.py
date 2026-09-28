@@ -48,7 +48,8 @@ IDENTIFIER_RE = re.compile(r"[\w.]+(?:\(\))?")
 # A citation spanning this many lines or more is a coverage statement, not a
 # location ("auth.py:1-45 read in full"): it credits no bug.
 MAX_CITED_SPAN = 10
-# How far off a citation may be when the finding quotes the bug's code.
+# How far off a citation of a quoted bug is still reported as "misplaced"
+# (a metric; it never counts towards recall).
 NEAR_LINES = 12
 # The independent check counts a citation 1-2 lines from the quoted code as
 # `near`, further as `wrong`.
@@ -287,16 +288,16 @@ def match_planted(answer, key, prefixes=(), known_files=None, read_file=None):
     range of at most MAX_CITED_SPAN lines: a wide range ("auth.py:1-45 read
     in full") is a coverage statement, not a location, and credits nothing.
 
-    A finding FINDS a bug when
-    - a citation names the bug's file within `window` lines of one of the
-      bug's anchor lines, or
-    - it quotes (in backticks) code that is on an anchor line and cites the
-      bug's file within NEAR_LINES of it: the bug was found but cited a few
-      lines off (`planted_found_misplaced`; the independent citation check
-      counts that citation as wrong, so it is not silently forgiven).
-    A finding that finds no bug is a false finding. Distinct false findings
-    are counted by their sorted citation set, so a summary table repeating
-    an item is not double-counted.
+    A finding FINDS a bug only when a citation names the bug's file within
+    `window` lines of one of the bug's anchor lines. A finding that finds no
+    bug is a false finding. Distinct false findings are counted by their
+    sorted citation set, so a summary table repeating an item is not
+    double-counted.
+
+    `planted_found_misplaced` reports (metric only) bugs that were never
+    found but that some finding quotes in backticks while citing the bug's
+    file within NEAR_LINES: described, but cited outside the window. Such a
+    finding stays a false finding and the bug stays missed.
     """
     window = int(key.get("window", 3))
     bugs = key["bugs"]
@@ -325,10 +326,7 @@ def match_planted(answer, key, prefixes=(), known_files=None, read_file=None):
             quoted = any(s in a or a in s for s in snippets for a in anchors)
             near = [c for c in same_file if any(c[1] - NEAR_LINES <= ln <= c[2] + NEAR_LINES for ln in lines)]
             if quoted and near:
-                if bug["id"] not in found:
-                    found[bug["id"]] = f"{near[0][0]}:{near[0][1]}"
-                    misplaced.add(bug["id"])
-                hit = True
+                misplaced.add(bug["id"])
         if not hit:
             sig = tuple(sorted(set(cites)))
             if sig not in seen_false:
@@ -342,7 +340,7 @@ def match_planted(answer, key, prefixes=(), known_files=None, read_file=None):
         "planted_found": len(found),
         "planted_recall": round(len(found) / total, 4) if total else 0.0,
         "planted_found_ids": sorted(found),
-        "planted_found_misplaced": len(misplaced),
+        "planted_found_misplaced": len(misplaced - set(found)),
         "planted_missed_ids": sorted(b["id"] for b in bugs if b["id"] not in found),
         "false_findings": len(false_findings),
         "false_findings_detail": false_findings[:12],
@@ -523,11 +521,9 @@ def score_review_planted(inp):
     c = _base_criteria(inp)
     c["recall_at_least_half"] = m["planted_recall"] >= 0.5
     c["false_findings_at_most_3"] = m["false_findings"] <= 3
+    c["citations_verified"] = m.get("citations_verified", 0) >= 3
     # Wrong citations by the binary's own gate AND by the harness's
     # independent check against the fixture (the binary grades itself).
-    # How many citations the binary could verify is a metric, not a
-    # criterion: it measures phrasing (whether a symbol is named), and it
-    # decided most review-planted failures.
     c["no_wrong_citations"] = (
         m.get("has_result", False)
         and m.get("citations_wrong", 1) == 0
@@ -545,10 +541,7 @@ def score_review_slugify(inp):
     c = _base_criteria(inp)
     c["coverage_reported"] = bool(m.get("coverage_present"))
     c["coverage_at_least_80"] = m.get("coverage_percent", 0) >= 80
-    # Checked locations, content-verified or not: requiring content
-    # verification measured how the model phrases a citation.
-    checked = m.get("citations_verified", 0) + m.get("citations_location_verified", 0)
-    c["at_least_3_checked_citations"] = checked >= 3
+    c["citations_verified"] = m.get("citations_verified", 0) >= 3
     c["no_wrong_citations"] = (
         m.get("has_result", False)
         and m.get("citations_wrong", 1) == 0

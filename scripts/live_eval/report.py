@@ -277,27 +277,27 @@ def compare(base, cand, th):
 
 
 def floor_checks(summaries, th):
-    """(failures, insufficient) for the absolute pass-rate floors.
+    """(failures, few_runs) for the absolute pass-rate floors.
 
-    A floor FAILS only when the scenario has >= min_samples graded runs and
-    even the upper end of its 95% Wilson interval is below the floor: one
-    unlucky run of a flaky scenario is not evidence (0.9.4 nightly: a floor
-    judged on n=1 would be red most nights). Fewer runs is `insufficient`.
+    A floor FAILS whenever the scenario's pass rate is below it, whatever the
+    number of runs. The 95% Wilson interval and a note when there are fewer
+    than min_samples runs (`few_runs`) are reported alongside; they never
+    change the outcome.
     """
-    failures, insufficient = [], []
+    failures, few_runs = [], []
     for scenario, floor in (th.get("floor_pass_rate") or {}).items():
         s = summaries.get(scenario)
-        if not s:
+        if not s or not s["n"]:
             continue
+        lo, hi = s["pass_ci95"]
         if s["n"] < th["min_samples"]:
-            insufficient.append(f"{scenario}: {s['n']} run(s) < {th['min_samples']} for its floor")
-            continue
-        hi = s["pass_ci95"][1]
-        if hi is not None and hi < floor:
+            few_runs.append(f"{scenario}: floor judged on {s['n']} run(s)")
+        if s["pass_rate"] < floor:
             failures.append(
-                f"{scenario}: pass rate {s['pass_rate']:.2f} (95% CI upper {hi:.2f}) below floor {floor}"
+                f"{scenario}: pass rate {s['pass_rate']:.2f} below floor {floor} "
+                f"(n={s['n']}, 95% CI {lo:.2f}-{hi:.2f})"
             )
-    return failures, insufficient
+    return failures, few_runs
 
 
 def floor_failures(summaries, th):
@@ -433,7 +433,7 @@ def build_report(records, th, candidate=None, baseline=None, scenarios=None, rep
                 target.append((kind, f"{scenario}: {msg}"))
         out["scenarios"][scenario] = entry
     cand_summaries = {s: e["candidate_stats"] for s, e in out["scenarios"].items()}
-    out["floor_failures"], out["insufficient"] = floor_checks(cand_summaries, th)
+    out["floor_failures"], out["few_runs"] = floor_checks(cand_summaries, th)
     # Runs that measured nothing about the commit, which a gate cannot pass.
     out["uncertified"] = [
         f"{s}: {cs['outages']} outage(s), {cs['setup_failures']} setup/harness failure(s)"
@@ -502,7 +502,7 @@ def render(report):
             lines.append("   no baseline commit")
     lines.append("")
     for key, label in (("missing", "MISSING"), ("floor_failures", "BELOW FLOOR"),
-                       ("insufficient", "INSUFFICIENT"), ("uncertified", "UNCERTIFIED"),
+                       ("few_runs", "NOTE"), ("uncertified", "UNCERTIFIED"),
                        ("contaminated", "CONTAMINATED")):
         for f in report.get(key, []):
             lines.append(f"{label}: {f}")
@@ -516,10 +516,10 @@ def render(report):
 def blocking_problems(report, strict_watch_kinds=("pass_rate", "citing_fraction")):
     """What fails a gate / `report --fail-on-regression`: regressions, a
     pass-rate or citing-fraction WATCH (a release is not certified on a drop
-    the samples were too few to test), floors, missing or insufficient runs,
-    outages/harness failures, contamination."""
+    the samples were too few to test), floors, missing runs, outages/harness
+    failures, contamination. (`few_runs` is a note, never a failure.)"""
     out = [m for _k, m in report["regressions"]]
     out += [m for k, m in report["watch"] if k in strict_watch_kinds]
-    for key in ("missing", "floor_failures", "insufficient", "uncertified", "contaminated"):
+    for key in ("missing", "floor_failures", "uncertified", "contaminated"):
         out += report.get(key, [])
     return out

@@ -387,15 +387,19 @@ class RegressionTest(unittest.TestCase):
         s = report.summarize([rec("s", "A", "abandoned", "t"), rec("s", "A", "pass", "t")])
         self.assertEqual((s["n"], s["passes"], s["abandoned"]), (1, 1, 1))
 
-    def test_floor_needs_samples_and_confidence(self):
+    def test_floor_fails_whenever_the_pass_rate_is_below_it(self):
         th = dict(self.th, floor_pass_rate={"s": 0.5})
+        # One run is enough to fail (no minimum-sample relaxation) ...
         rep = report.build_report([rec("s", "A", "fail", "t")], th)
-        self.assertEqual(rep["floor_failures"], [])
-        self.assertTrue(rep["insufficient"])
+        self.assertTrue(rep["floor_failures"])
+        self.assertTrue(report.blocking_problems(rep))
+        self.assertTrue(rep["few_runs"])  # reported, not decisive
         rep = report.build_report([rec("s", "A", "fail", f"t{i}") for i in range(3)], th)
-        self.assertEqual(rep["floor_failures"], [])  # 0/3: upper bound 0.56
-        rep = report.build_report([rec("s", "A", "fail", f"t{i}") for i in range(5)], th)
-        self.assertTrue(rep["floor_failures"])  # 0/5: upper bound 0.43
+        self.assertTrue(rep["floor_failures"])  # 0/3 fails although its CI reaches 0.56
+        # ... and a pass rate at or above the floor passes at any n.
+        rep = report.build_report([rec("s", "A", "pass", "t")], th)
+        self.assertEqual(rep["floor_failures"], [])
+        self.assertEqual(report.blocking_problems(rep), [])
 
     def test_missing_scenarios_and_short_runs(self):
         records = [rec("s", "A", "pass", "t0")]
@@ -534,10 +538,13 @@ class ReviewScoringFixesTest(unittest.TestCase):
         self.assertEqual(s["planted_found_ids"], ["pagination-off-by-one"])
         self.assertEqual(s["false_findings"], 0)
 
-    def test_quoted_bug_cited_a_few_lines_off_is_found_and_the_citation_wrong(self):
+    def test_quoted_bug_cited_outside_the_window_is_not_found(self):
+        # Recall credits only a citation inside the bug's window; the quoted
+        # but misplaced finding is reported, stays a miss and a false finding.
         s = self.score("- shopkeep/auth.py:24 `token_is_valid` returns `token.expires_at < now`, inverted")
-        self.assertEqual(s["planted_found_ids"], ["token-expiry-inverted"])
-        self.assertEqual((s["planted_found_misplaced"], s["false_findings"]), (1, 0))
+        self.assertEqual(s["planted_found"], 0)
+        self.assertIn("token-expiry-inverted", s["planted_missed_ids"])
+        self.assertEqual((s["planted_found_misplaced"], s["false_findings"]), (1, 1))
         self.assertEqual(s["fixture_citations_wrong"], 1)
         near = self.score("- shopkeep/auth.py:27 returns `token.expires_at < now`")
         self.assertEqual((near["fixture_citations_wrong"], near["fixture_citations_near"]), (0, 1))
@@ -567,7 +574,7 @@ class ReviewScoringFixesTest(unittest.TestCase):
         )
         self.assertEqual(unquoted["fixture_citations_unchecked"], 1)
 
-    def test_planted_pass_does_not_require_content_verified_citations(self):
+    def test_planted_pass_requires_three_content_verified_citations(self):
         answer = "\n".join(
             f"- {b['file']}:{b['line']} bug" for b in self.key["bugs"]
         )
@@ -579,7 +586,24 @@ class ReviewScoringFixesTest(unittest.TestCase):
             "read_file": lambda rel: (self.fixture / rel).read_text(),
         })
         _m, c = scorers.score_review_planted(inp)
+        self.assertFalse(c["citations_verified"])
+        self.assertEqual([k for k, v in c.items() if not v], ["citations_verified"])
+        stdout = result_line(answer=answer, grounding={"total": 8, "verified": 3,
+                                                       "location_verified": 5},
+                             review_coverage={"percent_lines": 100, "complete": True})
+        inp = scorers.ScoreInput(0, stdout, extra={
+            "answer_key": self.key, "known_files": self.files,
+            "read_file": lambda rel: (self.fixture / rel).read_text(),
+        })
+        _m, c = scorers.score_review_planted(inp)
         self.assertTrue(all(c.values()), c)
+
+    def test_slugify_counts_only_content_verified_citations(self):
+        stdout = result_line(grounding={"total": 9, "verified": 2, "location_verified": 7},
+                             review_coverage={"percent_lines": 100, "complete": True})
+        _m, c = scorers.score_review_slugify(scorers.ScoreInput(0, stdout))
+        self.assertFalse(c["citations_verified"])
+        self.assertNotIn("at_least_3_checked_citations", c)
 
     def test_contamination_hits(self):
         hits = scorers.contamination_hits(

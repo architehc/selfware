@@ -85,8 +85,8 @@ jobs:
     # (review-planted, qa-greeting, interrupt; scripts/live_eval). The 4 h
     # review-core-long and the scenarios that need local fixtures run in the
     # long-running loop (docs/live-eval.md), not here. Individual failed runs
-    # are data; the job fails when a scenario is confidently below its
-    # pass-rate floor (95% upper bound < floor, >= 3 runs), when a scenario
+    # are data; the job fails when a scenario's pass rate is below its
+    # floor (thresholds.json), when a scenario
     # has fewer runs than requested (a crashed harness is not a pass), on an
     # endpoint outage, a harness/setup failure, or a contaminated run.
     name: Live eval (quick scenarios)

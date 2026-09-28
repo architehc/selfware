@@ -2,7 +2,7 @@
   "_comment": "Regression thresholds for scripts/live_eval report/gate. Every entry carries its rationale. A change beyond a threshold is REGRESSION only when it is also significant with at least min_samples runs per side (pass rate and citing fraction: one-sided Fisher exact p < alpha; continuous metrics: one-sided Mann-Whitney U p < alpha_continuous); otherwise WATCH. The gate also fails on a pass-rate or citing-fraction WATCH.",
   "min_samples": {
     "value": 3,
-    "rationale": "Below three runs per side a single flaky run swings a mean by a third or more; qwen38 on this endpoint showed 2x wall variance between identical runs. It also gates the pass-rate floors: a floor is judged only with >= min_samples runs."
+    "rationale": "Below three runs per side a single flaky run swings a mean by a third or more; qwen38 on this endpoint showed 2x wall variance between identical runs."
   },
   "alpha": {
     "value": 0.1,
@@ -42,7 +42,7 @@
       "qa-greeting": 0.5,
       "interrupt": 0.8
     },
-    "rationale": "Absolute floors: independent of the baseline, so a first release or an already-bad baseline cannot ship below them. A floor FAILS only when there are >= min_samples runs and the upper end of the 95% Wilson interval is below it (0/5 fails 0.5; 0/3 does not: 3 runs cannot show a 0.5 scenario is below 0.5). Listed only for scenarios whose floor the current release meets; review-slugify/edit-tests/c24 get floors once their baseline is measured."
+    "rationale": "Absolute floors: independent of the baseline, so a first release or an already-bad baseline cannot ship below them. A floor FAILS whenever the pass rate is below it, at any number of runs (the 95% Wilson interval is printed but does not decide). Listed only for scenarios whose floor the current release meets; review-slugify/edit-tests/c24 get floors once their baseline is measured."
   },
   "alpha_continuous": {
     "value": 0.05,

@@ -16,8 +16,8 @@ and the long-running `run.py loop` on a developer machine.
 
 | name | what it measures | pass criteria (all must hold) |
 |---|---|---|
-| `review-planted` | review of a 16-file Python fixture with 8 planted bugs (hidden `answer_key.json`, never copied into the workspace) | completed, recall >= 0.5, <= 3 false findings, 0 wrong citations (binary's gate AND the harness's own check against the fixture), coverage complete, no edits |
-| `review-slugify` | review of python-slugify (clean clone of `$LIVE_EVAL_SLUGIFY_REPO`) | completed, coverage reported and >= 80 %, >= 3 checked citations (content- or location-verified), 0 wrong, no edits |
+| `review-planted` | review of a 16-file Python fixture with 8 planted bugs (hidden `answer_key.json`, never copied into the workspace) | completed, recall >= 0.5, <= 3 false findings, >= 3 verified citations, 0 wrong citations (binary's gate AND the harness's own check against the fixture), coverage complete, no edits |
+| `review-slugify` | review of python-slugify (clean clone of `$LIVE_EVAL_SLUGIFY_REPO`) | completed, coverage reported and >= 80 %, >= 3 verified citations, 0 wrong, no edits |
 | `edit-tests` | add `max_words` + a test to slugify and run pytest | completed, >= 2 files changed, the harness's own pytest run passes, a behaviour probe passes, a test mentions `max_words` |
 | `c24` | the 24k-window multi-step documentation task (`$LIVE_EVAL_C24_WS`, `cfg.toml`, `compact.prompt`) | completed, CONTEXT_NOTES.md bullet count equals the measured `pub fn` count, `context.rs` diff adds only `///` lines, every `pub fn` documented, 0 wrong citations |
 | `qa-greeting` | "hi" | completed, no tool calls, <= 2 turns (0 = answered in the planning turn), short answer, and a text-mode twin run shows no `NO_CHANGES` noise |
@@ -45,8 +45,10 @@ loop stops on shutdown is `abandoned`: counted, never a pass.
 Planted-bug scoring: a finding is an unindented list item, heading or table
 row (nested sub-bullets belong to their parent). A citation range of 10 or
 more lines ("auth.py:1-45 read in full") credits nothing. A finding finds a
-bug when it cites the bug's file within 3 lines of an anchor, or quotes the
-bug's code and cites within 12 lines (`planted_found_misplaced`). The
+bug only when it cites the bug's file within 3 lines of an anchor. A
+finding that quotes a bug's code but cites it 4-12 lines off is reported as
+`planted_found_misplaced` (a metric) and still counts as a miss and a false
+finding. The
 harness checks citations itself against the pristine fixture
 (`fixture_citations_ok/near/wrong/unchecked`): a quoted expression that
 occurs once in the file pins the line; 1-2 lines off is `near`, further is
@@ -114,8 +116,9 @@ tokens, recall, false findings, per-run wrong-citation rate over citing
 runs, coverage, interventions per turn) by one-sided Mann-Whitney U
 (p <= 0.05). Otherwise `WATCH`. Pass rates are compared over runs that
 measured the commit; outage and harness-error runs stay FAIL in the raw
-pass rate and mark the commit `UNCERTIFIED`. A floor fails only with >= 3
-runs and a 95 % Wilson upper bound below it (`INSUFFICIENT` with fewer).
+pass rate and mark the commit `UNCERTIFIED`. A floor fails whenever the
+pass rate is below it, at any number of runs; its 95 % Wilson interval and a
+`NOTE` when there are fewer than 3 runs are printed but never decide.
 `report --fail-on-regression --scenarios ... --expect-runs N` also fails
 when a scenario has fewer than N graded runs at the candidate, or when there
 are no records at all.
@@ -123,7 +126,7 @@ are no records at all.
 `gate` builds `--rev`, runs the quick scenarios `--samples` (default 5)
 times, judges the candidate on its own runs only, and exits 1 on any
 REGRESSION, a pass-rate or citing-fraction WATCH, a floor failure,
-insufficient or missing runs, or an outage/harness failure/contamination in
+missing runs, or an outage/harness failure/contamination in
 its runs. `--binary` without `--commit` takes the commit from the binary's
 `+g<sha>` and refuses a binary whose version names another commit.
 
