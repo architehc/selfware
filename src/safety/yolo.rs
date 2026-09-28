@@ -1188,6 +1188,8 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
 /// checks). Glob operands (`cat *`, `cat .e*`) are expanded against the
 /// call's working directory first and every match is checked, so a
 /// pattern cannot stand in for a denied name.
+/// (Test convenience; production uses [`headless_read_shell_guard`].)
+#[cfg(test)]
 pub(crate) fn headless_read_shell_guard_pass(
     cmd: &str,
     segments: &[crate::safety::shell_read::Segment],
@@ -1195,21 +1197,71 @@ pub(crate) fn headless_read_shell_guard_pass(
     denied_paths: &[String],
     protected_paths: &[String],
 ) -> bool {
+    headless_read_shell_guard(cmd, segments, cwd, denied_paths, protected_paths)
+        == HeadlessReadGuard::Pass
+}
+
+/// Verdict of [`headless_read_shell_guard`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeadlessReadGuard {
+    /// Every check passed.
+    Pass,
+    /// Every check passed except one: a recursive reader's search root
+    /// contains a denied or sensitive path (the reason names it). The call
+    /// is still a read — the caller answers it with a tool error instead
+    /// of stopping the run.
+    RecursiveRead(String),
+    /// Some other check failed.
+    Fail,
+}
+
+/// `headless_read_shell_guard_pass` with the recursive-read refusal told
+/// apart from every other failure.
+pub(crate) fn headless_read_shell_guard(
+    cmd: &str,
+    segments: &[crate::safety::shell_read::Segment],
+    cwd: Option<&str>,
+    denied_paths: &[String],
+    protected_paths: &[String],
+) -> HeadlessReadGuard {
+    let Ok(base) = headless_read_operands_pass(cmd, segments, cwd, denied_paths, protected_paths)
+    else {
+        return HeadlessReadGuard::Fail;
+    };
+    let commands: Vec<crate::safety::recursive_read::Command> = segments
+        .iter()
+        .map(crate::safety::recursive_read::Command::from_segment)
+        .collect();
+    match crate::safety::recursive_read::recursive_read_violation(&commands, &base, denied_paths) {
+        Some(why) => HeadlessReadGuard::RecursiveRead(why),
+        None => HeadlessReadGuard::Pass,
+    }
+}
+
+/// Every headless read check except the recursive walk; `Ok(base dir)`
+/// when they pass.
+fn headless_read_operands_pass(
+    cmd: &str,
+    segments: &[crate::safety::shell_read::Segment],
+    cwd: Option<&str>,
+    denied_paths: &[String],
+    protected_paths: &[String],
+) -> Result<std::path::PathBuf, ()> {
     if !headless_auto_edit_shell_guard_pass(cmd, denied_paths, protected_paths)
         || sensitive_token_in(cmd).is_some()
         || denied_token_in(cmd, denied_paths).is_some()
     {
-        return false;
+        return Err(());
     }
     let base = match cwd {
         Some(d) if std::path::Path::new(d).is_absolute() => std::path::PathBuf::from(d),
         Some(d) => match std::env::current_dir() {
             Ok(c) => c.join(d),
-            Err(_) => return false,
+            Err(_) => return Err(()),
         },
         None => match std::env::current_dir() {
             Ok(c) => c,
-            Err(_) => return false,
+            Err(_) => return Err(()),
         },
     };
     let mut operands: Vec<String> = Vec::new();
@@ -1228,10 +1280,10 @@ pub(crate) fn headless_read_shell_guard_pass(
                     None => ("", w.text.as_str()),
                 };
                 if dir_part.contains(['*', '?', '[']) {
-                    return false;
+                    return Err(());
                 }
                 let Ok(pattern) = glob::Pattern::new(name_part) else {
-                    return false;
+                    return Err(());
                 };
                 let options = glob::MatchOptions {
                     require_literal_leading_dot: true,
@@ -1242,7 +1294,7 @@ pub(crate) fn headless_read_shell_guard_pass(
                 };
                 for (n, entry) in entries.flatten().enumerate() {
                     if n >= 10_000 {
-                        return false;
+                        return Err(());
                     }
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if pattern.matches_with(&name, options) {
@@ -1258,27 +1310,23 @@ pub(crate) fn headless_read_shell_guard_pass(
     }
     for op in &operands {
         if sensitive_token_in(op).is_some() {
-            return false;
+            return Err(());
         }
         let trimmed = op.trim_start_matches("./");
         // Per component too: `secrets/x` (from `cat secrets/*`) has no
         // leading `/secrets/` for the substring list to see.
         let is_dir = base.join(trimmed).is_dir();
         if crate::safety::recursive_read::sensitive_component(trimmed, is_dir).is_some() {
-            return false;
+            return Err(());
         }
         if denied_among(&[trimmed], denied_paths).is_some() {
-            return false;
+            return Err(());
         }
     }
     // A recursive reader (`grep -r`, `rg`, `git grep`, `diff -r`, …) reads
-    // every file below its operands, not only the operands.
-    let commands: Vec<crate::safety::recursive_read::Command> = segments
-        .iter()
-        .map(crate::safety::recursive_read::Command::from_segment)
-        .collect();
-    crate::safety::recursive_read::recursive_read_violation(&commands, &base, denied_paths)
-        .is_none()
+    // every file below its operands, not only the operands: the caller
+    // walks those roots next ([`headless_read_shell_guard`]).
+    Ok(base)
 }
 
 /// Guard heuristics that a shell command must pass before the headless

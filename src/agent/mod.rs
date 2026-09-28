@@ -594,6 +594,30 @@ fn render_restore_outcomes(
     line
 }
 
+/// What [`Agent::headless_shell_verdict`] decided for a headless shell call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeadlessShellVerdict {
+    /// A read that passes every check: runs without an operator.
+    Allowed,
+    /// A read whose recursive search root contains a denied or sensitive
+    /// path (the reason names it): answered with a tool error, not a stop.
+    RecursiveRead(String),
+    /// Anything else: the ordinary policy (headless: PERMISSION_REQUIRED).
+    NotAllowed,
+}
+
+/// The tool error for a recursive read refused because its search root
+/// contains a denied or sensitive path. Shared by headless approval and
+/// the unattended YOLO floor.
+pub(crate) fn recursive_read_tool_error(why: &str) -> String {
+    format!(
+        "Not run: {why}. A recursive search whose root contains a denied or sensitive path \
+         is refused (it would read that file). Use the grep_search tool (it skips denied \
+         paths), or search a narrower root that does not contain it (e.g. `grep -rn PATTERN \
+         src/`)."
+    )
+}
+
 /// The `cwd` argument of a `shell_exec` / `pty_shell` call, if any.
 fn shell_call_cwd(args: &serde_json::Value) -> Option<&str> {
     args.get("cwd")
@@ -3089,11 +3113,24 @@ To call a tool, use this EXACT XML structure:
         cwd: Option<&str>,
         allow_project_code: bool,
     ) -> bool {
+        self.headless_shell_verdict(cmd, cwd, allow_project_code) == HeadlessShellVerdict::Allowed
+    }
+
+    /// [`Self::headless_shell_call_allowed`] with the one refusal that is
+    /// still a read told apart: a read-shaped command that passes every
+    /// check except that a recursive reader's search root contains a
+    /// denied or sensitive path (`grep -r x .` next to `.env`).
+    pub(crate) fn headless_shell_verdict(
+        &self,
+        cmd: &str,
+        cwd: Option<&str>,
+        allow_project_code: bool,
+    ) -> HeadlessShellVerdict {
         if cmd.trim().is_empty() {
-            return false;
+            return HeadlessShellVerdict::NotAllowed;
         }
         let Ok(segments) = crate::safety::shell_read::parse(cmd) else {
-            return false;
+            return HeadlessShellVerdict::NotAllowed;
         };
         let reads = crate::safety::confirm_view::classify_shell_risk(cmd)
             == crate::safety::confirm_view::RiskTag::Reads;
@@ -3101,16 +3138,55 @@ To call a tool, use this EXACT XML structure:
             || (allow_project_code
                 && (crate::agent::tool_dispatch::helpers::shell_command_is_observational(cmd)
                     || interpreter_script_run_is_observational(cmd)));
-        observational
-            && self.safety.check_shell_command(cmd).is_ok()
-            && crate::safety::yolo::headless_read_shell_guard_pass(
-                cmd,
-                &segments,
-                cwd,
-                &self.config.safety.denied_paths,
-                self.yolo_manager.protected_paths(),
-            )
-            && git_segments_are_inert(&segments, cwd)
+        if !observational
+            || self.safety.check_shell_command(cmd).is_err()
+            || !git_segments_are_inert(&segments, cwd)
+        {
+            return HeadlessShellVerdict::NotAllowed;
+        }
+        use crate::safety::yolo::HeadlessReadGuard;
+        match crate::safety::yolo::headless_read_shell_guard(
+            cmd,
+            &segments,
+            cwd,
+            &self.config.safety.denied_paths,
+            self.yolo_manager.protected_paths(),
+        ) {
+            HeadlessReadGuard::Pass => HeadlessShellVerdict::Allowed,
+            HeadlessReadGuard::RecursiveRead(why) => HeadlessShellVerdict::RecursiveRead(why),
+            HeadlessReadGuard::Fail => HeadlessShellVerdict::NotAllowed,
+        }
+    }
+
+    /// Headless Normal / AutoEdit: when `tool_name` is a shell call that is
+    /// a read refused ONLY because a recursive reader would reach a denied
+    /// or sensitive path, the tool error to hand the model (the run goes
+    /// on). `None` for everything else, which keeps the ordinary policy
+    /// (and its PERMISSION_REQUIRED stop for writes, builds, tests,
+    /// network).
+    pub(crate) fn headless_recursive_read_refusal(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<String> {
+        use crate::config::ExecutionMode;
+        let allow_project_code = match self.config.execution_mode {
+            ExecutionMode::Normal => false,
+            ExecutionMode::AutoEdit => true,
+            _ => return None,
+        };
+        if self.is_interactive()
+            || self.has_tui_renderer()
+            || !matches!(tool_name, "shell_exec" | "pty_shell")
+            || self.operator_requires_confirmation(tool_name)
+        {
+            return None;
+        }
+        let cmd = args.get("command").and_then(|c| c.as_str())?;
+        match self.headless_shell_verdict(cmd, shell_call_cwd(args), allow_project_code) {
+            HeadlessShellVerdict::RecursiveRead(why) => Some(recursive_read_tool_error(&why)),
+            _ => None,
+        }
     }
 
     /// Whether the operator explicitly listed `tool_name` in

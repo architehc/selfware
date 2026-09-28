@@ -3724,6 +3724,20 @@ impl Agent {
         if headless && self.headless_normal_auto_approve(name, &args_for_policy()) == Some(true) {
             return Ok(true);
         }
+        // Headless Normal / AutoEdit: a READ refused only because a
+        // recursive reader's root holds a denied/sensitive path (`grep -r x
+        // .` next to `.env`) is answered with a tool error naming the path
+        // and the alternatives; the run goes on. Writes, builds, tests and
+        // network keep the PERMISSION_REQUIRED stop below.
+        if headless {
+            let args_value: serde_json::Value =
+                serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
+            if let Some(msg) = self.headless_recursive_read_refusal(name, &args_value) {
+                self.push_tool_skip_message(name, call_id, use_native_fc, &msg);
+                return Ok(false);
+            }
+        }
+
         let confirmation_needed = match self.config.execution_mode {
             // Headless Normal does NOT get the plain cargo_check / cargo_test
             // / cargo_clippy allowance: builds and tests run project code for

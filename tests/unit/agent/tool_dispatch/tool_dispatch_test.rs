@@ -9073,3 +9073,177 @@ async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injecti
     }
     server.stop().await;
 }
+
+/// Integrator follow-up (0.9.6): a headless `--mode normal` review whose
+/// model greps the repository root (`grep -r x .`, next to `.env`) gets a
+/// tool error naming the denied path and the alternatives — the run goes
+/// on, the model switches to `grep_search`, and the review completes. A
+/// write still stops the run (PERMISSION_REQUIRED).
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn headless_normal_recursive_read_of_a_denied_root_is_a_tool_error_not_a_stop() {
+    use crate::testing::mock_api::MockToolCall;
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join(".env"), "API_KEY=sk-live-0000\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n",
+    )
+    .unwrap();
+    let call = |id: &str, name: &str, args: serde_json::Value| {
+        vec![MockToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }]
+    };
+    let server = MockLlmServer::builder()
+        .with_tool_calls(call(
+            "grep_root",
+            "shell_exec",
+            serde_json::json!({ "command": "grep -rn println ." }),
+        ))
+        .with_tool_calls(call(
+            "grep_tool",
+            "grep_search",
+            serde_json::json!({ "pattern": "println", "path": "." }),
+        ))
+        .with_tool_calls(call(
+            "read_main",
+            "file_read",
+            serde_json::json!({ "path": "src/main.rs" }),
+        ))
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "Review complete. FINDING: src/main.rs:3 — prints a constant; no bugs found."
+                .to_string(),
+        ))
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config_with_limits(
+        &format!("{}/v1", server.url()),
+        24_000,
+        8_192,
+        20,
+        30,
+    );
+    config.agent.native_function_calling = true;
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    assert!(!agent.is_interactive());
+    let outcome = agent
+        .run_task("Review this repository for bugs. Do not change any code.")
+        .await;
+    if let Err(e) = &outcome {
+        assert!(
+            !crate::errors::is_confirmation_error(e),
+            "a refused recursive read must not stop the run: {e:?}"
+        );
+    }
+
+    let requests = server.captured_request_bodies().await;
+    let tool_result = |id: &str| -> Option<String> {
+        requests.iter().find_map(|body| {
+            let v: serde_json::Value = serde_json::from_str(body).ok()?;
+            v["messages"].as_array()?.iter().find_map(|m| {
+                (m["role"] == "tool" && m["tool_call_id"] == id)
+                    .then(|| m["content"].as_str().unwrap_or_default().to_string())
+            })
+        })
+    };
+    let refused = tool_result("grep_root").expect("the model got an answer for its grep");
+    assert!(refused.contains("Not run"), "{refused}");
+    assert!(refused.contains(".env"), "names the denied path: {refused}");
+    assert!(
+        refused.contains("grep_search"),
+        "names the alternative: {refused}"
+    );
+    assert!(!refused.contains("sk-live"), "{refused}");
+    let found = tool_result("grep_tool").expect("the run continued to grep_search");
+    assert!(found.contains("main.rs"), "{found}");
+    assert!(!found.contains("sk-live"), "{found}");
+    assert!(
+        tool_result("read_main").is_some(),
+        "the review kept reading after the refusal"
+    );
+    assert!(outcome.is_ok(), "the review completes: {outcome:?}");
+}
+
+/// The recursive-read tool error is only for reads: a write in headless
+/// Normal still stops with the typed confirmation error (exit 6).
+#[tokio::test]
+async fn headless_normal_write_still_stops_after_the_recursive_read_change() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    let shell = |cmd: &str| serde_json::json!({ "command": cmd }).to_string();
+    for cmd in [
+        "echo x > notes.txt",
+        "cargo test",
+        "curl https://example.com",
+    ] {
+        let err = agent
+            .confirm_tool_execution("shell_exec", &shell(cmd), "call_w", false)
+            .await
+            .expect_err(&format!("`{cmd}` must stop headless Normal"));
+        assert!(crate::errors::is_confirmation_error(&err), "{cmd}: {err:?}");
+    }
+    let err = agent
+        .confirm_tool_execution(
+            "file_write",
+            &serde_json::json!({ "path": "notes.txt", "content": "x" }).to_string(),
+            "call_fw",
+            false,
+        )
+        .await
+        .expect_err("a write must stop headless Normal");
+    assert!(crate::errors::is_confirmation_error(&err), "{err:?}");
+    // A recursive read that reaches a denied path is answered, not stopped.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".env"), "K=1\n").unwrap();
+    let args = serde_json::json!({
+        "command": "grep -r K .",
+        "cwd": tmp.path().to_str().unwrap(),
+    })
+    .to_string();
+    let ran = agent
+        .confirm_tool_execution("shell_exec", &args, "call_r", false)
+        .await
+        .expect("a refused recursive read is a tool error, not a stop");
+    assert!(!ran);
+    server.stop().await;
+}
+
+/// Unattended YOLO: the floor's recursive-read refusal is a tool error the
+/// model sees (naming the path and `grep_search`), never a run stop.
+#[tokio::test]
+async fn unattended_yolo_recursive_read_of_a_denied_root_is_a_tool_error() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Yolo;
+    let mut agent = Agent::new(config).await.unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".env"), "K=1\n").unwrap();
+    let args = serde_json::json!({
+        "command": "grep -r K .",
+        "cwd": tmp.path().to_str().unwrap(),
+    })
+    .to_string();
+    let ran = agent
+        .confirm_tool_execution("shell_exec", &args, "call_y", true)
+        .await
+        .expect("a refused recursive read is a tool error, not a stop");
+    assert!(!ran);
+    let last = agent.messages.last().unwrap().content.text();
+    assert!(
+        last.contains(".env") && last.contains("grep_search"),
+        "{last}"
+    );
+    server.stop().await;
+}
