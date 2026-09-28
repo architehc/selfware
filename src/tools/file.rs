@@ -1455,15 +1455,28 @@ pub(crate) const PREFIXES_STRIPPED_NOTE: &str =
     "line-number prefixes stripped: old_str/new_str carried file_read's `N<TAB>` line-number \
      metadata; the edit was applied to the text without it";
 
-/// Entities the tool-result channel could have shown in place of a literal
-/// character (whole-content XML escaping did, before 0.9.4).
-const DISPLAY_ENTITIES: &[(&str, &str)] = &[
-    ("&amp;", "&"),
-    ("&lt;", "<"),
-    ("&gt;", ">"),
-    ("&quot;", "\""),
-    ("&#39;", "'"),
-];
+/// The `[REDACTED:<kind>]` markers in `text` whose kind the model-facing
+/// redactor actually emits — text a model can only have copied from
+/// redacted output. Any other bracketed text (`[REDACTED]`, the bare
+/// `[REDACTED:` prefix in redaction code, `[REDACTED:example]`) is ordinary.
+fn redaction_markers(text: &str) -> Vec<&str> {
+    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    let Some(re) = RE
+        .get_or_init(|| regex::Regex::new(r"\[REDACTED:([a-z0-9_]+)\]").ok())
+        .as_ref()
+    else {
+        return Vec::new();
+    };
+    let kinds = crate::safety::redact::model_redaction_kinds();
+    let mut markers: Vec<&str> = re
+        .captures_iter(text)
+        .filter(|c| kinds.contains(&&c[1]))
+        .filter_map(|c| c.get(0).map(|m| m.as_str()))
+        .collect();
+    markers.sort_unstable();
+    markers.dedup();
+    markers
+}
 
 /// File types whose text legitimately carries entities.
 fn is_markup_path(path: &str) -> bool {
@@ -1505,14 +1518,19 @@ fn is_markup_path(path: &str) -> bool {
 }
 
 /// Refuse to write text that the model copied from a DISPLAY of the file
-/// rather than from the file: a `[REDACTED:…]` secret marker, or an HTML
-/// entity standing in for a literal character. `original` is the file's
-/// current text (`None` for a new file), `old` the text being replaced
-/// (empty for a whole-file write), `new` the replacement.
+/// rather than from the file: a `[REDACTED:<kind>]` secret marker, or the
+/// `&lt;` the text tool-calling envelope writes before a framing tag /
+/// special token (`&lt;tool_result>`, `&lt;|im_start|>` — the ONLY entity
+/// text the envelope produces). `original` is the file's current text
+/// (`None` for a new file), `old` the text being replaced (empty for a
+/// whole-file write), `new` the replacement.
 ///
 /// The model "repaired" a redacted line and wrote entity-escaped text back
 /// into source files (0.9.4 live finding). Writing either corrupts the file
-/// silently, so the edit fails loudly instead.
+/// silently, so the edit fails loudly instead. Ordinary entities (`&amp;`,
+/// `&lt;` before anything else, `&quot;`) are legitimate in HTML-escaping
+/// code and its tests, and tool output never shows them in place of a
+/// character, so they are not refused (0.9.5).
 pub(crate) fn refuse_display_artifacts(
     tool: &str,
     path: &str,
@@ -1521,20 +1539,18 @@ pub(crate) fn refuse_display_artifacts(
     new: &str,
 ) -> Result<()> {
     let original_text = original.unwrap_or("");
-    for marker in [
-        crate::safety::redact::MODEL_REDACTION_MARKER_PREFIX,
-        "[REDACTED]",
-    ] {
+    for marker in redaction_markers(new) {
         if new.matches(marker).count() > old.matches(marker).count()
             && !original_text.contains(marker)
         {
             return Err(ToolError::Execution {
                 name: tool.to_string(),
                 message: format!(
-                    "Refusing to write {path}: the new text contains `{marker}…`, a marker selfware \
+                    "Refusing to write {path}: the new text contains `{marker}`, a marker selfware \
                      showed you IN PLACE OF a secret value — it is not the file's text, and writing \
                      it would destroy the real value. Leave that line as it is in the file (edit \
-                     around it), or change only the parts you can see."
+                     around it), or change only the parts you can see. (Code that must contain \
+                     this marker text can build it at runtime, e.g. `format!(\"[REDACTED:{{}}]\", kind)`.)"
                 ),
             }
             .into());
@@ -1543,21 +1559,18 @@ pub(crate) fn refuse_display_artifacts(
     if original.is_none() || is_markup_path(path) {
         return Ok(());
     }
-    for (entity, literal) in DISPLAY_ENTITIES {
-        if new.matches(entity).count() > old.matches(entity).count()
-            && !original_text.contains(entity)
-        {
-            return Err(ToolError::Execution {
-                name: tool.to_string(),
-                message: format!(
-                    "Refusing to write {path}: the new text contains the HTML entity `{entity}`, \
-                     which this file never uses — tool output is not entity-escaped, so this is \
-                     almost certainly a copy of escaped text. Write the literal character \
-                     (`{literal}`) instead."
-                ),
-            }
-            .into());
+    use crate::agent::result_envelope::escaped_tag_count;
+    if escaped_tag_count(new) > escaped_tag_count(old) && escaped_tag_count(original_text) == 0 {
+        return Err(ToolError::Execution {
+            name: tool.to_string(),
+            message: format!(
+                "Refusing to write {path}: the new text contains `&lt;` before tag or \
+                 special-token text (e.g. `&lt;tool_result>`), which this file never uses — the \
+                 tool-result envelope shows `<` that way so it cannot be read as markup, so this \
+                 is a copy of escaped display text. Write the literal `<` instead."
+            ),
         }
+        .into());
     }
     Ok(())
 }
@@ -1565,25 +1578,22 @@ pub(crate) fn refuse_display_artifacts(
 /// Why an `old_str` that matches nowhere probably came from a display of the
 /// file (a redaction marker or an entity), for the not-found error.
 fn display_artifact_hint(content: &str, old: &str) -> Option<String> {
-    for marker in [
-        crate::safety::redact::MODEL_REDACTION_MARKER_PREFIX,
-        "[REDACTED]",
-    ] {
-        if old.contains(marker) && !content.contains(marker) {
+    for marker in redaction_markers(old) {
+        if !content.contains(marker) {
             return Some(format!(
-                "old_str contains `{marker}…`, which replaced a secret value in what you were \
+                "old_str contains `{marker}`, which replaced a secret value in what you were \
                  shown; the file has the real value there. Choose old_str from lines without \
                  the marker."
             ));
         }
     }
-    for (entity, literal) in DISPLAY_ENTITIES {
-        if old.contains(entity) && !content.contains(entity) {
-            return Some(format!(
-                "old_str contains the entity `{entity}` but the file never uses it — the file \
-                 has the literal `{literal}`. Use the literal character."
-            ));
-        }
+    use crate::agent::result_envelope::escaped_tag_count;
+    if escaped_tag_count(old) > 0 && escaped_tag_count(content) == 0 {
+        return Some(
+            "old_str contains `&lt;` before tag text (e.g. `&lt;tool_result>`) but the file \
+             never uses it — the file has the literal `<`. Use the literal character."
+                .to_string(),
+        );
     }
     None
 }

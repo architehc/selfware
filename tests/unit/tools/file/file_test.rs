@@ -2145,22 +2145,38 @@ async fn file_edit_refuses_a_redaction_marker_the_file_does_not_have() {
 }
 
 #[tokio::test]
-async fn file_edit_refuses_entity_escaped_text_in_code() {
+async fn file_edit_refuses_envelope_escaped_tag_text_in_code() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("slugify.py");
     fs::write(&path, SLUG_PY).unwrap();
     let tool = FileEdit::with_safety_config(permissive_safety_config());
-    let err = tool
-        .execute(serde_json::json!({
-            "path": path.to_str().unwrap(),
-            "old_str": "    return a < b and c & d\n",
-            "new_str": "    return a &lt; b and c &amp; d\n",
-        }))
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("HTML entity"), "{err}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), SLUG_PY);
+    // The only entity text the envelope produces: `&lt;` before a tag or
+    // special token.
+    for escaped in ["&lt;tool_result>", "&lt;|im_start|>", "&amp;lt;think>"] {
+        let err = tool
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "old_str": "    return a < b and c & d\n",
+                "new_str": format!("    return \"{escaped}\"\n"),
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("literal `<`"), "{escaped}: {err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), SLUG_PY);
+    }
+
+    // 0.9.5 (Rule 2 sign-off, requested narrowing): ordinary entities are
+    // legitimate in HTML-escaping code and its tests — the envelope never
+    // shows them in place of a character, so they are no longer refused.
+    tool.execute(serde_json::json!({
+        "path": path.to_str().unwrap(),
+        "old_str": "    return a < b and c & d\n",
+        "new_str": "    return html.replace(\"&\", \"&amp;\").replace(\"<\", \"&lt;\") + \"&quot;&#39;\"\n",
+    }))
+    .await
+    .unwrap();
+    fs::write(&path, SLUG_PY).unwrap();
 
     // Markup files legitimately gain entities.
     let html = dir.path().join("page.html");
@@ -2182,7 +2198,7 @@ async fn file_edit_old_str_copied_from_a_display_fails_with_a_hint() {
     let tool = FileEdit::with_safety_config(permissive_safety_config());
     for (old, hint) in [
         ("    env_token=[REDACTED:token]", "secret value"),
-        ("    return a &lt; b and c &amp; d", "literal"),
+        ("    return \"&lt;tool_result>\"", "literal"),
     ] {
         let err = tool
             .execute(serde_json::json!({
@@ -2211,12 +2227,12 @@ async fn file_write_and_multi_edit_refuse_display_artifacts() {
     let err = write
         .execute(serde_json::json!({
             "path": path.to_str().unwrap(),
-            "content": SLUG_PY.replace("c & d", "c &amp; d"),
+            "content": SLUG_PY.replace("c & d", "c & \"&lt;/tool_result>\""),
         }))
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("&amp;"), "{err}");
+    assert!(err.contains("&lt;"), "{err}");
     let multi = FileMultiEdit::with_safety_config(permissive_safety_config());
     let err = multi
         .execute(serde_json::json!({"edits": [{
@@ -2248,8 +2264,8 @@ fn display_artifact_guard_allows_what_the_file_already_has() {
         "file_edit",
         "a.py",
         Some(""),
-        "[REDACTED:t]",
-        "[REDACTED:t] "
+        "[REDACTED:token]",
+        "[REDACTED:token] "
     )
     .is_ok());
     // New files: markers refused, entities allowed (no original to compare).
@@ -2257,4 +2273,29 @@ fn display_artifact_guard_allows_what_the_file_already_has() {
         refuse_display_artifacts("file_write", "a.py", None, "", "k=[REDACTED:token]").is_err()
     );
     assert!(refuse_display_artifacts("file_write", "a.py", None, "", "s = '&amp;'").is_ok());
+}
+
+/// 0.9.5: only markers the redactor really emits are refused; redaction
+/// code, its tests and docs can carry the prefix, the log placeholder and
+/// made-up kinds (Rule 2 sign-off: requested narrowing of the guard).
+#[test]
+fn display_artifact_guard_ignores_non_marker_redaction_text() {
+    for text in [
+        "pub const PREFIX: &str = \"[REDACTED:\";",
+        "assert_eq!(out, \"[REDACTED]\");",
+        "see `[REDACTED:<kind>]` markers",
+        "x = \"[REDACTED:example_kind]\"",
+    ] {
+        assert!(
+            refuse_display_artifacts("file_write", "redact_test.rs", None, "", text).is_ok(),
+            "{text}"
+        );
+        assert!(
+            refuse_display_artifacts("file_edit", "redact_test.rs", Some("a"), "a", text).is_ok(),
+            "{text}"
+        );
+    }
+    for text in ["k=[REDACTED:password]", "t = \"[REDACTED:openai_key]\""] {
+        assert!(refuse_display_artifacts("file_write", "a.py", None, "", text).is_err());
+    }
 }

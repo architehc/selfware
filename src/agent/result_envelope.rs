@@ -122,6 +122,18 @@ fn encode_parts(content: &str) -> (String, usize, usize) {
     )
 }
 
+/// How many envelope-escaped tag openers (`&lt;tool_result`, `&lt;|im_start|>`,
+/// `&amp;lt;think>`, …) `text` contains — the only entity text the envelope
+/// ever produces, so the only entity text a model can have copied from it.
+pub(crate) fn escaped_tag_count(text: &str) -> usize {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&format!(r"&(?:amp;)*lt;{TAG_PATTERN}")).expect("static envelope regex")
+    })
+    .find_iter(text)
+    .count()
+}
+
 /// Whether `text` contains a chat-template special token (`<|im_start|>`,
 /// `<｜…｜>`, `<think>`, `<start_of_turn>`, `</s>`, …) — text that must not
 /// reach a raw completion endpoint (FIM) at all.

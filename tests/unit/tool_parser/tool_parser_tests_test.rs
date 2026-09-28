@@ -2092,3 +2092,19 @@ fn qwen3_parameter_values_are_delivered_byte_for_byte() {
         "LITERAL = \"a &amp; b\" if x < y && z else \"&lt;\""
     );
 }
+
+#[test]
+fn xml_element_argument_values_are_delivered_byte_for_byte() {
+    // 0.9.5 (Rule 5 sweep of the Qwen3 no-decode fix): XML-element
+    // arguments are raw too — a file's literal `&amp;` must not become `&`,
+    // and a literal `<` is allowed in the value.
+    let content = "<tool>\n<name>file_edit</name>\n<arguments><path>slug.py</path>\
+                   <old_str>LITERAL = \"a &amp; b\"</old_str>\
+                   <new_str>if x < y && z: s = \"&lt;\"</new_str></arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1, "{result:?}");
+    let args = &result.tool_calls[0].arguments;
+    assert_eq!(args["path"], "slug.py");
+    assert_eq!(args["old_str"], "LITERAL = \"a &amp; b\"");
+    assert_eq!(args["new_str"], "if x < y && z: s = \"&lt;\"");
+}
