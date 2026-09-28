@@ -2205,7 +2205,22 @@ impl Agent {
         Self::PARALLEL_SAFE_TOOLS.contains(&name)
     }
 
+    /// Dispatch a batch; after a batch that mutated the tree, report the
+    /// references in files written this task that it moved
+    /// (`agent::stale_citations`).
     pub(super) async fn execute_tool_batch(
+        &mut self,
+        tool_calls: Vec<super::execution::CollectedToolCall>,
+    ) -> Result<()> {
+        let mutation_sequence = self.mutation_sequence;
+        let result = self.execute_tool_batch_inner(tool_calls).await;
+        if result.is_ok() && self.mutation_sequence != mutation_sequence {
+            self.push_stale_citations_notice();
+        }
+        result
+    }
+
+    async fn execute_tool_batch_inner(
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
@@ -4211,6 +4226,7 @@ impl Agent {
         });
 
         let written_paths = self.snapshot_mutation_paths(name, args);
+        self.stale_citations_before_mutation(name, args);
         let result = match self.best_snapshot.before_mutation(&written_paths) {
             Ok(()) => {
                 let result = self

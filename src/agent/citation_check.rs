@@ -1491,6 +1491,164 @@ pub(crate) fn is_deliverable_path(path: &str) -> bool {
         })
 }
 
+/// The line (1-based) of `lines` that a citation's named content anchors
+/// to: the line within the cited range (± [`LINE_TOLERANCE`]) carrying the
+/// named symbol, nearest the cited start line (the cited line itself when it
+/// carries it); for a quote-only citation, the cited start line when the
+/// quote occurs in that window. `None` when nothing named anchors there (or
+/// the range lies outside `lines`).
+pub(crate) fn citation_anchor(lines: &[String], c: &Citation) -> Option<usize> {
+    if c.start == 0 || c.end < c.start || c.end > lines.len() {
+        return None;
+    }
+    let lo = c.start.saturating_sub(LINE_TOLERANCE).max(1);
+    let hi = (c.end + LINE_TOLERANCE).min(lines.len());
+    if let Some(sym) = &c.symbol {
+        return (lo..=hi)
+            .filter(|&n| contains_word(&lines[n - 1], sym))
+            .min_by_key(|&n| (n.abs_diff(c.start), n));
+    }
+    let quote = c.quote.as_deref().and_then(QuotePattern::new)?;
+    let window: String = lines[lo - 1..hi]
+        .iter()
+        .flat_map(|l| l.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    quote.matches(&window).then_some(c.start)
+}
+
+/// For every line of `old` (0-based) that an edit left unchanged, its index
+/// in `new`; `None` for lines the edit changed or deleted. Computed from a
+/// line diff (Myers, bounded by a deadline: a diff cut short maps fewer
+/// lines, never a wrong one).
+pub(crate) fn unchanged_line_map(old: &[String], new: &[String]) -> Vec<Option<usize>> {
+    let mut map = vec![None; old.len()];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    for op in
+        similar::capture_diff_slices_deadline(similar::Algorithm::Myers, old, new, Some(deadline))
+    {
+        if let similar::DiffOp::Equal {
+            old_index,
+            new_index,
+            len,
+        } = op
+        {
+            for k in 0..len {
+                map[old_index + k] = Some(new_index + k);
+            }
+        }
+    }
+    map
+}
+
+/// Where a citation's cited range moved to after edits, or `None` when it
+/// did not move (or cannot be mapped exactly).
+///
+/// `versions` are earlier contents of the cited file this task (oldest
+/// first: each the file as it was right before an edit), `current` the file
+/// now. A citation that anchors exactly on its cited line now is current.
+/// Otherwise the newest earlier version where it anchored EXACTLY is the
+/// one it was written against (a version where it only anchors within the
+/// tolerance is used when none is exact); the anchor line is carried
+/// through the diff from that version to `current`, and the citation moves
+/// by the same offset. A cited line the edit itself changed or deleted
+/// maps to nothing and is not reported (the completion gate still checks
+/// it). A citation that anchors in no version was never right and is left
+/// to the completion gate.
+pub(crate) fn moved_citation_range(
+    c: &Citation,
+    versions: &[&[String]],
+    current: &[String],
+) -> Option<(usize, usize)> {
+    if citation_anchor(current, c) == Some(c.start) {
+        return None;
+    }
+    let exact = versions.iter().rev().find_map(|v| {
+        citation_anchor(v, c)
+            .filter(|&a| a == c.start)
+            .map(|a| (v, a))
+    });
+    let (version, anchor) = exact.or_else(|| {
+        versions
+            .iter()
+            .rev()
+            .find_map(|v| citation_anchor(v, c).map(|a| (v, a)))
+    })?;
+    let moved_to = unchanged_line_map(version, current)
+        .get(anchor - 1)
+        .copied()
+        .flatten()?
+        + 1;
+    if moved_to == anchor {
+        return None;
+    }
+    let delta = moved_to as isize - anchor as isize;
+    let start = usize::try_from(c.start as isize + delta).ok()?;
+    let end = usize::try_from(c.end as isize + delta).ok()?;
+    (start >= 1 && end <= current.len()).then_some((start, end))
+}
+
+/// A citation in a file the agent wrote whose cited lines an edit moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MovedCitation {
+    /// The written file carrying the citation (`docs/NOTES.md`).
+    pub source: String,
+    pub citation: Citation,
+    /// The cited file, workspace-relative.
+    pub file: String,
+    pub new_start: usize,
+    pub new_end: usize,
+}
+
+impl MovedCitation {
+    /// "docs/NOTES.md cites src/a.rs:96 `name` — now at :100 after your edit"
+    pub(crate) fn describe(&self) -> String {
+        let c = &self.citation;
+        let what = match (&c.symbol, &c.quote) {
+            (Some(sym), _) => format!(" `{sym}`"),
+            (None, Some(quote)) => format!(" `{quote}`"),
+            (None, None) => String::new(),
+        };
+        let (old, new) = if c.start == c.end {
+            (format!("{}", c.start), format!(":{}", self.new_start))
+        } else {
+            (
+                format!("{}-{}", c.start, c.end),
+                format!(":{}-{}", self.new_start, self.new_end),
+            )
+        };
+        format!(
+            "{} cites {}:{old}{what} — now at {new} after your edit",
+            self.source, self.file
+        )
+    }
+}
+
+impl CitationResolver {
+    /// The lines of the file a citation names, with its canonical path and
+    /// workspace-relative display, under the same confinement as a check.
+    /// `None` when the path is missing, ambiguous, refused or unreadable.
+    /// `context` is the text the citation came from (full paths named there
+    /// disambiguate a bare file name, as in [`Self::verify_text`]).
+    pub(crate) fn cited_file(
+        &mut self,
+        context: &str,
+        cited: &str,
+    ) -> Option<(PathBuf, String, Vec<String>)> {
+        self.mentioned = mentioned_paths(context);
+        let Resolution::Found(path) = self.resolve(cited) else {
+            return None;
+        };
+        let file = self.relative_display(&path);
+        let lines = match self.lines(&path) {
+            Loaded::Lines(lines) => lines.clone(),
+            Loaded::Refused | Loaded::Unreadable => return None,
+        };
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        Some((canonical, file, lines))
+    }
+}
+
 /// The directive fed back to the model for one correction round.
 pub(crate) fn correction_directive(report: &CitationReport, round: usize) -> String {
     let listed: Vec<String> = report
@@ -1573,7 +1731,7 @@ impl super::Agent {
 
     /// Doc-like files this task wrote (REVIEW.md, ...), deduplicated, in
     /// write order.
-    fn written_deliverables(&self) -> Vec<String> {
+    pub(super) fn written_deliverables(&self) -> Vec<String> {
         let Some(cp) = self.current_checkpoint.as_ref() else {
             return Vec::new();
         };

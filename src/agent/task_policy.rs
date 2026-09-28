@@ -30,6 +30,9 @@ pub(crate) enum PolicyKind {
     /// A failed tool call's unified error feedback (the single channel —
     /// see `tool_dispatch::push_tool_result_message`).
     ToolError,
+    /// References in a file the agent wrote that an edit moved
+    /// (`agent::stale_citations`).
+    StaleCitations,
 }
 
 impl PolicyKind {
@@ -40,6 +43,7 @@ impl PolicyKind {
             PolicyKind::RetrySuppressed => "retry_suppressed",
             PolicyKind::Gate => "gate",
             PolicyKind::ToolError => "tool_error",
+            PolicyKind::StaleCitations => "stale_citations",
         }
     }
 }

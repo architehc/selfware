@@ -131,6 +131,7 @@ pub mod review_shards;
 pub(crate) mod runner_invocation;
 pub mod session_log;
 pub(crate) mod session_usage;
+pub(crate) mod stale_citations;
 mod streaming;
 pub(crate) use streaming::visible_response_text;
 pub(crate) mod task_policy;
@@ -1109,6 +1110,9 @@ pub struct Agent {
     /// Deterministic citation gate state: bounded correction rounds and the
     /// grounding outcome for the run summary, banner and JSON result.
     citation_gate: std::sync::Mutex<citation_check::CitationGateState>,
+    /// Earlier contents of edited files, for references an edit moved
+    /// (`stale_citations`). Per task.
+    stale_citations: stale_citations::StaleCitationWatch,
     /// Review coverage state (inventory plan, per-file line coverage,
     /// recorded findings, gate counters) for a task classified as a code
     /// review; see `review_coverage`.
@@ -2087,6 +2091,7 @@ To call a tool, use this EXACT XML structure:
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
             requirements_audit_status: std::sync::Mutex::new(None),
             citation_gate: std::sync::Mutex::new(Default::default()),
+            stale_citations: Default::default(),
             review: std::sync::Mutex::new(Default::default()),
             tool_schema_in_prompt,
             #[cfg(feature = "resilience")]

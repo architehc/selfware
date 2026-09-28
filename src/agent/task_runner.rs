@@ -1263,6 +1263,7 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.reset_citation_gate();
+        self.stale_citations = Default::default();
         // Summarizer backoff and failure cap are per-task: a summarizer that
         // died during the previous task gets a fresh chance on this one.
         self.compressor.reset_summary_state_for_task();
