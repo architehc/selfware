@@ -3,11 +3,17 @@
   "tier": "quick",
   "hermetic_fixture": false,
   "scorer": "edit_tests",
-  "setup": {"kind": "git_clone", "env": "LIVE_EVAL_SLUGIFY_REPO",
-            "default": "${LIVE_EVAL_FIXTURES}/ux092/projects/slugify"},
-  "config": {"kind": "tracked"},
+  "setup": {
+    "kind": "git_clone",
+    "env": "LIVE_EVAL_SLUGIFY_REPO",
+    "default": "${LIVE_EVAL_FIXTURES}/ux092/projects/slugify"
+  },
+  "config": {
+    "kind": "tracked"
+  },
   "mode": "yolo",
   "wall_secs": 1800,
   "post_check": "edit_tests",
-  "prompt_file": "prompt.txt"
+  "prompt_file": "prompt.txt",
+  "wall_rationale": "Measured 2026-09-27/28 on llm.selfware.design: 20 completed runs took 164-627 s (p50 ~317 s), including 3 runs with the harness toolchain where the agent's pytest works (216, 337, 351 s; the 351 s one at 14 tok/s, the slowest endpoint rate seen). 1800 s is 2.9x the slowest completed run. The one run that hit 1800 s was a stall (the same pytest command re-run ~10 times after the tests passed), which a longer wall would only prolong."
 }

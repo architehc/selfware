@@ -22,7 +22,6 @@ import random
 import re
 import shutil
 import signal
-import site
 import subprocess
 import sys
 import tempfile
@@ -35,6 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import scorers  # noqa: E402
+import toolchain  # noqa: E402
 
 SCENARIO_DIR = HERE / "scenarios"
 REPO_ROOT = HERE.parents[1]
@@ -200,68 +200,15 @@ def git(*args, cwd=None, check=True, capture=True):
 # --------------------------------------------------------------------------
 
 
-def prepare_home(home, results_dir):
-    """Make the real toolchains usable from the isolated HOME.
-
-    selfware's tool spawns keep only a small env allowlist
-    (`safety::process_env::DEFAULT_KEEP`: PATH, HOME, CARGO_HOME,
-    RUSTUP_HOME, ...), so PYTHONUSERBASE / CARGO_TARGET_DIR set for the agent
-    never reached its `python3 -m pytest` or `cargo check` (0.9.4 live:
-    "No module named pytest" in 5 of 6 edit-tests runs; the shared target
-    dir was never created). Instead the HOME itself carries them:
-    - the Python user site (where pytest lives) is symlinked at the same
-      path relative to the fake HOME;
-    - CARGO_HOME is a per-run dir whose bin/registry/git link to the real
-      ones and whose config.toml sets `build.target-dir` to the shared
-      `<results>/child-target`;
-    - ~/.rustup links to the real toolchains.
-    Returns the CARGO_HOME to export.
-    """
-    real_home = Path(os.path.expanduser("~")).resolve()
-    home = Path(home)
-    userbase = Path(site.getuserbase())
-    try:
-        rel = userbase.resolve().relative_to(real_home)
-        link = home / rel
-        if userbase.exists() and not link.exists():
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(userbase)
-    except ValueError:
-        pass
-    real_cargo = Path(os.environ.get("CARGO_HOME") or real_home / ".cargo")
-    cargo_home = home / ".cargo"
-    cargo_home.mkdir(parents=True, exist_ok=True)
-    for name in ("bin", "registry", "git"):
-        if (real_cargo / name).exists() and not (cargo_home / name).exists():
-            (cargo_home / name).symlink_to(real_cargo / name)
-    config = ""
-    for name in ("config.toml", "config"):
-        if (real_cargo / name).is_file():
-            config = (real_cargo / name).read_text()
-            break
-    target = str(Path(results_dir) / "child-target")
-    if "target-dir" not in config:
-        line = f'target-dir = "{target}"\n'
-        if "[build]" in config:
-            config = config.replace("[build]", "[build]\n" + line, 1)
-        else:
-            config = config.rstrip() + ("\n\n" if config.strip() else "") + "[build]\n" + line
-    (cargo_home / "config.toml").write_text(config)
-    real_rustup = Path(os.environ.get("RUSTUP_HOME") or real_home / ".rustup")
-    if real_rustup.exists() and not (home / ".rustup").exists():
-        (home / ".rustup").symlink_to(real_rustup)
-    return cargo_home
-
-
-def child_env(home, results_dir):
-    """Environment for the agent: isolated HOME, no inherited selfware/API keys.
+def child_env(home, results_dir, tc):
+    """Environment for the agent: isolated HOME, no inherited selfware/API keys,
+    and the harness-owned toolchain `tc` (see toolchain.py) — never the
+    user's Python user site, ~/.cargo or ~/.rustup, which a yolo agent could
+    write to.
 
     HOME is per run so no response cache, checkpoint, trust entry or global
-    config (~/.config/selfware) leaks between runs; `prepare_home` makes the
-    real toolchains reachable from it.
+    config (~/.config/selfware) leaks between runs.
     """
-    real_home = os.path.expanduser("~")
-    cargo_home = prepare_home(home, results_dir)
     env = {
         k: v
         for k, v in os.environ.items()
@@ -269,13 +216,18 @@ def child_env(home, results_dir):
         and not k.endswith("_API_KEY")
         and not k.startswith("GIT_")
         and not k.startswith("LIVE_EVAL_")
+        and not k.startswith("PYTHON")
+        and not k.startswith("VIRTUAL_ENV")
+        and k not in ("CARGO_TARGET_DIR",)
     }
     env["HOME"] = str(home)
     env["NO_COLOR"] = "1"
-    env["CARGO_HOME"] = str(cargo_home)
-    env.setdefault("RUSTUP_HOME", os.path.join(real_home, ".rustup"))
-    env.pop("CARGO_TARGET_DIR", None)
-    env.pop("PYTHONUSERBASE", None)
+    env["PATH"] = tc.path(os.environ.get("PATH", ""))
+    env["CARGO_HOME"] = str(tc.cargo_home)
+    env["RUSTUP_HOME"] = tc.rustup_home_for_env()
+    # Not forwarded by selfware's tool spawns, but it covers the harness's
+    # own subprocesses (trust, post-checks).
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
@@ -512,11 +464,11 @@ def post_c24(work, pre):
     return extra
 
 
-def post_edit_tests(work, env):
+def post_edit_tests(work, env, python):
     extra = {}
     try:
         res = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "--color=no", "-p", "no:cacheprovider"],
+            [python, "-m", "pytest", "-q", "--color=no", "-p", "no:cacheprovider"],
             cwd=work, env=env, capture_output=True, text=True, timeout=900,
         )
         extra["pytest_exit"] = res.returncode
@@ -532,7 +484,7 @@ def post_edit_tests(work, env):
         "assert slugify('one two three') == 'one-two-three'\n"
     )
     res = subprocess.run(
-        [sys.executable, "-c", probe], cwd=work, env=env, capture_output=True, text=True,
+        [python, "-c", probe], cwd=work, env=env, capture_output=True, text=True,
         timeout=120,
     )
     extra["behavior_probe_ok"] = res.returncode == 0
@@ -721,12 +673,25 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def finish_setup_failure(state, results_dir, reason):
+    rec = _finish(state["record"], "fail", f"setup_failed: {reason}", {}, {"setup": False},
+                  results_dir)
+    state["appended"] = True
+    return rec
+
+
 def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, abandon,
                   endpoint_override, log):
     work = scratch / "ws"
     home = scratch / "home"
     home.mkdir(parents=True)
-    env = child_env(home, results_dir)
+    try:
+        tc = toolchain.ensure(scratch.parent, results_dir)
+    except toolchain.ToolchainError as exc:
+        return finish_setup_failure(state, results_dir, f"toolchain: {exc}")
+    state["record"]["toolchain_isolation"] = dict(tc.isolation)
+    toolchain_before = toolchain.fingerprint(tc.watched())
+    env = child_env(home, results_dir, tc)
 
     def finish(*args):
         rec = _finish(state["record"], *args, results_dir)
@@ -788,7 +753,7 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         twin_ws, twin_home = scratch / "twin", scratch / "twin-home"
         twin_ws.mkdir()
         twin_home.mkdir()
-        twin_env = child_env(twin_home, results_dir)
+        twin_env = child_env(twin_home, results_dir, tc)
         _git_init_commit(twin_ws)
         subprocess.run(
             [binary.path, "trust", str(cfg_path), "-q"], cwd=twin_ws, env=twin_env,
@@ -810,7 +775,7 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
     if spec.get("post_check") == "c24":
         extra.update(post_c24(work, extra))
     elif spec.get("post_check") == "edit_tests":
-        extra.update(post_edit_tests(work, env))
+        extra.update(post_edit_tests(work, env, str(tc.python)))
     prefixes = [str(work) + "/", os.path.realpath(work) + "/"]
     extra["prefixes"] = prefixes
     markers = []
@@ -849,6 +814,10 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         forbidden_paths=[str(results_dir), str(HERE), str(REPO_ROOT)],
         extra_markers=markers,
     )
+    # A run that wrote into the shared toolchain (pip install into the venv,
+    # cargo install) changed what later runs get: contaminated.
+    if toolchain.fingerprint(tc.watched()) != toolchain_before:
+        hits.append("the run modified the harness toolchain (venv or cargo bin)")
     metrics["contamination_hits"] = hits[:10]
     criteria["not_contaminated"] = not hits
 

@@ -17,6 +17,7 @@ sys.path.insert(0, str(LIVE_EVAL))
 import harness  # noqa: E402
 import report  # noqa: E402
 import scorers  # noqa: E402
+import toolchain  # noqa: E402
 
 PLANTED = LIVE_EVAL / "scenarios" / "review-planted"
 
@@ -623,15 +624,19 @@ class HarnessHardeningTest(unittest.TestCase):
 
         harness.preflight = lambda *_a, **_k: (True, "m")
         harness.setup_workspace = boom
+        saved_ensure = toolchain.ensure
+        toolchain.ensure = lambda *_a, **_k: self.fake_toolchain()
         try:
             rec = harness.run_scenario(spec, binary, self.results, log=lambda _m: None)
         finally:
             harness.preflight, harness.setup_workspace = saved
+            toolchain.ensure = saved_ensure
         self.assertEqual(rec["status"], "fail")
         self.assertTrue(rec["reason"].startswith("harness_error: TimeoutExpired"), rec["reason"])
         records = report.load_records(self.results / "results.jsonl")
         self.assertEqual(len(records), 1)
-        self.assertEqual(list((Path(self.tmp.name) / "work").iterdir()), [])
+        self.assertEqual(
+            [p.name for p in (Path(self.tmp.name) / "work").iterdir()], [])
 
     def test_work_root_must_not_overlap_results_or_repo(self):
         import os
@@ -647,22 +652,81 @@ class HarnessHardeningTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             harness.default_results_dir(str(harness.REPO_ROOT / "x"))
 
-    def test_isolated_home_reaches_the_toolchains(self):
+    def fake_toolchain(self):
+        root = Path(self.tmp.name) / "tc"
+        tc = toolchain.Toolchain(root, self.results)
+        (tc.venv / "bin").mkdir(parents=True)
+        (tc.cargo_home / "bin").mkdir(parents=True)
+        return tc
+
+    def test_agent_env_uses_the_harness_toolchain_not_the_users(self):
         import site
 
+        tc = self.fake_toolchain()
         home = Path(self.tmp.name) / "home"
         home.mkdir()
-        cargo_home = harness.prepare_home(home, self.results)
-        config = (cargo_home / "config.toml").read_text()
-        self.assertIn(str(self.results / "child-target"), config)
-        self.assertIn("[build]", config)
-        userbase = Path(site.getuserbase())
-        real_home = Path(os.path.expanduser("~")).resolve()
-        if userbase.exists() and str(userbase.resolve()).startswith(str(real_home)):
-            self.assertTrue((home / userbase.resolve().relative_to(real_home)).exists())
-        env = harness.child_env(home, self.results)
-        self.assertEqual(env["CARGO_HOME"], str(home / ".cargo"))
+        real_cargo_bin = str(Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo") / "bin")
+        user_bin = str(Path(site.getuserbase()) / "bin")
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = os.pathsep.join([real_cargo_bin, user_bin, "/usr/bin", "/bin"])
+        try:
+            env = harness.child_env(home, self.results, tc)
+        finally:
+            os.environ["PATH"] = old_path
+        path = env["PATH"].split(os.pathsep)
+        self.assertEqual(path[:2], [str(tc.venv / "bin"), str(tc.cargo_home / "bin")])
+        self.assertNotIn(real_cargo_bin, path)
+        self.assertNotIn(user_bin, path)
+        self.assertEqual(env["CARGO_HOME"], str(tc.cargo_home))
         self.assertNotIn("CARGO_TARGET_DIR", env)
+        self.assertNotIn("PYTHONUSERBASE", env)
+        # Nothing in the per-run HOME points at the user's machine.
+        self.assertEqual(list(home.iterdir()), [])
+
+    def test_harness_cargo_home_is_owned_not_linked(self):
+        real = Path(self.tmp.name) / "real-cargo"
+        (real / "bin").mkdir(parents=True)
+        (real / "bin" / "rustup").write_text("#!/bin/sh\n")
+        (real / "bin" / "cargo").symlink_to("rustup")
+        (real / "registry").mkdir()
+        (real / "registry" / "x").write_text("cached")
+        (real / "config.toml").write_text("[net]\nretry = 3\n")
+        rustup = Path(self.tmp.name) / "real-rustup"
+        (rustup / "toolchains").mkdir(parents=True)
+        saved = {k: os.environ.get(k) for k in ("CARGO_HOME", "RUSTUP_HOME")}
+        os.environ["CARGO_HOME"], os.environ["RUSTUP_HOME"] = str(real), str(rustup)
+        try:
+            tc = toolchain.Toolchain(Path(self.tmp.name) / "tc", self.results)
+            tc.ensure_cargo()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertFalse((tc.cargo_home / "bin").is_symlink())
+        self.assertTrue((tc.cargo_home / "bin" / "cargo").is_symlink())
+        config = (tc.cargo_home / "config.toml").read_text()
+        self.assertIn("retry = 3", config)
+        self.assertIn(str(self.results / "child-target"), config)
+        registry = tc.cargo_home / "registry"
+        if registry.exists():  # a copy-on-write clone (macOS), never a link
+            self.assertFalse(registry.is_symlink())
+            (registry / "x").write_text("changed by the agent")
+            self.assertEqual((real / "registry" / "x").read_text(), "cached")
+        self.assertIn("rustup", tc.isolation)
+
+    def test_toolchain_changes_are_detected(self):
+        tc = self.fake_toolchain()
+        before = toolchain.fingerprint(tc.watched())
+        (tc.venv / "bin" / "evil").write_text("x")
+        self.assertNotEqual(toolchain.fingerprint(tc.watched()), before)
+
+    def test_requirements_are_pinned(self):
+        for line in toolchain.REQUIREMENTS.read_text().splitlines():
+            line = line.split("#")[0].strip()
+            if line:
+                self.assertIn("==", line, line)
 
     def test_binary_label_must_match_its_version(self):
         self.assertEqual(harness.version_sha("selfware 0.9.3+gaa184b3f"), "aa184b3f")

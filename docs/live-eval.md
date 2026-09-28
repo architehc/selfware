@@ -58,11 +58,23 @@ the repository, so no `../..` walk from a workspace reaches the answer key
 or earlier results. Every tool call (stream events and the checkpoint's
 assistant turns) is scanned for the results dir, the harness or repository
 path, `results.jsonl`, and for review-planted `answer_key`; a hit marks the
-run contaminated (`not_contaminated` criterion). The isolated HOME carries
-the real toolchains (selfware's tool spawns keep only PATH, HOME,
-CARGO_HOME, RUSTUP_HOME and a few more): the Python user site is symlinked
-into it, and a per-run CARGO_HOME links the real bin/registry and sets
-`build.target-dir` to the shared `<results>/child-target`. After each run
+run contaminated (`not_contaminated` criterion).
+
+Toolchain: the agent never gets the user's Python user site, ~/.cargo or
+~/.rustup (a yolo agent could `pip install --user` or `cargo install` into
+them). `scripts/live_eval/toolchain.py` prepares, once per harness install
+under `<work root>/.toolchain`, a read-only venv with the pinned
+`toolchain-requirements.txt` (from PyPI, or offline from
+`$LIVE_EVAL_WHEELHOUSE`), a harness CARGO_HOME (copied config plus
+`build.target-dir` = `<results>/child-target`, rustup proxy links, registry
+and git caches as copy-on-write clones on macOS or downloaded), and a
+copy-on-write clone of ~/.rustup (where clones are unavailable the run
+records `toolchain_isolation.rustup: shared`). PATH, CARGO_HOME and
+RUSTUP_HOME survive selfware's tool-env sanitizer, so the agent's shell
+resolves `python3`/`pytest`/`cargo` there; the user's ~/.cargo/bin and
+Python user-base bin are removed from PATH. The venv and the harness cargo
+bin are fingerprinted before and after every run: a run that changed them
+is contaminated, and the venv is rebuilt before the next run. After each run
 `selfware resources reap` runs with the run's HOME.
 
 ## Running
