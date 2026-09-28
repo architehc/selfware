@@ -222,7 +222,7 @@ def child_env(home, results_dir, tc):
     }
     env["HOME"] = str(home)
     env["NO_COLOR"] = "1"
-    env["PATH"] = tc.path(os.environ.get("PATH", ""))
+    env["PATH"] = tc.path()
     env["CARGO_HOME"] = str(tc.cargo_home)
     env["RUSTUP_HOME"] = tc.rustup_home_for_env()
     # Not forwarded by selfware's tool spawns, but it covers the harness's

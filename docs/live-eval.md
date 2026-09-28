@@ -73,8 +73,14 @@ and git caches as copy-on-write clones on macOS or downloaded), and a
 copy-on-write clone of ~/.rustup (where clones are unavailable the run
 records `toolchain_isolation.rustup: shared`). PATH, CARGO_HOME and
 RUSTUP_HOME survive selfware's tool-env sanitizer, so the agent's shell
-resolves `python3`/`pytest`/`cargo` there; the user's ~/.cargo/bin and
-Python user-base bin are removed from PATH. The venv and the harness cargo
+resolves `python3`/`pytest`/`cargo` there. PATH holds nothing else of the
+host's: after the harness dirs come only /usr/bin:/bin:/usr/sbin:/sbin, and
+`<work root>/.toolchain/tools-bin` links single binaries a scenario provably
+needs — `rg` (selfware's grep_search uses ripgrep when it is on PATH and a
+built-in walker otherwise, so without it reviews would measure a different
+backend) and `git` where it is not in a system dir. ~/.local/bin, nvm,
+homebrew, ~/.cargo/bin and the Python user base are unreachable by name;
+each record's `toolchain_isolation` names the PATH and every linked tool. The venv and the harness cargo
 bin are fingerprinted before and after every run: a run that changed them
 is contaminated, and the venv is rebuilt before the next run. After each run
 `selfware resources reap` runs with the run's HOME.

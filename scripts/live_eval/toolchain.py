@@ -19,9 +19,11 @@ once per harness install, under `<work root>/.toolchain`:
   `rustup: shared` in `toolchain_isolation` instead of pretending.
 
 selfware's tool spawns keep PATH, HOME, CARGO_HOME and RUSTUP_HOME
-(`safety::process_env::DEFAULT_KEEP`), so these reach the agent's shell:
-PATH starts with the venv's bin and the harness cargo bin, and the user's
-~/.cargo/bin and Python user-base bin are removed from it.
+(`safety::process_env::DEFAULT_KEEP`), so these reach the agent's shell.
+PATH is the venv's bin, the harness cargo bin, `tools-bin` (single-file
+links to LINKED_TOOLS, e.g. rg) and the system dirs (SYSTEM_PATH) — nothing
+else of the host PATH: ~/.local/bin, nvm, homebrew, ~/.cargo/bin and the
+Python user base are unreachable by name.
 
 Every run fingerprints the venv and cargo bin before and after; a run that
 changed them is marked contaminated and the venv is rebuilt.
@@ -33,7 +35,6 @@ import json
 import os
 import platform
 import shutil
-import site
 import stat
 import subprocess
 import sys
@@ -41,6 +42,22 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REQUIREMENTS = HERE / "toolchain-requirements.txt"
+
+# The only directories of the host PATH the agent gets.
+SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+# User-installed tools a scenario provably needs, linked one file at a time
+# (never their directory), with the reason recorded per run.
+LINKED_TOOLS = {
+    # selfware's grep_search uses ripgrep when `rg` is on PATH and falls back
+    # to its built-in walker otherwise (src/tools/grep_search/mod.rs
+    # rg_available): without it every review scenario would measure a
+    # different search backend than users (and all earlier records) get.
+    "rg": "grep_search backend (tools/grep_search rg_available)",
+    # Every workspace is a git repo and selfware spawns git throughout; it is
+    # linked only where it is not already in a system dir (/usr/bin/git on
+    # macOS and CI runners).
+    "git": "workspace VCS; selfware spawns git",
+}
 
 
 class ToolchainError(Exception):
@@ -82,6 +99,14 @@ def _remove(path):
     if Path(path).exists():
         _set_writable(path, True)
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _tool_version(path):
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
+        return (out.stdout or out.stderr).strip().splitlines()[0][:80]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return "version unknown"
 
 
 def fingerprint(paths):
@@ -210,17 +235,47 @@ class Toolchain:
             return str(self.rustup_home)
         return os.environ.get("RUSTUP_HOME") or str(_real_home() / ".rustup")
 
-    def path(self, base_path):
-        """PATH for the agent: venv bin, harness cargo bin, then `base_path`
-        without the user's ~/.cargo/bin and Python user-base bin."""
-        real_home = _real_home()
-        drop = {
-            str(Path(os.environ.get("CARGO_HOME") or real_home / ".cargo") / "bin"),
-            str(Path(site.getuserbase()) / "bin"),
-        }
-        keep = [p for p in (base_path or "").split(os.pathsep)
-                if p and os.path.normpath(p) not in {os.path.normpath(d) for d in drop}]
-        return os.pathsep.join([str(self.venv / "bin"), str(self.cargo_home / "bin")] + keep)
+    def ensure_linked_tools(self, base_path):
+        """`tools-bin`: single-file links to the few user-installed tools a
+        scenario provably needs (LINKED_TOOLS), so their whole directories
+        (~/.local/bin, nvm, homebrew, ...) stay off the agent's PATH.
+
+        Records each link's target (or `absent`) in `isolation["linked_tools"]`.
+        """
+        tools_bin = self.root / "tools-bin"
+        tools_bin.mkdir(parents=True, exist_ok=True)
+        search = os.pathsep.join(
+            p for p in (base_path or "").split(os.pathsep)
+            if p and not p.startswith(str(self.root))
+        )
+        linked = {}
+        for name, why in LINKED_TOOLS.items():
+            link = tools_bin / name
+            target = shutil.which(name, path=search)
+            if target and os.path.dirname(target) in SYSTEM_PATH:
+                linked[name] = f"{target} (system dir, not linked)"
+                continue
+            if target:
+                # The same binary the host PATH resolves first (what earlier
+                # records and the user's own shell used); its version is
+                # recorded because a different rg is a different backend.
+                target = os.path.realpath(target)
+                if not link.is_symlink() or os.readlink(link) != target:
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(target)
+                linked[name] = f"{target} [{_tool_version(target)}] ({why})"
+            else:
+                link.unlink(missing_ok=True)
+                linked[name] = f"absent ({why})"
+        self.isolation["linked_tools"] = linked
+        self.isolation["path"] = "harness venv + cargo + tools-bin, then " + ":".join(SYSTEM_PATH)
+
+    def path(self, base_path=None):
+        """PATH for the agent: the harness venv, harness cargo bin, the linked
+        tools, then the system directories only — never the user's PATH
+        (~/.local/bin, nvm, homebrew, ~/.cargo/bin, the Python user base)."""
+        dirs = [str(self.venv / "bin"), str(self.cargo_home / "bin"), str(self.root / "tools-bin")]
+        return os.pathsep.join(dirs + list(SYSTEM_PATH))
 
 
 def ensure(work_root, results_dir):
@@ -233,6 +288,7 @@ def ensure(work_root, results_dir):
         try:
             tc.ensure_venv()
             tc.ensure_cargo()
+            tc.ensure_linked_tools(os.environ.get("PATH", ""))
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     return tc

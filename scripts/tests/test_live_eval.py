@@ -709,20 +709,40 @@ class HarnessHardeningTest(unittest.TestCase):
         real_cargo_bin = str(Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo") / "bin")
         user_bin = str(Path(site.getuserbase()) / "bin")
         old_path = os.environ["PATH"]
-        os.environ["PATH"] = os.pathsep.join([real_cargo_bin, user_bin, "/usr/bin", "/bin"])
+        os.environ["PATH"] = os.pathsep.join(
+            [real_cargo_bin, user_bin, "/opt/homebrew/bin", str(Path.home() / ".local/bin"),
+             "/usr/bin", "/bin"])
         try:
             env = harness.child_env(home, self.results, tc)
         finally:
             os.environ["PATH"] = old_path
-        path = env["PATH"].split(os.pathsep)
-        self.assertEqual(path[:2], [str(tc.venv / "bin"), str(tc.cargo_home / "bin")])
-        self.assertNotIn(real_cargo_bin, path)
-        self.assertNotIn(user_bin, path)
+        # Only the harness toolchain and the system dirs: nothing of the host PATH.
+        self.assertEqual(env["PATH"].split(os.pathsep), [
+            str(tc.venv / "bin"), str(tc.cargo_home / "bin"), str(tc.root / "tools-bin"),
+            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ])
         self.assertEqual(env["CARGO_HOME"], str(tc.cargo_home))
         self.assertNotIn("CARGO_TARGET_DIR", env)
         self.assertNotIn("PYTHONUSERBASE", env)
         # Nothing in the per-run HOME points at the user's machine.
         self.assertEqual(list(home.iterdir()), [])
+
+    def test_only_needed_user_tools_are_linked_one_file_each(self):
+        host = Path(self.tmp.name) / "host-bin"
+        host.mkdir()
+        for name in ("rg", "node", "brew"):
+            (host / name).write_text("#!/bin/sh\n")
+            (host / name).chmod(0o755)
+        tc = self.fake_toolchain()
+        tc.ensure_linked_tools(os.pathsep.join([str(host), "/usr/bin", "/bin"]))
+        tools = tc.root / "tools-bin"
+        self.assertEqual(sorted(p.name for p in tools.iterdir()), ["rg"])
+        self.assertEqual(os.readlink(tools / "rg"), os.path.realpath(host / "rg"))
+        linked = tc.isolation["linked_tools"]
+        self.assertIn("grep_search", linked["rg"])
+        # git: /usr/bin/git where present (a system dir), else linked or absent.
+        self.assertTrue(linked["git"])
+        self.assertIn("/usr/bin:/bin:/usr/sbin:/sbin", tc.isolation["path"])
 
     def test_harness_cargo_home_is_owned_not_linked(self):
         real = Path(self.tmp.name) / "real-cargo"
