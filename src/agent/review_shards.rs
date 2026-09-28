@@ -515,6 +515,10 @@ pub struct ShardRunReport {
     pub findings_relocated: usize,
     pub findings_unverified: usize,
     pub wall_secs: u64,
+    /// Broad `file_read`s of shard-read files answered with a note instead
+    /// of the content (once per file; see `SHARD_REREAD_GUIDANCE`).
+    #[serde(default)]
+    pub rereads_withheld: usize,
     /// Tokens the shard calls cost (prompt + completion, as accounted).
     pub tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,7 +530,7 @@ pub struct ShardRunReport {
 }
 
 impl ShardRunReport {
-    fn render_line(&mut self) {
+    pub(crate) fn render_line(&mut self) {
         if self.shards == 0 {
             self.line = format!(
                 "review shards: none run for {} files{}",
@@ -560,6 +564,12 @@ impl ShardRunReport {
             line.push_str(&format!(
                 "; {} failed twice (files left unread)",
                 self.failed
+            ));
+        }
+        if self.rereads_withheld > 0 {
+            line.push_str(&format!(
+                "; {} whole-file re-read(s) of shard-read files withheld once",
+                self.rereads_withheld
             ));
         }
         if self.not_run > 0 {
@@ -1042,6 +1052,9 @@ impl Agent {
                             .collect();
                         this.review_commit_reads(&delivered);
                         this.with_review_session(|session| {
+                            for (path, range) in &delivered {
+                                session.record_shard_delivery(path, *range);
+                            }
                             for (path, note) in &outcome.notes {
                                 session.add_note(path, note);
                             }

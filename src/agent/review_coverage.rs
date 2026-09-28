@@ -82,6 +82,10 @@ text). Do NOT file_read them again, in whole or in chunks — that repeats the r
 confirm or correct one specific finding, read a few lines around it (line_range, at most ~40 \
 lines); files the shards did not cover are named as unread and still need file_read.";
 
+/// A `file_read` of at most this many lines of a shard-read file is a
+/// narrow confirmation read and is always delivered.
+pub(crate) const SHARD_REREAD_NARROW_LINES: usize = 60;
+
 /// Which answer the next model turn is expected to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,6 +196,11 @@ pub(crate) struct ReviewSession {
     /// does not need the raw text.
     notes: HashMap<String, String>,
     shard_report: Option<super::review_shards::ShardRunReport>,
+    /// Ranges the shard calls delivered (a subset of `coverage`).
+    shard_delivered: HashMap<String, Vec<(usize, usize)>>,
+    /// Files whose broad re-read was withheld once (a second request for
+    /// the same file is delivered).
+    reread_withheld: HashSet<String>,
 }
 
 static FINDING_LINE: Lazy<Regex> = Lazy::new(|| {
@@ -336,7 +345,68 @@ impl ReviewSession {
             shard_inventory: String::new(),
             notes: HashMap::new(),
             shard_report: None,
+            shard_delivered: HashMap::new(),
+            reread_withheld: HashSet::new(),
         }
+    }
+
+    /// Record a range a shard call delivered (coverage itself is committed
+    /// through the ledger's commit API).
+    pub(crate) fn record_shard_delivery(&mut self, rel: &str, range: (usize, usize)) {
+        if self.entry(rel).is_some() {
+            merge_range(
+                self.shard_delivered.entry(rel.to_string()).or_default(),
+                range,
+            );
+        }
+    }
+
+    /// The first broad `file_read` of a file the shards already delivered
+    /// in full over `requested` (1-based inclusive; `None` = whole file):
+    /// a short note instead of the content — the per-file shard note, the
+    /// findings recorded on it, and how to read a narrow range. `None` for
+    /// a narrow read (at most [`SHARD_REREAD_NARROW_LINES`] lines), a range
+    /// the shards did not deliver, outside a shard review, and for the
+    /// second request of the same file (the model insists: it gets it).
+    pub(crate) fn shard_reread_note(
+        &mut self,
+        rel: &str,
+        requested: Option<(usize, usize)>,
+    ) -> Option<String> {
+        self.shard_report.as_ref()?;
+        let lines = self.entry(rel)?.lines;
+        let (a, b) = requested.unwrap_or((1, lines));
+        let (a, b) = (a.max(1), b.min(lines));
+        if b < a || b - a < SHARD_REREAD_NARROW_LINES {
+            return None;
+        }
+        let delivered = self.shard_delivered.get(rel)?;
+        if !delivered.iter().any(|&(s, e)| s <= a && b <= e) {
+            return None;
+        }
+        if !self.reread_withheld.insert(rel.to_string()) {
+            return None;
+        }
+        let findings: Vec<&String> = self
+            .findings
+            .iter()
+            .filter(|f| f.starts_with(&format!("{rel}:")))
+            .collect();
+        Some(
+            serde_json::json!({
+                "review_shards_already_read": rel,
+                "lines": format!("{a}-{b}"),
+                "note": format!(
+                    "NOT DELIVERED AGAIN: the review's shard reads already delivered {rel} lines \
+                     {a}-{b}; they count as read. To confirm or correct one finding, read a narrow \
+                     range around it (line_range, at most {SHARD_REREAD_NARROW_LINES} lines). If \
+                     you really need the whole range again, repeat this exact call."
+                ),
+                "shard_note": self.notes.get(rel),
+                "recorded_findings": findings,
+            })
+            .to_string(),
+        )
     }
 
     /// Unread ranges of every planned file, in plan order:
@@ -628,7 +698,12 @@ impl ReviewSession {
                 self.cited_unread.join(", ")
             )
         };
-        let line = match &self.shard_report {
+        let shards = self.shard_report.clone().map(|mut s| {
+            s.rereads_withheld = self.reread_withheld.len();
+            s.render_line();
+            s
+        });
+        let line = match &shards {
             Some(shards) => format!("{line}; {}", shards.line),
             None => line,
         };
@@ -648,7 +723,7 @@ impl ReviewSession {
             stopped: self.stopped.clone(),
             unreadable: self.unreadable.clone(),
             cited_unread: self.cited_unread.clone(),
-            shards: self.shard_report.clone(),
+            shards,
             line,
         }
     }
@@ -1104,6 +1179,30 @@ impl Agent {
     /// file's unread ranges, and the compact inventory for shard prompts.
     pub(super) fn review_shard_targets(&self) -> Option<(PathBuf, UnreadGaps, String)> {
         self.with_review(|s| (s.root.clone(), s.unread_gaps(), s.shard_inventory.clone()))
+    }
+
+    /// The shard re-read note for a `file_read` call (see
+    /// `ReviewSession::shard_reread_note`), `None` when the read is
+    /// delivered normally.
+    pub(super) fn review_shard_reread_note(&self, args_str: &str) -> Option<String> {
+        let workspace = self.tools.workspace_root().path();
+        let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
+        let arg_path = ["path", "file_path", "file", "filepath"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_str()))?;
+        let requested = args
+            .get("line_range")
+            .and_then(|r| r.as_array())
+            .and_then(|r| Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize)));
+        let note = self.with_review(|session| {
+            let rel = relative_key(&session.root, &workspace, arg_path)?;
+            session.shard_reread_note(&rel, requested)
+        })??;
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "review_reread_withheld".to_string(),
+            detail: format!("{arg_path}: already delivered by the shard reads"),
+        });
+        Some(note)
     }
 
     /// Whether this task runs under the review coverage machinery.
@@ -1744,6 +1843,26 @@ mod tests {
         assert_eq!(t.unread_citations("git.rs:50"), vec!["src/tools/git.rs:50"]);
         t.record("src/tools/git.rs", (1, 100));
         assert!(t.unread_citations("git.rs:50").is_empty());
+    }
+
+    #[test]
+    fn only_a_broad_reread_of_shard_delivered_lines_is_withheld_once() {
+        let mut s = session(&[("a.rs", 200), ("b.rs", 200)]);
+        s.record("a.rs", (1, 200));
+        s.record_shard_delivery("a.rs", (1, 200));
+        s.record("b.rs", (1, 200)); // read by the main agent, not a shard
+                                    // No shard phase: nothing withheld.
+        assert!(s.shard_reread_note("a.rs", None).is_none());
+        s.set_shard_report(super::super::review_shards::ShardRunReport::default());
+        // Narrow confirmation reads are delivered.
+        assert!(s.shard_reread_note("a.rs", Some((10, 60))).is_none());
+        // Lines the shards did not deliver are delivered.
+        assert!(s.shard_reread_note("b.rs", None).is_none());
+        let note = s.shard_reread_note("a.rs", None).expect("withheld");
+        assert!(note.contains("NOT DELIVERED AGAIN"), "{note}");
+        // The same file again: the model insists, it gets the content.
+        assert!(s.shard_reread_note("a.rs", Some((1, 200))).is_none());
+        assert_eq!(s.report().shards.unwrap().rereads_withheld, 1);
     }
 
     #[test]

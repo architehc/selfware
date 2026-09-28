@@ -644,3 +644,74 @@ async fn the_shard_phase_runs_once_and_main_requests_keep_its_coverage() {
     );
     server.stop().await;
 }
+
+/// Measured before (8282adc2, live): with coverage complete from the shard
+/// reads, the main agent still re-read every file whole. The first broad
+/// re-read of a shard-read file gets the shard note and the file's recorded
+/// findings instead of the content; a narrow confirmation read and a
+/// repeated request are delivered; nothing is credited for the note.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn a_broad_reread_of_a_shard_read_file_is_withheld_once() {
+    use crate::testing::mock_api::MockLlmServer;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+    let body: String = (1..=100)
+        .map(|i| format!("def f{i}(x):\n    return x + {i}\n"))
+        .collect();
+    std::fs::write(dir.path().join("pkg/big.py"), &body).unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let read = |args: &str| {
+        format!("<tool>\n<name>file_read</name>\n<arguments>{args}</arguments>\n</tool>")
+    };
+    let shard = r#"{"files":[{"path":"pkg/big.py","summary":"one hundred adders"}],
+      "findings":[{"path":"pkg/big.py","line":4,"severity":"low","title":"f2 adds a constant","evidence_quote":"return x + 2"}]}"#;
+    let server = MockLlmServer::builder()
+        .with_response(shard)
+        .with_response(read(r#"{"path":"pkg/big.py"}"#))
+        .with_response(read(r#"{"path":"pkg/big.py","line_range":[1,30]}"#))
+        .with_response(read(r#"{"path":"pkg/big.py"}"#))
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "Final review: pkg/big.py:4 `return x + 2` — [low] f2 adds a constant.".to_string(),
+        ))
+        .build()
+        .await;
+    let mut agent = Agent::new(shard_config(server.url())).await.unwrap();
+    let result = agent
+        .run_task("review this repository for bugs, cite file:line")
+        .await;
+    server.stop().await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    let texts: Vec<String> = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    let withheld: Vec<&String> = texts
+        .iter()
+        .filter(|t| t.contains("review_shards_already_read"))
+        .collect();
+    assert_eq!(withheld.len(), 1, "exactly the first broad re-read");
+    assert!(
+        withheld[0].contains("one hundred adders"),
+        "{}",
+        withheld[0]
+    );
+    assert!(withheld[0].contains("pkg/big.py:4"), "{}", withheld[0]);
+    // The narrow read and the repeated whole read were delivered.
+    let delivered = texts
+        .iter()
+        .filter(|t| t.contains("return x + 1") && t.contains("lines_returned"))
+        .count()
+        + texts
+            .iter()
+            .filter(|t| t.contains("return x + 100") && !t.contains("review_shards_already_read"))
+            .count();
+    assert!(delivered >= 2, "{texts:#?}");
+    let coverage = agent.review_coverage().unwrap();
+    assert!(coverage.complete);
+    assert_eq!(coverage.shards.unwrap().rereads_withheld, 1);
+}

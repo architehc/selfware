@@ -4734,6 +4734,9 @@ impl Agent {
             if let Some(note) = self
                 .unchanged_reread_note(args_str, result)
                 .or_else(|| self.outline_reread_note(args_str, result))
+                // A review's shard reads already delivered this file: the
+                // first broad re-read gets its shard note and findings.
+                .or_else(|| self.review_shard_reread_note(args_str))
             {
                 let gate = sanitize_tool_context(
                     tool_name,
