@@ -285,3 +285,63 @@ async fn xml_mode_neutralizes_only_framing_tags() {
     assert!(text.contains("[framing: 1 `<`"), "{text}");
     assert_eq!(text.matches("</tool_result>").count(), 1);
 }
+
+/// 0.9.5: every secret shape reaches the model redacted through the real
+/// gate, in each tool-result shape (grep matches, shell output, file_read),
+/// with the line count intact and the redaction note attached.
+#[test]
+fn sanitize_tool_context_redacts_the_secret_corpus_in_every_shape() {
+    for (input, secrets, context) in crate::safety::redact::tests::secret_corpus() {
+        let path = match context {
+            crate::safety::redact::RedactionContext::RustSource => "src/config.rs",
+            crate::safety::redact::RedactionContext::Generic => "deploy/app.env",
+        };
+        let shapes = [
+            (
+                "grep_search",
+                serde_json::json!({"path": path}),
+                serde_json::json!({"matches": input.lines().enumerate().map(|(i, l)| {
+                    serde_json::json!({"file": path, "line": i + 1, "content": l})
+                }).collect::<Vec<_>>()})
+                .to_string(),
+            ),
+            (
+                "shell_exec",
+                serde_json::json!({"command": "cat deploy/app.env"}),
+                serde_json::json!({"stdout": input, "exit_code": 0}).to_string(),
+            ),
+            (
+                "file_read",
+                serde_json::json!({"path": path}),
+                serde_json::json!({
+                    "content": crate::tools::line_numbers::number_lines(&input, 1),
+                    "line_numbers": true
+                })
+                .to_string(),
+            ),
+        ];
+        for (tool, args, result) in shapes {
+            // Rust-source quoted literals are only a Rust-path concern.
+            if context == crate::safety::redact::RedactionContext::RustSource
+                && tool == "shell_exec"
+            {
+                continue;
+            }
+            let gate = sanitize_tool_context(tool, &args.to_string(), &result, true);
+            for secret in &secrets {
+                let escaped = serde_json::to_string(secret).unwrap();
+                let escaped = &escaped[1..escaped.len() - 1];
+                assert!(
+                    !gate.content.contains(escaped),
+                    "{tool}: {secret} leaked: {}",
+                    gate.content
+                );
+            }
+            assert!(
+                gate.content.contains("[REDACTED:"),
+                "{tool}: {}",
+                gate.content
+            );
+        }
+    }
+}

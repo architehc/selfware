@@ -850,3 +850,459 @@ fn every_builtin_secret_detector_has_model_redaction_coverage() {
         assert_eq!(out.content.lines().count(), input.lines().count());
     }
 }
+
+// ── 0.9.5 security review: the model-facing redactor must catch every
+// secret the log redactor caught (and more), in every output shape the
+// agent produces — while still never touching code. ──
+
+/// Secret fixtures built at runtime (push protection).
+struct SecretFixtures {
+    hex: String,
+    github: String,
+    openai: String,
+    hf: String,
+    whsec: String,
+    xapp: String,
+    xoxe: String,
+    pypi: String,
+    aws_secret: String,
+}
+
+fn fixtures() -> SecretFixtures {
+    SecretFixtures {
+        hex: ["a4f8e2b19c7d", "3f5a6b8c0d2e4f6a8b0c"].concat(),
+        github: ["ghp", "A1b2C3d4E5f6G7h8I9j0K1l2"].join("_"),
+        openai: ["sk", "proj", "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0"].join("-"),
+        hf: ["hf", "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3W"].join("_"),
+        whsec: ["whsec", "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1"].join("_"),
+        xapp: ["xapp", "1", "A0123456789", "1234567890123", "ab12cd34ef56"].join("-"),
+        xoxe: ["xoxe.xoxp", "1", "Mi0yLTEyMzQ1Njc4OTAx"].join("-"),
+        pypi: ["pypi", "AgEIcHlwaS5vcmcCJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAw"].join("-"),
+        aws_secret: ["wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"].join("/"),
+    }
+}
+
+/// (input, secrets that must not survive, context). Every shape the review
+/// reproduced as a regression, plus formats both redactors used to miss.
+/// Shared with the FIM, checkpoint and dispatch tests.
+pub(crate) fn secret_corpus() -> Vec<(String, Vec<String>, RedactionContext)> {
+    let f = fixtures();
+    let g = RedactionContext::Generic;
+    let hex = f.hex.clone();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF0Tx6gBCAC7ZkpxyZq8Xw3Lm9\n=Ab3C\n-----END PGP PRIVATE KEY BLOCK-----\n";
+    let putty = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nComment: me\nPublic-Lines: 1\nAAAAC3NzaC1lZDI1NTE5AAAAIPublicPart\nPrivate-Lines: 2\nAAAAIPrivateBlobH9vz3E8Kq5X2\nAAAAIPrivateTailZq8Xw3Lm9\nPrivate-MAC: 8f3a2b1c9d7e6f5a4b3c2d1e0f9a8b7c\n";
+    vec![
+        // grep / rg output: `path:line:` and `path-line-` prefixes.
+        (format!("src/app.env:4:API_TOKEN={hex}"), vec![hex.clone()], g),
+        (format!("src/app.env:4:1:API_TOKEN={hex}"), vec![hex.clone()], g),
+        (
+            "./config/settings.py:12:SECRET_KEY = \"django-insecure-k9#m2$xq7!v@4pz8&w1\"".into(),
+            s(&["k9#m2$xq7!v@4pz8&w1"]),
+            g,
+        ),
+        ("config/app.env-5-DB_PASSWORD=Sup3rS3cret9".into(), s(&["Sup3rS3cret9"]), g),
+        // Several pairs on one line; a bare value ends at whitespace.
+        (
+            format!(
+                "SELFWARE_API_KEY=Zq8Xw3Lm9Np2Rt5Vb7 DB_PASSWORD=Sup3rS3cret9 AWS_SECRET_ACCESS_KEY={} PATH=/bin",
+                f.aws_secret
+            ),
+            vec!["Zq8Xw3Lm9Np2Rt5Vb7".into(), "Sup3rS3cret9".into(), f.aws_secret.clone()],
+            g,
+        ),
+        // Diff lines and jq -R output.
+        (format!("+API_TOKEN={hex}"), vec![hex.clone()], g),
+        ("> DB_PASSWORD=Sup3rS3cret9".into(), s(&["Sup3rS3cret9"]), g),
+        ("-DB_PASSWORD=hunterabcdefgh".into(), s(&["hunterabcdefgh"]), g),
+        ("< HMAC_KEY=9f8e7d6c5b4a3f2e".into(), s(&["9f8e7d6c5b4a3f2e"]), g),
+        ("\"DB_PASSWORD=Sup3rS3cret9\"".into(), s(&["Sup3rS3cret9"]), g),
+        ("\"DB_PASSWORD=hunterabcdefgh\"".into(), s(&["hunterabcdefgh"]), g),
+        // Secret word not last.
+        ("HMAC_KEY=9f8e7d6c5b4a3f2e1d0c".into(), s(&["9f8e7d6c5b4a3f2e1d0c"]), g),
+        (format!("SECRET_KEY_BASE={hex}"), vec![hex.clone()], g),
+        ("API_KEY_PROD=Zq8Xw3Lm9Np2Rt5Vb7".into(), s(&["Zq8Xw3Lm9Np2Rt5Vb7"]), g),
+        // Value followed by more command.
+        ("TOKEN=Zq8Xw3Lm9Np2Rt5Vb7 ./run.sh".into(), s(&["Zq8Xw3Lm9Np2Rt5Vb7"]), g),
+        (
+            "export TOKEN=Zq8Xw3Lm9Np2Rt5Vb7 && make deploy".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7"]),
+            g,
+        ),
+        (
+            "curl -H \"X-Api-Key: Zq8Xw3Lm9Np2Rt5Vb7\" https://api.example.com".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7"]),
+            g,
+        ),
+        (
+            "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyzABCDEF' https://x.io".into(),
+            s(&["abcdefghijklmnopqrstuvwxyzABCDEF"]),
+            g,
+        ),
+        (
+            "docker run -e DB_PASSWORD=hunterabcdefgh postgres".into(),
+            s(&["hunterabcdefgh"]),
+            g,
+        ),
+        // Opaque bearer without a digit.
+        (
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyzABCDEF".into(),
+            s(&["abcdefghijklmnopqrstuvwxyzABCDEF"]),
+            g,
+        ),
+        (
+            "Authorization: Basic dXNlcjpodW50ZXIyc2VjcmV0".into(),
+            s(&["dXNlcjpodW50ZXIyc2VjcmV0"]),
+            g,
+        ),
+        // Connection strings.
+        (
+            "sqlserver://db.example.com;user=sa;password=Sup3rS3cret9;encrypt=true".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "Server=tcp:db.example.com,1433;User ID=sa;Password=Sup3rS3cret9;Encrypt=True;".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "DATABASE_URL=postgres://app:pa/ss9word@db.internal/app".into(),
+            s(&["pa/ss9word", "ss9word"]),
+            g,
+        ),
+        ("postgres://app:p@ss1@host/db".into(), s(&["p@ss1", "ss1@"]), g),
+        (
+            "git remote add origin https://deploy:Sup3rS3cret9@git.example.com/repo.git".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        // Rust source: quoted literal secrets redact in code files too.
+        (
+            "let password = \"hunter2secret\";".into(),
+            s(&["hunter2secret"]),
+            RedactionContext::RustSource,
+        ),
+        (
+            "const API_TOKEN: &str = \"Zq8Xw3Lm9Np2Rt5Vb7\";".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7"]),
+            RedactionContext::RustSource,
+        ),
+        // Kubeconfig.
+        (
+            "users:\n- name: admin\n  user:\n    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo=\n    token: Zq8Xw3Lm9Np2Rt5Vb7Yc4\n".into(),
+            s(&["LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo=", "Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        // PGP and PuTTY private keys.
+        (pgp.into(), s(&["lQOYBF0Tx6gBCAC7ZkpxyZq8Xw3Lm9", "=Ab3C"]), g),
+        (
+            putty.into(),
+            s(&[
+                "AAAAIPrivateBlobH9vz3E8Kq5X2",
+                "AAAAIPrivateTailZq8Xw3Lm9",
+                "8f3a2b1c9d7e6f5a4b3c2d1e0f9a8b7c",
+            ]),
+            g,
+        ),
+        // Vendor formats.
+        (format!("HF={}", f.hf), vec![f.hf.clone()], g),
+        (format!("hook secret {}", f.whsec), vec![f.whsec.clone()], g),
+        (format!("slack app token {}", f.xapp), vec![f.xapp.clone()], g),
+        (format!("rotated: {}", f.xoxe), vec![f.xoxe.clone()], g),
+        // mysql -p / --password=.
+        ("mysql -u root -pSup3rS3cret9 appdb".into(), s(&["Sup3rS3cret9"]), g),
+        ("mysqldump --password=Sup3rS3cret9 appdb".into(), s(&["Sup3rS3cret9"]), g),
+        ("mysql -u root --password=hunterabcdefgh appdb".into(), s(&["hunterabcdefgh"]), g),
+        // .npmrc / .pypirc.
+        (
+            "//registry.npmjs.org/:_authToken=Zq8Xw3Lm9Np2Rt5Vb7Yc4".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        (
+            format!("[pypi]\nusername = __token__\npassword = {}\n", f.pypi),
+            vec![f.pypi.clone()],
+            g,
+        ),
+        ("[server]\npassword = hunter2secret\n".into(), s(&["hunter2secret"]), g),
+        // Docker auths, GCP service account (as text lines).
+        (
+            "{\n  \"auths\": {\n    \"https://index.docker.io/v1/\": {\n      \"auth\": \"dXNlcjpodW50ZXIyc2VjcmV0\"\n    }\n  }\n}\n extra".into(),
+            s(&["dXNlcjpodW50ZXIyc2VjcmV0"]),
+            g,
+        ),
+        (
+            "  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n-----END PRIVATE KEY-----\\n\",".into(),
+            s(&["MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"]),
+            g,
+        ),
+        // Passphrases with spaces, secret-named and quoted.
+        (
+            "passphrase = \"correct horse battery staple\"".into(),
+            s(&["correct horse battery staple"]),
+            g,
+        ),
+        (
+            "DB_PASSWORD=\"correct horse battery staple\"".into(),
+            s(&["correct horse battery staple"]),
+            g,
+        ),
+        // env dump.
+        (
+            format!(
+                "HOME=/Users/ivo\nPWD=/Users/ivo/app\nGITHUB_TOKEN={}\nOPENAI_API_KEY={}\n",
+                f.github, f.openai
+            ),
+            vec![f.github.clone(), f.openai.clone()],
+            g,
+        ),
+        // Command lines.
+        (
+            "psql \"host=db port=5432 user=app password=Sup3rS3cret9 dbname=app\"".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "aws configure set aws_secret_access_key Zq8Xw3Lm9Np2Rt5Vb7 && AWS_SESSION_TOKEN=Zq8Xw3Lm9Np2Rt5Vb7Yc4Ab ./deploy".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7Yc4Ab", "Zq8Xw3Lm9Np2Rt5Vb7 "]),
+            g,
+        ),
+        (
+            format!("AWS_SECRET_ACCESS_KEY = \"{}\"", f.aws_secret),
+            vec![f.aws_secret.clone()],
+            g,
+        ),
+    ]
+}
+
+#[test]
+fn model_redaction_catches_every_secret_shape_line_preserving() {
+    for (input, secrets, context) in secret_corpus() {
+        let out = redact_for_model(&input, context);
+        for secret in &secrets {
+            assert!(
+                !out.content.contains(secret.as_str()),
+                "{secret} leaked from {input:?}: {}",
+                out.content
+            );
+        }
+        assert!(out.redacted > 0, "{input:?}");
+        assert!(
+            out.content.contains(MODEL_REDACTION_MARKER_PREFIX),
+            "{input:?}"
+        );
+        assert_eq!(
+            out.content.lines().count(),
+            input.lines().count(),
+            "line count: {input:?} -> {}",
+            out.content
+        );
+        // The same text as a JSON tool result (grep/file_read/shell shape).
+        let json = serde_json::json!({"output": input, "exit_code": 0}).to_string();
+        let out = redact_for_model(&json, context);
+        let value: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        let delivered = value["output"].as_str().unwrap();
+        for secret in &secrets {
+            assert!(
+                !delivered.contains(secret.as_str()),
+                "{secret} leaked (json): {delivered}"
+            );
+        }
+        assert_eq!(delivered.lines().count(), input.lines().count());
+    }
+}
+
+#[test]
+fn model_redaction_keeps_the_key_and_the_rest_of_the_line() {
+    let cases = [
+        (
+            "src/app.env:4:API_TOKEN=a4f8e2b19c7d3f5a6b8c0d2e4f6a8b0c",
+            "src/app.env:4:API_TOKEN=[REDACTED:token]",
+        ),
+        (
+            "A=1 DB_PASSWORD=Sup3rS3cret9 PATH=/bin",
+            "A=1 DB_PASSWORD=[REDACTED:password] PATH=/bin",
+        ),
+        (
+            "TOKEN=Zq8Xw3Lm9Np2Rt5Vb7 ./run.sh --verbose",
+            "TOKEN=[REDACTED:token] ./run.sh --verbose",
+        ),
+        (
+            "Server=db;User ID=sa;Password=Sup3rS3cret9;Encrypt=True;",
+            "Server=db;User ID=sa;Password=[REDACTED:password];Encrypt=True;",
+        ),
+        (
+            "postgres://app:p@ss1@host/db",
+            "postgres://app:[REDACTED:connection_password]@host/db",
+        ),
+        (
+            "let password = \"hunter2secret\";",
+            "let password = \"[REDACTED:password]\";",
+        ),
+    ];
+    for (input, want) in cases {
+        let context = if input.starts_with("let ") {
+            RedactionContext::RustSource
+        } else {
+            RedactionContext::Generic
+        };
+        assert_eq!(redact_for_model(input, context).content, want);
+    }
+}
+
+/// Code and config text that must reach the model byte for byte — the
+/// 0.9.4 false-positive corpus plus lookalikes of the new shapes.
+const CODE_FALSE_POSITIVES: &[&str] = &[
+    "    tokens = text.split(DEFAULT_SEPARATOR)",
+    "    token_count = len(tokens)",
+    "    password_field = form[\"password\"]",
+    "    api_key = get_key()",
+    "    if x < y && y > z:",
+    "LITERAL = \"a &amp; b\"",
+    "def slugify(text, api_key=None):",
+    "_authToken=${NPM_TOKEN}",
+    "PWD=/Users/ivo/app",
+    "OLDPWD=/private/tmp",
+    "SSH_AUTH_SOCK=/private/tmp/com.apple.launchd.abc/Listeners",
+    "    password_placeholder = \"Enter your password\"",
+    "  \"password\": \"Enter your password\",",
+    "auth_url = \"https://auth.example.com/oauth2/token\"",
+    "    conn = connect(password=db_password, user=db_user)",
+    "    page = fetch(token=next_token2)",
+    "    let token: Token = lexer.next_token();",
+    "    api_key: String,",
+    "    pub password: Option<String>,",
+    "Bearer authentication is required for this endpoint.",
+    "See https://registry.npmjs.org/@scope/pkg for details",
+    "    url = \"http://localhost:8080/@user\"",
+    "    if password != confirm_password {",
+    "    let api_key = std::env::var(\"API_KEY\")?;",
+    "secret_name: my-app-secret",
+    "        self.token = token",
+    "token_type: bearer",
+    "max_tokens: 4096",
+    "- name: API_TOKEN",
+    "export PATH=/usr/local/bin:$PATH",
+    "const TOKEN_PREFIX: &str = \"ghp_\";",
+    "      password: ${{ secrets.DB_PASSWORD }}",
+    "mysql -u root -p appdb",
+    "curl -u \"$USER:$PASS\" https://example.com",
+    "Basic authentication is disabled.",
+    "    let secret = compute_hash();",
+    "    let api_key = fetch_remote_api_key();",
+    "    SECRET_KEY = os.environ[\"SECRET_KEY\"]",
+    "    token = next_token2 + 1",
+    "    kind = \"access_token\"",
+    "    api_key=API_KEY,",
+    "    headers = {\"Authorization\": f\"Bearer {token}\"}",
+    "    match token { Token::Ident(name) => name, _ => \"\" }",
+    "    let key = cache_key(&path);",
+    "sort_key: created_at",
+];
+
+#[test]
+fn model_redaction_leaves_code_false_positive_corpus_untouched() {
+    let text = CODE_FALSE_POSITIVES.join("\n") + "\n";
+    for context in [RedactionContext::Generic, RedactionContext::RustSource] {
+        for line in CODE_FALSE_POSITIVES {
+            let out = redact_for_model(line, context);
+            assert_eq!(out.content, *line, "{context:?} mangled {line:?}");
+            assert_eq!(out.redacted, 0, "{line:?}");
+        }
+        let out = redact_for_model(&text, context);
+        assert_eq!(out.content, text);
+        let numbered = crate::tools::line_numbers::number_lines(&text, 1);
+        let json = serde_json::json!({"content": numbered}).to_string();
+        assert_eq!(redact_for_model(&json, context).content, json);
+        // grep-shaped
+        for line in CODE_FALSE_POSITIVES {
+            let grep = format!("src/lib.py:12:{line}");
+            assert_eq!(redact_for_model(&grep, context).content, grep);
+        }
+    }
+}
+
+/// The inherit-every-detector invariant: after model redaction, no scanner
+/// detector finds a live secret in the output (PEM headers stay by design —
+/// their bodies are what gets redacted).
+#[test]
+fn no_scanner_detector_survives_model_redaction() {
+    let detectors = crate::safety::scanner::SecretScanner::default_patterns();
+    let mut inputs: Vec<(String, RedactionContext)> = secret_corpus()
+        .into_iter()
+        .map(|(input, _, context)| (input, context))
+        .collect();
+    inputs.push((
+        "password = \"H9vz3E8Kq5X2\"\nauth=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A\nBearer B7q2Xk9Lm3Np8Qr4\nAccountKey=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv\napi_key = \"A1b2C3d4E5f6G7h8I9j0\"\n".into(),
+        RedactionContext::Generic,
+    ));
+    for (input, context) in inputs {
+        let out = redact_for_model(&input, context);
+        for detector in &detectors {
+            if detector.name == "Private Key" {
+                continue;
+            }
+            let Some(re) = &detector.compiled else {
+                continue;
+            };
+            for line in out.content.lines() {
+                for m in re.find_iter(line) {
+                    assert!(
+                        m.as_str().contains(MODEL_REDACTION_MARKER_PREFIX),
+                        "{} still matches {:?} in {:?}",
+                        detector.name,
+                        m.as_str(),
+                        out.content
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn log_redactor_keeps_backslashes_inside_values() {
+    let out = redact_secrets("password=ab\\cdefgh");
+    assert!(!out.contains("cdefgh"), "{out}");
+    assert!(!out.contains("ab\\"), "{out}");
+    // …without reintroducing the JSON-newline swallow.
+    let json = serde_json::json!({"c": "password=abcdefgh\nnext_line_stays"}).to_string();
+    let out = redact_secrets(&json);
+    assert!(out.contains("\\nnext_line_stays"), "{out}");
+    assert!(!out.contains("abcdefgh"), "{out}");
+}
+
+#[test]
+fn model_redaction_of_whole_json_documents() {
+    let docker = serde_json::json!({
+        "auths": {"https://index.docker.io/v1/": {"auth": "dXNlcjpodW50ZXIyc2VjcmV0"}}
+    })
+    .to_string();
+    let out = redact_for_model(&docker, RedactionContext::Generic);
+    assert!(
+        !out.content.contains("dXNlcjpodW50ZXIyc2VjcmV0"),
+        "{}",
+        out.content
+    );
+    let gcp = serde_json::json!({
+        "type": "service_account",
+        "private_key_id": "0123456789abcdef",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nAbCdEf0123\n-----END PRIVATE KEY-----\n",
+        "client_email": "svc@project.iam.gserviceaccount.com"
+    })
+    .to_string();
+    let out = redact_for_model(&gcp, RedactionContext::Generic);
+    assert!(
+        !out.content.contains("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("AbCdEf0123"), "{}", out.content);
+    assert!(out.content.contains("svc@project.iam.gserviceaccount.com"));
+    let env =
+        serde_json::json!({"env": {"DB_PASSWORD": "Sup3rS3cret9", "PATH": "/bin"}}).to_string();
+    let out = redact_for_model(&env, RedactionContext::Generic);
+    assert!(!out.content.contains("Sup3rS3cret9"));
+    assert!(out.content.contains("/bin"));
+}

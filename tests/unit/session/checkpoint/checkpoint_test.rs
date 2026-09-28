@@ -3058,3 +3058,43 @@ fn test_save_keeps_code_in_messages_byte_for_byte() {
     let loaded = manager.load("fidelity").unwrap();
     assert_eq!(loaded.messages.last().unwrap().content.text(), code);
 }
+
+#[test]
+fn checkpoint_on_disk_holds_no_secret_from_the_corpus() {
+    // Checkpoints are written to disk and restored into the model context:
+    // every secret shape the model-facing redactor covers must be gone from
+    // the file, whether it came as a message or a serialized tool result.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let corpus = crate::safety::redact::tests::secret_corpus();
+    let mut checkpoint = TaskCheckpoint::new("corpus".to_string(), "Corpus".to_string());
+    for (input, _, _) in &corpus {
+        checkpoint.messages.push(Message::user(input.as_str()));
+        let tool_result = serde_json::json!({"output": input, "exit_code": 0}).to_string();
+        checkpoint.messages.push(Message::assistant(tool_result));
+    }
+    manager.save(&checkpoint).unwrap();
+    let mut raw = String::new();
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if entry.path().is_file() {
+            raw.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+    }
+    let loaded = manager.load("corpus").unwrap();
+    let texts: Vec<String> = loaded
+        .messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    for (input, secrets, _) in &corpus {
+        for secret in secrets {
+            let escaped = serde_json::to_string(secret).unwrap();
+            let escaped = &escaped[1..escaped.len() - 1];
+            assert!(!raw.contains(escaped), "{secret} on disk (from {input:?})");
+            assert!(
+                texts.iter().all(|t| !t.contains(secret.as_str())),
+                "{secret} restored from checkpoint (from {input:?})"
+            );
+        }
+    }
+}
