@@ -25,7 +25,9 @@ import signal
 import site
 import subprocess
 import sys
+import tempfile
 import time
+import traceback
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,7 +39,7 @@ import scorers  # noqa: E402
 SCENARIO_DIR = HERE / "scenarios"
 REPO_ROOT = HERE.parents[1]
 TRACKED_CONFIG = "selfware-llm-selfware-design.toml"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: 0.9.5 scorer (review fixes), toolchain HOME, work root
 
 # Artifact caps (bytes): keep the head and tail of long streams.
 CAP_HEAD = 512 * 1024
@@ -53,17 +55,48 @@ def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def default_results_dir():
-    """$LIVE_EVAL_RESULTS_DIR, else $TMPDIR/selfware-live-eval (never the repo)."""
-    raw = os.environ.get("LIVE_EVAL_RESULTS_DIR") or os.path.join(
+def _inside(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def default_results_dir(explicit=None):
+    """`explicit`, else $LIVE_EVAL_RESULTS_DIR, else $TMPDIR/selfware-live-eval.
+
+    Never inside the repository tree, whichever way it was given.
+    """
+    raw = explicit or os.environ.get("LIVE_EVAL_RESULTS_DIR") or os.path.join(
         os.environ.get("TMPDIR") or "/tmp", "selfware-live-eval"
     )
     path = Path(raw).expanduser().resolve()
-    try:
-        path.relative_to(REPO_ROOT)
-    except ValueError:
-        return path
-    raise SystemExit(f"results dir {path} is inside the repository tree; choose another")
+    if _inside(path, REPO_ROOT):
+        raise SystemExit(f"results dir {path} is inside the repository tree; choose another")
+    return path
+
+
+def work_root(results_dir):
+    """Where run workspaces live: $LIVE_EVAL_WORK_ROOT, else a directory in
+    the system temp dir — never inside the results dir or the harness repo.
+
+    A workspace inside the results dir let a yolo shell walk `../../..` to
+    the answer key (in build-src) and to earlier runs' results; keeping the
+    workspace out of their ancestry removes that route, and
+    `contamination_hits` flags any run that reaches them anyway.
+    """
+    raw = os.environ.get("LIVE_EVAL_WORK_ROOT") or os.path.join(
+        tempfile.gettempdir(), "selfware-live-eval-work"
+    )
+    root = Path(raw).expanduser().resolve()
+    for other in (results_dir, REPO_ROOT, HERE):
+        if _inside(root, other) or _inside(other, root):
+            raise SystemExit(
+                f"work root {root} overlaps {other}: the agent could reach harness state"
+            )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 # --------------------------------------------------------------------------
@@ -124,6 +157,12 @@ class Binary:
         self.commit = commit
         self.source_tree = str(source_tree)
         self.version = version or binary_version(path)
+        built = version_sha(self.version)
+        if built and not commit.startswith(built):
+            raise ValueError(
+                f"{path} reports {self.version!r} but is labelled {commit[:12]}: "
+                "refusing to record its runs under the wrong commit"
+            )
 
     def as_dict(self):
         return {
@@ -132,6 +171,12 @@ class Binary:
             "version": self.version,
             "source_tree": self.source_tree,
         }
+
+
+def version_sha(version):
+    """The `+g<sha>` a dev build embeds in `--version`, or None (release build)."""
+    m = re.search(r"\+g([0-9a-f]{7,40})\b", version or "")
+    return m.group(1) if m else None
 
 
 def binary_version(path):
@@ -155,14 +200,68 @@ def git(*args, cwd=None, check=True, capture=True):
 # --------------------------------------------------------------------------
 
 
+def prepare_home(home, results_dir):
+    """Make the real toolchains usable from the isolated HOME.
+
+    selfware's tool spawns keep only a small env allowlist
+    (`safety::process_env::DEFAULT_KEEP`: PATH, HOME, CARGO_HOME,
+    RUSTUP_HOME, ...), so PYTHONUSERBASE / CARGO_TARGET_DIR set for the agent
+    never reached its `python3 -m pytest` or `cargo check` (0.9.4 live:
+    "No module named pytest" in 5 of 6 edit-tests runs; the shared target
+    dir was never created). Instead the HOME itself carries them:
+    - the Python user site (where pytest lives) is symlinked at the same
+      path relative to the fake HOME;
+    - CARGO_HOME is a per-run dir whose bin/registry/git link to the real
+      ones and whose config.toml sets `build.target-dir` to the shared
+      `<results>/child-target`;
+    - ~/.rustup links to the real toolchains.
+    Returns the CARGO_HOME to export.
+    """
+    real_home = Path(os.path.expanduser("~")).resolve()
+    home = Path(home)
+    userbase = Path(site.getuserbase())
+    try:
+        rel = userbase.resolve().relative_to(real_home)
+        link = home / rel
+        if userbase.exists() and not link.exists():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(userbase)
+    except ValueError:
+        pass
+    real_cargo = Path(os.environ.get("CARGO_HOME") or real_home / ".cargo")
+    cargo_home = home / ".cargo"
+    cargo_home.mkdir(parents=True, exist_ok=True)
+    for name in ("bin", "registry", "git"):
+        if (real_cargo / name).exists() and not (cargo_home / name).exists():
+            (cargo_home / name).symlink_to(real_cargo / name)
+    config = ""
+    for name in ("config.toml", "config"):
+        if (real_cargo / name).is_file():
+            config = (real_cargo / name).read_text()
+            break
+    target = str(Path(results_dir) / "child-target")
+    if "target-dir" not in config:
+        line = f'target-dir = "{target}"\n'
+        if "[build]" in config:
+            config = config.replace("[build]", "[build]\n" + line, 1)
+        else:
+            config = config.rstrip() + ("\n\n" if config.strip() else "") + "[build]\n" + line
+    (cargo_home / "config.toml").write_text(config)
+    real_rustup = Path(os.environ.get("RUSTUP_HOME") or real_home / ".rustup")
+    if real_rustup.exists() and not (home / ".rustup").exists():
+        (home / ".rustup").symlink_to(real_rustup)
+    return cargo_home
+
+
 def child_env(home, results_dir):
     """Environment for the agent: isolated HOME, no inherited selfware/API keys.
 
     HOME is per run so no response cache, checkpoint, trust entry or global
-    config (~/.config/selfware) leaks between runs; toolchain homes are pinned
-    to the real ones so `cargo` / `python3 -m pytest` still resolve.
+    config (~/.config/selfware) leaks between runs; `prepare_home` makes the
+    real toolchains reachable from it.
     """
     real_home = os.path.expanduser("~")
+    cargo_home = prepare_home(home, results_dir)
     env = {
         k: v
         for k, v in os.environ.items()
@@ -173,12 +272,10 @@ def child_env(home, results_dir):
     }
     env["HOME"] = str(home)
     env["NO_COLOR"] = "1"
-    env.setdefault("CARGO_HOME", os.path.join(real_home, ".cargo"))
+    env["CARGO_HOME"] = str(cargo_home)
     env.setdefault("RUSTUP_HOME", os.path.join(real_home, ".rustup"))
-    env["PYTHONUSERBASE"] = site.getuserbase()
-    # The agent's own cargo check/test builds (c24) share one target dir
-    # across runs instead of filling each throwaway workspace.
-    env["CARGO_TARGET_DIR"] = str(Path(results_dir) / "child-target")
+    env.pop("CARGO_TARGET_DIR", None)
+    env.pop("PYTHONUSERBASE", None)
     return env
 
 
@@ -458,6 +555,20 @@ def leaked_resources(binary, env, cwd):
         return None
 
 
+def reap_resources(binary, env, cwd):
+    """`selfware resources reap` with the run's HOME: tear down whatever the
+    run registered and left behind (its own process groups are outside the
+    child's session, so the harness's killpg does not reach them)."""
+    try:
+        res = subprocess.run(
+            [binary.path, "resources", "reap", "--json"], cwd=cwd, env=env,
+            capture_output=True, text=True, timeout=180,
+        )
+        return res.returncode
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 # --------------------------------------------------------------------------
 # artifacts
 # --------------------------------------------------------------------------
@@ -481,19 +592,25 @@ CHECKPOINT_CAP = 20 * 1024 * 1024
 
 
 def keep_checkpoint(home, run_dir):
-    """Keep the run's checkpoint (the conversation as the model saw it:
-    messages with tool results, tool calls) gzipped next to the record.
+    """Keep the run's checkpoints (the conversation as the model saw it:
+    messages with tool results, tool calls) gzipped next to the record, one
+    file per checkpoint; returns the kept paths.
 
     Turn artifacts are off by default and enabling them would change the
     tracked config under test, so the checkpoint is the evidence of what the
     model read. Kept whole (a capped JSON is unreadable) up to 20 MB.
     """
+    kept = []
     for path in sorted(Path(home, ".selfware", "checkpoints").glob("*.json")):
         if path.stat().st_size > CHECKPOINT_CAP:
-            (run_dir / "checkpoint.skipped").write_text(f"{path.name}: {path.stat().st_size} bytes\n")
+            with open(run_dir / "checkpoint.skipped", "a") as fh:
+                fh.write(f"{path.name}: {path.stat().st_size} bytes\n")
             continue
-        with open(path, "rb") as src, gzip.open(run_dir / "checkpoint.json.gz", "wb") as dst:
+        dest = run_dir / f"checkpoint-{path.stem}.json.gz"
+        with open(path, "rb") as src, gzip.open(dest, "wb") as dst:
             shutil.copyfileobj(src, dst)
+        kept.append(dest)
+    return kept
 
 
 def append_record(results_dir, record):
@@ -572,35 +689,66 @@ def _finish(record, status, reason, metrics, criteria, results_dir):
 
 
 def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None, log=print):
-    """Run one scenario once; returns the appended record."""
+    """Run one scenario once; ALWAYS appends and returns exactly one record.
+
+    Any exception inside the run (a post-check timeout, `git init` failing,
+    a scorer bug) becomes a FAIL record with reason `harness_error: ...`
+    instead of killing the caller's worker thread and silently dropping the
+    rest of its queue; the run's scratch dir is removed either way.
+    """
     results_dir = Path(results_dir)
     started = utc_now()
     run_id = f"{started.replace(':', '').replace('-', '')}-{spec['name']}-{random.randrange(16**4):04x}"
     run_dir = results_dir / "runs" / run_id
     run_dir.mkdir(parents=True)
-    scratch = results_dir / "work" / run_id
+    scratch = work_root(results_dir) / run_id
+    state = {"record": _record_base(spec, binary, run_id, started, endpoint_override, None),
+             "appended": False}
+    try:
+        return _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state,
+                             abandon, endpoint_override, log)
+    except Exception as exc:  # noqa: BLE001 - recorded, never swallowed
+        tb = traceback.format_exc(limit=6)
+        (run_dir / "harness_error.txt").write_text(tb)
+        log(f"[{spec['name']}] HARNESS ERROR {type(exc).__name__}: {exc}")
+        if state["appended"]:
+            return state["record"]
+        return _finish(
+            state["record"], "fail", f"harness_error: {type(exc).__name__}: {str(exc)[:300]}",
+            {}, {"harness_ok": False}, results_dir,
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, abandon,
+                  endpoint_override, log):
     work = scratch / "ws"
     home = scratch / "home"
     home.mkdir(parents=True)
     env = child_env(home, results_dir)
 
+    def finish(*args):
+        rec = _finish(state["record"], *args, results_dir)
+        state["appended"] = True
+        return rec
+
     try:
         cfg_path, cfg_text, cfg_src = prepare_config(spec, binary, run_dir, endpoint_override)
     except SetupError as exc:
-        record = _record_base(spec, binary, run_id, started, endpoint_override, None)
-        shutil.rmtree(scratch, ignore_errors=True)
-        return _finish(record, "fail", f"setup_failed: {exc}", {}, {"setup": False}, results_dir)
+        return finish("fail", f"setup_failed: {exc}", {}, {"setup": False})
     endpoint = endpoint_from_config(cfg_text)
     model = model_from_config(cfg_text)
-    record = _record_base(spec, binary, run_id, started, endpoint, model)
+    record = state["record"] = _record_base(
+        spec, binary, run_id, state["record"]["started_at"], endpoint, model
+    )
     record["config_source"] = cfg_src
     record["config_sha256"] = hashlib.sha256(cfg_text.encode()).hexdigest()
     record["artifacts"] = str(run_dir)
 
     def fail(reason, criteria, metrics=None):
-        shutil.rmtree(scratch, ignore_errors=True)
         log(f"[{spec['name']}] FAIL {reason}")
-        return _finish(record, "fail", reason, metrics or {}, criteria, results_dir)
+        return finish("fail", reason, metrics or {}, criteria)
 
     ok, detail = preflight(endpoint or "")
     record["endpoint_models"] = detail if ok else None
@@ -635,12 +783,20 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
     stderr = err_path.read_text(errors="replace")
 
     if spec.get("scorer") == "qa_greeting" and not info["abandoned"]:
-        twin_ws = scratch / "twin"
+        # Its own HOME: the twin must not see the first run's checkpoint,
+        # trust entry or response cache.
+        twin_ws, twin_home = scratch / "twin", scratch / "twin-home"
         twin_ws.mkdir()
+        twin_home.mkdir()
+        twin_env = child_env(twin_home, results_dir)
         _git_init_commit(twin_ws)
+        subprocess.run(
+            [binary.path, "trust", str(cfg_path), "-q"], cwd=twin_ws, env=twin_env,
+            capture_output=True, timeout=60,
+        )
         twin_cmd = base_cmd + ["--max-wall-secs", str(wall), "-p", prompt]
         twin_info = run_child(
-            twin_cmd, twin_ws, env, run_dir / "text_twin.txt", run_dir / "text_twin.err",
+            twin_cmd, twin_ws, twin_env, run_dir / "text_twin.txt", run_dir / "text_twin.err",
             hard_timeout=wall + 60, abandon=abandon,
         )
         extra["text_twin"] = (run_dir / "text_twin.txt").read_text(errors="replace") + (
@@ -649,11 +805,15 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         extra["text_twin_exit"] = twin_info["exit_code"]
         compress_capped(run_dir / "text_twin.txt", run_dir / "text_twin.txt.gz")
         compress_capped(run_dir / "text_twin.err", run_dir / "text_twin.err.gz")
+        reap_resources(binary, twin_env, twin_ws)
 
     if spec.get("post_check") == "c24":
         extra.update(post_c24(work, extra))
     elif spec.get("post_check") == "edit_tests":
         extra.update(post_edit_tests(work, env))
+    prefixes = [str(work) + "/", os.path.realpath(work) + "/"]
+    extra["prefixes"] = prefixes
+    markers = []
     if spec["scorer"] == "review_planted":
         key = json.loads((Path(spec["_dir"]) / "answer_key.json").read_text())
         fixture = Path(spec["_dir"]) / spec["setup"]["dir"]
@@ -662,7 +822,12 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         extra["known_files"] = [
             str(p.relative_to(fixture)) for p in fixture.rglob("*") if p.is_file()
         ]
-        extra["prefixes"] = [str(work) + "/", os.path.realpath(work) + "/"]
+        # Citations are checked against the pristine fixture, not the
+        # workspace the agent could have edited.
+        extra["read_file"] = lambda rel: _read_or_none(fixture / rel)
+        markers.append("answer_key")
+    elif spec["scorer"] == "review_slugify":
+        extra["read_file"] = lambda rel: _read_or_none(work / rel)
     extra["leaked_listing"] = leaked_resources(binary, env, work)
     for k in ("sigint_at", "exit_after_sigint", "streaming_before_sigint"):
         if k in info:
@@ -675,6 +840,18 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
     metrics["leaked_listing"] = extra["leaked_listing"]
     criteria["no_harness_timeout"] = not info["timed_out"]
 
+    kept = keep_checkpoint(home, run_dir)
+    texts = [str(ev.get("args") or "") for ev in inp.stream["events"]
+             if ev.get("event") == "tool_call_started"]
+    texts += checkpoint_tool_texts(kept)
+    hits = scorers.contamination_hits(
+        texts,
+        forbidden_paths=[str(results_dir), str(HERE), str(REPO_ROOT)],
+        extra_markers=markers,
+    )
+    metrics["contamination_hits"] = hits[:10]
+    criteria["not_contaminated"] = not hits
+
     if inp.result is not None:
         (run_dir / "result.json").write_text(json.dumps(inp.result, indent=1)[:PATCH_CAP])
     try:
@@ -686,8 +863,7 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         pass
     compress_capped(out_path, run_dir / "events.jsonl.gz")
     compress_capped(err_path, run_dir / "transcript.txt.gz")
-    keep_checkpoint(home, run_dir)
-    shutil.rmtree(scratch, ignore_errors=True)
+    metrics["reap_exit"] = reap_resources(binary, env, work)
 
     if info["abandoned"]:
         status, reason = "abandoned", "harness stopped (loop shutdown) before the run ended"
@@ -706,7 +882,31 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         reason = f"endpoint_error_mid_run; {reason}"
     record["wall_s"] = info["wall_s"]
     log(f"[{spec['name']}] {status.upper()} {reason or ''} wall={info['wall_s']}s")
-    return _finish(record, status, reason, metrics, criteria, results_dir)
+    return finish(status, reason, metrics, criteria)
+
+
+def _read_or_none(path):
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def checkpoint_tool_texts(paths):
+    """The assistant turns (tool calls with full arguments) of kept checkpoints."""
+    texts = []
+    for path in paths:
+        try:
+            data = json.load(gzip.open(path))
+        except (OSError, ValueError):
+            continue
+        for msg in (data.get("payload") or {}).get("messages") or []:
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                texts.append(content if isinstance(content, str) else json.dumps(content))
+            for call in msg.get("tool_calls") or []:
+                texts.append(json.dumps(call))
+    return texts
 
 
 OUTAGE_RE = re.compile(

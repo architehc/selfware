@@ -1,8 +1,8 @@
 {
-  "_comment": "Regression thresholds for scripts/live_eval report/gate. Every entry carries its rationale. A change beyond a threshold is REGRESSION when both sides have at least min_samples runs (and, for pass rate, a one-sided Fisher exact p below alpha); otherwise it is WATCH: visible, never silently dropped, but not gate-failing on thin evidence.",
+  "_comment": "Regression thresholds for scripts/live_eval report/gate. Every entry carries its rationale. A change beyond a threshold is REGRESSION only when it is also significant with at least min_samples runs per side (pass rate and citing fraction: one-sided Fisher exact p < alpha; continuous metrics: one-sided Mann-Whitney U p < alpha_continuous); otherwise WATCH. The gate also fails on a pass-rate or citing-fraction WATCH.",
   "min_samples": {
     "value": 3,
-    "rationale": "Below three runs per side a single flaky run swings a mean by a third or more; qwen38 on this endpoint showed 2x wall variance between identical runs (memory: 17-20 tok/s under load)."
+    "rationale": "Below three runs per side a single flaky run swings a mean by a third or more; qwen38 on this endpoint showed 2x wall variance between identical runs. It also gates the pass-rate floors: a floor is judged only with >= min_samples runs."
   },
   "alpha": {
     "value": 0.1,
@@ -28,10 +28,6 @@
     "value": 2.0,
     "rationale": "Mean false findings per run up by two or more: the reviewer started reporting noise, which is the top complaint for repository review."
   },
-  "citations_wrong_increase": {
-    "value": 0.5,
-    "rationale": "Mean wrong citations per run up by half a citation: the target is zero, so any systematic increase matters."
-  },
   "coverage_drop_points": {
     "value": 10,
     "rationale": "Review coverage (percent of relevant lines read) down 10 points or more: reading less of the repo is the failure mode the coverage gate exists to stop."
@@ -41,7 +37,19 @@
     "rationale": "Interventions (nudges, refusals, gate blocks) per turn up by 0.1: the harness is steering one extra turn in ten."
   },
   "floor_pass_rate": {
-    "value": {"review-planted": 0.5, "qa-greeting": 0.5, "interrupt": 0.8},
-    "rationale": "Absolute floors for `gate`: independent of the baseline, so a first release or a baseline that was already bad still cannot ship below them. Only scenarios whose floor is met by the current release are listed; review-slugify/edit-tests/c24 get floors once their baseline is measured."
+    "value": {
+      "review-planted": 0.5,
+      "qa-greeting": 0.5,
+      "interrupt": 0.8
+    },
+    "rationale": "Absolute floors: independent of the baseline, so a first release or an already-bad baseline cannot ship below them. A floor FAILS only when there are >= min_samples runs and the upper end of the 95% Wilson interval is below it (0/5 fails 0.5; 0/3 does not: 3 runs cannot show a 0.5 scenario is below 0.5). Listed only for scenarios whose floor the current release meets; review-slugify/edit-tests/c24 get floors once their baseline is measured."
+  },
+  "alpha_continuous": {
+    "value": 0.05,
+    "rationale": "One-sided Mann-Whitney U on per-run values. The external review (0.9.4) resampled recorded walls: a bare 1.5x-median threshold at n=3 flagged review-slugify 25% and review-planted 10% of the time with no change. At n=3 per side p=0.05 needs complete separation of the two samples; more samples lower the bar."
+  },
+  "citations_wrong_rate_increase": {
+    "value": 0.05,
+    "rationale": "Mean per-run wrong/checked citation rate up by 5 points, over runs that produced citations (n = citing runs). A rate, not a count: 3 wrong of 44 and 3 wrong of 5 are different failures. A drop in the share of runs that cite at all is flagged separately (citing fraction, Fisher), so a candidate cannot pass by citing nothing."
   }
 }

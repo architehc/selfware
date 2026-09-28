@@ -1,13 +1,16 @@
 """Aggregate live-eval JSONL records into per-scenario statistics.
 
-Groups records by (scenario, commit), orders commits by when they were
-first seen, and compares the latest commit with the previous one using the
-thresholds in thresholds.json. Pure functions over record dicts, so the
-regression logic is unit-tested offline.
+Groups records by (scenario, commit), orders commits by git ancestry (when a
+repository is given; else by first record), and compares the candidate with
+its nearest ancestor that has records, using thresholds.json. Pass rates use
+a one-sided Fisher exact test, continuous metrics a one-sided Mann-Whitney U
+test: a change is a REGRESSION only when it is both beyond its threshold and
+significant with enough runs on both sides, otherwise WATCH.
 """
 
 import json
 import math
+import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -77,9 +80,74 @@ def fisher_one_sided(pass_a, n_a, pass_b, n_b):
     return min(1.0, p)
 
 
+def mann_whitney_greater(xs, ys):
+    """One-sided p that `xs` tends to be LARGER than `ys` (Mann-Whitney U).
+
+    Exact null distribution by dynamic programming for small samples (ties
+    count 1/2, compared against the no-ties distribution, which is slightly
+    conservative), normal approximation with continuity correction beyond.
+    """
+    m, n = len(xs), len(ys)
+    if m == 0 or n == 0:
+        return 1.0
+    u = sum(1.0 if x > y else 0.5 if x == y else 0.0 for x in xs for y in ys)
+    if m * n <= 400:
+        counts = _u_distribution(m, n)
+        total = sum(counts)
+        need = math.ceil(u - 1e-9)
+        return sum(counts[need:]) / total
+    mu = m * n / 2
+    sigma = math.sqrt(m * n * (m + n + 1) / 12)
+    z = (u - 0.5 - mu) / sigma
+    return 0.5 * math.erfc(z / math.sqrt(2))
+
+
+def _u_distribution(m, n):
+    """Number of arrangements giving each U = 0..m*n (no ties)."""
+    # f(m, n, u) = f(m-1, n, u-n) + f(m, n-1, u)
+    table = {}
+
+    def f(a, b):
+        if (a, b) in table:
+            return table[(a, b)]
+        if a == 0 or b == 0:
+            res = [1] + [0] * (a * b)
+        else:
+            left, right = f(a - 1, b), f(a, b - 1)
+            res = [0] * (a * b + 1)
+            for u, c in enumerate(left):
+                res[u + b] += c
+            for u, c in enumerate(right):
+                res[u] += c
+        table[(a, b)] = res
+        return res
+
+    return f(m, n)
+
+
 def is_outage(rec):
     reason = rec.get("reason") or ""
     return reason.startswith("endpoint_unreachable") or reason.startswith("endpoint_error_mid_run")
+
+
+def is_harness_failure(rec):
+    reason = rec.get("reason") or ""
+    return reason.startswith("setup_failed") or reason.startswith("harness_error")
+
+
+# Per-run metrics compared between commits:
+# (name, record metric or None for a derived one, threshold key, direction, kind)
+# direction +1: higher is worse. kind "ratio": relative change of the median;
+# "abs": absolute change of the mean.
+CONTINUOUS = (
+    ("wall", "wall_s", "wall_p50_increase_ratio", +1, "ratio"),
+    ("tokens", "total_tokens", "tokens_p50_increase_ratio", +1, "ratio"),
+    ("recall", "planted_recall", "recall_drop", -1, "abs"),
+    ("false_findings", "false_findings", "false_findings_increase", +1, "abs"),
+    ("wrong_citation_rate", None, "citations_wrong_rate_increase", +1, "abs"),
+    ("coverage", "coverage_percent", "coverage_drop_points", -1, "abs"),
+    ("intervention_rate", "intervention_rate", "intervention_rate_increase", +1, "abs"),
+)
 
 
 def summarize(records):
@@ -87,7 +155,9 @@ def summarize(records):
     graded = [r for r in records if r.get("status") in ("pass", "fail")]
     abandoned = sum(1 for r in records if r.get("status") == "abandoned")
     outages = sum(1 for r in graded if is_outage(r))
-    reachable = [r for r in graded if not is_outage(r)]
+    harness_failures = sum(1 for r in graded if is_harness_failure(r))
+    # Runs that measured the commit: not an outage, not a harness failure.
+    reachable = [r for r in graded if not is_outage(r) and not is_harness_failure(r)]
     passes = sum(1 for r in graded if r["status"] == "pass")
     passes_reachable = sum(1 for r in reachable if r["status"] == "pass")
     ran = [r for r in reachable if r.get("metrics")]
@@ -96,11 +166,17 @@ def summarize(records):
         return [r["metrics"].get(name) for r in ran if r["metrics"].get(name) is not None]
 
     # Wrong citations only mean something where the run produced checkable
-    # citations: a run that wrote nothing has 0 wrong and must not make a
-    # later run that cites (and gets 3 of 44 wrong) look like a regression
-    # (0.9.3 vs fix-094 c24 A/B, 2026-09-27).
+    # citations: a run that wrote nothing has no wrong citations to count.
+    # They are compared as a per-run RATE (wrong / checked), over citing
+    # runs, and the share of runs that cite at all is compared on its own —
+    # a candidate that stops citing must not pass as "no wrong citations".
     citing = [r for r in ran if (r["metrics"].get("citations_total") or 0) > 0]
-    wrong_citing = [r["metrics"].get("citations_wrong") for r in citing]
+    wrong_rates = [
+        (r["metrics"].get("citations_wrong") or 0) / r["metrics"]["citations_total"]
+        for r in citing
+    ]
+    values = {name: metric(key) for name, key, _t, _d, _k in CONTINUOUS if key}
+    values["wrong_citation_rate"] = wrong_rates
 
     n = len(graded)
     failed = {}
@@ -116,9 +192,7 @@ def summarize(records):
         "passes_reachable": passes_reachable,
         "pass_rate_reachable": round(passes_reachable / len(reachable), 4) if reachable else None,
         "outages": outages,
-        "setup_failures": sum(
-            1 for r in graded if (r.get("reason") or "").startswith("setup_failed")
-        ),
+        "setup_failures": harness_failures,
         "abandoned": abandoned,
         "wall_p50": percentile(metric("wall_s"), 50),
         "wall_p90": percentile(metric("wall_s"), 90),
@@ -128,22 +202,166 @@ def summarize(records):
         "coverage_mean": mean(metric("coverage_percent")),
         "recall_mean": mean(metric("planted_recall")),
         "false_findings_mean": mean(metric("false_findings")),
-        "citations_wrong_mean": mean(wrong_citing),
         "runs_with_citations": len(citing),
+        "citing_fraction": round(len(citing) / len(ran), 4) if ran else None,
+        "wrong_citation_rate_mean": mean(wrong_rates),
+        "citations_wrong_mean": mean([r["metrics"].get("citations_wrong") for r in citing]),
         "citations_verified_mean": mean(metric("citations_verified")),
+        "fixture_citations_wrong_mean": mean(metric("fixture_citations_wrong")),
         "intervention_rate_mean": mean(metric("intervention_rate")),
         "interventions_mean": mean(metric("interventions")),
         "files_per_hour_mean": mean(metric("files_per_hour")),
+        "contaminated": sum(1 for r in ran if r["metrics"].get("contamination_hits")),
         "failed_criteria": failed,
+        "values": values,
+        "n_ran": len(ran),
     }
 
 
-def commit_order(records):
-    """Commits in order of their first record."""
+def _center(values, kind):
+    if not values:
+        return None
+    return percentile(values, 50) if kind == "ratio" else sum(values) / len(values)
+
+
+def compare(base, cand, th):
+    """Flags for candidate summary `cand` against baseline summary `base`.
+
+    Returns (level, kind, message) triples; level REGRESSION or WATCH, kind
+    `pass_rate`, `citing_fraction` or `metric`. Pass rates and the citing
+    fraction: a drop >= pass_rate_drop is REGRESSION when the one-sided
+    Fisher p < alpha and both sides have >= min_samples runs. Continuous
+    metrics: a change beyond its threshold is REGRESSION when the one-sided
+    Mann-Whitney p <= alpha_continuous with >= min_samples runs per side
+    (per CITING run for the wrong-citation rate).
+    """
+    flags = []
+    min_n = th["min_samples"]
+
+    def rate_check(kind, pb, nb, pc, nc, label):
+        if not nb or not nc:
+            return
+        rb, rc = pb / nb, pc / nc
+        if rb - rc >= th["pass_rate_drop"]:
+            p = fisher_one_sided(pb, nb, pc, nc)
+            level = "REGRESSION" if (p < th["alpha"] and nb >= min_n and nc >= min_n) else "WATCH"
+            flags.append((level, kind, f"{label} {rb:.2f} -> {rc:.2f} (n {nb}->{nc}, Fisher p={p:.3f})"))
+
+    rate_check("pass_rate", base["passes_reachable"], base["n_reachable"],
+               cand["passes_reachable"], cand["n_reachable"], "pass rate")
+    rate_check("citing_fraction", base["runs_with_citations"], base["n_ran"],
+               cand["runs_with_citations"], cand["n_ran"], "runs with citations")
+    alpha_c = th.get("alpha_continuous", th["alpha"])
+    for name, _key, tkey, direction, kind in CONTINUOUS:
+        bv, cv = base["values"].get(name) or [], cand["values"].get(name) or []
+        b, c = _center(bv, kind), _center(cv, kind)
+        if b is None or c is None:
+            continue
+        limit = th[tkey]
+        if kind == "ratio":
+            if b <= 0:
+                continue
+            change = (c - b) / b * direction
+            msg = f"{name} median {b:g} -> {c:g} ({(c - b) / b * 100:+.0f}%)"
+        else:
+            change = (c - b) * direction
+            msg = f"{name} mean {b:.3g} -> {c:.3g}"
+        if change < limit:
+            continue
+        worse, better = (cv, bv) if direction > 0 else ([-x for x in cv], [-x for x in bv])
+        p = mann_whitney_greater(worse, better)
+        enough = len(bv) >= min_n and len(cv) >= min_n
+        level = "REGRESSION" if (enough and p <= alpha_c) else "WATCH"
+        flags.append((level, "metric", f"{msg} (n {len(bv)}->{len(cv)}, Mann-Whitney p={p:.3f})"))
+    return flags
+
+
+def floor_checks(summaries, th):
+    """(failures, insufficient) for the absolute pass-rate floors.
+
+    A floor FAILS only when the scenario has >= min_samples graded runs and
+    even the upper end of its 95% Wilson interval is below the floor: one
+    unlucky run of a flaky scenario is not evidence (0.9.4 nightly: a floor
+    judged on n=1 would be red most nights). Fewer runs is `insufficient`.
+    """
+    failures, insufficient = [], []
+    for scenario, floor in (th.get("floor_pass_rate") or {}).items():
+        s = summaries.get(scenario)
+        if not s:
+            continue
+        if s["n"] < th["min_samples"]:
+            insufficient.append(f"{scenario}: {s['n']} run(s) < {th['min_samples']} for its floor")
+            continue
+        hi = s["pass_ci95"][1]
+        if hi is not None and hi < floor:
+            failures.append(
+                f"{scenario}: pass rate {s['pass_rate']:.2f} (95% CI upper {hi:.2f}) below floor {floor}"
+            )
+    return failures, insufficient
+
+
+def floor_failures(summaries, th):
+    return floor_checks(summaries, th)[0]
+
+
+class Ancestry:
+    """`git merge-base --is-ancestor` answers for a repository, cached.
+
+    None (unknown commit, or no repository) makes callers fall back to the
+    order records were first seen, and the report says so.
+    """
+
+    def __init__(self, repo=None):
+        self.repo = repo
+        self.cache = {}
+
+    def is_ancestor(self, a, b):
+        if not self.repo or not a or not b:
+            return None
+        if (a, b) not in self.cache:
+            try:
+                res = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", a, b], cwd=self.repo,
+                    capture_output=True, timeout=30,
+                )
+                self.cache[(a, b)] = {0: True, 1: False}.get(res.returncode)
+            except (OSError, subprocess.SubprocessError):
+                self.cache[(a, b)] = None
+        return self.cache[(a, b)]
+
+
+def first_seen_order(records):
     seen = {}
     for r in sorted(records, key=lambda r: r.get("started_at") or ""):
         seen.setdefault(r.get("commit"), r.get("started_at"))
     return [c for c, _ in sorted(seen.items(), key=lambda kv: kv[1] or "")]
+
+
+def commit_order(records, ancestry=None):
+    """Commits oldest to newest: by git ancestry when known, else first seen.
+
+    Sort key: how many of the other commits are its ancestors (a linear
+    history sorts exactly), then first-seen order. Commits the repository
+    does not know count no ancestors. (Ordering by first record alone made
+    a v0.9.3 replay the "candidate" against a newer baseline.)
+    """
+    order = first_seen_order(records)
+    if ancestry is None or not ancestry.repo:
+        return order
+    rank = {
+        c: (sum(1 for d in order if d != c and ancestry.is_ancestor(d, c)), i)
+        for i, c in enumerate(order)
+    }
+    return sorted(order, key=lambda c: rank[c])
+
+
+def nearest_ancestor(cand, commits, ancestry):
+    """The newest of `commits` that is an ancestor of `cand` (None if none)."""
+    ancestors = [c for c in commits if c != cand and ancestry.is_ancestor(c, cand)]
+    for c in ancestors:
+        if not any(d != c and ancestry.is_ancestor(c, d) for d in ancestors):
+            return c
+    return None
 
 
 def group(records):
@@ -153,85 +371,56 @@ def group(records):
     return out
 
 
-# (metric key, threshold key, direction, kind) — direction +1 means "higher is worse".
-CONTINUOUS_CHECKS = (
-    ("wall_p50", "wall_p50_increase_ratio", +1, "ratio"),
-    ("tokens_p50", "tokens_p50_increase_ratio", +1, "ratio"),
-    ("recall_mean", "recall_drop", -1, "abs"),
-    ("false_findings_mean", "false_findings_increase", +1, "abs"),
-    ("citations_wrong_mean", "citations_wrong_increase", +1, "abs"),
-    ("coverage_mean", "coverage_drop_points", -1, "abs"),
-    ("intervention_rate_mean", "intervention_rate_increase", +1, "abs"),
-)
+class OrderError(ValueError):
+    """An explicit baseline that is newer than the candidate."""
 
 
-def compare(base, cand, th):
-    """Flags for candidate summary `cand` against baseline summary `base`.
-
-    Pass rates are compared over endpoint-reachable runs (an outage is a
-    FAIL in the pass rate, but says nothing about the commit).
-    Returns a list of (level, message) with level REGRESSION or WATCH.
-    """
-    flags = []
-    min_n = th["min_samples"]
-    nb, nc = base["n_reachable"], cand["n_reachable"]
-    if nb and nc:
-        rb = base["passes_reachable"] / nb
-        rc = cand["passes_reachable"] / nc
-        drop = rb - rc
-        if drop >= th["pass_rate_drop"]:
-            p = fisher_one_sided(base["passes_reachable"], nb, cand["passes_reachable"], nc)
-            msg = f"pass rate {rb:.2f} -> {rc:.2f} (n {nb}->{nc}, Fisher p={p:.3f})"
-            level = "REGRESSION" if (p < th["alpha"] and nb >= min_n and nc >= min_n) else "WATCH"
-            flags.append((level, msg))
-    for key, tkey, direction, kind in CONTINUOUS_CHECKS:
-        b, c = base.get(key), cand.get(key)
-        if b is None or c is None:
-            continue
-        limit = th[tkey]
-        if kind == "ratio":
-            worse = b > 0 and (c - b) / b >= limit if direction > 0 else False
-            msg = f"{key} {b} -> {c} (+{(c - b) / b * 100:.0f}%)" if b > 0 else ""
-        else:
-            delta = (c - b) * direction
-            worse = delta >= limit
-            msg = f"{key} {b} -> {c}"
-        if worse:
-            enough = nb >= min_n and nc >= min_n
-            flags.append(("REGRESSION" if enough else "WATCH", msg))
-    return flags
-
-
-def floor_failures(summaries, th):
-    """Scenarios whose pass rate is below the absolute floor."""
-    out = []
-    for scenario, floor in (th.get("floor_pass_rate") or {}).items():
-        s = summaries.get(scenario)
-        if s and s["n"] and s["pass_rate"] < floor:
-            out.append(f"{scenario}: pass rate {s['pass_rate']:.2f} below floor {floor}")
-    return out
-
-
-def build_report(records, th, candidate=None, baseline=None, scenarios=None):
+def build_report(records, th, candidate=None, baseline=None, scenarios=None, repo=None,
+                 expect_runs=None):
     """Structured report: per scenario, the candidate/baseline stats and flags.
 
-    `candidate` defaults to the latest commit seen for the scenario and
-    `baseline` to the commit seen before it.
+    `candidate` defaults to the newest commit with records (by ancestry when
+    `repo` is given) and `baseline` to the candidate's nearest ancestor with
+    records (without a repo: the commit first seen before it). An explicit
+    baseline that is a DESCENDANT of the candidate raises OrderError.
+    `scenarios` requested with no candidate records, or fewer than
+    `expect_runs` graded runs, are listed under `missing`.
     """
+    ancestry = Ancestry(repo)
+    if candidate and baseline and ancestry.is_ancestor(candidate, baseline) and candidate != baseline:
+        raise OrderError(
+            f"baseline {baseline[:12]} is newer than candidate {candidate[:12]} "
+            "(it descends from it); swap them"
+        )
     grouped = group(records)
-    out = {"scenarios": {}, "regressions": [], "watch": []}
-    for scenario in sorted(grouped):
+    out = {"scenarios": {}, "regressions": [], "watch": [], "missing": [],
+           "ordering": "git ancestry" if repo else "first seen (no repository given)"}
+    names = sorted(set(grouped) | set(scenarios or []))
+    for scenario in names:
         if scenarios and scenario not in scenarios:
             continue
-        by_commit = grouped[scenario]
-        order = [c for c in commit_order(records) if c in by_commit]
-        cand = candidate if candidate in by_commit else (order[-1] if candidate is None else None)
-        if cand is None:
-            continue
-        if baseline is not None:
-            base = baseline if baseline in by_commit else None
+        by_commit = grouped.get(scenario, {})
+        order = [c for c in commit_order(records, ancestry) if c in by_commit]
+        if candidate is not None:
+            cand = next((c for c in by_commit if c == candidate or c.startswith(candidate)), None)
         else:
-            earlier = order[: order.index(cand)] if cand in order else []
+            cand = order[-1] if order else None
+        graded_n = summarize(by_commit[cand])["n"] if cand else 0
+        if cand is None or (expect_runs and graded_n < expect_runs):
+            out["missing"].append(
+                f"{scenario}: {graded_n} graded run(s) at "
+                f"{(candidate or cand or 'any commit')[:12]}"
+                + (f", expected {expect_runs}" if expect_runs else "")
+            )
+            if cand is None:
+                continue
+        if baseline is not None:
+            base = next((c for c in by_commit if c == baseline or c.startswith(baseline)), None)
+        elif repo:
+            # Only an ANCESTOR is a baseline: a sibling branch is not "before".
+            base = nearest_ancestor(cand, list(by_commit), ancestry)
+        else:
+            earlier = order[: order.index(cand)]
             base = earlier[-1] if earlier else None
         cs = summarize(by_commit[cand])
         entry = {"candidate": cand, "candidate_stats": cs, "baseline": base, "flags": []}
@@ -239,17 +428,21 @@ def build_report(records, th, candidate=None, baseline=None, scenarios=None):
             bs = summarize(by_commit[base])
             entry["baseline_stats"] = bs
             entry["flags"] = compare(bs, cs, th)
-            for level, msg in entry["flags"]:
+            for level, kind, msg in entry["flags"]:
                 target = out["regressions"] if level == "REGRESSION" else out["watch"]
-                target.append(f"{scenario}: {msg}")
+                target.append((kind, f"{scenario}: {msg}"))
         out["scenarios"][scenario] = entry
     cand_summaries = {s: e["candidate_stats"] for s, e in out["scenarios"].items()}
-    out["floor_failures"] = floor_failures(cand_summaries, th)
+    out["floor_failures"], out["insufficient"] = floor_checks(cand_summaries, th)
     # Runs that measured nothing about the commit, which a gate cannot pass.
     out["uncertified"] = [
-        f"{s}: {cs['outages']} outage(s), {cs['setup_failures']} setup failure(s)"
+        f"{s}: {cs['outages']} outage(s), {cs['setup_failures']} setup/harness failure(s)"
         for s, cs in cand_summaries.items()
         if cs["outages"] or cs["setup_failures"]
+    ]
+    out["contaminated"] = [
+        f"{s}: {cs['contaminated']} run(s) touched harness state outside the workspace"
+        for s, cs in cand_summaries.items() if cs["contaminated"]
     ]
     return out
 
@@ -263,7 +456,7 @@ def _fmt(v, digits=2):
 
 
 def render(report):
-    lines = []
+    lines = [f"(baseline = nearest earlier commit by {report.get('ordering', '?')})"]
     for scenario, e in report["scenarios"].items():
         cs = e["candidate_stats"]
         lo, hi = cs["pass_ci95"]
@@ -271,18 +464,21 @@ def render(report):
         lines.append(
             f"   pass {cs['passes']}/{cs['n']} = {_fmt(cs['pass_rate'])} "
             f"(95% CI {_fmt(lo)}-{_fmt(hi)})  outages {cs['outages']}  "
-            f"abandoned {cs['abandoned']}"
+            f"harness/setup failures {cs['setup_failures']}  abandoned {cs['abandoned']}"
         )
+        # Nearest-rank p90 of fewer than 10 runs is just the maximum.
+        tail = "p90" if cs["n_ran"] >= 10 else "max"
         lines.append(
-            f"   wall p50/p90 {_fmt(cs['wall_p50'])}/{_fmt(cs['wall_p90'])} s  "
+            f"   wall p50/{tail} {_fmt(cs['wall_p50'])}/{_fmt(cs['wall_p90'])} s  "
             f"tokens p50 {_fmt(cs['tokens_p50'])}  turns p50 {_fmt(cs['turns_p50'])}  "
             f"endpoint tok/s p50 {_fmt(cs['decode_tok_s_p50'])}"
         )
         lines.append(
             f"   coverage {_fmt(cs['coverage_mean'])}%  recall {_fmt(cs['recall_mean'])}  "
             f"false findings {_fmt(cs['false_findings_mean'])}  "
-            f"citations wrong {_fmt(cs['citations_wrong_mean'])} "
-            f"verified {_fmt(cs['citations_verified_mean'])}  "
+            f"citing runs {cs['runs_with_citations']}/{cs['n_ran']}  "
+            f"wrong-citation rate {_fmt(cs['wrong_citation_rate_mean'], 3)} "
+            f"(independent wrong {_fmt(cs['fixture_citations_wrong_mean'])})  "
             f"interventions/turn {_fmt(cs['intervention_rate_mean'], 3)}"
             + (
                 f"  files/hour {_fmt(cs['files_per_hour_mean'])}"
@@ -300,17 +496,30 @@ def render(report):
                 f"wall p50 {_fmt(bs['wall_p50'])}, recall {_fmt(bs['recall_mean'])}, "
                 f"coverage {_fmt(bs['coverage_mean'])}"
             )
-            for level, msg in e["flags"]:
+            for level, _kind, msg in e["flags"]:
                 lines.append(f"   {level}: {msg}")
         else:
-            lines.append("   no baseline commit yet")
+            lines.append("   no baseline commit")
     lines.append("")
-    for f in report["floor_failures"]:
-        lines.append(f"BELOW FLOOR: {f}")
-    for f in report.get("uncertified", []):
-        lines.append(f"UNCERTIFIED: {f}")
+    for key, label in (("missing", "MISSING"), ("floor_failures", "BELOW FLOOR"),
+                       ("insufficient", "INSUFFICIENT"), ("uncertified", "UNCERTIFIED"),
+                       ("contaminated", "CONTAMINATED")):
+        for f in report.get(key, []):
+            lines.append(f"{label}: {f}")
     lines.append(
         f"regressions: {len(report['regressions'])}  watch: {len(report['watch'])}  "
-        f"below floor: {len(report['floor_failures'])}"
+        f"below floor: {len(report['floor_failures'])}  missing: {len(report['missing'])}"
     )
     return "\n".join(lines)
+
+
+def blocking_problems(report, strict_watch_kinds=("pass_rate", "citing_fraction")):
+    """What fails a gate / `report --fail-on-regression`: regressions, a
+    pass-rate or citing-fraction WATCH (a release is not certified on a drop
+    the samples were too few to test), floors, missing or insufficient runs,
+    outages/harness failures, contamination."""
+    out = [m for _k, m in report["regressions"]]
+    out += [m for k, m in report["watch"] if k in strict_watch_kinds]
+    for key in ("missing", "floor_failures", "insufficient", "uncertified", "contaminated"):
+        out += report.get(key, [])
+    return out

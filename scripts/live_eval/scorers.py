@@ -40,7 +40,19 @@ CITATION_RE = re.compile(
     r"(?P<path>(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+\.[A-Za-z0-9]{1,5})"
     r"(?::|#L| line |, line |:L)(?P<start>\d+)(?:\s*[-–:]\s*L?(?P<end>\d+))?"
 )
-ITEM_START_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)")
+# A new top-level item: an unindented (<= 1 space) list item, a heading or
+# a table row. Deeper-indented bullets are sub-points of their parent.
+ITEM_START_RE = re.compile(r"^(?: ?(?:[-*+]\s|\d+[.)]\s)|\s*#{1,6}\s|\s*\|)")
+SNIPPET_RE = re.compile(r"`([^`\n]+)`")
+IDENTIFIER_RE = re.compile(r"[\w.]+(?:\(\))?")
+# A citation spanning this many lines or more is a coverage statement, not a
+# location ("auth.py:1-45 read in full"): it credits no bug.
+MAX_CITED_SPAN = 10
+# How far off a citation may be when the finding quotes the bug's code.
+NEAR_LINES = 12
+# The independent check counts a citation 1-2 lines from the quoted code as
+# `near`, further as `wrong`.
+NEAR_CITATION_LINES = 2
 
 
 # --------------------------------------------------------------------------
@@ -232,8 +244,10 @@ def extract_citations(text, prefixes=()):
 def split_findings(answer):
     """Split an answer into top-level items (list items, headings, table rows).
 
-    Continuation lines belong to the item above them; text before the first
-    item is its own block.
+    Only an UNINDENTED list item (at most one leading space) starts a new
+    item: nested sub-bullets are details of their parent finding, not
+    findings of their own. Continuation lines belong to the item above;
+    text before the first item is its own block.
     """
     blocks, current = [], []
     for line in (answer or "").splitlines():
@@ -253,37 +267,68 @@ def _path_matches(cited, expected):
     return "/" not in cited and expected.rsplit("/", 1)[-1] == cited
 
 
-def match_planted(answer, key, prefixes=(), known_files=None):
+def code_snippets(block):
+    """Backticked code spans of a finding (>= 6 chars), whitespace-collapsed."""
+    # Pair backticks first, THEN drop short spans: filtering inside the
+    # regex paired the closing tick of `True` with the next opening one.
+    spans = (" ".join(s.split()) for s in SNIPPET_RE.findall(block or ""))
+    return [s for s in spans if 6 <= len(s) <= 200]
+
+
+def _norm(line):
+    return " ".join(line.split())
+
+
+def match_planted(answer, key, prefixes=(), known_files=None, read_file=None):
     """Score a review answer against the planted-bug answer key.
 
     A finding is a top-level item of the answer that cites at least one
-    fixture file (`known_files`, when given; otherwise any citation). It
-    FINDS a bug when one of its citations names the bug's file with a range
-    that comes within `window` lines of one of the bug's anchor lines. A
-    finding that matches no bug is a false finding. Distinct false findings
+    fixture file (`known_files`, when given; otherwise any citation) with a
+    range of at most MAX_CITED_SPAN lines: a wide range ("auth.py:1-45 read
+    in full") is a coverage statement, not a location, and credits nothing.
+
+    A finding FINDS a bug when
+    - a citation names the bug's file within `window` lines of one of the
+      bug's anchor lines, or
+    - it quotes (in backticks) code that is on an anchor line and cites the
+      bug's file within NEAR_LINES of it: the bug was found but cited a few
+      lines off (`planted_found_misplaced`; the independent citation check
+      counts that citation as wrong, so it is not silently forgiven).
+    A finding that finds no bug is a false finding. Distinct false findings
     are counted by their sorted citation set, so a summary table repeating
     an item is not double-counted.
     """
     window = int(key.get("window", 3))
     bugs = key["bugs"]
-    found = {}
+    found, misplaced = {}, set()
     false_findings = []
     seen_false = set()
     for block in split_findings(answer):
-        cites = extract_citations(block, prefixes)
+        cites = [c for c in extract_citations(block, prefixes) if c[2] - c[1] < MAX_CITED_SPAN]
         if known_files is not None:
             cites = [c for c in cites if any(_path_matches(c[0], f) for f in known_files)]
         if not cites:
             continue
+        snippets = code_snippets(block)
         hit = False
         for bug in bugs:
             lines = bug.get("anchor_lines") or [bug["line"]]
-            for path, start, end in cites:
-                if not _path_matches(path, bug["file"]):
-                    continue
-                if any(start - window <= ln <= end + window for ln in lines):
-                    found.setdefault(bug["id"], f"{path}:{start}")
-                    hit = True
+            same_file = [c for c in cites if _path_matches(c[0], bug["file"])]
+            if not same_file:
+                continue
+            close = [c for c in same_file if any(c[1] - window <= ln <= c[2] + window for ln in lines)]
+            if close:
+                found.setdefault(bug["id"], f"{close[0][0]}:{close[0][1]}")
+                hit = True
+                continue
+            anchors = [_norm(a) for a in bug.get("anchors") or []]
+            quoted = any(s in a or a in s for s in snippets for a in anchors)
+            near = [c for c in same_file if any(c[1] - NEAR_LINES <= ln <= c[2] + NEAR_LINES for ln in lines)]
+            if quoted and near:
+                if bug["id"] not in found:
+                    found[bug["id"]] = f"{near[0][0]}:{near[0][1]}"
+                    misplaced.add(bug["id"])
+                hit = True
         if not hit:
             sig = tuple(sorted(set(cites)))
             if sig not in seen_false:
@@ -292,15 +337,117 @@ def match_planted(answer, key, prefixes=(), known_files=None):
                     {"citations": [f"{p}:{s}" for p, s, _ in sig], "text": block.strip()[:240]}
                 )
     total = len(bugs)
-    return {
+    out = {
         "planted_total": total,
         "planted_found": len(found),
         "planted_recall": round(len(found) / total, 4) if total else 0.0,
         "planted_found_ids": sorted(found),
+        "planted_found_misplaced": len(misplaced),
         "planted_missed_ids": sorted(b["id"] for b in bugs if b["id"] not in found),
         "false_findings": len(false_findings),
         "false_findings_detail": false_findings[:12],
     }
+    if read_file is not None:
+        out.update(check_citations(answer, read_file, prefixes, known_files))
+    return out
+
+
+def check_citations(answer, read_file, prefixes=(), known_files=None):
+    """Check the answer's citations against the files, independently of the
+    binary under test (whose own grounding counts are self-reported).
+
+    Per finding (top-level item) and per citation of at most MAX_CITED_SPAN
+    lines into a readable file:
+    - `out_of_range`: the cited line is past the end of the file -> wrong;
+    - `ok`: code the finding quotes in backticks is on a cited line;
+    - `wrong` / `near`: the finding cites that file exactly once and quotes
+      an expression that occurs exactly once in the file, on a line more
+      than NEAR_CITATION_LINES away (wrong) or within them (near); bare
+      names never make a citation wrong;
+    - otherwise `unchecked` (nothing quoted, or several citations into the
+      file so the quote cannot be tied to one of them).
+    `read_file(rel)` returns the file text or None.
+    """
+    ok = wrong = near = unchecked = 0
+    detail = []
+    seen = set()
+    for block in split_findings(answer):
+        cites = [c for c in extract_citations(block, prefixes) if c[2] - c[1] < MAX_CITED_SPAN]
+        if known_files is not None:
+            cites = [c for c in cites if any(_path_matches(c[0], f) for f in known_files)]
+        snippets = code_snippets(block)
+        for path, start, end in cites:
+            if (path, start, end, tuple(snippets)) in seen:
+                continue
+            seen.add((path, start, end, tuple(snippets)))
+            rel = path
+            if known_files is not None:
+                rel = next(f for f in known_files if _path_matches(path, f))
+            text = read_file(rel)
+            if text is None:
+                unchecked += 1
+                continue
+            lines = [_norm(ln) for ln in text.splitlines()]
+            if start > len(lines):
+                wrong += 1
+                detail.append(f"{path}:{start} past end of file ({len(lines)} lines)")
+                continue
+            span = lines[start - 1:end]
+            in_span = [sn for sn in snippets if any(sn in ln for ln in span)]
+            # Only a quoted EXPRESSION that occurs exactly once in the file
+            # pins a line: a bare name (`can_delete_order`, `currency`) is
+            # defined on one line and used on others, so quoting it next to
+            # a correct citation proves nothing.
+            pinned = []
+            for sn in snippets:
+                if IDENTIFIER_RE.fullmatch(sn):
+                    continue
+                at = [i + 1 for i, ln in enumerate(lines) if sn in ln]
+                if len(at) == 1:
+                    pinned.append(at[0])
+            same_file = [c for c in cites if c[0] == path]
+            if in_span:
+                ok += 1
+            elif pinned and len(same_file) == 1:
+                gap = min(min(abs(p - start), abs(p - end)) for p in pinned)
+                if gap <= NEAR_CITATION_LINES:
+                    # 1-2 lines off: a statement spanning lines, or the model
+                    # counting lines by hand. Counted, not failed.
+                    near += 1
+                else:
+                    wrong += 1
+                    detail.append(f"{path}:{start} quotes code that is at line {pinned[0]}")
+            else:
+                unchecked += 1
+    return {
+        "fixture_citations_ok": ok,
+        "fixture_citations_wrong": wrong,
+        "fixture_citations_near": near,
+        "fixture_citations_unchecked": unchecked,
+        "fixture_citations_wrong_detail": detail[:12],
+    }
+
+
+CONTAMINATION_MARKERS_ANY = ("results.jsonl", "heartbeat.json", "HARNESS_BASE_COMMIT")
+
+
+def contamination_hits(texts, forbidden_paths=(), extra_markers=()):
+    """Tool-call texts that reach harness state outside the workspace.
+
+    `forbidden_paths` are absolute paths the agent has no business touching
+    (results dir, harness scripts, build checkout); `extra_markers` are
+    scenario-specific names (the planted fixture's `answer_key`). A hit
+    marks the run contaminated: its score may reflect the answer key or
+    earlier runs' results rather than the review.
+    """
+    markers = [m for m in list(forbidden_paths) + list(extra_markers) if m]
+    markers += list(CONTAMINATION_MARKERS_ANY)
+    hits = []
+    for text in texts:
+        for m in markers:
+            if m in (text or ""):
+                hits.append(f"{m} in {text[:160]!r}")
+    return hits
 
 
 def resolve_anchor_lines(key, read_file):
@@ -370,13 +517,22 @@ def score_review_planted(inp):
             key,
             prefixes=inp.extra.get("prefixes", ()),
             known_files=inp.extra.get("known_files"),
+            read_file=inp.extra.get("read_file"),
         )
     )
     c = _base_criteria(inp)
     c["recall_at_least_half"] = m["planted_recall"] >= 0.5
     c["false_findings_at_most_3"] = m["false_findings"] <= 3
-    c["citations_verified"] = m.get("citations_verified", 0) >= 3
-    c["no_wrong_citations"] = m.get("has_result", False) and m.get("citations_wrong", 1) == 0
+    # Wrong citations by the binary's own gate AND by the harness's
+    # independent check against the fixture (the binary grades itself).
+    # How many citations the binary could verify is a metric, not a
+    # criterion: it measures phrasing (whether a symbol is named), and it
+    # decided most review-planted failures.
+    c["no_wrong_citations"] = (
+        m.get("has_result", False)
+        and m.get("citations_wrong", 1) == 0
+        and m.get("fixture_citations_wrong", 1) == 0
+    )
     c["coverage_complete"] = bool(m.get("coverage_complete"))
     c["no_edits"] = m.get("has_result", False) and m.get("files_changed", 1) == 0
     return m, c
@@ -384,11 +540,20 @@ def score_review_planted(inp):
 
 def score_review_slugify(inp):
     m = dict(inp.metrics)
+    if inp.extra.get("read_file") is not None:
+        m.update(check_citations(inp.answer, inp.extra["read_file"], inp.extra.get("prefixes", ())))
     c = _base_criteria(inp)
     c["coverage_reported"] = bool(m.get("coverage_present"))
     c["coverage_at_least_80"] = m.get("coverage_percent", 0) >= 80
-    c["citations_verified"] = m.get("citations_verified", 0) >= 3
-    c["no_wrong_citations"] = m.get("has_result", False) and m.get("citations_wrong", 1) == 0
+    # Checked locations, content-verified or not: requiring content
+    # verification measured how the model phrases a citation.
+    checked = m.get("citations_verified", 0) + m.get("citations_location_verified", 0)
+    c["at_least_3_checked_citations"] = checked >= 3
+    c["no_wrong_citations"] = (
+        m.get("has_result", False)
+        and m.get("citations_wrong", 1) == 0
+        and m.get("fixture_citations_wrong", 0) == 0
+    )
     c["no_edits"] = m.get("has_result", False) and m.get("files_changed", 1) == 0
     return m, c
 

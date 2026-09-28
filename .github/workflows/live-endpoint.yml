@@ -16,8 +16,8 @@ on:
         default: "https://llm.selfware.design/v1"
         required: false
       eval_samples:
-        description: "Runs per live-eval scenario (scripts/live_eval)"
-        default: "2"
+        description: "Runs per live-eval scenario (scripts/live_eval; floors need >= 3)"
+        default: "5"
         required: false
 
 permissions:
@@ -85,13 +85,18 @@ jobs:
     # (review-planted, qa-greeting, interrupt; scripts/live_eval). The 4 h
     # review-core-long and the scenarios that need local fixtures run in the
     # long-running loop (docs/live-eval.md), not here. Individual failed runs
-    # are data; the job fails on a scenario below its pass-rate floor, on an
-    # endpoint outage, or on a fixture that could not be set up.
+    # are data; the job fails when a scenario is confidently below its
+    # pass-rate floor (95% upper bound < floor, >= 3 runs), when a scenario
+    # has fewer runs than requested (a crashed harness is not a pass), on an
+    # endpoint outage, a harness/setup failure, or a contaminated run.
     name: Live eval (quick scenarios)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       LIVE_EVAL_RESULTS_DIR: ${{ github.workspace }}/../live-eval
+      LIVE_EVAL_WORK_ROOT: ${{ runner.temp }}/live-eval-work
+      # Passed through the environment, never interpolated into a script.
+      EVAL_SAMPLES: ${{ github.event.inputs.eval_samples || '5' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -117,14 +122,18 @@ jobs:
       - name: Run quick scenarios
         # Per-run failures are recorded and judged by the report step below.
         run: |
+          case "$EVAL_SAMPLES" in ''|*[!0-9]*) echo "eval_samples must be a number"; exit 1;; esac
           python3 scripts/live_eval/run.py run --binary target/release/selfware --source . \
-            --hermetic-only --concurrency 2 --endpoint "$SELFWARE_ENDPOINT" \
-            --samples "${{ github.event.inputs.eval_samples || '1' }}" || true
+            --commit "$GITHUB_SHA" --hermetic-only --concurrency 2 \
+            --endpoint "$SELFWARE_ENDPOINT" --samples "$EVAL_SAMPLES" || true
 
-      - name: Report (fails below floor, on outage or setup failure)
+      - name: Report (fails below floor, on missing runs, outage or harness failure)
         run: |
           mkdir -p live-eval-out
-          python3 scripts/live_eval/run.py report --fail-on-regression --out live-eval-out/report.txt
+          python3 scripts/live_eval/run.py report --fail-on-regression \
+            --candidate "$GITHUB_SHA" --expect-runs "$EVAL_SAMPLES" \
+            --scenarios review-planted qa-greeting interrupt \
+            --out live-eval-out/report.txt
 
       - name: Collect results
         if: always()

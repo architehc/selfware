@@ -71,8 +71,21 @@ def pick_scenarios(names, tier=None, hermetic_only=False):
 def binary_from_args(args, results_dir, log):
     if args.binary:
         tree = Path(args.source).resolve()
-        commit = args.commit or harness.git("rev-parse", "HEAD", cwd=tree)
-        return harness.Binary(Path(args.binary).resolve(), commit, tree)
+        version = harness.binary_version(args.binary)
+        built = harness.version_sha(version)
+        if args.commit:
+            commit = harness.git("rev-parse", "--verify", f"{args.commit}^{{commit}}", cwd=tree)
+        elif built:
+            # The commit the binary says it was built from, never HEAD.
+            commit = harness.git("rev-parse", "--verify", f"{built}^{{commit}}", cwd=tree)
+        else:
+            raise SystemExit(
+                f"{args.binary} reports {version!r} without a +g<sha>: pass --commit"
+            )
+        try:
+            return harness.Binary(Path(args.binary).resolve(), commit, tree, version=version)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
     target = args.target_dir or DEFAULT_TARGET_DIR
     if not target:
         raise SystemExit("--target-dir (or LIVE_EVAL_TARGET_DIR) is required to build")
@@ -91,9 +104,16 @@ def run_batch(specs, binary, results_dir, samples, concurrency, log, endpoint=No
                 if not queue or (abandon is not None and abandon.is_set()):
                     return
                 spec = queue.pop(0)
-            rec = harness.run_scenario(
-                spec, binary, results_dir, abandon=abandon, endpoint_override=endpoint, log=log
-            )
+            try:
+                rec = harness.run_scenario(
+                    spec, binary, results_dir, abandon=abandon, endpoint_override=endpoint,
+                    log=log,
+                )
+            except Exception as exc:  # noqa: BLE001 - run_scenario records its own errors;
+                # this is the last line of defence (e.g. the run dir could not be made).
+                log(f"[{spec['name']}] harness error outside the run: {exc}")
+                rec = {"scenario": spec["name"], "status": "fail",
+                       "reason": f"harness_error: {type(exc).__name__}: {exc}"}
             with lock:
                 records.append(rec)
 
@@ -116,7 +136,7 @@ def cmd_list(_args):
 
 
 def cmd_run(args):
-    results_dir = Path(args.results_dir or harness.default_results_dir())
+    results_dir = harness.default_results_dir(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     log = log_to(results_dir / "run.log")
     specs = pick_scenarios(args.scenarios, tier=args.tier, hermetic_only=args.hermetic_only)
@@ -130,17 +150,27 @@ def cmd_run(args):
             f"{r['scenario']}: {r['status']} {r.get('reason') or ''} wall={m.get('wall_s')} "
             f"turns={m.get('num_turns')} tokens={m.get('total_tokens')}"
         )
+    expected = args.samples * len(specs)
+    if len(records) < expected:
+        log(f"only {len(records)} of {expected} runs recorded")
+        return 1
     return 0 if all(r["status"] == "pass" for r in records) else 1
 
 
 def cmd_report(args):
-    results_dir = Path(args.results_dir or harness.default_results_dir())
+    results_dir = harness.default_results_dir(args.results_dir)
     records = report_mod.load_records(args.results or results_dir / "results.jsonl")
     th = report_mod.load_thresholds(args.thresholds)
-    rep = report_mod.build_report(
-        records, th, candidate=args.candidate, baseline=args.baseline,
-        scenarios=args.scenarios or None,
-    )
+    try:
+        rep = report_mod.build_report(
+            records, th, candidate=args.candidate, baseline=args.baseline,
+            scenarios=args.scenarios or None, repo=args.repo, expect_runs=args.expect_runs,
+        )
+    except report_mod.OrderError as exc:
+        print(f"report refused: {exc}")
+        return 2
+    if args.fail_on_regression and not records:
+        rep["missing"].append("no records at all")
     if args.json:
         print(json.dumps(rep, indent=1, default=str))
     else:
@@ -148,12 +178,16 @@ def cmd_report(args):
         print(report_mod.render(rep))
     if args.out:
         Path(args.out).write_text(report_mod.render(rep) + "\n")
-    bad = rep["regressions"] or rep["floor_failures"] or rep["uncertified"]
-    return 1 if (args.fail_on_regression and bad) else 0
+    bad = report_mod.blocking_problems(rep)
+    if args.fail_on_regression and bad:
+        for p in bad:
+            print(f"FAIL: {p}")
+        return 1
+    return 0
 
 
 def cmd_gate(args):
-    results_dir = Path(args.results_dir or harness.default_results_dir())
+    results_dir = harness.default_results_dir(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     log = log_to(results_dir / "gate.log")
     specs = pick_scenarios(args.scenarios, tier="quick", hermetic_only=args.hermetic_only)
@@ -167,12 +201,27 @@ def cmd_gate(args):
     )
     all_records = report_mod.load_records(results_dir / "results.jsonl")
     th = report_mod.load_thresholds(args.thresholds)
-    rep = report_mod.build_report(
-        all_records, th, candidate=binary.commit, baseline=args.baseline,
-        scenarios=[s["name"] for s in specs],
-    )
+    own_ids = {r.get("run_id") for r in records}
+    # The candidate is judged on THIS gate's runs only: an outage or a bad
+    # run from an earlier loop at the same commit must not decide it (nor
+    # make it permanently uncertified). Baselines come from the history.
+    history = [
+        r for r in all_records if r.get("commit") != binary.commit or r.get("run_id") in own_ids
+    ]
+    try:
+        rep = report_mod.build_report(
+            history, th, candidate=binary.commit, baseline=args.baseline,
+            scenarios=[s["name"] for s in specs], repo=args.source,
+            expect_runs=args.samples,
+        )
+    except report_mod.OrderError as exc:
+        log(f"GATE FAILED: {exc}")
+        return 1
     print(report_mod.render(rep))
-    problems = list(rep["regressions"]) + list(rep["floor_failures"]) + list(rep["uncertified"])
+    problems = report_mod.blocking_problems(rep)
+    expected = args.samples * len(specs)
+    if len(records) < expected:
+        problems.append(f"only {len(records)} of {expected} gate runs were recorded")
     if args.out:
         Path(args.out).write_text(report_mod.render(rep) + "\n")
     if problems:
@@ -191,7 +240,7 @@ def cmd_gate(args):
 class Loop:
     def __init__(self, args):
         self.args = args
-        self.results_dir = Path(args.results_dir or harness.default_results_dir())
+        self.results_dir = harness.default_results_dir(args.results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.log = log_to(self.results_dir / "loop.log")
         self.source = Path(args.source).resolve()
@@ -220,6 +269,7 @@ class Loop:
         self.started_at = harness.utc_now()
         self.state = "starting"
         self.last_build_error = None
+        self.failed_head = None
 
     # -- signals / heartbeat ------------------------------------------------
 
@@ -277,21 +327,29 @@ class Loop:
             )
             with self.lock:
                 self.binary = binary
+                self.source_head = sha
                 self.last_build_error = None
+                self.failed_head = None
             self.log(f"[build] now evaluating {binary.commit[:12]} ({binary.version})")
-        except builder.BuildError as exc:
+        except Exception as exc:  # noqa: BLE001 - BuildError, OSError, a bad label...
+            # HEAD is NOT marked done: the same head is retried after
+            # --build-retry-secs (a transient failure must not stick).
             with self.lock:
-                self.last_build_error = f"{sha[:12]}: {str(exc)[:400]}"
+                self.last_build_error = f"{sha[:12]}: {type(exc).__name__}: {str(exc)[:400]}"
+                self.failed_head = (sha, time.time())
             self.log(f"[build] FAILED {sha[:12]}: {str(exc)[:400]}; keeping the previous binary")
         finally:
             self.building = False
 
     def maybe_rebuild(self):
         head = self.current_head()
-        if head and head != self.source_head and not self.building:
-            self.source_head = head
-            self.building = True
-            threading.Thread(target=self.build_head, args=(head,), daemon=True).start()
+        if not head or head == self.source_head or self.building:
+            return
+        if self.failed_head and self.failed_head[0] == head:
+            if time.time() - self.failed_head[1] < self.args.build_retry_secs:
+                return
+        self.building = True
+        threading.Thread(target=self.build_head, args=(head,), daemon=True).start()
 
     # -- scheduling -----------------------------------------------------------
 
@@ -421,7 +479,7 @@ def cmd_loop(args):
 
 
 def cmd_status(args):
-    results_dir = Path(args.results_dir or harness.default_results_dir())
+    results_dir = harness.default_results_dir(args.results_dir)
     hb = results_dir / "heartbeat.json"
     if not hb.exists():
         print(f"no heartbeat at {hb}")
@@ -443,7 +501,7 @@ def _pid_alive(pid):
 
 
 def cmd_stop(args):
-    results_dir = Path(args.results_dir or harness.default_results_dir())
+    results_dir = harness.default_results_dir(args.results_dir)
     if args.finish:
         (results_dir / "STOP").write_text("finish current runs, then exit\n")
         print(f"wrote {results_dir / 'STOP'}: the loop exits after its current runs")
@@ -491,8 +549,10 @@ def main(argv=None):
 
     sp = sub.add_parser("gate")
     binary_opts(sp)
-    sp.add_argument("--samples", type=int, default=3)
-    sp.add_argument("--baseline", help="baseline commit (default: the previous commit in the results)")
+    sp.add_argument("--samples", type=int, default=5,
+                    help="runs per scenario (default 5: at 3, only a 3/3 -> 0/3 drop is testable)")
+    sp.add_argument("--baseline",
+                    help="baseline commit (default: the candidate's nearest ancestor with results)")
     sp.add_argument("--thresholds")
     sp.add_argument("--out", help="also write the rendered report here")
     sp.set_defaults(fn=cmd_gate)
@@ -505,9 +565,14 @@ def main(argv=None):
     sp.add_argument("--scenarios", nargs="*")
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--out")
+    sp.add_argument("--repo", default=str(harness.REPO_ROOT),
+                    help="git repository used to order commits by ancestry (default: this one)")
+    sp.add_argument("--expect-runs", type=int,
+                    help="each requested scenario must have at least this many graded runs "
+                         "at the candidate")
     sp.add_argument("--fail-on-regression", action="store_true",
-                    help="exit 1 on a regression, a pass rate below its floor, or any "
-                         "outage/setup failure in the candidate's runs")
+                    help="exit 1 on a regression, a pass-rate WATCH, a pass rate below its "
+                         "floor, missing runs, or any outage/harness failure/contamination")
     sp.set_defaults(fn=cmd_report)
 
     sp = sub.add_parser("loop")
@@ -520,6 +585,8 @@ def main(argv=None):
     sp.add_argument("--long-every-hours", type=float, default=6.0,
                     help="start review-core-long at most this often (one at a time)")
     sp.add_argument("--poll-secs", type=int, default=300, help="how often to check the source HEAD")
+    sp.add_argument("--build-retry-secs", type=int, default=1800,
+                    help="retry a head whose build failed after this long")
     sp.add_argument("--stagger-secs", type=int, default=30)
     sp.add_argument("--keep-runs", type=int, default=300)
     sp.add_argument("--max-artifact-mb", type=int, default=2048)

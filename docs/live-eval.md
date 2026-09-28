@@ -16,8 +16,8 @@ and the long-running `run.py loop` on a developer machine.
 
 | name | what it measures | pass criteria (all must hold) |
 |---|---|---|
-| `review-planted` | review of a 16-file Python fixture with 8 planted bugs (hidden `answer_key.json`, never copied into the workspace) | completed, recall >= 0.5, <= 3 false findings, >= 3 verified citations, 0 wrong, coverage complete, no edits |
-| `review-slugify` | review of python-slugify (clean clone of `$LIVE_EVAL_SLUGIFY_REPO`) | completed, coverage reported and >= 80 %, >= 3 verified citations, 0 wrong, no edits |
+| `review-planted` | review of a 16-file Python fixture with 8 planted bugs (hidden `answer_key.json`, never copied into the workspace) | completed, recall >= 0.5, <= 3 false findings, 0 wrong citations (binary's gate AND the harness's own check against the fixture), coverage complete, no edits |
+| `review-slugify` | review of python-slugify (clean clone of `$LIVE_EVAL_SLUGIFY_REPO`) | completed, coverage reported and >= 80 %, >= 3 checked citations (content- or location-verified), 0 wrong, no edits |
 | `edit-tests` | add `max_words` + a test to slugify and run pytest | completed, >= 2 files changed, the harness's own pytest run passes, a behaviour probe passes, a test mentions `max_words` |
 | `c24` | the 24k-window multi-step documentation task (`$LIVE_EVAL_C24_WS`, `cfg.toml`, `compact.prompt`) | completed, CONTEXT_NOTES.md bullet count equals the measured `pub fn` count, `context.rs` diff adds only `///` lines, every `pub fn` documented, 0 wrong citations |
 | `qa-greeting` | "hi" | completed, no tool calls, <= 2 turns (0 = answered in the planning turn), short answer, and a text-mode twin run shows no `NO_CHANGES` noise |
@@ -36,10 +36,34 @@ gate blocks (citation correction rounds, `cap_completion_gate`,
 `*_accept_draft`); `no_tool_call` is counted apart because every plain
 final answer emits it.
 
-An unreachable endpoint, a fixture that cannot be set up, a harness timeout
-or a missing result object is a FAIL record with a reason, never a skip
-(AGENTS.md rule 3). A run the loop stops on shutdown is `abandoned`: counted,
-never a pass.
+An unreachable endpoint, a fixture that cannot be set up, a harness timeout,
+a missing result object or an exception inside the harness
+(`harness_error: ...`) is a FAIL record with a reason, never a skip
+(AGENTS.md rule 3); every started run appends exactly one record. A run the
+loop stops on shutdown is `abandoned`: counted, never a pass.
+
+Planted-bug scoring: a finding is an unindented list item, heading or table
+row (nested sub-bullets belong to their parent). A citation range of 10 or
+more lines ("auth.py:1-45 read in full") credits nothing. A finding finds a
+bug when it cites the bug's file within 3 lines of an anchor, or quotes the
+bug's code and cites within 12 lines (`planted_found_misplaced`). The
+harness checks citations itself against the pristine fixture
+(`fixture_citations_ok/near/wrong/unchecked`): a quoted expression that
+occurs once in the file pins the line; 1-2 lines off is `near`, further is
+`wrong`.
+
+Isolation: workspaces live under `$LIVE_EVAL_WORK_ROOT` (default: a
+directory in the system temp dir), which may not overlap the results dir or
+the repository, so no `../..` walk from a workspace reaches the answer key
+or earlier results. Every tool call (stream events and the checkpoint's
+assistant turns) is scanned for the results dir, the harness or repository
+path, `results.jsonl`, and for review-planted `answer_key`; a hit marks the
+run contaminated (`not_contaminated` criterion). The isolated HOME carries
+the real toolchains (selfware's tool spawns keep only PATH, HOME,
+CARGO_HOME, RUSTUP_HOME and a few more): the Python user site is symlinked
+into it, and a per-run CARGO_HOME links the real bin/registry and sets
+`build.target-dir` to the shared `<results>/child-target`. After each run
+`selfware resources reap` runs with the run's HOME.
 
 ## Running
 
@@ -52,7 +76,7 @@ scripts/live_eval/run.py list
 scripts/live_eval/run.py run --binary target/release/selfware --scenarios review-planted --samples 3
 scripts/live_eval/run.py run --source . --rev HEAD --target-dir /path/to/target   # build, then run all quick
 scripts/live_eval/run.py report                      # stats + comparison vs the previous commit
-scripts/live_eval/run.py gate --rev v0.9.4-rc1 --samples 3 --target-dir /path/to/target
+scripts/live_eval/run.py gate --rev v0.9.5-rc1 --samples 5 --target-dir /path/to/target
 ```
 
 Builds never touch the source worktree: a `git clone --shared` at
@@ -68,14 +92,28 @@ turns, coverage, planted-bug recall, false findings, wrong/verified
 citations, interventions per turn, files/hour, and which criteria failed.
 It then compares the latest commit with the one before it using
 `scripts/live_eval/thresholds.json` (every threshold carries its
-rationale). A change beyond a threshold is `REGRESSION` when both sides
-have >= 3 runs (pass rate: also one-sided Fisher exact p < 0.1), otherwise
-`WATCH`. Pass rates are compared over endpoint-reachable runs; outage runs
-stay FAIL in the raw pass rate and mark the commit `UNCERTIFIED`.
+rationale). The baseline is the candidate's nearest git ANCESTOR with
+records (`--repo`, default this repository; without one, the commit first
+seen before it); an explicit `--baseline` newer than the candidate is
+refused. A change beyond a threshold is `REGRESSION` only when it is also
+significant with >= 3 runs per side: pass rate and the share of runs that
+cite at all by one-sided Fisher exact (p < 0.1), continuous metrics (wall,
+tokens, recall, false findings, per-run wrong-citation rate over citing
+runs, coverage, interventions per turn) by one-sided Mann-Whitney U
+(p <= 0.05). Otherwise `WATCH`. Pass rates are compared over runs that
+measured the commit; outage and harness-error runs stay FAIL in the raw
+pass rate and mark the commit `UNCERTIFIED`. A floor fails only with >= 3
+runs and a 95 % Wilson upper bound below it (`INSUFFICIENT` with fewer).
+`report --fail-on-regression --scenarios ... --expect-runs N` also fails
+when a scenario has fewer than N graded runs at the candidate, or when there
+are no records at all.
 
-`gate` builds `--rev`, runs the quick scenarios `--samples` times, and
-exits 1 on any REGRESSION, any scenario below its absolute floor
-(`floor_pass_rate`), or any outage/setup failure in its own runs.
+`gate` builds `--rev`, runs the quick scenarios `--samples` (default 5)
+times, judges the candidate on its own runs only, and exits 1 on any
+REGRESSION, a pass-rate or citing-fraction WATCH, a floor failure,
+insufficient or missing runs, or an outage/harness failure/contamination in
+its runs. `--binary` without `--commit` takes the commit from the binary's
+`+g<sha>` and refuses a binary whose version names another commit.
 
 ## Long-running loop
 
@@ -96,7 +134,8 @@ once (the endpoint serves 8 slots; the rest stay usable), starts
 `review-core-long` at most every `--long-every-hours` (default 6) and never
 two at once, checks the source HEAD every `--poll-secs` (default 300) and
 rebuilds in the background when it moves (a failed build keeps the previous
-binary and is shown in the heartbeat). On an endpoint outage it records the
+binary, is shown in the heartbeat, and the same head is retried after
+`--build-retry-secs`, default 1800). On an endpoint outage it records the
 FAIL and backs off exponentially (60 s doubling to 30 min). It writes
 `heartbeat.json` every 5 s, keeps the newest `--keep-runs` (300) run
 artifact dirs under `--max-artifact-mb` (2048), caps each stream at 1 MB
@@ -107,7 +146,8 @@ past `--child-target-gb` (20). `results.jsonl` is never rotated.
 
 Save as `~/Library/LaunchAgents/design.selfware.live-eval.plist`, adjust the
 paths, then `launchctl load` it. `KeepAlive` restarts the loop if it exits;
-`launchctl unload` sends SIGTERM (current runs are recorded as abandoned).
+`launchctl unload` sends SIGTERM (current runs are recorded as abandoned;
+stopping a run's process group takes up to ~70 s, hence ExitTimeOut 180).
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,7 +171,7 @@ paths, then `launchctl load` it. `KeepAlive` restarts the loop if it exits;
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ExitTimeOutSecs</key><integer>120</integer>
+  <key>ExitTimeOut</key><integer>180</integer>
   <key>StandardOutPath</key><string>/Users/you/selfware-live-eval/loop.out</string>
   <key>StandardErrorPath</key><string>/Users/you/selfware-live-eval/loop.out</string>
 </dict>
