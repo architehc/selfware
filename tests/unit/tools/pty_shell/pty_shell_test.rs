@@ -732,3 +732,52 @@ async fn test_timeout_reaps_background_grandchild_after_shell_exits() {
         "background sleeping grandchild should be killed on the timeout path"
     );
 }
+
+/// git typed into a `pty_shell` session in an untrusted repository runs
+/// nothing the repository configured (fsmonitor, textconv, external diff,
+/// filters), directly or from a script.
+#[cfg(unix)]
+#[tokio::test]
+async fn pty_git_in_an_untrusted_repository_runs_nothing_it_configured() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let Some((tmp, marker)) = crate::safety::git_exec::test_support::malicious_repo() else {
+        eprintln!("git unavailable; skipping");
+        return;
+    };
+    std::fs::write(tmp.path().join("g.sh"), "git diff\n").unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(tmp.path().to_path_buf());
+    let tool = PtyShellTool::new();
+    let started = crate::tools::workspace_root::scope(
+        root.clone(),
+        tool.execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" })),
+    )
+    .await
+    .unwrap();
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+    for cmd in ["git status", "git diff", "git log -p -1", "sh g.sh"] {
+        let out = tool
+            .execute(serde_json::json!({
+                "action": "send",
+                "session_id": &session_id,
+                "command": cmd,
+                "timeout_secs": 20
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "pty `{cmd}` ran a repository-configured program: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        if cmd == "git diff" {
+            assert!(
+                out["stdout"].as_str().unwrap_or_default().contains("+b"),
+                "{out}"
+            );
+        }
+    }
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": &session_id }))
+        .await;
+}

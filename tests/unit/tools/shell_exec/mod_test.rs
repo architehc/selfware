@@ -677,3 +677,49 @@ async fn test_shell_exec_env_still_denies_injection_vars() {
         );
     }
 }
+
+/// 0.9.5 known issue: git the model runs itself through `shell_exec` in an
+/// untrusted repository ran the repository's fsmonitor / textconv /
+/// external diff / filters. The shell now carries the git neutralisation
+/// in its environment, and the env map cannot override it.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_in_an_untrusted_repository_runs_nothing_it_configured() {
+    let Some((tmp, marker)) = crate::safety::git_exec::test_support::malicious_repo() else {
+        eprintln!("git unavailable; skipping");
+        return;
+    };
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    for cmd in [
+        "git status",
+        "git diff",
+        "git log -p -1",
+        "sh -c 'git diff HEAD'",
+    ] {
+        let out = ShellExec
+            .execute(serde_json::json!({ "command": cmd, "cwd": &cwd, "timeout_secs": 30 }))
+            .await
+            .unwrap_or_else(|e| panic!("`{cmd}` must run: {e}"));
+        assert!(
+            !marker.exists(),
+            "shell_exec `{cmd}` ran a repository-configured program: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        if cmd == "git diff" {
+            let stdout = out["stdout"].as_str().unwrap_or_default();
+            assert!(stdout.contains("+b"), "the diff still prints: {out}");
+        }
+    }
+    let refused = ShellExec
+        .execute(serde_json::json!({
+            "command": "git status",
+            "cwd": &cwd,
+            "env": { "GIT_CONFIG_COUNT": "0" },
+        }))
+        .await;
+    assert!(
+        refused.is_err(),
+        "env map must not override the git hardening"
+    );
+    assert!(!marker.exists());
+}

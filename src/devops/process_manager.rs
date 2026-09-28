@@ -551,6 +551,7 @@ impl ProcessManager {
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
+        apply_git_hardening(&mut cmd, &config);
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -1072,6 +1073,24 @@ impl Default for ProcessManager {
 }
 
 /// Spawn a child process from config (used by start and restart)
+/// git run by a managed process (directly or from its scripts) must not
+/// execute what an untrusted repository configured
+/// (`crate::safety::git_exec::shell_git_env`); the process's own env map
+/// cannot carry git config variables past it.
+fn apply_git_hardening(cmd: &mut Command, config: &ProcessConfig) {
+    for key in config.env.keys() {
+        if crate::safety::git_exec::is_git_config_env(key) {
+            cmd.env_remove(key);
+        }
+    }
+    let dir = config
+        .cwd
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::tools::workspace_root::current_path);
+    crate::safety::git_exec::apply_shell_git_env(cmd, &dir);
+}
+
 async fn spawn_child_process(
     config: &ProcessConfig,
 ) -> Result<(Option<u32>, Arc<RwLock<Option<Child>>>)> {
@@ -1088,6 +1107,7 @@ async fn spawn_child_process(
     for (key, value) in &config.env {
         cmd.env(key, value);
     }
+    apply_git_hardening(&mut cmd, config);
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

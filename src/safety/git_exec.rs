@@ -76,9 +76,30 @@ fn always_on() -> Vec<(String, String)> {
     ]
 }
 
+/// Neutral `diff.external` / `diff.<driver>.command`: a plain unified diff
+/// of the two blobs git hands an external driver (`path old-file old-hex
+/// old-mode new-file new-hex new-mode`), so `git diff` keeps working
+/// instead of failing on an empty program (git runs an empty value as a
+/// program named "" — checked with git 2.50). `diff` exits 1 on a
+/// difference, which git would read as a crash.
+#[cfg(not(windows))]
+pub const NEUTRAL_EXTERNAL_DIFF: &str =
+    r#"f() { diff -u -L "a/$1" -L "b/$1" -- "$2" "$5"; [ $? -le 1 ]; }; f"#;
+#[cfg(windows)]
+pub const NEUTRAL_EXTERNAL_DIFF: &str = "";
+
+/// Neutral textconv / clean / smudge program: the identity (`cat`). An
+/// empty value makes git fail with "cannot run" instead of skipping it.
+#[cfg(not(windows))]
+const NEUTRAL_FILTER: &str = "cat";
+#[cfg(windows)]
+const NEUTRAL_FILTER: &str = "";
+
 /// The inert value for a config key that can make git run a program, or
 /// `None` when the key cannot. `key` is the full dotted name as git prints
-/// it (section and variable lowercased, subsection verbatim).
+/// it (section and variable lowercased, subsection verbatim). Where git
+/// would fail on an empty program, the value is a working stand-in that
+/// runs nothing the repository chose ([`NEUTRAL_EXTERNAL_DIFF`], `cat`).
 pub fn neutral_value(key: &str) -> Option<&'static str> {
     let lower = key.to_ascii_lowercase();
     let (section, rest) = lower.split_once('.')?;
@@ -90,9 +111,11 @@ pub fn neutral_value(key: &str) -> Option<&'static str> {
         ("core", "pager") | ("pager", _) => Some("cat"),
         ("core", "editor") | ("sequence", "editor") => Some(":"),
         ("core", "sshcommand" | "gitproxy" | "askpass" | "alternaterefscommand") => Some(""),
-        ("diff", "external") => Some(""),
-        ("diff", "textconv" | "command") if has_subsection => Some(""),
-        ("filter", "clean" | "smudge" | "process") if has_subsection => Some(""),
+        ("diff", "external") => Some(NEUTRAL_EXTERNAL_DIFF),
+        ("diff", "command") if has_subsection => Some(NEUTRAL_EXTERNAL_DIFF),
+        ("diff", "textconv") if has_subsection => Some(NEUTRAL_FILTER),
+        ("filter", "clean" | "smudge") if has_subsection => Some(NEUTRAL_FILTER),
+        ("filter", "process") if has_subsection => Some(""),
         ("filter", "required") if has_subsection => Some("false"),
         ("merge", "driver") if has_subsection => Some(""),
         ("credential", "helper") => Some(""),
@@ -125,6 +148,58 @@ pub fn neutral_value(key: &str) -> Option<&'static str> {
 /// or git is unavailable. Lists configuration only — `git config` runs no
 /// hook, filter or monitor.
 pub fn repo_exec_config(dir: &Path) -> Vec<(String, String)> {
+    let key = config_cache_key(dir);
+    if let Some((root, contents)) = &key {
+        let cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached, exec)) = cache.get(root) {
+            if cached == contents {
+                return exec.clone();
+            }
+        }
+    }
+    let exec = repo_exec_config_uncached(dir);
+    if let Some((root, contents)) = key {
+        let mut cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= CONFIG_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(root, (contents, exec.clone()));
+    }
+    exec
+}
+
+const CONFIG_CACHE_MAX: usize = 64;
+
+type ConfigCache =
+    std::collections::HashMap<PathBuf, ([Option<Vec<u8>>; 2], Vec<(String, String)>)>;
+
+/// Repository root → (the bytes of its `.git/config` and
+/// `.git/config.worktree` when last listed, the exec keys found then).
+static CONFIG_CACHE: std::sync::LazyLock<std::sync::Mutex<ConfigCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Cache key for [`repo_exec_config`]: the repository root and the exact
+/// bytes of the only files the `local`/`worktree` scopes read. `None` (no
+/// caching) when the repository is not a plain `.git` directory (worktree,
+/// submodule, bare) or its config uses `include`/`includeIf` — then other
+/// files contribute and the bytes here would not decide the answer.
+fn config_cache_key(dir: &Path) -> Option<(PathBuf, [Option<Vec<u8>>; 2])> {
+    let root = repo_root(dir)?;
+    let git_dir = root.join(".git");
+    if !git_dir.is_dir() {
+        return None;
+    }
+    let read = |name: &str| std::fs::read(git_dir.join(name)).ok();
+    let contents = [read("config"), read("config.worktree")];
+    let includes = contents.iter().flatten().any(|bytes| {
+        String::from_utf8_lossy(bytes)
+            .to_ascii_lowercase()
+            .contains("include")
+    });
+    (!includes).then_some((root, contents))
+}
+
+fn repo_exec_config_uncached(dir: &Path) -> Vec<(String, String)> {
     let mut cmd = std::process::Command::new("git");
     crate::safety::process_env::sanitize_std_command_env(&mut cmd);
     cmd.args(["config", "--list", "--show-scope", "--includes", "-z"])
@@ -226,6 +301,69 @@ pub fn hardening_args(dir: &Path, scope: GitScope) -> Vec<String> {
         args.push(format!("{k}={v}"));
     }
     args
+}
+
+/// Environment variables that pass git config the command-line way
+/// (`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`, and
+/// the older `GIT_CONFIG_PARAMETERS`). A caller-supplied one would replace
+/// the neutralisation [`shell_git_env`] sets.
+pub fn is_git_config_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper == "GIT_CONFIG_COUNT"
+        || upper == "GIT_CONFIG_PARAMETERS"
+        || upper.starts_with("GIT_CONFIG_KEY_")
+        || upper.starts_with("GIT_CONFIG_VALUE_")
+}
+
+/// Environment for a shell the agent spawns for the model (`shell_exec`,
+/// `pty_shell`, `process_start`, workflow shell steps) whose working
+/// directory is `dir`: every `git` the shell runs — directly, from a
+/// script, from `make` — gets the same neutralisation as a hardened
+/// [`GitScope::UserOperation`] call, passed as `GIT_CONFIG_COUNT` /
+/// `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`. Environment config has
+/// command-line precedence: it beats the repository's `.git/config` (each
+/// key checked with git 2.50; git 2.31+ reads these variables).
+///
+/// - trusted repository ([`repo_is_trusted`]): nothing (it keeps its
+///   fsmonitor, filters, hooks, …);
+/// - otherwise, always `core.fsmonitor=false`, `core.hooksPath` = the null
+///   device, `protocol.ext.allow=never`, `core.pager=cat`, plus every
+///   exec-capable key the repository's own config sets (driver names are
+///   only known from the config), with [`neutral_value`]'s working
+///   stand-ins so `git diff` / `git log -p` still print diffs.
+///
+/// Limits: per-driver keys are enumerated for the repository at `dir` when
+/// the shell starts; a `cd` into a DIFFERENT untrusted repository keeps
+/// only the fixed keys above. A command can still undo this on purpose
+/// (`GIT_CONFIG_COUNT=0 git …`): this protects a model from the
+/// repository, not the repository from the model.
+pub fn shell_git_env(dir: &Path) -> Vec<(String, String)> {
+    if repo_is_trusted(dir) {
+        return Vec::new();
+    }
+    let mut overrides = always_on();
+    overrides.push(("core.pager".to_string(), "cat".to_string()));
+    for (key, _) in repo_exec_config(dir) {
+        if let Some(v) = neutral_value(&key) {
+            if !overrides.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+                overrides.push((key, v.to_string()));
+            }
+        }
+    }
+    let mut env = vec![("GIT_CONFIG_COUNT".to_string(), overrides.len().to_string())];
+    for (n, (k, v)) in overrides.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{n}"), k));
+        env.push((format!("GIT_CONFIG_VALUE_{n}"), v));
+    }
+    env
+}
+
+/// Apply [`shell_git_env`] for `dir` to a model shell's command. Call after
+/// the environment clear and after any caller-supplied variables.
+pub fn apply_shell_git_env(cmd: &mut tokio::process::Command, dir: &Path) {
+    for (k, v) in shell_git_env(dir) {
+        cmd.env(k, v);
+    }
 }
 
 fn hardening_env(scope: GitScope) -> Vec<(&'static str, &'static str)> {
@@ -366,3 +504,7 @@ pub const NO_EXTERNAL_DIFF: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 #[cfg(test)]
 #[path = "../../tests/unit/safety/git_exec/git_exec_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/unit/safety/git_exec/support.rs"]
+pub(crate) mod test_support;

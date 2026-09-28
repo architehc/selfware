@@ -419,6 +419,15 @@ impl Tool for ShellExec {
             // shared list — see DENIED_ENV_VARS for what's deliberately NOT
             // denied (ENV, LD_DEBUG, HOME, …).
             let upper = name.to_ascii_uppercase();
+            // Git config passed through the environment would replace the
+            // untrusted-repository neutralisation set below.
+            if crate::safety::git_exec::is_git_config_env(name) {
+                anyhow::bail!(
+                    "Environment variable '{}' is not allowed in shell_exec env (it would \
+                     override the git hardening of this shell)",
+                    name
+                );
+            }
             if crate::safety::checker::validation::DENIED_ENV_VARS.contains(&upper.as_str()) {
                 anyhow::bail!(
                     "Environment variable '{}' is not allowed in shell_exec env (injection risk)",
@@ -460,6 +469,15 @@ impl Tool for ShellExec {
         // layered on afterwards and survive the clear.
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.envs(&args.env);
+        // Every git this shell runs (directly or from a script) must not
+        // execute what an untrusted repository configured (fsmonitor,
+        // textconv, external diff, filters, hooks, pager).
+        let git_dir = args
+            .cwd
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::tools::workspace_root::current_path);
+        crate::safety::git_exec::apply_shell_git_env(&mut cmd, &git_dir);
 
         // Run the child in its own process group so a timeout can reap the
         // ENTIRE process tree (grandchildren included, e.g. cargo -> rustc), not

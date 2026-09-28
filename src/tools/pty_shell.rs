@@ -130,6 +130,12 @@ impl PtySession {
             .env("PS1", "")
             .env("PS2", "")
             .env("TERM", "dumb");
+        // git in this session must not run what an untrusted repository
+        // configured (see `git_exec::shell_git_env`).
+        crate::safety::git_exec::apply_shell_git_env(
+            &mut cmd,
+            &crate::tools::workspace_root::current_path(),
+        );
 
         let mut child = cmd
             .spawn()

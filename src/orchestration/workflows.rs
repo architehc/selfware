@@ -2222,6 +2222,11 @@ impl WorkflowExecutor {
                 // credentials (SELFWARE_API_KEY, GITHUB_TOKEN, …) — scripts
                 // can spawn arbitrary children (review round 6 #5).
                 crate::safety::process_env::sanitize_command_env(&mut shell_cmd);
+                // …nor run what an untrusted repository configured for git.
+                crate::safety::git_exec::apply_shell_git_env(
+                    &mut shell_cmd,
+                    std::path::Path::new(&dir),
+                );
                 let shell_future = shell_cmd
                     .arg(flag)
                     .arg(&resolved_cmd)

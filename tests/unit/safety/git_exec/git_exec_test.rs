@@ -8,11 +8,11 @@ fn neutral_values_cover_the_exec_capable_keys() {
         ("core.pager", "cat"),
         ("pager.log", "cat"),
         ("core.sshcommand", ""),
-        ("diff.external", ""),
-        ("diff.evil.textconv", ""),
-        ("diff.evil.command", ""),
-        ("filter.evil.clean", ""),
-        ("filter.evil.smudge", ""),
+        ("diff.external", NEUTRAL_EXTERNAL_DIFF),
+        ("diff.evil.textconv", NEUTRAL_FILTER),
+        ("diff.evil.command", NEUTRAL_EXTERNAL_DIFF),
+        ("filter.evil.clean", NEUTRAL_FILTER),
+        ("filter.evil.smudge", NEUTRAL_FILTER),
         ("filter.evil.process", ""),
         ("filter.evil.required", "false"),
         ("merge.evil.driver", ""),
@@ -54,70 +54,8 @@ fn scoped_config_output_is_parsed() {
     assert_eq!(parsed[2].2, "");
 }
 
-/// A repository whose own config and hooks run `hook.sh` from every
-/// angle 0.9.4 left open (fsmonitor, textconv, external diff, clean/smudge
-/// filters, hooks). Returns (repo dir, marker path).
 #[cfg(unix)]
-fn malicious_repo() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-    let tmp = tempfile::tempdir().ok()?;
-    let dir = tmp.path();
-    let marker = dir.join("MARKER");
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-    };
-    git(&["init", "-q"])?;
-    git(&["config", "user.email", "t@example.com"])?;
-    git(&["config", "user.name", "t"])?;
-    git(&["config", "commit.gpgsign", "false"])?;
-    let hook = dir.join("hook.sh");
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 0\n",
-            marker.display()
-        ),
-    )
-    .ok()?;
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).ok()?;
-    std::fs::write(dir.join("f.txt"), "a\n").ok()?;
-    std::fs::write(dir.join(".gitattributes"), "f.txt diff=evil filter=evil\n").ok()?;
-    git(&["add", "-A"])?;
-    git(&["commit", "-qm", "init"])?;
-    std::fs::write(dir.join("f.txt"), "b\n").ok()?;
-    let hook_s = hook.to_str()?;
-    let hooks_dir = dir.join("hk");
-    std::fs::create_dir(&hooks_dir).ok()?;
-    for name in [
-        "post-checkout",
-        "pre-commit",
-        "post-commit",
-        "reference-transaction",
-    ] {
-        let h = hooks_dir.join(name);
-        std::fs::copy(&hook, &h).ok()?;
-    }
-    for (k, v) in [
-        ("core.fsmonitor", hook_s),
-        ("diff.external", hook_s),
-        ("diff.evil.textconv", hook_s),
-        ("filter.evil.clean", hook_s),
-        ("filter.evil.smudge", hook_s),
-        ("core.hooksPath", hooks_dir.to_str()?),
-    ] {
-        git(&["config", k, v])?;
-    }
-    Some((tmp, marker))
-}
+use super::test_support::malicious_repo;
 
 #[cfg(unix)]
 fn run(mut cmd: std::process::Command) {
@@ -197,4 +135,150 @@ fn clean_repository_is_inert() {
     assert_eq!(args[0], "--no-pager");
     assert!(args.contains(&"core.fsmonitor=false".to_string()));
     assert!(args.iter().any(|a| a.starts_with("core.hooksPath=")));
+}
+
+/// Run `script` with `sh -c` in `dir` the way a model shell runs it: the
+/// sanitized environment plus [`shell_git_env`]. Returns stdout.
+#[cfg(unix)]
+fn shell_run(dir: &std::path::Path, script: &str) -> String {
+    let mut cmd = std::process::Command::new("sh");
+    crate::safety::process_env::sanitize_std_command_env(&mut cmd);
+    cmd.args(["-c", script])
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (k, v) in shell_git_env(dir) {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("sh runs");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A model shell in an untrusted repository: git run directly, from a
+/// script, or nested in a subshell executes nothing the repository
+/// configured, and `git diff` / `git log -p` still print real diffs.
+#[cfg(unix)]
+#[test]
+fn shell_git_env_neutralises_repository_programs_for_nested_git() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some((tmp, marker)) = malicious_repo() else {
+        eprintln!("git unavailable; skipping");
+        return;
+    };
+    let dir = tmp.path();
+    // Not vacuous: the same shell without the environment triggers.
+    let mut plain = std::process::Command::new("sh");
+    plain.args(["-c", "git status"]).current_dir(dir);
+    run(plain);
+    assert!(marker.exists(), "fixture must trigger on an unhardened git");
+    std::fs::remove_file(&marker).unwrap();
+
+    let env = shell_git_env(dir);
+    let get = |key: &str| {
+        let n = env
+            .iter()
+            .find(|(k, v)| k.starts_with("GIT_CONFIG_KEY_") && v.eq_ignore_ascii_case(key))
+            .map(|(k, _)| k.trim_start_matches("GIT_CONFIG_KEY_").to_string())?;
+        env.iter()
+            .find(|(k, _)| *k == format!("GIT_CONFIG_VALUE_{n}"))
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(get("core.fsmonitor").as_deref(), Some("false"));
+    assert_eq!(get("core.pager").as_deref(), Some("cat"));
+    assert!(get("diff.evil.textconv").is_some(), "{env:?}");
+    assert!(get("filter.evil.clean").is_some(), "{env:?}");
+
+    let script = dir.join("gitscript.sh");
+    std::fs::write(&script, "#!/bin/sh\ngit diff\ngit status --short\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for cmd in [
+        "git status",
+        "git status --porcelain",
+        "git diff",
+        "git diff HEAD",
+        "git log -p -1",
+        "git show HEAD",
+        "git -p diff",
+        "./gitscript.sh",
+        "sh -c 'cd . && git diff'",
+        "git add -A && git commit -qm x",
+    ] {
+        let out = shell_run(dir, cmd);
+        assert!(
+            !marker.exists(),
+            "`{cmd}` ran a repository-configured program: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        if cmd == "git diff" || cmd == "./gitscript.sh" {
+            assert!(
+                out.contains("+b"),
+                "`{cmd}` must still print the diff: {out}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_or_clean_repositories_get_only_what_they_need() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return;
+    }
+    // A clean untrusted repository still gets the fixed keys (a later
+    // `git clone` + `cd` is covered for fsmonitor/hooks/pager).
+    let env = shell_git_env(tmp.path());
+    assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "4".to_string()));
+    assert!(is_git_config_env("GIT_CONFIG_COUNT"));
+    assert!(is_git_config_env("git_config_key_0"));
+    assert!(is_git_config_env("GIT_CONFIG_PARAMETERS"));
+    assert!(!is_git_config_env("GIT_CONFIG_NOSYSTEM"));
+    assert!(!is_git_config_env("GIT_AUTHOR_NAME"));
+}
+
+/// The config listing is cached by the bytes of `.git/config`: a changed
+/// config is re-listed, and a config with includes is never cached.
+#[cfg(unix)]
+#[test]
+fn exec_config_cache_follows_the_config_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q"]) {
+        return;
+    }
+    assert!(repo_exec_config(dir).is_empty());
+    assert!(repo_exec_config(dir).is_empty());
+    assert!(git(&["config", "core.fsmonitor", "./x.sh"]));
+    assert_eq!(
+        repo_exec_config(dir),
+        vec![("core.fsmonitor".to_string(), "./x.sh".to_string())]
+    );
+    // An included file changes without `.git/config` changing.
+    let inc = dir.join("inc.cfg");
+    std::fs::write(&inc, "").unwrap();
+    assert!(git(&["config", "include.path", inc.to_str().unwrap()]));
+    assert_eq!(repo_exec_config(dir).len(), 1);
+    std::fs::write(&inc, "[diff]\n\texternal = ./y.sh\n").unwrap();
+    assert_eq!(
+        repo_exec_config(dir).len(),
+        2,
+        "{:?}",
+        repo_exec_config(dir)
+    );
 }
