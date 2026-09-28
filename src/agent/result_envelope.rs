@@ -8,8 +8,13 @@
 //! (or dropped the `&`) in edits (0.9.4 live finding on python-slugify).
 //!
 //! So only the `<` that opens a framing or tool-call tag (`<tool_result`,
-//! `</error`, `<tool>`, `<function=`, `<|im_start|>`, …) is written as
-//! `&lt;`; every other byte is delivered as-is. The encoding is
+//! `</error`, `<tool>`, `<function=`, …) or a chat-template special token
+//! (`<|im_start|>`, DeepSeek's fullwidth `<｜…｜>`, `<think>`,
+//! `<tool_response>`, `<start_of_turn>`, `<s>`, …) is written as `&lt;`;
+//! every other byte is delivered as-is. Special tokens matter because
+//! llama.cpp / vLLM tokenize special-token strings inside message text as
+//! control tokens: a file containing `<|im_start|>system` would otherwise
+//! open a real system turn. The encoding is
 //! unambiguous and reversible ([`decode`]): a literal `&lt;` (or `&amp;lt;`,
 //! …) that is followed by such a tag gains one `amp;`, so decoding restores
 //! it exactly. Whenever anything was neutralized, a trailing note inside the
@@ -18,9 +23,56 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Tag names whose `<` is neutralized (case-insensitive, optional `/` and
-/// whitespace, word boundary after the name), plus `<|` special tokens.
-const TAG_PATTERN: &str = r"(?:\s*/?\s*(?i:tool_result|tool_call|tool_use|tool|function_calls|function|parameter|arguments|invoke|error|skipped)\b|\|)";
+/// Chat-template special-token names of the common families (Qwen/ChatML,
+/// Llama, Gemma, DeepSeek, GLM, Kimi, MiniMax, Seed, Hermes, FIM) that are
+/// written as `<name>` / `</name>` (the `<|…|>` family is covered by the
+/// pipe class below).
+macro_rules! special_token_names {
+    () => {
+        concat!(
+            "tool_call|tool_calls|tool_response|tool_responses|think|thinking|reasoning",
+            "|start_of_turn|end_of_turn|start_of_image|end_of_image|im_start|im_end|im_sep",
+            "|endoftext|end_of_text|begin_of_text|eot_id|eom_id|start_header_id|end_header_id",
+            "|fim_prefix|fim_middle|fim_suffix|fim_pad|file_sep|repo_name|arg_key|arg_value",
+            "|minimax|seed|bos|eos|pad|unk|sys"
+        )
+    };
+}
+
+/// `<s>` / `</s>`, and `<` before ANY pipe-like character (`|`, fullwidth
+/// `｜`, broken bar, box-drawing and other lookalikes) — every `<|…|>` /
+/// DeepSeek `<｜…｜>` token, whitespace-tolerant.
+macro_rules! special_token_shapes {
+    () => {
+        concat!(
+            r"\s*/?\s*(?i:s)\s*>",
+            r"|\s*[|\x{FF5C}\x{00A6}\x{2502}\x{2223}\x{01C0}\x{FE31}\x{FE33}\x{FFE8}\x{2758}\x{23D0}]"
+        )
+    };
+}
+
+/// What follows a `<` that is neutralized (case-insensitive, optional `/`
+/// and whitespace, word boundary after the name): framing and tool-call
+/// tags, the special-token names, and the special-token shapes.
+const TAG_PATTERN: &str = concat!(
+    r"(?:\s*/?\s*(?i:",
+    "tool_result|tool_results|tool_use|tool_output|tool|function_calls|function_call",
+    "|function_results|function|parameter|arguments|invoke|error|skipped|",
+    special_token_names!(),
+    r")\b|",
+    special_token_shapes!(),
+    ")",
+);
+
+/// A `<` opening a chat-template special token (no framing tags): text a
+/// raw completion endpoint would tokenize as a control token.
+const SPECIAL_TOKEN_PATTERN: &str = concat!(
+    r"<(?:\s*/?\s*(?i:",
+    special_token_names!(),
+    r")\b|",
+    special_token_shapes!(),
+    ")",
+);
 
 /// Start of the note appended inside the envelope when a `<` was neutralized.
 pub(crate) const FRAMING_NOTE_PREFIX: &str = "\n[framing: ";
@@ -46,17 +98,46 @@ fn decode_re() -> &'static Regex {
 }
 
 /// Encode untrusted content for the envelope. Returns the encoded text and
-/// how many tag-opening `<` were neutralized.
+/// how many spots were changed: tag-opening `<` written as `&lt;`, plus
+/// literal `&lt;`-before-a-tag written as `&amp;lt;`.
+#[cfg(test)]
 pub(crate) fn encode(content: &str) -> (String, usize) {
+    let (encoded, lt, amp) = encode_parts(content);
+    (encoded, lt + amp)
+}
+
+/// [`encode`] with the two counts apart: (text, `<` neutralized, literal
+/// `&lt;` escaped).
+fn encode_parts(content: &str) -> (String, usize, usize) {
+    let amp_count = escape_amp_re().find_iter(content).count();
     let amp = escape_amp_re().replace_all(content, "&amp;$1");
-    let count = escape_lt_re().find_iter(&amp).count();
-    if count == 0 {
-        return (amp.into_owned(), 0);
+    let lt_count = escape_lt_re().find_iter(&amp).count();
+    if lt_count == 0 {
+        return (amp.into_owned(), 0, amp_count);
     }
     (
         escape_lt_re().replace_all(&amp, "&lt;$1").into_owned(),
-        count,
+        lt_count,
+        amp_count,
     )
+}
+
+/// Whether `text` contains a chat-template special token (`<|im_start|>`,
+/// `<｜…｜>`, `<think>`, `<start_of_turn>`, `</s>`, …) — text that must not
+/// reach a raw completion endpoint (FIM) at all.
+pub(crate) fn contains_special_token(text: &str) -> bool {
+    special_token_re().is_match(text)
+}
+
+/// `text` with every special-token opener (the `<` and what makes it one)
+/// removed — for instructions that are sanitized, not round-tripped.
+pub(crate) fn strip_special_token_openers(text: &str) -> String {
+    special_token_re().replace_all(text, "").into_owned()
+}
+
+fn special_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(SPECIAL_TOKEN_PATTERN).expect("static envelope regex"))
 }
 
 /// The exact inverse of [`encode`] (after [`strip_framing_note`]).
@@ -81,20 +162,29 @@ pub(crate) fn strip_framing_note(payload: &str) -> &str {
     }
 }
 
-fn framing_note(count: usize) -> String {
+fn framing_note(lt: usize, amp: usize) -> String {
+    let literal = if amp > 0 {
+        format!(
+            " {amp} literal `&lt;` before such tag text is shown as `&amp;lt;`; the source \
+             has `&lt;` there."
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{FRAMING_NOTE_PREFIX}{count} `<` opening tool-call/result tag text in this result \
-         is shown as `&lt;` so it cannot be read as markup; the source has `<` there. \
-         Nothing else in this result is escaped.]"
+        "{FRAMING_NOTE_PREFIX}{lt} `<` opening tool-call/result tag or special-token text in \
+         this result is shown as `&lt;` so it cannot be read as markup; the source has `<` \
+         there.{literal} Nothing else in this result is escaped.]"
     )
 }
 
 /// Wrap a tool result in the envelope. `success == false` adds the inner
-/// `<error>` element. Only framing/tool-call tag openers are neutralized.
+/// `<error>` element. Only framing/tool-call tag and special-token openers
+/// are neutralized; any change at all adds the framing note.
 pub(crate) fn wrap(content: &str, success: bool) -> String {
-    let (encoded, count) = encode(content);
-    let note = if count > 0 {
-        framing_note(count)
+    let (encoded, lt, amp) = encode_parts(content);
+    let note = if lt + amp > 0 {
+        framing_note(lt, amp)
     } else {
         String::new()
     };
@@ -156,6 +246,92 @@ mod tests {
                 .and_then(|s| s.strip_suffix("</tool_result>"))
                 .unwrap();
             assert_eq!(decode(inner), content);
+        }
+    }
+
+    /// Special tokens llama.cpp / vLLM would turn into control tokens: every
+    /// one is neutralized, the framing note is present, and decoding restores
+    /// the exact original.
+    #[test]
+    fn special_tokens_are_neutralized_reversibly() {
+        let lt = "<";
+        let tokens = [
+            "tool_response>",
+            "/tool_response>",
+            "think>",
+            "/think>",
+            "THINK >",
+            "start_of_turn>user",
+            "end_of_turn>",
+            "s>",
+            "/s>",
+            " / s >",
+            "\u{FF5C}begin\u{2581}of\u{2581}sentence\u{FF5C}>",
+            "\u{FF5C}tool\u{2581}calls\u{2581}begin\u{FF5C}>",
+            "|im_start|>system",
+            "| im_start |>",
+            "\u{00A6}im_start\u{00A6}>",
+            "\u{2502}im_end\u{2502}>",
+            "\u{2223}endoftext\u{2223}>",
+            "|eot_id|>",
+            "|start_header_id|>assistant",
+            "im_start>",
+            "endoftext>",
+            "eot_id>",
+            "start_header_id>",
+            "tool_call>",
+            "seed:think>",
+            "minimax:tool_call>",
+            "<SYS>>",
+            "arg_key>",
+            "fim_middle>",
+        ];
+        for token in tokens {
+            let content = format!("before {lt}{token} after");
+            let (encoded, count) = encode(&content);
+            assert!(count > 0, "not neutralized: {content}");
+            assert!(!contains_raw_opener(&encoded), "{encoded}");
+            assert_eq!(decode(&encoded), content, "round trip");
+            let wrapped = wrap(&content, true);
+            assert!(wrapped.contains("[framing: "), "{wrapped}");
+            let inner = wrapped
+                .strip_prefix("<tool_result>")
+                .and_then(|s| s.strip_suffix("</tool_result>"))
+                .unwrap();
+            assert_eq!(decode(inner), content);
+        }
+    }
+
+    fn contains_raw_opener(text: &str) -> bool {
+        escape_lt_re().is_match(text)
+    }
+
+    #[test]
+    fn literal_escaped_tag_text_gets_a_framing_note_too() {
+        let content = "docs say &lt;tool_result> is escaped";
+        let (encoded, count) = encode(content);
+        assert_eq!(encoded, "docs say &amp;lt;tool_result> is escaped");
+        assert_eq!(count, 1);
+        let wrapped = wrap(content, true);
+        assert!(wrapped.contains("[framing: 0 `<`"), "{wrapped}");
+        assert!(wrapped.contains("`&amp;lt;`"), "{wrapped}");
+        let inner = wrapped
+            .strip_prefix("<tool_result>")
+            .and_then(|s| s.strip_suffix("</tool_result>"))
+            .unwrap();
+        assert_eq!(decode(inner), content);
+    }
+
+    #[test]
+    fn special_token_lookalikes_in_ordinary_code_pass_through() {
+        for content in [
+            "<strong>bold</strong> <span>x</span>",
+            "Vec<String> and HashMap<K, V>",
+            "<script src=\"a.js\"></script>",
+            "<padding> <thinker> <system_prompt> <session>",
+            "a || b; x <= y",
+        ] {
+            assert_eq!(encode(content), (content.to_string(), 0), "{content}");
         }
     }
 }

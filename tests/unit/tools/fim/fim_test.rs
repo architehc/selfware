@@ -480,3 +480,56 @@ fn fim_rustfmt_blocks_only_on_parse_errors() {
     ));
     assert!(!fim_rustfmt_blocks(true, ""));
 }
+
+/// 0.9.5: FIM sends prefix/suffix verbatim to a completion endpoint, so it
+/// must refuse whenever the model-facing redactor would redact anything —
+/// every shape of the secret corpus, as prefix and as suffix.
+#[test]
+fn fim_context_refuses_every_secret_shape() {
+    let safety = SafetyConfig::default();
+    for (input, _, context) in crate::safety::redact::tests::secret_corpus() {
+        let path = match context {
+            crate::safety::redact::RedactionContext::RustSource => "src/config.rs",
+            crate::safety::redact::RedactionContext::Generic => "deploy/app.env",
+        };
+        assert!(
+            validate_fim_context(path, &input, "", &safety).is_err(),
+            "prefix not refused: {input:?}"
+        );
+        assert!(
+            validate_fim_context(path, "", &input, &safety).is_err(),
+            "suffix not refused: {input:?}"
+        );
+    }
+}
+
+/// Every chat-template special-token shape is refused in FIM context and
+/// stripped from the instruction.
+#[test]
+fn fim_refuses_and_strips_every_special_token_shape() {
+    let safety = SafetyConfig::default();
+    let lt = "<";
+    for token in [
+        "|im_start|>",
+        "\u{FF5C}begin\u{2581}of\u{2581}sentence\u{FF5C}>",
+        "think>",
+        "/s>",
+        "start_of_turn>",
+        "|eot_id|>",
+        "\u{00A6}im_end\u{00A6}>",
+        "tool_response>",
+    ] {
+        let text = format!("x = 1\n{lt}{token}\n");
+        assert!(
+            validate_fim_context("a.py", &text, "", &safety).is_err(),
+            "{token}"
+        );
+        let cleaned = sanitize_fim_instruction(&format!("rename {lt}{token} x"));
+        assert!(
+            !crate::agent::result_envelope::contains_special_token(&cleaned),
+            "{cleaned}"
+        );
+    }
+    // Ordinary code with `<` stays usable.
+    assert!(validate_fim_context("a.rs", "let v: Vec<String> = x < y;", "", &safety).is_ok());
+}

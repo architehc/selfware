@@ -43,6 +43,10 @@ fn sanitize_fim_instruction(raw: &str) -> String {
             sanitized = re.replace_all(&sanitized, "").to_string();
         }
     }
+    // Any other special-token opener (`<｜…｜>`, `<think>`, `</s>`,
+    // `<start_of_turn>`, unicode-pipe lookalikes): drop the opener so no
+    // control token reaches the completion endpoint.
+    sanitized = crate::agent::result_envelope::strip_special_token_openers(&sanitized);
 
     // ── Step 2: Remove common injection patterns ───────────────────
     let injection_patterns: &[&str] = &[
@@ -99,16 +103,12 @@ fn validate_fim_context(
             safety.trust_gate_tool_results,
         );
         let lower = content.to_ascii_lowercase();
+        // Any chat-template special token (every `<|…|>` / `<｜…｜>` shape,
+        // `<think>`, `<start_of_turn>`, `</s>`, …) — the completion endpoint
+        // would tokenize it as a control token.
         if gated.content != content
-            || [
-                "<|fim_",
-                "<|im_start|>",
-                "<|im_end|>",
-                "<|endoftext|>",
-                "[selfware_fim_metadata_",
-            ]
-            .iter()
-            .any(|token| lower.contains(token))
+            || crate::agent::result_envelope::contains_special_token(content)
+            || lower.contains("[selfware_fim_metadata_")
         {
             return Err(anyhow!("FIM context contains credentials or unsafe control text. Use a targeted file_edit that does not send this context to the model."));
         }
