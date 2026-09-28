@@ -592,6 +592,58 @@ fn render_restore_outcomes(
     line
 }
 
+/// The `cwd` argument of a `shell_exec` / `pty_shell` call, if any.
+fn shell_call_cwd(args: &serde_json::Value) -> Option<&str> {
+    args.get("cwd")
+        .or_else(|| args.get("working_dir"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Whether every `git` a headless-approved command would run executes
+/// nothing its repository chose (G1): each directory the command can run
+/// git in — the call's `cwd` (or the process cwd) and every `cd` target in
+/// the chain — must be a trusted repository or one whose own configuration
+/// sets no exec-capable key (`core.fsmonitor`, textconv, filters, …).
+/// Commands without a `git` segment pass.
+fn git_segments_are_inert(
+    segments: &[crate::safety::shell_read::Segment],
+    cwd: Option<&str>,
+) -> bool {
+    let runs_git = segments.iter().any(|seg| {
+        seg.program()
+            .is_some_and(|(prog, _)| prog.rsplit('/').next().unwrap_or(prog) == "git")
+    });
+    if !runs_git {
+        return true;
+    }
+    let base = match cwd {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(_) => return false,
+        },
+    };
+    let base = if base.is_relative() {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(base),
+            Err(_) => return false,
+        }
+    } else {
+        base
+    };
+    let mut dirs = vec![base.clone()];
+    for seg in segments {
+        if let Some(("cd", args)) = seg.program() {
+            if let Some(target) = args.first() {
+                dirs.push(base.join(&target.text));
+            }
+        }
+    }
+    dirs.iter()
+        .all(|d| crate::safety::git_exec::repo_git_is_inert(d))
+}
+
 /// Conservative extension of the dispatcher's read-only classifier for
 /// PLAIN INTERPRETER SCRIPT RUNS (`python3 stats.py`), used by
 /// [`Agent::headless_auto_edit_auto_approve`].
@@ -2988,7 +3040,10 @@ To call a tool, use this EXACT XML structure:
                 if cmd.trim().is_empty() {
                     return None;
                 }
-                Some(self.headless_shell_call_allowed(cmd, true))
+                if self.operator_requires_confirmation(tool_name) {
+                    return None;
+                }
+                Some(self.headless_shell_call_allowed(cmd, shell_call_cwd(args), true))
             }
             _ => None,
         }
@@ -3010,10 +3065,30 @@ To call a tool, use this EXACT XML structure:
     ///
     /// Headless Normal passes `allow_project_code = false`: `ls`, `wc`,
     /// `grep`, `git log` run; `cargo test`, `pytest`, `python3 x.py` stop.
-    pub(crate) fn headless_shell_call_allowed(&self, cmd: &str, allow_project_code: bool) -> bool {
+    ///
+    /// Both branches first require the command to PARSE as plain shell
+    /// (`crate::safety::shell_read::parse`): no command or process
+    /// substitution, no parameter expansion, no environment assignment that
+    /// steers a program (`GIT_EXTERNAL_DIFF=…`, `RIPGREP_CONFIG_PATH=…`), no
+    /// redirection that writes a file. `echo $(sh tools/x.sh)` is neither a
+    /// read nor a project-code run (0.9.5 review, C1).
+    ///
+    /// A command that runs `git` is approved only when the repository's own
+    /// configuration cannot make git run a program (`core.fsmonitor`,
+    /// textconv, filters, …) or the repository is trusted
+    /// (`crate::safety::git_exec::repo_git_is_inert`, G1).
+    pub(crate) fn headless_shell_call_allowed(
+        &self,
+        cmd: &str,
+        cwd: Option<&str>,
+        allow_project_code: bool,
+    ) -> bool {
         if cmd.trim().is_empty() {
             return false;
         }
+        let Ok(segments) = crate::safety::shell_read::parse(cmd) else {
+            return false;
+        };
         let reads = crate::safety::confirm_view::classify_shell_risk(cmd)
             == crate::safety::confirm_view::RiskTag::Reads;
         let observational = reads
@@ -3022,11 +3097,33 @@ To call a tool, use this EXACT XML structure:
                     || interpreter_script_run_is_observational(cmd)));
         observational
             && self.safety.check_shell_command(cmd).is_ok()
-            && crate::safety::yolo::headless_auto_edit_shell_guard_pass(
+            && crate::safety::yolo::headless_read_shell_guard_pass(
                 cmd,
+                &segments,
+                cwd,
                 &self.config.safety.denied_paths,
                 self.yolo_manager.protected_paths(),
             )
+            && git_segments_are_inert(&segments, cwd)
+    }
+
+    /// Whether the operator explicitly listed `tool_name` in
+    /// `safety.require_confirmation` (a config file, env var or CLI flag set
+    /// the list — not the built-in default). An explicit listing wins over
+    /// the headless read/AutoEdit shell approvals: an operator who wrote
+    /// `require_confirmation = ["shell_exec"]` gets a stop, not a silent run.
+    pub(crate) fn operator_requires_confirmation(&self, tool_name: &str) -> bool {
+        let explicit = !matches!(
+            self.config.sources.get("safety.require_confirmation"),
+            None | Some(crate::config::ConfigSource::Default)
+        );
+        explicit
+            && self
+                .config
+                .safety
+                .require_confirmation
+                .iter()
+                .any(|t| t == tool_name)
     }
 
     /// Headless Normal mode (0.9.4): with no operator, a shell call is
@@ -3051,7 +3148,10 @@ To call a tool, use this EXACT XML structure:
             return None;
         }
         let cmd = args.get("command").and_then(|c| c.as_str())?;
-        Some(self.headless_shell_call_allowed(cmd, false))
+        if self.operator_requires_confirmation(tool_name) {
+            return None;
+        }
+        Some(self.headless_shell_call_allowed(cmd, shell_call_cwd(args), false))
     }
 
     /// Check if running in non-interactive mode (piped stdin)

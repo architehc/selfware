@@ -8878,6 +8878,90 @@ fn halt_notes_cover_side_effecting_tools() {
 }
 
 #[tokio::test]
+async fn explicit_require_confirmation_wins_over_headless_read_approval() {
+    // 0.9.5 (Rule 2 reversal of the 0.9.4 precedence): an operator who SET
+    // `safety.require_confirmation` and lists `shell_exec` gets a stop for a
+    // plain read, in headless Normal and headless AutoEdit alike. The
+    // built-in default list (which also names shell_exec) does not.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let shell = serde_json::json!({ "command": "ls" }).to_string();
+    for mode in [
+        crate::config::ExecutionMode::Normal,
+        crate::config::ExecutionMode::AutoEdit,
+    ] {
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.execution_mode = mode;
+        let mut agent = Agent::new(config.clone()).await.unwrap();
+        assert!(
+            agent
+                .confirm_tool_execution("shell_exec", &shell, "call_test", false)
+                .await
+                .unwrap(),
+            "{mode:?}: default list must not stop a read"
+        );
+
+        config.sources.set(
+            "safety.require_confirmation",
+            crate::config::ConfigSource::ConfigFile("selfware.toml".into()),
+        );
+        let mut agent = Agent::new(config).await.unwrap();
+        let err = agent
+            .confirm_tool_execution("shell_exec", &shell, "call_test", false)
+            .await
+            .expect_err("explicit require_confirmation must stop the read");
+        assert!(
+            crate::errors::is_confirmation_error(&err),
+            "{mode:?}: {err:?}"
+        );
+    }
+    server.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_git_read_stops_in_a_repo_whose_config_runs_programs() {
+    // 0.9.5 review G1: `git status` in a repository whose own config names
+    // an fsmonitor program runs that program. Headless approval requires the
+    // repository to be inert (or trusted).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q"]) {
+        return;
+    }
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    let call = serde_json::json!({
+        "command": "git status",
+        "cwd": dir.to_string_lossy(),
+    })
+    .to_string();
+    assert!(
+        agent
+            .confirm_tool_execution("shell_exec", &call, "call_test", false)
+            .await
+            .unwrap(),
+        "a clean repository's git status is a read"
+    );
+    assert!(git(&["config", "core.fsmonitor", "./hook.sh"]));
+    let err = agent
+        .confirm_tool_execution("shell_exec", &call, "call_test", false)
+        .await
+        .expect_err("fsmonitor-configured repository must stop");
+    assert!(crate::errors::is_confirmation_error(&err), "{err:?}");
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injection() {
     // 0.9.4: headless `--mode normal` approves observational shell reads by
     // the SAME classifier headless AutoEdit and the risk tags use
@@ -8904,8 +8988,6 @@ async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injecti
         "git log --oneline -5",
         "git diff",
         "git show HEAD --stat",
-        "cargo metadata --format-version 1 --no-deps",
-        "cargo tree --depth 1",
         "sed -n '1,20p' src/lib.rs",
     ] {
         let approved = agent
@@ -8944,6 +9026,27 @@ async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injecti
         "printenv",
         "env",
         "curl https://example.com",
+        // 0.9.5 (Rule 2, review-authorized): cargo tree / metadata can write
+        // Cargo.lock, reach the network and run a repo-configured rustc
+        // wrapper — no longer approved as reads.
+        "cargo metadata --format-version 1 --no-deps",
+        "cargo tree --depth 1",
+        // 0.9.5 review C1/M1/M2/M5: substitution, env-steered readers,
+        // bundled writing flags, environment printers, denied files through
+        // readers the 0.9.4 lists missed.
+        "echo $(sh tools/x.sh)",
+        "ls `./tools/x.sh`",
+        "cat <(./tools/x.sh)",
+        "GIT_EXTERNAL_DIFF=./tools/x.sh git diff HEAD~1",
+        "RIPGREP_CONFIG_PATH=./tools/rgrc rg foo",
+        "tree -ao victim.txt .",
+        "ps eww",
+        "ps -E",
+        "jq -R . .env",
+        "cut -c1- .env",
+        "git show HEAD:.env",
+        "git diff HEAD -- .env",
+        "comm .env Cargo.toml",
     ] {
         let err = agent
             .confirm_tool_execution("shell_exec", &shell(cmd), "call_test", false)

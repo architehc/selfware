@@ -8,12 +8,14 @@
 pub mod audit;
 pub mod checker;
 pub mod confirm_view;
+pub mod git_exec;
 pub mod killswitch;
 pub mod path_validator;
 pub mod permissions;
 pub mod process_env;
 pub mod redact;
 pub mod scanner;
+pub mod shell_read;
 pub(crate) mod source_context;
 pub mod tool_metadata;
 

@@ -2171,7 +2171,14 @@ impl SafetyChecker {
             }
             // Every operand is a full path-policy candidate — read-verb
             // operands included (policy flip, see the doc comment above).
-            let is_file_verb = FILE_TARGET_VERBS.contains(&verb);
+            // Every program on the shared reader list consumes its operands'
+            // contents, so every operand is a path candidate — the same list
+            // the headless read approval and the YOLO heuristics use
+            // (`crate::safety::shell_read::CONTENT_READERS`). 0.9.4 kept a
+            // shorter copy here: `jq -R . .env` and `cut -c1- .env` read a
+            // denied file that `cat .env` could not (0.9.5 review, M5).
+            let is_file_verb = FILE_TARGET_VERBS.contains(&verb)
+                || crate::safety::shell_read::CONTENT_READERS.contains(&verb);
             let mut chmod_mode_seen = false;
             let mut flags_done = false;
             // What to do with the token after a redirect operator: `>`
@@ -2235,6 +2242,29 @@ impl SafetyChecker {
                 }
                 if tok == "--" {
                     flags_done = true;
+                    continue;
+                }
+                // `git show HEAD:.env`, `git cat-file -p main:.env`,
+                // `scp host:.env .`: the part after the last `:` names a path
+                // that is read. Denied patterns only — revisions and hosts
+                // are not workspace paths for the allow-list.
+                if let Some((_, after)) = tok.rsplit_once(':') {
+                    if !after.is_empty() && !tok.contains("://") && !tok.starts_with('-') {
+                        if let Some(pattern) = redirect_target_matches_denied(
+                            after,
+                            &self.working_dir,
+                            &self.config.denied_paths,
+                        ) {
+                            return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                                pattern,
+                            }));
+                        }
+                    }
+                }
+                // `git diff HEAD -- .env` / `git log -p -- .env`: pathspecs
+                // after `--` are paths git prints the contents of.
+                if flags_done && verb == "git" {
+                    self.check_shell_path_candidate(tok)?;
                     continue;
                 }
                 if !flags_done && tok.starts_with('-') && tok.len() > 1 {

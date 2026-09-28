@@ -714,11 +714,16 @@ pub fn classify_shell_risk(command: &str) -> RiskTag {
         }
     }
     if worst == RiskTag::Reads
-        && !crate::agent::tool_dispatch::helpers::shell_command_is_observational(command)
+        && !(crate::agent::tool_dispatch::helpers::shell_command_is_observational(command)
+            && crate::safety::shell_read::is_read_command(command))
     {
         // Our own segment table saw nothing risky, but the dispatcher's
-        // stricter read-only classifier does not vouch for it: never label
-        // an unrecognised command as a read.
+        // stricter read-only classifier does not vouch for it — or the
+        // command is not a plain read by the shell-read parser (command or
+        // process substitution, a program-steering env assignment, a
+        // writing redirection, a bundled writing flag, an environment
+        // printer; see `crate::safety::shell_read`): never label it a read.
+        // `[reads]` is approved unasked by headless Normal/AutoEdit.
         worst = RiskTag::RunsCommand;
     }
     worst
@@ -759,10 +764,24 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
     // Read-only programs whose OPTIONS write files or run programs: never a
     // plain read (headless Normal/AutoEdit approve `[reads]` unasked).
     let starts = |p: &str| words.iter().any(|w| w.starts_with(p));
+    // Short flags bundle (`tree -ao victim.txt .` is `-a -o victim.txt`):
+    // match the flag letter inside any single-dash option word.
+    let short = |c: char| {
+        words[1..]
+            .iter()
+            .take_while(|w| **w != "--")
+            .any(|w| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c))
+    };
     let option_writes = (prog == "git" && starts("--output"))
-        || (prog == "tree" && (has("-o") || starts("--output")))
-        || (prog == "file" && (has("-c") || has("--compile")))
-        || (prog == "sort" && (starts("-o") || starts("--output")));
+        || (prog == "tree" && (short('o') || starts("--output") || starts("--o")))
+        || (prog == "file" && (short('c') || starts("--comp")))
+        || (prog == "sort" && (short('o') || starts("--output") || starts("--o")))
+        || (prog == "uniq"
+            && words[1..]
+                .iter()
+                .filter(|w| !w.starts_with('-') || **w == "-")
+                .count()
+                > 1);
     if option_writes {
         return RiskTag::WritesWorkspace;
     }
@@ -901,7 +920,7 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
 /// Whether `sed` arguments are the plain print form (`-n` plus scripts made
 /// only of line addresses and `p`, e.g. `-n '10,20p'`). Any other sed
 /// script can write (`w file`) or execute (`e cmd`).
-fn sed_script_is_plain_print(args: &[&str]) -> bool {
+pub(crate) fn sed_script_is_plain_print(args: &[&str]) -> bool {
     let mut saw_n = false;
     let mut saw_script = false;
     let mut iter = args.iter();

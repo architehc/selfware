@@ -844,3 +844,84 @@ fn test_headless_auto_edit_guard_pass_vetoes_deny_glob_reads() {
         );
     }
 }
+
+// ===== headless read guard (0.9.5 review M5) =====
+
+fn default_denied() -> Vec<String> {
+    crate::config::safety::default_denied_paths()
+}
+
+fn headless_pass(cmd: &str, cwd: &std::path::Path) -> bool {
+    let segments = crate::safety::shell_read::parse(cmd).expect("parses");
+    headless_read_shell_guard_pass(
+        cmd,
+        &segments,
+        Some(cwd.to_str().unwrap()),
+        &default_denied(),
+        &[],
+    )
+}
+
+#[test]
+fn headless_read_guard_checks_every_reader_not_a_short_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join(".env"), "KEY=1\n").unwrap();
+    std::fs::write(dir.join("db.env"), "KEY=2\n").unwrap();
+    std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+    for cmd in [
+        "jq -R . .env",
+        "cut -c1- .env",
+        "comm .env a.txt",
+        "column .env",
+        "diff .env a.txt",
+        "git show HEAD:.env",
+        "git cat-file -p main:.env",
+        "git diff HEAD -- .env",
+        "wc -c < .env",
+        "cat /proc/self/environ",
+        // globs are expanded and every match is vetted
+        "cat .e*",
+        "cat *",
+        "head -1 *.env",
+        "cat .ss?/id_rsa",
+    ] {
+        assert!(!headless_pass(cmd, dir), "`{cmd}` must not pass");
+    }
+    for cmd in [
+        "cat a.txt",
+        "wc -l a.txt",
+        "ls -la",
+        "cat *.txt",
+        "rg -n x .",
+    ] {
+        assert!(headless_pass(cmd, dir), "`{cmd}` should pass");
+    }
+}
+
+#[test]
+fn reader_detection_uses_the_shared_list() {
+    // 0.9.4's READERS/SHELL_READERS missed these; the YOLO floor's
+    // sensitive/denied heuristics now key on the shared reader list.
+    for cmd in [
+        "jq -R . .env",
+        "cut -c1- .env",
+        "comm .env x",
+        "git show HEAD:.env",
+    ] {
+        assert!(reads_sensitive_path(cmd).is_some(), "{cmd}");
+    }
+    assert_eq!(
+        reads_denied_path("jq -R . .env", &default_denied()).as_deref(),
+        Some("**/.env")
+    );
+    assert_eq!(
+        reads_denied_path("git show HEAD:.env", &default_denied()).as_deref(),
+        Some("**/.env")
+    );
+    // Glued / quoted program names still count as readers.
+    assert!(reads_sensitive_path("c\"a\"t .env").is_some());
+    assert!(reads_sensitive_path("sh -c'cat .env'").is_some());
+    // Listing is not reading.
+    assert!(reads_sensitive_path("ls ~/.ssh/").is_none());
+}

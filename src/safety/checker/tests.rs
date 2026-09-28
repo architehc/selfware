@@ -4680,3 +4680,47 @@ fn shell_path_refusal_reports_the_path_as_typed() {
         assert!(message.contains("[safety] allowed_paths"), "{message}");
     }
 }
+
+#[test]
+fn denied_paths_hold_through_every_shared_reader() {
+    // 0.9.5 review M5: `cat .env` was refused, but readers missing from the
+    // checker's file-verb list (jq, cut, comm, column, …) and `REV:path` /
+    // pathspec forms read the same file. Every program on the shared reader
+    // list (`crate::safety::shell_read::CONTENT_READERS`) now makes all of
+    // its operands path candidates.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "jq -R . .env",
+        "cut -c1- .env",
+        "comm .env README.md",
+        "column -t .env",
+        "sort .env",
+        "uniq .env",
+        "nl .env",
+        "tac .env",
+        "awk 1 .env",
+        "sed -n 1p .env",
+        "strings .env",
+        "git show HEAD:.env",
+        "git cat-file -p main:config/.env.production",
+        "git diff HEAD -- .env",
+        "git log -p -- secrets/db.key",
+    ] {
+        match checker.check_shell_command(cmd) {
+            Err(crate::errors::SelfwareError::Safety(
+                crate::errors::SafetyError::PathDeniedPattern { .. },
+            )) => {}
+            other => panic!("`{cmd}` must be refused as a denied path, got {other:?}"),
+        }
+    }
+    for cmd in [
+        "jq -r .name package.json",
+        "cut -d: -f1 README.md",
+        "git show HEAD:README.md",
+        "git log --oneline -5",
+        "git diff HEAD -- src",
+    ] {
+        assert!(checker.check_shell_command(cmd).is_ok(), "{cmd}");
+    }
+}

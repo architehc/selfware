@@ -3714,10 +3714,13 @@ impl Agent {
         // Headless Normal: read-only shell observation (`ls`, `wc`, `grep`,
         // `git log`, ...) runs — the same classifier headless AutoEdit and
         // the risk tags use (`Agent::headless_shell_call_allowed`). Like the
-        // headless AutoEdit branch above, this precedes
-        // `safety.require_confirmation` (whose default lists `shell_exec`):
+        // headless AutoEdit branch above, this precedes the BUILT-IN
+        // `safety.require_confirmation` default (which lists `shell_exec`):
         // only a `[reads]` command that passes the checker and every YOLO
-        // guard gets here; everything else still stops.
+        // guard gets here; everything else still stops. An operator who SET
+        // `require_confirmation` and lists the tool wins: both headless
+        // approvals return `None` for it (`Agent::operator_requires_confirmation`,
+        // 0.9.5 — Rule 2 reversal of the 0.9.4 precedence).
         if headless && self.headless_normal_auto_approve(name, &args_for_policy()) == Some(true) {
             return Ok(true);
         }

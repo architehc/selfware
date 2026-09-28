@@ -910,49 +910,81 @@ fn is_destructive_command(cmd: &str) -> bool {
         .any(|re| re.is_match(&normalized))
 }
 
-/// Best-effort detection of a shell command that READS a sensitive path
-/// (SSH/private keys, cloud/git credentials, .env, .admitted_ledger.json, .selfware). Defense-in-depth only — a
-/// determined command can evade this; see docs/limitations.md. Returns the
-/// matched sensitive token so the confirmation reason can name it.
-fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
+/// High-signal sensitive path tokens (SSH/private keys, cloud/git
+/// credentials, `.env`, process environments, selfware's own control files).
+const SENSITIVE: &[&str] = &[
+    ".ssh/",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    ".aws/credentials",
+    ".netrc",
+    ".git-credentials",
+    "private_key",
+    ".pem",
+    "/secrets/",
+    ".env",
+    "/environ",
+    ".admitted_ledger.json",
+    ".selfware/skills",
+    ".selfware/commands",
+    ".selfware/killswitch",
+];
+
+/// Whether any word of `cmd` runs a program that consumes file contents
+/// (`crate::safety::shell_read::consumes_file_contents` — the ONE reader
+/// list the checker's path policy and the headless read approval share).
+///
+/// Word-based on a quote/escape-stripped copy, so `c"a"t .env`, `c\at
+/// .env`, `/bin/cat .env` and `$(cat .env)` all name `cat`. The 0.9.4 lists
+/// here (`READERS`, `SHELL_READERS`) were a separate, shorter copy that
+/// missed `jq`, `cut`, `git show REV:path`, … (0.9.5 review, M5).
+///
+/// Names of three or more letters (plus `od`/`nl`) also match as substrings
+/// of the raw command, which keeps glued forms like `sh -c'cat .env'` in
+/// view; `pr` is word-only (it would match every `private_key`).
+fn command_uses_content_reader(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    // High-signal sensitive path tokens.
-    const SENSITIVE: &[&str] = &[
-        ".ssh/",
-        "id_rsa",
-        "id_ed25519",
-        "id_ecdsa",
-        ".aws/credentials",
-        ".netrc",
-        ".git-credentials",
-        "private_key",
-        ".pem",
-        "/secrets/",
-        ".env",
-        ".admitted_ledger.json",
-        ".selfware/skills",
-        ".selfware/commands",
-        ".selfware/killswitch",
-    ];
-    // Commands that read file contents (as opposed to merely listing).
-    const READERS: &[&str] = &[
-        "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od", "strings",
-        "base64", "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
-    ];
-    let secret = SENSITIVE.iter().copied().find(|s| lower.contains(s))?;
-    if READERS.iter().any(|r| lower.contains(r)) {
-        Some(secret)
-    } else {
-        None
+    let substring_hit = crate::safety::shell_read::CONTENT_READERS
+        .iter()
+        .chain(crate::safety::shell_read::CONTENT_COPIERS)
+        .filter(|r| r.len() >= 3 || matches!(**r, "od" | "nl"))
+        .any(|r| lower.contains(r));
+    if substring_hit {
+        return true;
     }
+    let stripped: String = lower
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '\\'))
+        .collect();
+    stripped
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, '|' | ';' | '&' | '(' | ')' | '<' | '>' | '`' | '$')
+        })
+        .filter(|w| !w.is_empty())
+        .any(|w| {
+            let base = w.rsplit('/').next().unwrap_or(w);
+            crate::safety::shell_read::consumes_file_contents(base)
+        })
 }
 
-/// Shell reader commands that consume file *contents* (as opposed to merely
-/// listing). Shared by the sensitive-path and denied-glob heuristics.
-const SHELL_READERS: &[&str] = &[
-    "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od", "strings", "base64",
-    "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
-];
+/// Best-effort detection of a shell command that READS a sensitive path
+/// (SSH/private keys, cloud/git credentials, .env, process environments,
+/// .admitted_ledger.json, .selfware). Defense-in-depth only — a determined
+/// command can evade this; see docs/limitations.md. Returns the matched
+/// sensitive token so the confirmation reason can name it.
+fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
+    if !command_uses_content_reader(cmd) {
+        return None;
+    }
+    sensitive_token_in(cmd)
+}
+
+/// The first [`SENSITIVE`] token `cmd` mentions, whatever program it runs.
+fn sensitive_token_in(cmd: &str) -> Option<&'static str> {
+    let lower = cmd.to_lowercase();
+    SENSITIVE.iter().copied().find(|s| lower.contains(s))
+}
 
 /// Split a shell command into candidate path tokens: whitespace and common
 /// shell metacharacters/quotes are separators, and a leading `./` is stripped
@@ -982,11 +1014,32 @@ fn reads_denied_path(cmd: &str, denied_paths: &[String]) -> Option<String> {
     if denied_paths.is_empty() {
         return None;
     }
-    let lower = cmd.to_lowercase();
-    if !SHELL_READERS.iter().any(|r| lower.contains(r)) {
+    if !command_uses_content_reader(cmd) {
         return None;
     }
-    let tokens = shell_path_tokens(cmd);
+    denied_token_in(cmd, denied_paths)
+}
+
+/// The first `denied_paths` glob any path-shaped token of `cmd` matches
+/// (including the `path` of `REV:path` / `host:path` tokens), whatever
+/// program it runs.
+fn denied_token_in(cmd: &str, denied_paths: &[String]) -> Option<String> {
+    if denied_paths.is_empty() {
+        return None;
+    }
+    let mut tokens: Vec<&str> = Vec::new();
+    for tok in shell_path_tokens(cmd) {
+        tokens.push(tok);
+        if let Some((_, after)) = tok.rsplit_once(':') {
+            if !after.is_empty() && !tok.contains("://") {
+                tokens.push(after.trim_start_matches("./"));
+            }
+        }
+    }
+    denied_among(&tokens, denied_paths)
+}
+
+fn denied_among(tokens: &[&str], denied_paths: &[String]) -> Option<String> {
     for pattern in denied_paths {
         let compiled = match glob::Pattern::new(pattern) {
             Ok(p) => p,
@@ -996,7 +1049,7 @@ fn reads_denied_path(cmd: &str, denied_paths: &[String]) -> Option<String> {
         // token's basename; a path pattern (e.g. "**/.ssh/**") matches the
         // whole token.
         let filename_only = !pattern.contains('/');
-        for tok in &tokens {
+        for tok in tokens {
             if compiled.matches(tok) {
                 return Some(pattern.clone());
             }
@@ -1096,6 +1149,97 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
     }
 
     None
+}
+
+/// Guard for a shell command headless Normal / AutoEdit is about to
+/// approve without an operator (`Agent::headless_shell_call_allowed`).
+///
+/// Everything [`headless_auto_edit_shell_guard_pass`] checks, but the
+/// sensitive-path and denied-glob checks apply to EVERY command, not only
+/// to ones naming a known reader: whatever is approved here is approved as
+/// a read, so each of its operands is read (0.9.5 review, M5 — `jq -R .
+/// .env`, `cut -c1- .env`, `git show HEAD:.env` passed the reader-gated
+/// checks). Glob operands (`cat *`, `cat .e*`) are expanded against the
+/// call's working directory first and every match is checked, so a
+/// pattern cannot stand in for a denied name.
+pub(crate) fn headless_read_shell_guard_pass(
+    cmd: &str,
+    segments: &[crate::safety::shell_read::Segment],
+    cwd: Option<&str>,
+    denied_paths: &[String],
+    protected_paths: &[String],
+) -> bool {
+    if !headless_auto_edit_shell_guard_pass(cmd, denied_paths, protected_paths)
+        || sensitive_token_in(cmd).is_some()
+        || denied_token_in(cmd, denied_paths).is_some()
+    {
+        return false;
+    }
+    let base = match cwd {
+        Some(d) if std::path::Path::new(d).is_absolute() => std::path::PathBuf::from(d),
+        Some(d) => match std::env::current_dir() {
+            Ok(c) => c.join(d),
+            Err(_) => return false,
+        },
+        None => match std::env::current_dir() {
+            Ok(c) => c,
+            Err(_) => return false,
+        },
+    };
+    let mut operands: Vec<String> = Vec::new();
+    for seg in segments {
+        for op in seg.path_operands() {
+            operands.push(op);
+        }
+        for w in &seg.words {
+            if w.glob {
+                // Expand like the shell would (dotfiles only by an explicit
+                // leading dot) and vet every match. Only the last path
+                // component may carry glob characters; a pattern that
+                // spans directories, or matches too much, is refused.
+                let (dir_part, name_part) = match w.text.rsplit_once('/') {
+                    Some((d, n)) => (d, n),
+                    None => ("", w.text.as_str()),
+                };
+                if dir_part.contains(['*', '?', '[']) {
+                    return false;
+                }
+                let Ok(pattern) = glob::Pattern::new(name_part) else {
+                    return false;
+                };
+                let options = glob::MatchOptions {
+                    require_literal_leading_dot: true,
+                    ..Default::default()
+                };
+                let Ok(entries) = std::fs::read_dir(base.join(dir_part)) else {
+                    continue;
+                };
+                for (n, entry) in entries.flatten().enumerate() {
+                    if n >= 10_000 {
+                        return false;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if pattern.matches_with(&name, options) {
+                        operands.push(if dir_part.is_empty() {
+                            name
+                        } else {
+                            format!("{dir_part}/{name}")
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for op in &operands {
+        if sensitive_token_in(op).is_some() {
+            return false;
+        }
+        let trimmed = op.trim_start_matches("./");
+        if denied_among(&[trimmed], denied_paths).is_some() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Guard heuristics that a shell command must pass before the headless
