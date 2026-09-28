@@ -69,6 +69,19 @@ const FINDING_MAX_CHARS: usize = 300;
 /// gap a 1-based inclusive range, in reading-plan order.
 pub(crate) type UnreadGaps = Vec<(String, usize, Vec<(usize, usize)>)>;
 
+/// After a shard phase: what was read counts, and follow-up reads stay
+/// narrow. Measured before this note (8282adc2, llm.selfware.design): with
+/// coverage already complete the main agent re-read whole files anyway —
+/// 6 and 6 whole-file reads of slugify's 6 files, 11 / 1 / 6 of the planted
+/// fixture's 11 — re-paying the reading the shards had done, in the
+/// full-history main loop. This replaces the inventory note's "read every
+/// file in the reading plan" for files the shards read.
+pub(crate) const SHARD_REREAD_GUIDANCE: &str = "The reading plan is done for every file the \
+shard reads covered: those lines count as read (they are cited from the delivered, numbered \
+text). Do NOT file_read them again, in whole or in chunks — that repeats the reading. Only to \
+confirm or correct one specific finding, read a few lines around it (line_range, at most ~40 \
+lines); files the shards did not cover are named as unread and still need file_read.";
+
 /// Which answer the next model turn is expected to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -423,11 +436,11 @@ impl ReviewSession {
                 if cov.not_read_count > 12 { ", …" } else { "" }
             ));
         }
+        head.push(SHARD_REREAD_GUIDANCE.to_string());
         head.push(
-            "Next: confirm or deepen findings with file_read (line_range) where useful, then \
-             write the final review: group by severity; for every finding write its citation \
-             followed by the quoted code, as recorded (path:line `code` — what is wrong); say \
-             which areas had no findings."
+            "Next: write the final review: group by severity; for every finding write its \
+             citation followed by the quoted code, as recorded (path:line `code` — what is \
+             wrong); say which areas had no findings."
                 .to_string(),
         );
         let close = "</selfware_context_note>";
@@ -794,6 +807,9 @@ impl ReviewSession {
                         report.relevant_files,
                         report.percent_lines
                     ));
+                }
+                if self.shard_report.is_some() {
+                    out.push(SHARD_REREAD_GUIDANCE.to_string());
                 }
                 out.push(
                     "Every finding needs a path:line citation to a line you read. Group by severity; \

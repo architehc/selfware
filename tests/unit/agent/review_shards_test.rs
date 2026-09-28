@@ -470,12 +470,16 @@ async fn a_review_is_read_by_shards_and_findings_are_verified() {
         "{note}"
     );
     assert!(note.contains("a made-up issue"), "{note}");
+    // Follow-up reads stay narrow: the note and every synthesis status say
+    // the shard-read lines count and must not be re-read.
+    assert!(note.contains("Do NOT file_read them again"), "{note}");
     assert_eq!(agent.review_phase(), Some(ReviewPhase::Synthesis));
     let status = agent.review_turn_note().unwrap();
     assert!(
         status.contains("pkg/b.py:3 `return items[len(items)]` — [high] last indexes"),
         "{status}"
     );
+    assert!(status.contains("Do NOT file_read them again"), "{status}");
     // The main agent answered without reading anything itself.
     assert!(
         !agent
