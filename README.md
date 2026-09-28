@@ -435,6 +435,33 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.5
+
+0.9.5 is a security release. **Upgrade if you run selfware on repositories
+you do not fully trust.** The full list is in [CHANGELOG.md](CHANGELOG.md):
+
+- **Read-only really means read-only.** Commands with substitutions, env
+  prefixes or writing redirects are never auto-approved as reads, and every
+  file a read touches is checked against denied paths.
+- **Git never runs what a repository configures.** fsmonitor, hooks,
+  filters, external diff and similar settings in a repository's own config
+  are disabled for every git call selfware makes. Hooks for tool-driven
+  commits run only in repositories you trusted with `selfware trust`.
+- **Secrets stay redacted, code stays exact.** The redactor catches every
+  `KEY=value` in grep, diff and env output and many more formats, without
+  changing ordinary code. Chat-template special tokens in tool output are
+  neutralised.
+- **Honest reviews and checks.** Review coverage counts only what the model
+  received, survives auto-continue, and never silently widens its scope. A
+  real test failure is never reported as "ran nothing" or "informational".
+
+### Behaviour changes to know when upgrading
+
+- **Trust your own repositories** (`selfware trust`) to keep their git hooks
+  on agent commits.
+- **Fewer commands count as `[reads]`**; an explicit `require_confirmation`
+  now wins over headless read approval.
+
 ## What's New in 0.9.4
 
 0.9.4 makes repository review honest and complete on llm.selfware.design.

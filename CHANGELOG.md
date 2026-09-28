@@ -5,6 +5,144 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-09-28
+
+A security and correctness release. An adversarial review of 0.9.4 found
+that the read-only shell used by headless normal mode could run code, that
+git calls could run programs configured by the repository being worked on,
+and that the 0.9.4 secret redactor missed secrets the previous one caught.
+All are fixed. **Upgrade if you run selfware on repositories you do not
+fully trust.**
+
+### Security
+- **A "read" is now a parsed plain read.** 0.9.4 treated these as
+  read-only and ran them without confirmation in headless normal mode:
+  `echo $(sh x.sh)`, `` ls `./x.sh` ``, `cat <(./x.sh)`,
+  `GIT_EXTERNAL_DIFF=./x.sh git diff`, `RIPGREP_CONFIG_PATH=… rg`,
+  `tree -ao file .` (overwrites the file) and `ps eww` (prints the agent's
+  environment, including API keys). One parser now decides what is a read:
+  no substitution or expansion, no writing redirects, only locale and
+  terminal variables as prefixes, an allowlist per program with bundled
+  flags expanded, no environment printers. Every operand of an approved read
+  is checked against sensitive and denied paths, including `REV:path` and
+  globs.
+- **Git never runs programs the repository configures.** A review's
+  `git ls-files` ran a cloned repository's `core.fsmonitor` hook (verified:
+  twice per `selfware review` on 0.9.4, never on 0.9.5). Every git call now
+  goes through one helper that disables fsmonitor, hooks, external diff,
+  textconv, filters, pagers, editors and credential helpers configured by
+  the repository. Tool-driven commits, patches and worktrees keep the
+  repository's hooks only in a repository trusted with `selfware trust`;
+  results say whether hooks ran (`repository_hooks`).
+- **Secrets are redacted again, without touching code.** The 0.9.4 redactor
+  missed `KEY=value` inside grep, rg and diff output, several pairs on one
+  line, keys like `SECRET_KEY_BASE` or `HMAC_KEY`, connection strings with
+  `password=`, URL passwords containing `/` or `@`, and quoted literals in
+  Rust source; this reached checkpoints on disk, spill files, MCP output and
+  FIM completions. The redactor now finds every `KEY=value`, recognises
+  secret words anywhere in the key, and covers more formats (Basic auth,
+  PGP and PuTTY keys, PEM inside JSON, `hf_`, `whsec_`, `pypi-`, docker
+  `auths`, `mysql -p`, `curl -u`, …). Every secret-scanner pattern runs on
+  the model path again. Ordinary code stays byte for byte.
+- **Special tokens cannot fake a turn.** In text tool-calling mode, tool
+  output could carry `<think>`, `<tool_response>`, Gemma turn markers, `<s>`
+  or fullwidth `<｜…｜>` tokens that some servers turn into control tokens.
+  They are neutralised, reversibly, with a visible note. FIM refuses them.
+- **MCP `resources/read` and grounded-review excerpts** now go through the
+  model-facing redactor.
+- The last two spawn sites without a process group (patch apply, git
+  worktree) now kill their whole process tree on timeout or cancel; a guard
+  test keeps the class closed.
+
+### Fixed
+- **Review coverage is only what the model actually received.** Reads
+  trimmed or stubbed before the request was sent no longer count. An
+  auto-continue keeps the review's coverage and findings. A resumed review
+  keeps its refusal state and gets no duplicate inventory note.
+- **Review detection and scope.** "preview", "audit log" and a pasted
+  snippet with "can you review this?" are no longer whole-repository
+  reviews. Scopes match case-insensitively, by suffix and by absolute path;
+  a scope that matches nothing says "scope not resolved" instead of
+  silently becoming the whole repository. Unreadable files are listed
+  instead of silently leaving the scope.
+- **A ranged read ending on a blank line** counts every line it returned.
+- **`code_introspect`, `code_query` and `code_plan` share one walker.** It
+  skips dependency and build directories at every level, walks each real
+  directory once (a symlink loop no longer recurses), respects
+  `.gitignore`, and checks every path against the workspace policy. Graph
+  output pays for its edges and claims no symbols it does not show. (The
+  0.9.4 walk fix made the dependency and symlink cases worse; this corrects
+  it.)
+- **Verification tells the truth.** A failing `cargo test` whose output
+  quotes "could not find Cargo.toml" is a failure again. Edits made through
+  patches, multi-edits or the shell are edits, so a failed check after them
+  is never "informational". A test runner that started and then failed on
+  its own import is a real failure.
+- **Explanations are not progress notes.** "Let's look at each stage:" and
+  "I'll start with the entry point" no longer get a real answer refused;
+  code blocks are ignored, and reads through `code_introspect`,
+  `code_query`, LSP tools, `git log/show` and shell readers count.
+- **Quotas.** The reasoning step-down retry keeps the turn's output cap
+  (it went back to 24,576). `--profile` `max_tokens` is obeyed. The qwen38
+  compaction point is derived from the measured per-turn growth and the
+  session's own budget.
+- **Live-eval harness.** A crashed run is recorded as a failure and the
+  gate fails on missing runs; continuous metrics need a significance test
+  before they count as a regression; citations are checked against the
+  fixture independently; the agent under test gets its own Python and Rust
+  toolchain and can no longer reach the answer key, earlier results, or the
+  user's real `~/.cargo`, `~/.rustup` or Python user site. Scoring criteria
+  are unchanged from 0.9.4.
+
+### Behaviour changes to know when upgrading
+- In a repository not trusted with `selfware trust`, git operations run by
+  tools (commit, checkpoint, patch apply, worktree add/remove) do not run
+  the repository's hooks or filters. Trust your own repositories to keep
+  their pre-commit hooks on agent commits.
+- Commands with substitutions, env prefixes (other than locale/terminal) or
+  writing redirects are never auto-approved as reads; `cargo tree`,
+  `cargo metadata`, `less`/`more` with options, `ps -ef` on macOS and `env`
+  are no longer `[reads]`.
+- An explicit `safety.require_confirmation` for `shell_exec` in your config
+  now wins over the headless read approval.
+
+### Known issues
+- `test_close_reaps_background_grandchild_after_shell_exits` can fail under
+  heavy machine load (a timing race in the test, not the product).
+- Recursive readers (`grep -r`, `rg -uu`) can still reach denied files
+  inside a directory; operands are checked, not each file found.
+- Git commands the model runs itself through `shell_exec` are not
+  re-hardened; only headless approval checks that the repository is inert.
+- Interactively and in yolo mode, the always-on checker still lets `awk`,
+  `cut` and similar read `.env` (the red-team corpus pins these as
+  allowed); unattended approval blocks them.
+- Unreadable in-scope files are named in the coverage line but do not yet
+  prevent "complete".
+- Bracket-style tokens (`[INST]`, `[TOOL_CALLS]`) and a model's own
+  tokenizer special tokens beyond the fixed list are not neutralised.
+
+### Review notes (AGENTS.md rule 2)
+These change or loosen checks or visible behaviour. Each has maintainer
+sign-off, given in the review conversation, and each is noted in its
+commit message:
+- **Hooks off in untrusted repositories** for tool-driven git operations
+  (see above); the evolve daemon's promotion commit keeps its hooks.
+- **`require_confirmation` precedence reversed** over the headless read
+  approval when the operator set it explicitly.
+- **Narrower `[reads]`**: `cargo metadata`/`cargo tree` moved from the
+  headless-approved to the stop list in its test; `less`/`more` with
+  options, `ps -ef` (macOS), `tsc --noEmit`, `env` and `git branch` lose the
+  `[reads]` label. Checker test rows for readers were removed because the
+  always-on checker keeps its previous file-verb list (the same commands
+  are asserted refused in the unattended-approval tests).
+- **Edit guard narrowed** to envelope-escaped tags and real
+  `[REDACTED:<kind>]` markers; ordinary HTML entities in code are accepted.
+  Its tests moved to those forms.
+- **Answer guard** checks the opening and final sentences (not every
+  sentence).
+- `render::truncate_output` and its test deleted (dead code); the qwen38
+  compaction-ratio assertion is now the exact derived value (≈ 0.8007).
+
 ## [0.9.4] - 2026-09-27
 
 Repository review is now a first-class, honest workflow. A review starts
