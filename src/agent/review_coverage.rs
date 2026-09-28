@@ -65,6 +65,10 @@ const NEXT_FILES_SHOWN: usize = 8;
 const MAX_FINDINGS: usize = 400;
 const FINDING_MAX_CHARS: usize = 300;
 
+/// Unread line ranges per planned file: `(path, total lines, gaps)`, each
+/// gap a 1-based inclusive range, in reading-plan order.
+pub(crate) type UnreadGaps = Vec<(String, usize, Vec<(usize, usize)>)>;
+
 /// Which answer the next model turn is expected to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +120,9 @@ pub struct ReviewCoverageReport {
     /// the relevant counts above, and named in `line`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
+    /// The shard reading phase, when it ran (see `agent::review_shards`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shards: Option<super::review_shards::ShardRunReport>,
     /// The summary line (`coverage: …`).
     pub line: String,
 }
@@ -126,7 +133,10 @@ pub(crate) type DeliveredReads = Vec<(String, (usize, usize))>;
 /// The per-task review state held by the agent.
 #[derive(Debug, Default)]
 pub(crate) struct ReviewState {
-    session: Option<ReviewSession>,
+    /// Boxed: keeps the agent — held by value in deep async frames — one
+    /// pointer wide here (measured on the auto-continue test chain's
+    /// minimum stack).
+    session: Option<Box<ReviewSession>>,
     /// Coverage + findings restored from a checkpoint, applied when the
     /// resumed task rebuilds its session.
     pending_restore: Option<serde_json::Value>,
@@ -161,6 +171,12 @@ pub(crate) struct ReviewSession {
     announced_phase: Option<ReviewPhase>,
     /// See [`ReviewCoverageReport::cited_unread`].
     cited_unread: Vec<String>,
+    /// Compact, token-measured inventory for shard prompts.
+    shard_inventory: String,
+    /// Per-file notes from shard reads (path → 1–2 lines), so synthesis
+    /// does not need the raw text.
+    notes: HashMap<String, String>,
+    shard_report: Option<super::review_shards::ShardRunReport>,
 }
 
 static FINDING_LINE: Lazy<Regex> = Lazy::new(|| {
@@ -301,7 +317,156 @@ impl ReviewSession {
             stopped: None,
             announced_phase: None,
             cited_unread: Vec::new(),
+            shard_inventory: String::new(),
+            notes: HashMap::new(),
+            shard_report: None,
         }
+    }
+
+    /// Unread ranges of every planned file, in plan order:
+    /// `(path, total lines, gaps)`.
+    pub(crate) fn unread_gaps(&self) -> UnreadGaps {
+        self.plan
+            .iter()
+            .filter(|e| self.covered(e) < e.lines)
+            .map(|e| {
+                let mut gaps = Vec::new();
+                let mut next = 1usize;
+                for &(a, b) in self.coverage.get(&e.path).map(Vec::as_slice).unwrap_or(&[]) {
+                    if a > next {
+                        gaps.push((next, (a - 1).min(e.lines)));
+                    }
+                    next = next.max(b + 1);
+                    if next > e.lines {
+                        break;
+                    }
+                }
+                if next <= e.lines {
+                    gaps.push((next, e.lines));
+                }
+                (e.path.clone(), e.lines, gaps)
+            })
+            .collect()
+    }
+
+    /// How many of `paths` are planned files read in full.
+    pub(crate) fn files_fully_read<'a>(&self, paths: impl Iterator<Item = &'a str>) -> usize {
+        paths
+            .filter_map(|p| self.entry(p))
+            .filter(|e| self.covered(e) >= e.lines)
+            .count()
+    }
+
+    /// Record a shard's note on `path` (a split file's parts are joined).
+    pub(crate) fn add_note(&mut self, path: &str, note: &str) {
+        if self.entry(path).is_none() {
+            return;
+        }
+        let slot = self.notes.entry(path.to_string()).or_default();
+        if slot.is_empty() {
+            slot.push_str(note);
+        } else if !slot.contains(note) {
+            slot.push_str(" | ");
+            slot.push_str(note);
+        }
+    }
+
+    /// Whether this session's shard phase already ran (it runs once, at
+    /// the start of a new task — never again on a continued segment).
+    pub(crate) fn shards_ran(&self) -> bool {
+        self.shard_report.is_some()
+    }
+
+    pub(crate) fn set_shard_report(&mut self, report: super::review_shards::ShardRunReport) {
+        self.shard_report = Some(report);
+    }
+
+    /// The context note that hands the shard results to the main agent,
+    /// within `budget` tokens (measured): what was read, per-file notes in
+    /// plan order, unverified findings, and what is still unread.
+    pub(crate) fn shard_context_note(
+        &self,
+        report: &super::review_shards::ShardRunReport,
+        unverified: &[String],
+        budget: usize,
+    ) -> String {
+        let cov = self.report();
+        let mut head = vec![
+            "<selfware_context_note kind=review_shards>".to_string(),
+            format!(
+                "The harness read the reading plan with {} parallel shard reads (fresh model calls \
+                 over the exact file_read content, numbered lines): {} of {} relevant files now read \
+                 ({}% of lines).",
+                report.succeeded, cov.read_files, cov.relevant_files, cov.percent_lines
+            ),
+            format!(
+                "{} finding(s) were verified against the cited lines (the evidence quote is on the \
+                 line) and are recorded; they are listed below. {} finding(s) were NOT verified \
+                 (the quote did not match the cited lines) and are not recorded — check one with \
+                 file_read before using it.",
+                report.findings_verified, report.findings_unverified
+            ),
+        ];
+        if !cov.complete {
+            head.push(format!(
+                "Still unread ({}): {}{} — read these with file_read.",
+                cov.not_read_count,
+                cov.not_read
+                    .iter()
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if cov.not_read_count > 12 { ", …" } else { "" }
+            ));
+        }
+        head.push(
+            "Next: confirm or deepen findings with file_read (line_range) where useful, then \
+             write the final review: group by severity; for every finding write its citation \
+             followed by the quoted code, as recorded (path:line `code` — what is wrong); say \
+             which areas had no findings."
+                .to_string(),
+        );
+        let close = "</selfware_context_note>";
+        let head = head.join("\n");
+        let mut room = budget
+            .saturating_sub(estimate_content_tokens(&head) + estimate_content_tokens(close) + 32);
+        let mut body: Vec<String> = Vec::new();
+        let mut push_section = |title: &str, lines: Vec<String>, room: &mut usize| {
+            if lines.is_empty() {
+                return;
+            }
+            let mut kept = Vec::new();
+            for l in &lines {
+                let cost = estimate_content_tokens(l) + 1;
+                if cost > *room {
+                    break;
+                }
+                *room -= cost;
+                kept.push(l.clone());
+            }
+            let elided = lines.len() - kept.len();
+            body.push(title.to_string());
+            body.extend(kept);
+            if elided > 0 {
+                body.push(format!("- (+{elided} more not shown for space)"));
+            }
+        };
+        let verified: Vec<String> = self.findings.iter().map(|f| format!("- {f}")).collect();
+        push_section("Recorded findings (verified):", verified, &mut room);
+        let unverified: Vec<String> = unverified.iter().map(|u| format!("- {u}")).collect();
+        push_section("Unverified shard findings:", unverified, &mut room);
+        let notes: Vec<String> = self
+            .plan
+            .iter()
+            .filter_map(|e| {
+                self.notes
+                    .get(&e.path)
+                    .map(|n| format!("- {}: {n}", e.path))
+            })
+            .collect();
+        push_section("Per-file notes (from the shard reads):", notes, &mut room);
+        format!("{head}\n{}\n{close}", body.join("\n"))
     }
 
     fn entry(&self, rel: &str) -> Option<&PlanEntry> {
@@ -447,6 +612,10 @@ impl ReviewSession {
                 self.cited_unread.join(", ")
             )
         };
+        let line = match &self.shard_report {
+            Some(shards) => format!("{line}; {}", shards.line),
+            None => line,
+        };
         ReviewCoverageReport {
             scope: self.scope_label.clone(),
             inventory: self.inventory_line.clone(),
@@ -463,6 +632,7 @@ impl ReviewSession {
             stopped: self.stopped.clone(),
             unreadable: self.unreadable.clone(),
             cited_unread: self.cited_unread.clone(),
+            shards: self.shard_report.clone(),
             line,
         }
     }
@@ -778,6 +948,7 @@ impl ReviewSession {
             "no_progress_refusals": self.no_progress_refusals,
             "covered_at_last_refusal": self.covered_at_last_refusal,
             "citation_nudged": self.citation_nudged,
+            "notes": self.notes,
         })
     }
 
@@ -819,6 +990,13 @@ impl ReviewSession {
         if snapshot.get("citation_nudged").and_then(|v| v.as_bool()) == Some(true) {
             self.citation_nudged = true;
         }
+        if let Some(notes) = snapshot.get("notes").and_then(|n| n.as_object()) {
+            for (path, note) in notes {
+                if let Some(note) = note.as_str() {
+                    self.add_note(path, note);
+                }
+            }
+        }
     }
 }
 
@@ -859,7 +1037,21 @@ fn relative_key(root: &Path, workspace: &Path, arg: &str) -> Option<String> {
 impl Agent {
     fn with_review<R>(&self, f: impl FnOnce(&mut ReviewSession) -> R) -> Option<R> {
         let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
-        state.session.as_mut().map(f)
+        state.session.as_deref_mut().map(f)
+    }
+
+    /// [`Self::with_review`] for the sibling review modules.
+    pub(super) fn with_review_session<R>(
+        &self,
+        f: impl FnOnce(&mut ReviewSession) -> R,
+    ) -> Option<R> {
+        self.with_review(f)
+    }
+
+    /// What the shard reader needs: the inventory root, every planned
+    /// file's unread ranges, and the compact inventory for shard prompts.
+    pub(super) fn review_shard_targets(&self) -> Option<(PathBuf, UnreadGaps, String)> {
+        self.with_review(|s| (s.root.clone(), s.unread_gaps(), s.shard_inventory.clone()))
     }
 
     /// Whether this task runs under the review coverage machinery.
@@ -939,7 +1131,10 @@ impl Agent {
         let plan = inventory.review_plan(scope);
         crate::output::review_inventory(&inventory.render_text(Some(&plan)));
         let compact = inventory.render_compact(&plan, INVENTORY_CONTEXT_TOKENS);
+        let shard_inventory =
+            inventory.render_compact(&plan, super::review_shards::SHARD_INVENTORY_TOKENS);
         let mut session = ReviewSession::new(&inventory, plan);
+        session.shard_inventory = shard_inventory;
         if let Some(snapshot) = pending.as_ref() {
             session.restore(snapshot);
         }
@@ -962,7 +1157,7 @@ impl Agent {
             self.push_review_inventory_note(&compact);
         }
         let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
-        state.session = (!session.plan.is_empty()).then_some(session);
+        state.session = (!session.plan.is_empty()).then(|| Box::new(session));
     }
 
     fn push_review_inventory_note(&mut self, compact: &str) {
@@ -1764,7 +1959,10 @@ mod tests {
             )
             .build()
             .await;
-        let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+        let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+        // This test scripts the main agent's own reading (the file_read
+        // path of the ledger and gate); shard reading has its own tests.
+        config.review.shard_reading = false;
         let mut agent = Agent::new(config).await.unwrap();
         let result = agent
             .run_task("review this repository for bugs, cite file:line")

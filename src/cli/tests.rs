@@ -3326,6 +3326,7 @@ fn render_run_summary_never_calls_a_partial_review_completed() {
         stopped: Some("iteration budget".to_string()),
         cited_unread: Vec::new(),
         unreadable: Vec::new(),
+        shards: None,
         line: "coverage: PARTIAL".to_string(),
     });
     let rendered = render_run_summary(&summary, None);

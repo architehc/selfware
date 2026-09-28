@@ -1146,6 +1146,17 @@ pub(crate) fn review_inventory(text: &str) {
     io::stdout().flush().ok();
 }
 
+/// One line of review shard-reading progress (text mode only; stream-json
+/// carries the same text as a `turn_decision` event, the TUI as a status).
+pub(crate) fn review_shard_progress(text: &str) {
+    if is_tui_active() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", format!("📚 {text}").bright_cyan());
+    io::stdout().flush().ok();
+}
+
 /// Whether prose (streamed answers, the final answer) is rendered from
 /// Markdown to terminal styling: a terminal with colour allowed. Plain mode
 /// (non-tty), `--no-color` and `NO_COLOR` keep the raw text.

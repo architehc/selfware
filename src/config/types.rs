@@ -222,6 +222,68 @@ impl Default for ConcurrencyConfig {
     }
 }
 
+/// Code-review reading configuration (loaded from `[review]` in selfware.toml).
+///
+/// A review task's reading plan is read by parallel, short-context shard
+/// calls before the main loop starts (see `agent::review_shards`): each shard
+/// is a fresh side call holding a measured slice of the plan's files, and
+/// returns per-file summaries and findings. Coverage is credited only for
+/// shards that returned a usable answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewConfig {
+    /// Read the review plan with parallel shard calls (`false`: the main
+    /// agent reads every file itself with `file_read`, the 0.9.4 behavior).
+    #[serde(default = "default_true")]
+    pub shard_reading: bool,
+    /// Shard calls in flight at once. Also bounded by
+    /// `[concurrency] max_streams` / `max_global` (the shared governor).
+    #[serde(default = "default_review_shard_parallelism")]
+    pub shard_parallelism: usize,
+    /// Measured tokens of file content per shard (a file larger than this
+    /// is split into line-range shards). Clamped to what the context window
+    /// leaves after the shard's output budget.
+    #[serde(default = "default_review_shard_tokens")]
+    pub shard_tokens: usize,
+    /// Output budget (`max_tokens`) of one shard call, reasoning included.
+    #[serde(default = "default_review_shard_max_tokens")]
+    pub shard_max_tokens: usize,
+    /// Send shard calls with thinking on (the `synthesis` workload quota);
+    /// the one retry of a failed shard always goes with thinking off.
+    #[serde(default = "default_true")]
+    pub shard_thinking: bool,
+    /// Wall-time cap of one shard call, seconds (`agent.max_call_secs`
+    /// tightens it).
+    #[serde(default = "default_review_shard_time_cap_secs")]
+    pub shard_time_cap_secs: u64,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            shard_reading: true,
+            shard_parallelism: default_review_shard_parallelism(),
+            shard_tokens: default_review_shard_tokens(),
+            shard_max_tokens: default_review_shard_max_tokens(),
+            shard_thinking: true,
+            shard_time_cap_secs: default_review_shard_time_cap_secs(),
+        }
+    }
+}
+
+pub(crate) fn default_review_shard_parallelism() -> usize {
+    6
+}
+pub(crate) fn default_review_shard_tokens() -> usize {
+    32_000
+}
+pub(crate) fn default_review_shard_max_tokens() -> usize {
+    12_288
+}
+pub(crate) fn default_review_shard_time_cap_secs() -> u64 {
+    1_200
+}
+
 /// Evolution daemon configuration (loaded from `[evolution]` in selfware.toml)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EvolutionTomlConfig {

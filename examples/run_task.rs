@@ -116,6 +116,7 @@ async fn main() -> Result<()> {
         mcp: Default::default(),
         hooks: Vec::new(),
         computer: Default::default(),
+        review: Default::default(),
         cache: Default::default(),
         plan_mode: false,
         debug: Default::default(),

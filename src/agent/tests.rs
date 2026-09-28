@@ -151,6 +151,12 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
             ..Default::default()
         },
         execution_mode: crate::config::ExecutionMode::Yolo,
+        // Scripted main-loop responses: no shard calls first (see
+        // `test_support::mock_agent_config`).
+        review: crate::config::ReviewConfig {
+            shard_reading: false,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

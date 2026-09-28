@@ -2017,6 +2017,31 @@ mod tests {
         );
     }
 
+    /// A mixed-case FILE name at the root or deeper scopes the review to that
+    /// file (0.9.4: "Review Cargo.toml and report problems" widened to the
+    /// whole repository — found while wiring the shard reader, where the
+    /// wrong scope would have sent 3.8M tokens of shard reads).
+    #[test]
+    fn a_mixed_case_file_name_scopes_to_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "Cargo.toml", "[package]\nname = \"demo\"\n");
+        write(r, "src/lib.rs", "pub mod api;\n");
+        write(r, "src/Api/Client.rs", "pub fn g() {}\n");
+        let inv = RepoInventory::scan(r).unwrap();
+        let scope = resolve_review_scope("Review Cargo.toml and report problems.", &inv);
+        assert_eq!(scope.prefixes, vec!["Cargo.toml".to_string()], "{scope:?}");
+        assert!(scope.unresolved.is_empty(), "{scope:?}");
+        assert_eq!(
+            resolve_review_scope("review Client.rs", &inv).prefixes,
+            vec!["src/Api/Client.rs".to_string()]
+        );
+        assert_eq!(
+            resolve_review_scope("review src/api for bugs", &inv).prefixes,
+            vec!["src/Api".to_string()]
+        );
+    }
+
     /// Review 2026-09-27 (F3): a code file that cannot be read left the
     /// scope silently (`code: false`), shrinking the denominator the review
     /// gate measures against. It is named instead.

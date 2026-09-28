@@ -1641,6 +1641,9 @@ impl Agent {
         // (shown to the user, compact version in context) and runs under the
         // coverage ledger + gate. No-op for any other task.
         self.begin_review_session().await;
+        // A review's reading plan is read by parallel shard calls before the
+        // main loop (see `review_shards`); no-op for any other task.
+        self.review_shard_phase_boxed().await;
 
         self.run_execution_loop(&task_description, LoopMode::NewTask)
             .await

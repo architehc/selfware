@@ -127,6 +127,7 @@ mod recovery;
 pub(crate) mod result_compaction;
 pub(crate) mod result_envelope;
 pub mod review_coverage;
+pub mod review_shards;
 pub(crate) mod runner_invocation;
 pub mod session_log;
 pub(crate) mod session_usage;
@@ -144,6 +145,7 @@ pub(crate) mod verification_scope;
 
 pub use done_check::{DoneCheckEntry, DoneCheckReport};
 pub use review_coverage::{ReviewCoverageReport, ReviewPhase};
+pub use review_shards::ShardRunReport;
 pub use task_runner::{RequirementsAuditStatus, RunBudgets, RunSummary};
 mod verification;
 

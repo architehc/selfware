@@ -400,6 +400,7 @@ fn test_config_full_roundtrip() {
         mcp: crate::mcp::McpConfig::default(),
         hooks: Vec::new(),
         computer: crate::config::ComputerConfig::default(),
+        review: crate::config::ReviewConfig::default(),
         plan_mode: false,
         concurrency: crate::config::ConcurrencyConfig::default(),
         matched_profile: None,

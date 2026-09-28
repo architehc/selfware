@@ -503,6 +503,38 @@ Profile fields:
 # (Internal resource management settings -- typically left at defaults)
 ```
 
+## `[review]` -- Code-Review Reading
+
+A task classified as a code review first gets a deterministic inventory and
+reading plan. With `shard_reading` on (the default) the harness then reads
+the plan before the main loop starts, with parallel side calls ("shards"):
+each shard is a fresh request holding a measured slice of the planned files
+(fetched through `file_read` and the same redaction/trust gate as any tool
+result) and returns per-file notes plus findings with an evidence quote.
+Only a shard that returned a usable answer counts toward review coverage; a
+finding is recorded only when its quote is on the cited line (a quote found
+a few lines away corrects the line; anything else is reported as
+unverified). A shard that fails is retried once with thinking off, then its
+files stay unread and the main agent is sent to read them. The main agent
+keeps `file_read` for follow-up and writes the final review.
+
+```toml
+[review]
+shard_reading = true        # false: the main agent reads every file itself
+shard_parallelism = 6       # also bounded by [concurrency] max_streams / max_global
+shard_tokens = 32000        # measured file-content tokens per shard (big files split by line range)
+shard_max_tokens = 12288    # output budget of one shard call, reasoning included
+shard_thinking = true       # first attempt under the synthesis workload quota; the retry runs with thinking off
+shard_time_cap_secs = 1200  # per shard call; agent.max_call_secs tightens it
+```
+
+A small scope is spread over the parallelism (shards of at least 8k tokens)
+instead of one call. Progress (`shard N/M`, files covered, findings) is
+shown in the terminal, as TUI status and as `turn_decision` events in
+`stream-json`; the run summary's coverage line and the JSON result's
+`review_coverage.shards` say how many shards ran, in parallel, what they
+cost and how many findings were verified.
+
 ## `[evolution]` -- Self-Improvement Daemon
 
 ```toml

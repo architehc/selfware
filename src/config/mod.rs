@@ -242,6 +242,16 @@ pub struct Config {
     #[serde(default)]
     pub computer: ComputerConfig,
 
+    /// Code-review reading: parallel shard reads of the review plan.
+    ///
+    /// ```toml
+    /// [review]
+    /// shard_parallelism = 6
+    /// shard_tokens = 32000
+    /// ```
+    #[serde(default)]
+    pub review: ReviewConfig,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -436,6 +446,7 @@ impl std::fmt::Debug for Config {
             .field("mcp", &redacted_view(&self.mcp))
             .field("hooks", &self.hooks)
             .field("computer", &self.computer)
+            .field("review", &self.review)
             .field("plan_mode", &self.plan_mode)
             .field("matched_profile", &self.matched_profile)
             .field("matched_profile_applied", &self.matched_profile_applied)
@@ -475,6 +486,7 @@ impl Default for Config {
             mcp: crate::mcp::McpConfig::default(),
             hooks: Vec::new(),
             computer: ComputerConfig::default(),
+            review: ReviewConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,

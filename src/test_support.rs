@@ -225,6 +225,14 @@ pub(crate) fn mock_agent_config(endpoint: &str) -> crate::config::Config {
             ..Default::default()
         },
         execution_mode: crate::config::ExecutionMode::Yolo,
+        // Tests script the main loop's responses one by one; a review task
+        // would otherwise send its reading plan to the mock as shard calls
+        // first. Shard reading is tested with it switched on explicitly
+        // (`agent::review_shards` tests).
+        review: crate::config::ReviewConfig {
+            shard_reading: false,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

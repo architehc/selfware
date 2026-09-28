@@ -34,6 +34,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "mcp",
     "hooks",
     "computer",
+    "review",
 ];
 
 use std::path::PathBuf;
@@ -252,6 +253,7 @@ fn known_section_keys(section: &str) -> Option<std::collections::HashSet<String>
         "cache" => struct_field_names::<crate::session::cache::LlmCacheConfig>(),
         "debug" => struct_field_names::<super::debug::DebugConfig>(),
         "computer" => struct_field_names::<super::types::ComputerConfig>(),
+        "review" => struct_field_names::<super::types::ReviewConfig>(),
         "workloads" => struct_field_names::<super::model_profiles::WorkloadQuotas>(),
         _ => return None,
     };

@@ -149,6 +149,11 @@ pub struct SideCall {
     /// (every side call before the done-check). Only the thinking toggle is
     /// taken: the side call's own `max_tokens` bound still applies.
     pub thinking_workload: Option<crate::config::TurnWorkload>,
+    /// Thinking mode of the request. `Disabled` for every classifier-style
+    /// side call; a review shard read asks for its workload quota
+    /// (`ThinkingMode::Workload`), whose `max_tokens` is then still clamped
+    /// to [`Self::max_tokens`].
+    pub thinking: ThinkingMode,
 }
 
 impl SideCall {
@@ -167,6 +172,7 @@ impl SideCall {
             max_tokens: Self::DEFAULT_MAX_TOKENS,
             time_cap_secs: Self::DEFAULT_TIME_CAP_SECS,
             thinking_workload: None,
+            thinking: ThinkingMode::Disabled,
         }
     }
 
@@ -174,6 +180,11 @@ impl SideCall {
     /// [`SideCall::thinking_workload`]).
     pub fn thinking_from(mut self, kind: crate::config::TurnWorkload) -> Self {
         self.thinking_workload = Some(kind);
+        self
+    }
+
+    pub fn thinking(mut self, thinking: ThinkingMode) -> Self {
+        self.thinking = thinking;
         self
     }
 
@@ -1509,7 +1520,7 @@ impl ApiClient {
     ///
     /// Always streamed (the SSE bytes keep a proxy/tunnel connection alive,
     /// where a non-streaming call sits silent until the gateway cuts it),
-    /// no tools, thinking disabled, `max_tokens` clamped to the spec and any
+    /// no tools, thinking as the spec says (disabled unless asked), `max_tokens` clamped to the spec and any
     /// session reasoning-effort pin lowered to [`SideCall::REASONING_EFFORT`]
     /// (see `apply_side_call_bounds`). The whole call — header wait, body,
     /// and at most one retry — is bounded by the spec's wall-time cap; an
@@ -1539,7 +1550,7 @@ impl ApiClient {
         let tick = crate::agent::llm_wait::LLM_WAIT_TICK;
         let mut wait_ticker = LlmWaitTicker::with_interval(tokio::time::Instant::now(), tick);
         let estimated_tokens = estimate_messages_tokens(&messages);
-        let mut body = self.build_chat_body(messages, None, ThinkingMode::Disabled, true)?;
+        let mut body = self.build_chat_body(messages, None, spec.thinking, true)?;
         let mut max_tokens = spec.max_tokens;
         apply_side_call_bounds(&mut body, max_tokens);
         if let Some(enable) = spec
