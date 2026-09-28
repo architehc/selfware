@@ -177,6 +177,12 @@ pub struct ModelDefaultsProfile {
     /// per-turn prompt growth against its history budget (global default
     /// 0.75).
     pub context_content_ratio: Option<f32>,
+    /// Measured p99 per-turn prompt growth (tokens) on this endpoint. When
+    /// set (and `context_content_ratio` is not explicit), the compaction
+    /// ratio is DERIVED from it against the session's actual history budget
+    /// (`AgentConfig::context_growth_p99_tokens`), so an explicit
+    /// `max_tokens` / `context_length` moves the threshold with the budget.
+    pub context_growth_p99_tokens: Option<usize>,
     /// Whether a `reasoning_effort` setting measurably changes how much this
     /// model reasons. `false` makes the reasoning-budget step-down retry
     /// switch thinking off at once instead of "lowering" an effort pin the
@@ -376,14 +382,21 @@ fn qwen38_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDe
         // margin) = 106,496. Per-turn prompt growth over 1,206 growing
         // steps in the val082–val090 runs (turn artifacts, server-counted
         // prompt tokens): p50 962, p90 5,658, p99 21,221, max 41,677. So
-        // 1 − 21,221 / 106,496 = 0.8007 → 0.80 (threshold 85,196; the gap
-        // 21,300 ≥ p99). The global 0.75 (79,872) compacted ~5.3k tokens
+        // 1 − 21,221 / 106,496 = 0.8007 (threshold 85,275; the gap equals
+        // the p99). The global 0.75 (79,872) compacted ~5.3k tokens
         // earlier than the growth requires; a review keeps more of what it
         // read, at +0.7 s prefill per turn (~7.2-7.8k tok/s measured
         // 2026-09-27, no prefix-cache reuse). The threshold is compared
         // with the ESTIMATED history, which for histories ≥ 80k ran at or
         // above the server count (server/estimate p99 0.992, 154 turns).
-        context_content_ratio: Some(0.80),
+        //
+        // What was measured is the HEADROOM (p99 growth), not the ratio: a
+        // fixed 0.80 derived for this 106,496 budget was applied whatever
+        // max_tokens / context_length the user set (review 2026-09-27). The
+        // ratio is derived at load from the session's own budget
+        // (`Config::effective_context_content_ratio`).
+        context_content_ratio: None,
+        context_growth_p99_tokens: Some(21_221),
         // No reasoning_effort value bounds this model's reasoning (2026-09-27
         // knobs run: "low" 643–8,192 and "xhigh" 7,072–8,192 reasoning tokens
         // on one prompt, the same spread as no setting). The step-down retry
@@ -493,10 +506,10 @@ pub const QWEN38_MEASURED: &[MeasuredQuota] = &[
         basis: "24,576 tokens at the slowest whole-call rate, 15.1 tok/s (val083)",
     },
     MeasuredQuota {
-        name: "agent.context_content_ratio",
-        value: "0.80",
-        basis: "history budget 106,496 minus p99 per-turn prompt growth 21,221 \
-                (1,206 steps, val082-val090)",
+        name: "agent.context_growth_p99_tokens",
+        value: "21221",
+        basis: "p99 per-turn prompt growth (1,206 steps, val082-val090); compaction ratio \
+                derived at load = 1 - 21,221 / history budget (0.80 at 106,496)",
     },
     MeasuredQuota {
         name: "workloads.planning",
@@ -612,6 +625,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: json!({}),
             workload_quotas: None,
@@ -634,6 +648,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: json!({
                 "top_p": 0.95,
@@ -670,6 +685,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: json!({
                 "top_p": 0.8,
@@ -698,6 +714,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: json!({
                 "top_p": 0.95,
@@ -721,6 +738,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: Value::Null,
             workload_quotas: None,
@@ -739,6 +757,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             max_global: None,
             max_call_secs: None,
             context_content_ratio: None,
+            context_growth_p99_tokens: None,
             reasoning_effort_honored: true,
             extra_body: Value::Null,
             workload_quotas: None,
@@ -870,6 +889,13 @@ pub fn apply_profile(
         if let Some(v) = profile.context_content_ratio {
             config.agent.context_content_ratio = v;
             applied.context_content_ratio = true;
+        }
+        if let Some(growth) = profile.context_growth_p99_tokens {
+            if config.agent.context_growth_p99_tokens.is_none() {
+                config.agent.context_growth_p99_tokens = Some(growth);
+                config.agent.context_content_ratio = config.effective_context_content_ratio();
+                applied.context_content_ratio = true;
+            }
         }
     }
 

@@ -188,6 +188,7 @@ fn test_agent_config_serde_roundtrip() {
         read_loop_policy: ReadLoopPolicy::Nudge,
         require_visual_verification: true,
         context_content_ratio: 0.5,
+        context_growth_p99_tokens: None,
         context_compression_ratio: 0.3,
         context_thinking_ratio: 0.1,
         compression_detail: "names".to_string(),

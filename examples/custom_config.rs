@@ -85,6 +85,7 @@ fn build_custom_config() -> Config {
             min_completion_steps: 3,
             require_verification_before_completion: true,
             context_content_ratio: 0.7,
+            context_growth_p99_tokens: None,
             context_compression_ratio: 0.15,
             context_thinking_ratio: 0.15,
             compression_detail: "signatures".to_string(),

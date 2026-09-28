@@ -380,8 +380,11 @@ pub enum ThinkingMode {
     /// hidden reasoning: the request is built as for `Enabled`, then every
     /// reasoning-effort pin is stepped down one level, or thinking is
     /// switched off where no effort can be lowered (see
-    /// [`client::apply_reasoning_step_down`]). `max_tokens` is untouched.
-    StepDown,
+    /// [`client::apply_reasoning_step_down`]). `max_tokens` is the retried
+    /// turn's: the workload quota's cap when the turn had one (review
+    /// 2026-09-27: the retry fell back to the config default — 24,576 over
+    /// a synthesis cap of 16,384 or a planning cap of 12,288).
+    StepDown(Option<crate::config::TurnWorkload>),
     /// A main-loop turn of the given kind: built as for `Enabled`, then the
     /// session's `[workloads.<kind>]` quota (`config.workloads`, filled from
     /// the matched model profile) sets this request's

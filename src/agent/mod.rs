@@ -1433,7 +1433,7 @@ impl Agent {
         let loop_control = AgentLoop::new(config.agent.max_iterations);
         // Compressor is created later, after max_context_tokens is calculated.
         // See the block near "Calculate max_context_tokens" below.
-        let compressor_content_ratio = config.agent.context_content_ratio;
+        let compressor_content_ratio = config.effective_context_content_ratio();
 
         // Initialize cognitive state and load global episodic memory if available
         let mut cognitive_state = CognitiveState::new();
@@ -1890,7 +1890,7 @@ To call a tool, use this EXACT XML structure:
         // than token_budget (which defaults to max_tokens = output budget).
         let ctx_map = context_map::ContextMap::new(
             max_context_tokens,
-            config.agent.context_content_ratio,
+            compressor_content_ratio,
             config.agent.context_compression_ratio,
             config.agent.context_thinking_ratio,
         );

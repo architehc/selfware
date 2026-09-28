@@ -219,6 +219,7 @@ impl ProfileManager {
 
         if let Some(max_tokens) = o.max_tokens {
             config.max_tokens = max_tokens;
+            obey_profile_max_tokens(config, profile_name, max_tokens);
         }
         if let Some(temperature) = o.temperature {
             config.temperature = temperature;
@@ -261,6 +262,50 @@ impl ProfileManager {
 impl Default for ProfileManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// `--profile` sets `max_tokens` for the session after `Config::load` has
+/// filled the per-turn workload quotas from the matched model profile, so
+/// those model-profile caps silently won on planning / synthesis turns
+/// (review 2026-09-27). The session profile is explicit, like a top-level
+/// `max_tokens` in the config file: model-profile-filled per-turn caps are
+/// dropped, and the run summary / llm-doctor say so. A per-kind
+/// `[workloads.<kind>] max_tokens` the user wrote stays (most specific
+/// wins), and is named too.
+fn obey_profile_max_tokens(config: &mut Config, profile_name: &str, max_tokens: usize) {
+    use crate::config::{ConfigSource, TurnWorkload};
+    let mut dropped = Vec::new();
+    let mut kept = Vec::new();
+    for kind in TurnWorkload::ALL {
+        let key = format!("workloads.{kind}.max_tokens");
+        let Some(cap) = config.workloads.get(kind).max_tokens else {
+            continue;
+        };
+        if matches!(config.sources.get(&key), Some(ConfigSource::Profile(_))) {
+            config.workloads.get_mut(kind).max_tokens = None;
+            config.sources.set(
+                key,
+                ConfigSource::CliArg(format!("--profile {profile_name}")),
+            );
+            dropped.push(format!("{kind} {cap}"));
+        } else {
+            kept.push(format!("{kind} {cap}"));
+        }
+    }
+    if !dropped.is_empty() {
+        config.workload_overrides.push(format!(
+            "per-turn max_tokens from the model profile not applied ({}): --profile \
+             {profile_name} sets max_tokens = {max_tokens} for every turn",
+            dropped.join(", ")
+        ));
+    }
+    if !kept.is_empty() {
+        config.workload_overrides.push(format!(
+            "--profile {profile_name} max_tokens = {max_tokens} does not apply to turns with an \
+             explicit [workloads.<kind>] max_tokens ({})",
+            kept.join(", ")
+        ));
     }
 }
 

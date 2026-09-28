@@ -5947,7 +5947,7 @@ async fn test_step_down_request_is_not_retried_again_by_the_client() {
     };
     let client = ApiClient::new(&config).unwrap();
     let err = client
-        .chat(vec![Message::user("q")], None, ThinkingMode::StepDown)
+        .chat(vec![Message::user("q")], None, ThinkingMode::StepDown(None))
         .await
         .expect_err("exhausted step-down request fails typed");
     assert!(matches!(
@@ -6148,6 +6148,61 @@ async fn test_workload_quota_sets_thinking_and_max_tokens_per_turn() {
     // A non-workload call never picks up a quota.
     assert_eq!(sent[2]["chat_template_kwargs"]["enable_thinking"], true);
     assert_eq!(sent[2]["max_tokens"], 4096);
+    let _ = server.await;
+}
+
+/// Review 2026-09-27: the reasoning step-down retry fell back to the config
+/// default max_tokens, overriding the turn's workload cap (synthesis
+/// 16,384 / planning 12,288 under a 24,576 default).
+#[tokio::test]
+async fn test_step_down_retry_keeps_the_turn_workload_cap() {
+    use crate::config::{TurnWorkload, WorkloadQuota, WorkloadQuotas};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ok_body = r#"{"id":"c-ok","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [ok_body, ok_body]);
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        max_tokens: 24_576,
+        workloads: WorkloadQuotas {
+            synthesis: WorkloadQuota {
+                enable_thinking: Some(true),
+                max_tokens: Some(16_384),
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    for mode in [
+        ThinkingMode::StepDown(Some(TurnWorkload::Synthesis)),
+        ThinkingMode::StepDown(None),
+    ] {
+        client
+            .chat(vec![Message::user("q")], None, mode)
+            .await
+            .expect("mock answers");
+    }
+    let sent: Vec<serde_json::Value> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| captured_json_body(b))
+        .collect();
+    assert_eq!(
+        sent[0]["max_tokens"], 16_384,
+        "the turn's cap, not the default"
+    );
+    // The step-down's own thinking decision is never re-enabled by the quota.
+    assert!(sent[0]
+        .get("chat_template_kwargs")
+        .and_then(|k| k.get("enable_thinking"))
+        .is_none_or(|v| v != true));
+    assert_eq!(sent[1]["max_tokens"], 24_576);
     let _ = server.await;
 }
 

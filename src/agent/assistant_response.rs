@@ -783,7 +783,11 @@ impl Agent {
         };
 
         match self
-            .request_step_completion(request_messages, ThinkingMode::StepDown, turn_start)
+            .request_step_completion(
+                request_messages,
+                ThinkingMode::StepDown(Some(workload)),
+                turn_start,
+            )
             .await
         {
             Ok(completion) => Ok(completion),

@@ -254,7 +254,7 @@ the compaction point.
 | `max_tokens` (reserved output) | 24,576 | longest real completion 13,799 (val083), 14,105 on replay |
 | `agent.max_call_secs` | 1,628 | 24,576 tokens at the slowest whole-call rate, 15.1 tok/s (val083); scales with a larger max_tokens, including a `[workloads]` one |
 | history budget (`max_context_tokens`) | 106,496 | 163,840 − 24,576 − 20% margin (32,768) |
-| `agent.context_content_ratio` (compaction point) | **0.80** → 85,196 | history budget − p99 per-turn prompt growth (21,221; p50 962, p90 5,658, max 41,677 over 1,206 growing steps, val082–val090): compaction starts as late as one p99 step allows without overshooting the hard budget. Was the global 0.75 (79,872). |
+| `agent.context_growth_p99_tokens` (compaction point) | **21,221** → ratio 0.8007 at the defaults (threshold 85,275) | p99 per-turn prompt growth (p50 962, p90 5,658, max 41,677 over 1,206 growing steps, val082–val090). The ratio is derived at load as 1 − 21,221 / the session's history budget, so an explicit `max_tokens` / `context_length` moves the threshold with the budget (0.9.5; 0.9.4 applied a fixed 0.80 derived for the 106,496 default budget). An explicit `agent.context_content_ratio` still wins. Was the global 0.75 (79,872). |
 
 Also measured, not changed: the 20% safety margin (32,768 tokens) is far
 above the estimator's measured error — for histories ≥ 20k estimated

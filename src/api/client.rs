@@ -1223,7 +1223,7 @@ impl ApiClient {
         // and a second exhaustion names it in the error.
         let mut discarded_usage: Option<crate::api::types::Usage> = None;
         if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
-            if self.user_pinned_reasoning() || thinking == ThinkingMode::StepDown {
+            if self.user_pinned_reasoning() || matches!(thinking, ThinkingMode::StepDown(_)) {
                 return Err(ApiError::ReasoningBudgetExhausted {
                     reasoning_chars,
                     retry: None,
@@ -1351,6 +1351,12 @@ impl ApiClient {
         let available_for_output = hard_limit.saturating_sub(input_tokens);
         let quota = match thinking {
             ThinkingMode::Workload(kind) => self.config.workloads.get(kind),
+            // The step-down retry keeps the turn's output cap; its thinking
+            // switch is the step-down's own (never re-enabled here).
+            ThinkingMode::StepDown(Some(kind)) => crate::config::WorkloadQuota {
+                max_tokens: self.config.workloads.get(kind).max_tokens,
+                ..crate::config::WorkloadQuota::default()
+            },
             _ => crate::config::WorkloadQuota::default(),
         };
         let max_tokens = quota
@@ -1403,7 +1409,7 @@ impl ApiClient {
             Some(&self.config.endpoint),
         )?;
 
-        if thinking == ThinkingMode::StepDown {
+        if matches!(thinking, ThinkingMode::StepDown(_)) {
             if let Some(step) = apply_reasoning_step_down(&mut body, &self.config.model) {
                 debug!("reasoning step-down retry: {}", step.describe());
             }

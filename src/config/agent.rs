@@ -78,6 +78,14 @@ pub struct AgentConfig {
     /// Compression triggers when content exceeds this fraction.
     #[serde(default = "default_context_content_ratio")]
     pub context_content_ratio: f32,
+    /// Measured p99 per-turn prompt growth (tokens). When set, the
+    /// compaction ratio is derived from the session's history budget —
+    /// `1 − growth / max_context_tokens` — instead of `context_content_ratio`
+    /// (see `Config::effective_context_content_ratio`). Filled by a model
+    /// profile that measured it, unless `context_content_ratio` is set
+    /// explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_growth_p99_tokens: Option<usize>,
     /// Fraction of token_budget reserved as compression headroom.
     /// Ensures compression always has room to work.
     #[serde(default = "default_context_compression_ratio")]
@@ -147,6 +155,7 @@ impl Default for AgentConfig {
             read_loop_policy: ReadLoopPolicy::default(),
             require_visual_verification: false,
             context_content_ratio: default_context_content_ratio(),
+            context_growth_p99_tokens: None,
             context_compression_ratio: default_context_compression_ratio(),
             context_thinking_ratio: default_context_thinking_ratio(),
             compression_detail: default_compression_detail(),

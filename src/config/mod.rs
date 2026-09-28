@@ -333,6 +333,24 @@ impl Config {
         Ok((max_context_tokens, reserved_output))
     }
 
+    /// The compaction ratio this session runs with. With a measured per-turn
+    /// growth (`agent.context_growth_p99_tokens`) it is derived from the
+    /// session's own history budget, so compaction starts exactly one p99
+    /// turn below the hard budget whatever `max_tokens` / `context_length`
+    /// are (clamped to 0.50–0.95; a budget smaller than the growth gets the
+    /// floor). Otherwise `agent.context_content_ratio`.
+    pub fn effective_context_content_ratio(&self) -> f32 {
+        let Some(growth) = self.agent.context_growth_p99_tokens else {
+            return self.agent.context_content_ratio;
+        };
+        match self.derive_context_budget() {
+            Ok((budget, _)) if budget > 0 => {
+                (1.0 - growth as f64 / budget as f64).clamp(0.50, 0.95) as f32
+            }
+            _ => self.agent.context_content_ratio,
+        }
+    }
+
     /// Strict context-fit check for GENERATED configs. The runtime
     /// derivation ([`Config::derive_context_budget`]) clamps an oversized
     /// `max_tokens`; a wizard must not silently emit a config that only

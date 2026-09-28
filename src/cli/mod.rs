@@ -7916,7 +7916,13 @@ pub(crate) fn config_show_rows(
     ));
     rows.push((
         "agent.context_content_ratio".to_string(),
-        format!("{}", config.agent.context_content_ratio),
+        match config.agent.context_growth_p99_tokens {
+            Some(growth) => format!(
+                "{:.4} (derived: 1 - {growth} p99 growth / history budget)",
+                config.effective_context_content_ratio()
+            ),
+            None => format!("{}", config.agent.context_content_ratio),
+        },
         config.source_of("agent.context_content_ratio"),
     ));
     // Per-workload turn quotas: one row per field that is set (profile or

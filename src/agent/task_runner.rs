@@ -2520,7 +2520,9 @@ impl Agent {
                             None;
                         loop {
                             let thinking = if planning_step_down.is_some() {
-                                crate::api::ThinkingMode::StepDown
+                                crate::api::ThinkingMode::StepDown(Some(
+                                    crate::config::TurnWorkload::Planning,
+                                ))
                             } else {
                                 crate::api::ThinkingMode::Workload(
                                     crate::config::TurnWorkload::Planning,

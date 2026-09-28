@@ -581,7 +581,10 @@ fn qwen38_compaction_ratio_applies_unless_set_explicitly() {
     let profile = match_profile("qwen38-flash-next").unwrap();
     let applied = apply_profile(&mut config, &profile, &UserExplicitFields::default());
     assert!(applied.context_content_ratio);
-    assert!((config.agent.context_content_ratio - 0.80).abs() < f32::EPSILON);
+    // Derived from the measured headroom: 1 − 21,221 / 106,496 = 0.8007.
+    assert_eq!(config.agent.context_growth_p99_tokens, Some(21_221));
+    assert!((config.effective_context_content_ratio() - 0.8007).abs() < 1e-4);
+    assert!((config.agent.context_content_ratio - 0.8007).abs() < 1e-4);
     assert!(applied.render().contains("agent.context_content_ratio"));
 
     let toml = "model = \"qwen38-flash-next\"\n[agent]\ncontext_content_ratio = 0.6\n";
@@ -590,6 +593,8 @@ fn qwen38_compaction_ratio_applies_unless_set_explicitly() {
     let applied = apply_profile(&mut config, &profile, &user_explicit);
     assert!(!applied.context_content_ratio);
     assert!((config.agent.context_content_ratio - 0.6).abs() < f32::EPSILON);
+    assert_eq!(config.agent.context_growth_p99_tokens, None);
+    assert!((config.effective_context_content_ratio() - 0.6).abs() < f32::EPSILON);
     // Other profiles keep the global default.
     let mut config = Config::default();
     apply_profile(
@@ -598,4 +603,29 @@ fn qwen38_compaction_ratio_applies_unless_set_explicitly() {
         &UserExplicitFields::default(),
     );
     assert!((config.agent.context_content_ratio - 0.75).abs() < f32::EPSILON);
+}
+
+/// Review 2026-09-27: the 0.80 derived for a 106,496-token history budget
+/// was applied whatever budget the session actually had. The measured
+/// headroom is kept and the ratio follows the session's budget.
+#[test]
+fn qwen38_compaction_ratio_follows_the_session_budget() {
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let toml = "model = \"qwen38-flash-next\"\nmax_tokens = 8192\n";
+    let user_explicit = UserExplicitFields::from_toml(toml);
+    let mut config: Config = toml::from_str(toml).unwrap();
+    apply_profile(&mut config, &profile, &user_explicit);
+    // 163,840 − 8,192 − 32,768 = 122,880 → 1 − 21,221 / 122,880 = 0.8273.
+    let (budget, _) = config.derive_context_budget().unwrap();
+    assert_eq!(budget, 122_880);
+    let ratio = config.effective_context_content_ratio();
+    assert!((ratio - 0.8273).abs() < 1e-4, "{ratio}");
+    // The threshold sits exactly one p99 turn below the budget.
+    let threshold = (budget as f64 * ratio as f64).round() as usize;
+    assert!((budget - threshold).abs_diff(21_221) < 16, "{threshold}");
+    // A later `--profile`-style max_tokens change moves it again.
+    config.max_tokens = 40_000;
+    let (budget, _) = config.derive_context_budget().unwrap();
+    let ratio = config.effective_context_content_ratio();
+    assert!(((1.0 - 21_221.0 / budget as f64) as f32 - ratio).abs() < 1e-5);
 }

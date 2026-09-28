@@ -39,3 +39,33 @@ fn test_list_profiles() {
     let profiles = manager.list();
     assert!(!profiles.is_empty());
 }
+
+/// Review 2026-09-27: `--profile` max_tokens is applied after the model
+/// profile filled the per-turn caps, which then silently overrode it on
+/// planning / synthesis turns.
+#[test]
+fn profile_max_tokens_is_obeyed_over_model_profile_turn_caps() {
+    use crate::config::{ConfigSource, TurnWorkload};
+    let manager = ProfileManager::new();
+    let mut config = crate::config::Config::default();
+    config.workloads.get_mut(TurnWorkload::Synthesis).max_tokens = Some(16_384);
+    config.sources.set(
+        "workloads.synthesis.max_tokens",
+        ConfigSource::Profile("glm-*".to_string()),
+    );
+    // A cap the user wrote in [workloads.planning] stays.
+    config.workloads.get_mut(TurnWorkload::Planning).max_tokens = Some(12_288);
+    manager.apply_profile(&mut config, "architect").unwrap();
+    assert_eq!(config.max_tokens, 8192);
+    assert_eq!(
+        config.workloads.get(TurnWorkload::Synthesis).max_tokens,
+        None
+    );
+    assert_eq!(
+        config.workloads.get(TurnWorkload::Planning).max_tokens,
+        Some(12_288)
+    );
+    let notes = config.workload_overrides.join("\n");
+    assert!(notes.contains("synthesis 16384"), "{notes}");
+    assert!(notes.contains("planning 12288"), "{notes}");
+}
