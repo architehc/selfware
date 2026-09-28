@@ -57,7 +57,9 @@ fn test_analysis_report_serializes_grounded_compiler_spans() {
                 column_end: 9,
                 is_primary: true,
                 label: Some("expected usize".to_string()),
+                ..Default::default()
             }],
+            ..Default::default()
         }],
         errors: 1,
         warnings: 0,

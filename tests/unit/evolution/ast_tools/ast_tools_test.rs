@@ -8,6 +8,7 @@ fn diag(level: &str, message: &str, span: Option<DiagnosticSpan>) -> CompilerDia
         message: message.to_string(),
         rendered: None,
         spans: span.into_iter().collect(),
+        ..Default::default()
     }
 }
 
@@ -20,6 +21,7 @@ fn span(file: &str, line: usize, column: usize, label: Option<&str>) -> Diagnost
         column_end: column + 1,
         is_primary: true,
         label: label.map(str::to_string),
+        ..Default::default()
     }
 }
 

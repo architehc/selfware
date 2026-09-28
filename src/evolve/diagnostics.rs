@@ -48,24 +48,42 @@ impl AnalysisKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiagnosticSpan {
     pub file: String,
     pub line_start: usize,
     pub line_end: usize,
+    /// One-based, in characters (rustc's JSON convention).
     pub column_start: usize,
     pub column_end: usize,
     pub is_primary: bool,
     pub label: Option<String>,
+    /// Zero-based byte offsets of the span in the file as rustc read it.
+    /// Edits are applied at these offsets: columns count characters, so
+    /// slicing a line by column breaks on non-ASCII text.
+    #[serde(default)]
+    pub byte_start: Option<usize>,
+    #[serde(default)]
+    pub byte_end: Option<usize>,
+    /// Replacement text rustc suggests for this span (`help:` children).
+    #[serde(default)]
+    pub suggested_replacement: Option<String>,
+    /// rustc's confidence in `suggested_replacement`: `MachineApplicable`,
+    /// `MaybeIncorrect`, `HasPlaceholders` or `Unspecified`.
+    #[serde(default)]
+    pub suggestion_applicability: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompilerDiagnostic {
     pub level: String,
     pub code: Option<String>,
     pub message: String,
     pub rendered: Option<String>,
     pub spans: Vec<DiagnosticSpan>,
+    /// Sub-diagnostics (`note:` / `help:`); suggestions live on their spans.
+    #[serde(default)]
+    pub children: Vec<CompilerDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,51 +137,76 @@ impl DiagnosticsEngine {
             .await
             .with_context(|| format!("failed to run {}", kind.label()))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut diagnostics = Vec::new();
-        let mut dropped = 0usize;
-
-        for line in stdout.lines().chain(stderr.lines()) {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if value.get("reason").and_then(Value::as_str) != Some("compiler-message") {
-                continue;
-            }
-            let Some(message) = value.get("message") else {
-                continue;
-            };
-            if diagnostics.len() >= MAX_DIAGNOSTICS {
-                dropped += 1;
-                continue;
-            }
-            diagnostics.push(parse_diagnostic(message));
-        }
-
-        let errors = diagnostics.iter().filter(|d| d.level == "error").count();
-        let warnings = diagnostics.iter().filter(|d| d.level == "warning").count();
-
-        Ok(AnalysisReport {
+        let command = std::iter::once("cargo".to_string())
+            .chain(args.iter().map(|arg| (*arg).to_string()))
+            .collect();
+        Ok(report_from_cargo_output(
             kind,
-            label: kind.label().to_string(),
-            command: std::iter::once("cargo".to_string())
-                .chain(args.iter().map(|arg| (*arg).to_string()))
-                .collect(),
-            success: output.status.success(),
-            exit_code: output.status.code(),
-            duration_ms: started.elapsed().as_millis() as u64,
-            diagnostics,
-            errors,
-            warnings,
-            stdout_tail: tail(&stdout, MAX_OUTPUT_BYTES),
-            stderr_tail: tail(&stderr, MAX_OUTPUT_BYTES),
-            evidence_complete: dropped == 0,
-        })
+            command,
+            output.status.success(),
+            output.status.code(),
+            started.elapsed().as_millis() as u64,
+            &output.stdout,
+            &output.stderr,
+        ))
     }
 }
 
-fn parse_diagnostic(message: &Value) -> CompilerDiagnostic {
+/// Build an [`AnalysisReport`] from a finished `cargo … --message-format=json`
+/// run: every `compiler-message` line on stdout/stderr becomes a
+/// [`CompilerDiagnostic`] (at most `MAX_DIAGNOSTICS`; `evidence_complete`
+/// says whether any were dropped).
+pub(crate) fn report_from_cargo_output(
+    kind: AnalysisKind,
+    command: Vec<String>,
+    success: bool,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> AnalysisReport {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut diagnostics = Vec::new();
+    let mut dropped = 0usize;
+
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("reason").and_then(Value::as_str) != Some("compiler-message") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if diagnostics.len() >= MAX_DIAGNOSTICS {
+            dropped += 1;
+            continue;
+        }
+        diagnostics.push(parse_diagnostic(message));
+    }
+
+    let errors = diagnostics.iter().filter(|d| d.level == "error").count();
+    let warnings = diagnostics.iter().filter(|d| d.level == "warning").count();
+
+    AnalysisReport {
+        kind,
+        label: kind.label().to_string(),
+        command,
+        success,
+        exit_code,
+        duration_ms,
+        diagnostics,
+        errors,
+        warnings,
+        stdout_tail: tail(&stdout, MAX_OUTPUT_BYTES),
+        stderr_tail: tail(&stderr, MAX_OUTPUT_BYTES),
+        evidence_complete: dropped == 0,
+    }
+}
+
+pub(crate) fn parse_diagnostic(message: &Value) -> CompilerDiagnostic {
     let spans = message
         .get("spans")
         .and_then(Value::as_array)
@@ -184,9 +227,31 @@ fn parse_diagnostic(message: &Value) -> CompilerDiagnostic {
                     .get("label")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                byte_start: span
+                    .get("byte_start")
+                    .and_then(Value::as_u64)
+                    .map(|b| b as usize),
+                byte_end: span
+                    .get("byte_end")
+                    .and_then(Value::as_u64)
+                    .map(|b| b as usize),
+                suggested_replacement: span
+                    .get("suggested_replacement")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                suggestion_applicability: span
+                    .get("suggestion_applicability")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             })
         })
         .collect();
+
+    let children = message
+        .get("children")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(parse_diagnostic).collect())
+        .unwrap_or_default();
 
     CompilerDiagnostic {
         level: message
@@ -209,6 +274,7 @@ fn parse_diagnostic(message: &Value) -> CompilerDiagnostic {
             .and_then(Value::as_str)
             .map(str::to_string),
         spans,
+        children,
     }
 }
 

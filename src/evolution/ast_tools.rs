@@ -43,6 +43,7 @@ impl AstMutationResult {
                 message: format!("Function `{}` not found in target file", fn_name),
                 rendered: None,
                 spans: Vec::new(),
+                ..Default::default()
             }],
             diff: String::new(),
             worktree_path: None,

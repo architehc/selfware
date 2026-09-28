@@ -988,7 +988,9 @@ mod tests {
                     column_end: 1,
                     is_primary: true,
                     label: None,
+                    ..Default::default()
                 }],
+                ..Default::default()
             }],
             errors: 1,
             warnings: 0,
