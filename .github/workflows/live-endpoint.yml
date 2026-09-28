@@ -94,7 +94,8 @@ jobs:
     timeout-minutes: 120
     env:
       LIVE_EVAL_RESULTS_DIR: ${{ github.workspace }}/../live-eval
-      LIVE_EVAL_WORK_ROOT: ${{ runner.temp }}/live-eval-work
+      # `runner` is not available in job-level env; github.workspace is.
+      LIVE_EVAL_WORK_ROOT: ${{ github.workspace }}/../live-eval-work
       # Passed through the environment, never interpolated into a script.
       EVAL_SAMPLES: ${{ github.event.inputs.eval_samples || '5' }}
     steps:
