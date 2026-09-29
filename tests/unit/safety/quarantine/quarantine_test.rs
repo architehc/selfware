@@ -347,6 +347,22 @@ async fn git_run_by_a_build_script_does_not_execute_a_repository_fsmonitor() {
     );
     let repo = candidate_repo(&fx, Some(&build), LIB_OK);
     let arm = prepare(&fx, &repo, "arm-git", false);
+    if !arm.git().attr_source_honoured() {
+        // git < 2.40 everywhere (no GIT_ATTR_SOURCE): the fixture's
+        // `.gitattributes`-selected clean filter WOULD run, and the arm's
+        // report must say so instead of claiming the protection (Rule 3).
+        assert!(
+            arm.isolation.git.contains("NOT neutralised"),
+            "{}",
+            arm.isolation.git
+        );
+        eprintln!(
+            "SKIP: no git 2.40+ on this host, attribute drivers are not neutralised \
+             (reported): {}",
+            arm.isolation.git
+        );
+        return;
+    }
     assert_ok(&cargo(&arm, &["build"]).await);
     let ran = std::fs::read_to_string(arm.home.join("git-ran")).unwrap();
     assert!(ran.contains("status=Ok(true)"), "git really ran: {ran}");
@@ -503,4 +519,161 @@ fn toolchain_is_cloned_per_run_or_the_shared_host_sysroot_is_recorded() {
             "stand-in"
         );
     }
+}
+
+#[test]
+fn parse_git_version_reads_apple_homebrew_and_windows_builds() {
+    assert_eq!(
+        parse_git_version("git version 2.39.3 (Apple Git-146)\n"),
+        Some((2, 39))
+    );
+    assert_eq!(parse_git_version("git version 2.55.0\n"), Some((2, 55)));
+    assert_eq!(
+        parse_git_version("git version 2.45.2.windows.1"),
+        Some((2, 45))
+    );
+    assert_eq!(parse_git_version("hub version 2.14.2"), None);
+    assert_eq!(parse_git_version(""), None);
+}
+
+/// macos-14 runners: `/usr/bin/git` (Xcode 15.4) is Apple Git 2.39, which
+/// ignores `GIT_ATTR_SOURCE`, while Homebrew's git 2.55 is on the
+/// operator's PATH. The arm must run the new one; a git inside the
+/// operator's home is never chosen; with no 2.40+ anywhere the report
+/// names the gap.
+#[cfg(unix)]
+#[test]
+fn arm_git_replaces_a_system_git_that_ignores_attr_source() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let mk = |dir: &str| {
+        let d = tmp.path().join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        let g = d.join("git");
+        std::fs::write(&g, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&g, std::fs::Permissions::from_mode(0o755)).unwrap();
+        d
+    };
+    let system = mk("usr-bin");
+    let brew = mk("opt-homebrew-bin");
+    let home = tmp.path().join("home");
+    let home_bin = {
+        let d = mk("home/.local/bin");
+        assert!(d.starts_with(&home));
+        d
+    };
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let versions = |system_v: Option<(u32, u32)>| {
+        let system = system.clone();
+        let home_bin = home_bin.clone();
+        move |p: &Path| {
+            if p.starts_with(&system) {
+                system_v
+            } else if p.starts_with(&home_bin) {
+                Some((2, 99))
+            } else {
+                Some((2, 55))
+            }
+        }
+    };
+
+    // New enough system git: kept, nothing replaced.
+    let g = select_arm_git(
+        std::slice::from_ref(&system),
+        std::slice::from_ref(&brew),
+        &home,
+        versions(Some((2, 40))),
+    );
+    assert!(
+        matches!(
+            &g,
+            ArmGit::System {
+                version: (2, 40),
+                ..
+            }
+        ),
+        "{g:?}"
+    );
+    assert!(g.attr_source_honoured());
+
+    // Apple Git 2.39: the operator's Homebrew git replaces it; the home one
+    // (listed first, newer) is skipped.
+    let g = select_arm_git(
+        std::slice::from_ref(&system),
+        &[home_bin.clone(), brew.clone()],
+        &home,
+        versions(Some((2, 39))),
+    );
+    match &g {
+        ArmGit::Replaced {
+            path,
+            version,
+            system_version,
+            ..
+        } => {
+            assert_eq!(path, &brew.join("git"));
+            assert_eq!(*version, (2, 55));
+            assert_eq!(*system_version, Some((2, 39)));
+        }
+        other => panic!("expected Replaced, got {other:?}"),
+    }
+    assert!(g.attr_source_honoured());
+    assert!(
+        g.describe().contains("ignores GIT_ATTR_SOURCE"),
+        "{}",
+        g.describe()
+    );
+
+    // An unknown system version is treated as too old.
+    let g = select_arm_git(
+        std::slice::from_ref(&system),
+        std::slice::from_ref(&brew),
+        &home,
+        versions(None),
+    );
+    assert!(matches!(g, ArmGit::Replaced { .. }), "{g:?}");
+
+    // No 2.40+ outside the operator's home: the gap is reported.
+    let g = select_arm_git(
+        std::slice::from_ref(&system),
+        &[home_bin.clone(), empty.clone()],
+        &home,
+        versions(Some((2, 39))),
+    );
+    assert!(matches!(g, ArmGit::Old { .. }), "{g:?}");
+    assert!(!g.attr_source_honoured());
+    assert!(g.describe().contains("NOT neutralised"), "{}", g.describe());
+
+    // No system git at all: nothing is added to the arm.
+    let g = select_arm_git(
+        std::slice::from_ref(&empty),
+        std::slice::from_ref(&brew),
+        &home,
+        versions(Some((2, 39))),
+    );
+    assert_eq!(g, ArmGit::Absent);
+}
+
+/// The wrapper the arm runs as `git` execs its target with every argument.
+#[cfg(unix)]
+#[test]
+fn arm_git_wrapper_execs_its_target_with_all_arguments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target_dir = tmp.path().join("it's here");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target = target_dir.join("git");
+    std::fs::write(&target, "#!/bin/sh\nprintf '%s|' \"$@\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let bin = tmp.path().join("bin");
+    write_git_wrapper(&bin, &target).unwrap();
+    let out = StdCommand::new(bin.join("git"))
+        .args(["-C", "a b", "status"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "-C|a b|status|");
 }

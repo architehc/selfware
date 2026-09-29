@@ -23,7 +23,8 @@
 //!   available), so no `rustup` proxy runs and nothing can install into or
 //!   update the operator's `~/.rustup`;
 //! - `CARGO_TARGET_DIR` inside the arm;
-//! - `PATH` = the toolchain `bin` + `/usr/bin:/bin:/usr/sbin:/sbin` only;
+//! - `PATH` = the toolchain `bin` + `/usr/bin:/bin:/usr/sbin:/sbin` only
+//!   (plus the arm's own `bin/` holding just `git`, see below);
 //! - the shared sanitized environment ([`crate::safety::process_env`]: no
 //!   API keys or tokens);
 //! - git neutralised for every `git` the arm runs: `GIT_CONFIG_*`
@@ -33,7 +34,12 @@
 //!   `GIT_CEILING_DIRECTORIES` at the arm root so repository discovery never
 //!   climbs out of the arm into an enclosing repository, and
 //!   `GIT_ATTR_SOURCE` = the empty tree so no `.gitattributes`-selected
-//!   filter/textconv/diff driver runs (limits in `quarantine_git_env`);
+//!   filter/textconv/diff driver runs (limits in `quarantine_git_env`).
+//!   git older than 2.40 ignores `GIT_ATTR_SOURCE`, so when the system
+//!   `git` is that old (macOS with Xcode ≤ 16: Apple Git 2.39) the arm gets
+//!   a private `bin/git` running the first git 2.40+ on the operator's
+//!   `PATH` ([`select_arm_git`]); when there is none, the
+//!   [`IsolationReport`] says those drivers are NOT neutralised;
 //! - its own process group, SIGKILLed as a group on timeout, cancel (future
 //!   dropped) or leftover descendants
 //!   ([`crate::tools::process_guard::run_command_bounded`]);
@@ -129,6 +135,163 @@ impl HostToolchain {
 
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The oldest git that honours `GIT_ATTR_SOURCE` (2.40). An older git
+/// ignores it, so a `.gitattributes`-selected filter/textconv driver that a
+/// repository's own config defines runs in that repository — observed on
+/// the macos-14 runners, whose `/usr/bin/git` (Xcode 15.4) is Apple Git
+/// 2.39: a build script's `git -C <evil repo> status` ran the repository's
+/// `filter.<x>.clean`.
+pub const GIT_ATTR_SOURCE_MIN: (u32, u32) = (2, 40);
+
+/// `(major, minor)` of the git at `git` (`git version 2.39.3 (Apple
+/// Git-146)` → `(2, 39)`), `None` when it does not run or says something
+/// else. `env` is the whole environment it runs with.
+pub fn git_version(git: &Path, env: &[(OsString, OsString)]) -> Option<(u32, u32)> {
+    let out = std::process::Command::new(git)
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_git_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `(major, minor)` from `git --version` output.
+pub fn parse_git_version(text: &str) -> Option<(u32, u32)> {
+    let rest = text.trim().strip_prefix("git version ")?;
+    let mut nums = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .map(str::parse::<u32>);
+    Some((nums.next()?.ok()?, nums.next()?.ok()?))
+}
+
+/// Which `git` an arm's processes run, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArmGit {
+    /// No `git` on the system part of the arm `PATH`: nested git calls
+    /// fail, nothing to harden. None is added.
+    Absent,
+    /// The first `git` on the system `PATH` honours `GIT_ATTR_SOURCE`.
+    System { path: PathBuf, version: (u32, u32) },
+    /// The system `git` is older than 2.40 (or its version is unknown); the
+    /// arm gets a private `bin/git` that runs `path` (the first git 2.40+
+    /// on the operator's `PATH` outside their home) instead.
+    Replaced {
+        path: PathBuf,
+        version: (u32, u32),
+        system: PathBuf,
+        system_version: Option<(u32, u32)>,
+    },
+    /// The system `git` is older than 2.40 and no git 2.40+ was found:
+    /// `.gitattributes`-selected drivers of repositories other than the
+    /// snapshot are NOT neutralised (stated in the [`IsolationReport`]).
+    Old {
+        path: PathBuf,
+        version: Option<(u32, u32)>,
+    },
+}
+
+/// Choose the arm's `git`: the first one in `system_dirs` (what the arm
+/// `PATH` resolves) when it honours `GIT_ATTR_SOURCE`, otherwise the first
+/// git 2.40+ in `operator_dirs` that is not inside `operator_home` (the arm
+/// never runs a program from the operator's home: under the sandbox it
+/// cannot read it, and a home shim reads the operator's own state).
+/// `version_of` runs `git --version` (injected for tests).
+pub fn select_arm_git(
+    system_dirs: &[PathBuf],
+    operator_dirs: &[PathBuf],
+    operator_home: &Path,
+    version_of: impl Fn(&Path) -> Option<(u32, u32)>,
+) -> ArmGit {
+    let git = exe("git");
+    let Some(system) = system_dirs
+        .iter()
+        .map(|d| d.join(&git))
+        .find(|p| p.is_file())
+    else {
+        return ArmGit::Absent;
+    };
+    let system_version = version_of(&system);
+    if let Some(version) = system_version.filter(|v| *v >= GIT_ATTR_SOURCE_MIN) {
+        return ArmGit::System {
+            path: system,
+            version,
+        };
+    }
+    for dir in operator_dirs {
+        if !dir.is_absolute() || is_within(dir, operator_home) {
+            continue;
+        }
+        let candidate = dir.join(&git);
+        if !candidate.is_file() {
+            continue;
+        }
+        if let Some(version) = version_of(&candidate).filter(|v| *v >= GIT_ATTR_SOURCE_MIN) {
+            return ArmGit::Replaced {
+                path: candidate,
+                version,
+                system,
+                system_version,
+            };
+        }
+    }
+    ArmGit::Old {
+        path: system,
+        version: system_version,
+    }
+}
+
+impl ArmGit {
+    /// The [`IsolationReport`] sentence about which git the arm runs.
+    pub fn describe(&self) -> String {
+        let v = |v: &Option<(u32, u32)>| match v {
+            Some((a, b)) => format!("git {a}.{b}"),
+            None => "unknown version".to_string(),
+        };
+        match self {
+            ArmGit::Absent => "no git on the arm PATH".to_string(),
+            ArmGit::System { path, version } => format!(
+                "arm git {} (git {}.{}, honours GIT_ATTR_SOURCE)",
+                path.display(),
+                version.0,
+                version.1
+            ),
+            ArmGit::Replaced {
+                path,
+                version,
+                system,
+                system_version,
+            } => format!(
+                "arm git {} (git {}.{}) via the arm's own bin/, ahead of {} ({}, which \
+                 ignores GIT_ATTR_SOURCE); a program calling {} by absolute path is \
+                 not covered",
+                path.display(),
+                version.0,
+                version.1,
+                system.display(),
+                v(system_version),
+                system.display()
+            ),
+            ArmGit::Old { path, version } => format!(
+                "arm git {} ({}) ignores GIT_ATTR_SOURCE and no git 2.40+ was found: \
+                 .gitattributes-selected filter/textconv drivers of repositories other \
+                 than the snapshot are NOT neutralised",
+                path.display(),
+                v(version)
+            ),
+        }
+    }
+
+    /// Whether `.gitattributes`-selected drivers are neutralised for every
+    /// repository the arm's `git` (by `PATH`) touches.
+    pub fn attr_source_honoured(&self) -> bool {
+        !matches!(self, ArmGit::Old { .. })
+    }
 }
 
 /// How an arm gets cargo's package caches.
@@ -290,6 +453,7 @@ pub struct ArmQuarantine {
     env: Vec<(OsString, OsString)>,
     sandbox_profile: Option<String>,
     offline: bool,
+    git: ArmGit,
     pub isolation: IsolationReport,
 }
 
@@ -408,8 +572,30 @@ impl ArmQuarantine {
         };
         let offline = options.sandbox;
 
+        let system_dirs: Vec<PathBuf> = SYSTEM_PATH.iter().map(PathBuf::from).collect();
+        let operator_dirs: Vec<PathBuf> = host
+            .parent_env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| std::env::split_paths(v).collect())
+            .unwrap_or_default();
+        let probe_env: Vec<(OsString, OsString)> = vec![
+            (
+                "PATH".into(),
+                std::env::join_paths(&system_dirs).context("building the probe PATH")?,
+            ),
+            ("HOME".into(), home.clone().into()),
+        ];
+        let arm_git = select_arm_git(&system_dirs, &operator_dirs, &host.home, |g| {
+            git_version(g, &probe_env)
+        });
         let mut path_dirs = vec![toolchain.bin.clone()];
-        path_dirs.extend(SYSTEM_PATH.iter().map(PathBuf::from));
+        if let ArmGit::Replaced { path, .. } = &arm_git {
+            let bin = root.join("bin");
+            write_git_wrapper(&bin, path)?;
+            path_dirs.insert(0, bin);
+        }
+        path_dirs.extend(system_dirs);
         let path = std::env::join_paths(&path_dirs).context("building the arm PATH")?;
 
         // Sanitized base (the shared allowlist, from the explicit parent env),
@@ -467,10 +653,12 @@ impl ArmQuarantine {
                 "{}; private empty RUSTUP_HOME (no rustup proxy runs)",
                 toolchain.isolation
             ),
-            git: "GIT_CONFIG_* neutralisation (fsmonitor/hooks/pager/external diff off), \
-                  no .gitattributes drivers (GIT_ATTR_SOURCE, git 2.40+), system and global \
-                  config off, discovery ceiling at the arm root"
-                .into(),
+            git: format!(
+                "GIT_CONFIG_* neutralisation (fsmonitor/hooks/pager/external diff off), \
+                 no .gitattributes drivers (GIT_ATTR_SOURCE, git 2.40+), system and global \
+                 config off, discovery ceiling at the arm root; {}",
+                arm_git.describe()
+            ),
             process: "own process group; the group is SIGKILLed on timeout, cancel or \
                       leftover descendants (a setsid() escapes it)"
                 .into(),
@@ -501,8 +689,14 @@ impl ArmQuarantine {
             env,
             sandbox_profile,
             offline,
+            git: arm_git,
             isolation,
         })
+    }
+
+    /// Which `git` the arm's processes run (see [`select_arm_git`]).
+    pub fn git(&self) -> &ArmGit {
+        &self.git
     }
 
     /// Whether cargo runs offline in this arm (sandboxed arms).
@@ -590,6 +784,24 @@ impl ArmQuarantine {
 
 /// Owner-writable again, so a tree whose permissions the arm changed can be
 /// removed.
+/// `bin/git` in the arm: a shell script that execs `target` (a wrapper, not
+/// a symlink, so git finds its own exec-path from its real location).
+#[cfg(unix)]
+fn write_git_wrapper(bin: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin)?;
+    let quoted = target.to_string_lossy().replace('\'', r"'\''");
+    let git = bin.join("git");
+    std::fs::write(&git, format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n"))?;
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_git_wrapper(_bin: &Path, _target: &Path) -> Result<()> {
+    bail!("the arm git wrapper is a POSIX shell script (unix only)")
+}
+
 fn make_writable(path: &Path) {
     #[cfg(unix)]
     {

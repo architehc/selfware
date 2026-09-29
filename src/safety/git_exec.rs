@@ -362,7 +362,9 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 ///
 /// Limits: per-driver keys selected from a repository's own
 /// `.git/info/attributes` are not covered for repositories other than
-/// `dir`; git older than 2.40 ignores `GIT_ATTR_SOURCE`. A program started
+/// `dir`; git older than 2.40 ignores `GIT_ATTR_SOURCE` (the arm
+/// quarantine therefore runs a git 2.40+ when one exists and reports the
+/// gap when none does: [`crate::safety::quarantine::select_arm_git`]). A program started
 /// that way still runs inside the caller's quarantine (same environment,
 /// process group and sandbox).
 pub fn quarantine_git_env(dir: &Path) -> Vec<(String, String)> {
