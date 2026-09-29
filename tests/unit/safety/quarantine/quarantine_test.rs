@@ -174,7 +174,18 @@ fn arm_environment_replaces_every_host_location_and_drops_secrets() {
         "no .gitattributes drivers"
     );
     let path = get("PATH").unwrap();
-    let dirs: Vec<PathBuf> = std::env::split_paths(path.as_os_str()).collect();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(path.as_os_str()).collect();
+    // A system git older than 2.40 (macos-14: Apple Git 2.39) is shadowed
+    // by the arm's own bin/, which holds nothing but that `git`.
+    if let ArmGit::Replaced { .. } = arm.git() {
+        let bin = dirs.remove(0);
+        assert_eq!(bin, arm.root.join("bin"));
+        let names: Vec<_> = std::fs::read_dir(&bin)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("git")]);
+    }
     assert_eq!(dirs[0], fx.toolchain.bin);
     assert_eq!(
         dirs[1..].to_vec(),
