@@ -555,6 +555,15 @@ impl ReviewSession {
         format!("{head}\n{}\n{close}", body.join("\n"))
     }
 
+    /// Whether this scope needs the review machinery: something to read,
+    /// or in-scope files that could not be read. A scope of only unreadable
+    /// files has nothing to gate but must still report PARTIAL — without a
+    /// session it had no coverage report at all and could end ✅
+    /// (formal/ReviewBounds.lean, RV2 `complete_iff`).
+    pub(crate) fn needed(&self) -> bool {
+        !self.plan.is_empty() || !self.unreadable.is_empty()
+    }
+
     fn entry(&self, rel: &str) -> Option<&PlanEntry> {
         self.plan.iter().find(|e| e.path == rel)
     }
@@ -623,9 +632,11 @@ impl ReviewSession {
         // A scope with a file the run could not read is not fully covered,
         // however much of the rest was read (AGENTS.md rule 3): PARTIAL.
         let complete = read_files == self.plan.len() && self.unreadable.is_empty();
+        // An empty plan (every in-scope file unreadable) read nothing: 0 %,
+        // not "100 % of 0 lines".
         let mut percent = (read_lines * 100)
             .checked_div(self.relevant_lines)
-            .unwrap_or(100);
+            .unwrap_or(if complete { 100 } else { 0 });
         if !complete && percent >= 100 {
             percent = 99;
         }
@@ -1294,8 +1305,10 @@ impl Agent {
             detail: session.inventory_line.clone(),
         });
         if session.plan.is_empty() {
-            // Nothing in scope to read: no gate, and the summary says so.
-            tracing::info!("review scope has no relevant code files — coverage gate off");
+            // Nothing in scope to read: nothing to gate. In-scope files that
+            // could not be read still keep the session, so the run reports
+            // PARTIAL coverage naming them.
+            tracing::info!("review scope has no readable code files — nothing to gate");
         }
         // A resumed history already carries the inventory note from the
         // original run: one copy only.
@@ -1308,7 +1321,7 @@ impl Agent {
             self.push_review_inventory_note(&compact);
         }
         let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
-        state.session = (!session.plan.is_empty()).then(|| Box::new(session));
+        state.session = session.needed().then(|| Box::new(session));
     }
 
     fn push_review_inventory_note(&mut self, compact: &str) {
@@ -2255,3 +2268,7 @@ mod tests {
         assert!(coverage.complete, "{coverage:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/review_coverage_formal_test.rs"]
+mod formal_conformance;

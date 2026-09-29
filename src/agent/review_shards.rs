@@ -27,7 +27,11 @@
 //!    governor (so `[concurrency] max_streams` still bounds the endpoint).
 //!    A failed shard (transport error, time cap, unparseable answer) is
 //!    re-queued once with thinking off; a second failure leaves its files
-//!    unread.
+//!    unread. Under a wall budget a shard starts only while the time left
+//!    covers the synthesis reserve plus the longest shard call so far, and
+//!    every call still running when the time left reaches the reserve is
+//!    dropped (`reserve_cut`), so the final answer keeps its time whatever
+//!    the endpoint does (formal/ReviewBounds.lean, RV4/RV5).
 //! 4. **Ledger.** Only a shard that returned a usable answer credits its
 //!    slices to the coverage ledger, with the same `delivered_range` the
 //!    `file_read` path uses. A finding is recorded only when its
@@ -198,6 +202,58 @@ pub(crate) fn balanced_shard_tokens(total: usize, parallelism: usize, budget: us
 /// (abe4aa6b, 322 files, ~73k-token prompt at ~20 tok/s decode).
 pub(crate) const SHARD_SYNTHESIS_RESERVE_SECS: u64 = 900;
 
+/// Wall seconds the shard phase leaves for the synthesis: the forecast
+/// answer, at least [`SHARD_SYNTHESIS_RESERVE_SECS`] — or a third of a
+/// smaller budget.
+pub(crate) fn synthesis_reserve_secs(max_wall_secs: u64, forecast_answer_secs: u64) -> u64 {
+    forecast_answer_secs.max(SHARD_SYNTHESIS_RESERVE_SECS.min(max_wall_secs / 3))
+}
+
+/// When shard calls still in flight are dropped: the moment the time left
+/// reaches the synthesis reserve. One second less than that, for the
+/// whole-second floor of the elapsed clock `remaining_secs` comes from.
+///
+/// Why a cut and not only [`wall_dispatch_stop`]: the dispatch rule can only
+/// use the longest call measured SO FAR — 0 before the first shard returns,
+/// and blind to a call that outruns every earlier one (an endpoint latency
+/// spike). A first-wave shard dispatched with 1,000 s left and a 600 s
+/// reserve could run to its 1,200 s side-call cap and take the whole budget.
+/// The cut makes the reserve hold for any call duration
+/// (formal/ReviewBounds.lean, RV5 `reserve_by_cut`); a cut shard is a failed
+/// attempt, its files stay unread, and coverage says PARTIAL.
+pub(crate) fn reserve_cut(
+    now: tokio::time::Instant,
+    remaining_secs: u64,
+    reserve_secs: u64,
+) -> tokio::time::Instant {
+    now + Duration::from_secs(
+        remaining_secs
+            .saturating_sub(reserve_secs)
+            .saturating_sub(1),
+    )
+}
+
+/// Run one shard call, dropped at `cut` (see [`reserve_cut`]); `None` =
+/// no wall budget, no cut.
+pub(crate) async fn within_reserve<T, F>(
+    cut: Option<tokio::time::Instant>,
+    call: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    match cut {
+        None => call.await,
+        Some(at) => tokio::time::timeout_at(at, call).await.unwrap_or_else(|_| {
+            Err(
+                "cut at the synthesis reserve (the wall budget left is kept for the final \
+                 answer)"
+                    .to_string(),
+            )
+        }),
+    }
+}
+
 /// Why no further shard may start under a wall budget, or `None`.
 ///
 /// Live failure this answers (f063a326, review-core-long, 2 h cap): every
@@ -215,7 +271,7 @@ pub(crate) fn wall_dispatch_stop(
     forecast_answer_secs: u64,
     longest_shard_secs: u64,
 ) -> Option<String> {
-    let synthesis = forecast_answer_secs.max(SHARD_SYNTHESIS_RESERVE_SECS.min(max_wall_secs / 3));
+    let synthesis = synthesis_reserve_secs(max_wall_secs, forecast_answer_secs);
     let need = synthesis + longest_shard_secs;
     (remaining_secs < need).then(|| {
         format!(
@@ -489,8 +545,11 @@ pub(crate) fn verify_quote(lines: &[(usize, String)], line: usize, quote: &str) 
         .expect("non-empty");
     let at = norm[nearest].0;
     let distance = at.abs_diff(line);
-    // A multi-line quote may start just above the cited line.
-    let spans_cited = at <= line && line < at + q.len();
+    // A multi-line quote may start just above the cited line — which must
+    // itself be a line the shard read: a quote matched across two slices of
+    // one file (lines 1-10 and 50-60) does not make line 11 read
+    // (formal/ReviewBounds.lean, RV6 `old_rule_cited_an_unread_line`).
+    let spans_cited = at <= line && line < at + q.len() && norm.iter().any(|&(n, _)| n == line);
     if distance == 0 || spans_cited {
         QuoteVerdict::Verified
     } else if distance <= RELOCATE_MAX_DISTANCE || candidates.len() == 1 {
@@ -620,7 +679,7 @@ impl ShardRunReport {
 
 /// Records a shard call's wall time into the running maximum when the
 /// call ends (success, failure or drop).
-struct LongestGuard<'a>(&'a std::sync::atomic::AtomicU64, Instant);
+struct LongestGuard<'a>(&'a std::sync::atomic::AtomicU64, tokio::time::Instant);
 
 impl Drop for LongestGuard<'_> {
     fn drop(&mut self) {
@@ -1025,12 +1084,26 @@ impl Agent {
         let longest_ref = &longest_shard_secs;
         let max_tokens = cfg.shard_max_tokens.max(1024);
         let cap = cfg.shard_time_cap_secs.max(30);
+        // Every call — its stream-permit wait included — is dropped when the
+        // time left reaches the synthesis reserve.
+        let cut = self
+            .config
+            .agent
+            .max_wall_secs
+            .filter(|&s| s > 0)
+            .map(|max| {
+                reserve_cut(
+                    tokio::time::Instant::now(),
+                    max.saturating_sub(self.budget_elapsed_secs()),
+                    synthesis_reserve_secs(max, self.call_forecast().answer_secs()),
+                )
+            });
         let call = |i: usize, attempt: u8| {
             let client = client.clone();
             let governor = std::sync::Arc::clone(&governor);
             let messages = prompts[i].clone();
             let first = attempt == 0;
-            async move {
+            within_reserve(cut, async move {
                 let _permit = governor
                     .acquire_stream()
                     .await
@@ -1046,7 +1119,7 @@ impl Agent {
                 } else {
                     spec.thinking_off()
                 };
-                let _longest = LongestGuard(longest_ref, Instant::now());
+                let _longest = LongestGuard(longest_ref, tokio::time::Instant::now());
                 let response = client
                     .side_chat(messages, spec)
                     .await
@@ -1060,7 +1133,7 @@ impl Agent {
                     let head: String = text.chars().take(120).collect();
                     format!("answer is not the JSON object asked for: {head:?}")
                 })
-            }
+            })
         };
 
         let mut report = ShardRunReport {
@@ -1237,3 +1310,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "../../tests/unit/agent/review_shards_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/review_shards_formal_test.rs"]
+mod formal_conformance;
