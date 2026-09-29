@@ -13,6 +13,8 @@
 #        ResourceFsm.lean          -> resource_table.json (src/lifecycle)
 #        HarnessLoopBounds.lean    -> agent_state_table.json
 #                                     (src/agent/loop_control.rs)
+#        VerificationGateBounds.lean -> verification_gate_table.json
+#                                     (Agent::check_completion_gate)
 #
 # Usage: scripts/check_formal.sh [--write]
 #   --write   regenerate the committed tables instead of comparing.
@@ -113,6 +115,7 @@ print("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]")
 check_model TaskFsm.lean "${FORMAL}/task_table.json"
 check_model ResourceFsm.lean "${FORMAL}/resource_table.json"
 check_model HarnessLoopBounds.lean "${FORMAL}/agent_state_table.json"
+check_model VerificationGateBounds.lean "${FORMAL}/verification_gate_table.json"
 if [ "${WRITE}" -eq 0 ]; then
     echo "check_formal: OK — all models check and every exported table matches."
 fi

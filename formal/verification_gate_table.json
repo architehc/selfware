@@ -1,0 +1,14 @@
+[
+  ["clean", "complete_no_read", "accept"],
+  ["clean", "complete_with_read", "accept"],
+  ["clean", "complete_at_readback_bound", "accept"],
+  ["code_unverified", "complete_no_read", "reject_unread"],
+  ["code_unverified", "complete_with_read", "reject_unverified"],
+  ["code_unverified", "complete_at_readback_bound", "reject_unverified"],
+  ["doc_after_pass", "complete_no_read", "reject_unread"],
+  ["doc_after_pass", "complete_with_read", "accept_with_proof"],
+  ["doc_after_pass", "complete_at_readback_bound", "accept_with_proof"],
+  ["failed_after_doc", "complete_no_read", "reject_unread"],
+  ["failed_after_doc", "complete_with_read", "reject_unverified"],
+  ["failed_after_doc", "complete_at_readback_bound", "reject_unverified"]
+]

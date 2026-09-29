@@ -792,6 +792,86 @@ struct NonCodeArtifactReadback {
 /// died at the wall cap.
 const ARTIFACT_READBACK_REJECTION_BOUND: usize = 2;
 
+/// What the W8b part of the completion gate sees, as
+/// formal/VerificationGateBounds.lean models it (see
+/// `Agent::gate_observation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GateObservation {
+    /// A task-named artifact was written since its last read-back and no
+    /// fresh pass after that write proves it.
+    pub pending_readback: bool,
+    /// `ArtifactReadbackRequired` rejections since the last write (the bound
+    /// when a deadline/budget step-aside holds).
+    pub readback_rejections: usize,
+    /// Code was written and no fresh (or proven doc-only-since) pass covers it.
+    pub code_unverified: bool,
+    /// Every check at this revision could not run, or failed only with
+    /// errors the starting tree already had.
+    pub waiver: bool,
+    /// Something was written after the last credited pass.
+    pub written_after_pass: bool,
+}
+
+/// The model's verdict on a completion attempt (`GateVerdict` in
+/// formal/VerificationGateBounds.lean).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelGateVerdict {
+    /// The pass covers the current revision.
+    Accept,
+    /// Only doc-only writes followed a proven pass (W8b accept-with-proof).
+    AcceptWithProof,
+    /// No check could run / only pre-existing failures: accepted WITHOUT
+    /// credit.
+    AcceptUncredited,
+    /// Unverified code: StaleVerification / FailingTestsAccepted / "file
+    /// written without a passing verification".
+    RejectUnverified,
+    /// `ArtifactReadbackRequired`.
+    RejectUnread,
+}
+
+impl ModelGateVerdict {
+    /// The label in formal/verification_gate_table.json.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ModelGateVerdict::Accept => "accept",
+            ModelGateVerdict::AcceptWithProof => "accept_with_proof",
+            ModelGateVerdict::AcceptUncredited => "accept_uncredited",
+            ModelGateVerdict::RejectUnverified => "reject_unverified",
+            ModelGateVerdict::RejectUnread => "reject_unread",
+        }
+    }
+
+    /// Whether the completion is accepted.
+    pub(crate) fn accepts(self) -> bool {
+        matches!(
+            self,
+            ModelGateVerdict::Accept
+                | ModelGateVerdict::AcceptWithProof
+                | ModelGateVerdict::AcceptUncredited
+        )
+    }
+}
+
+/// `verdictOf` of formal/VerificationGateBounds.lean on an observation:
+/// the readback demand first (bounded), then unverified code, then the
+/// accept kinds.
+pub(crate) fn model_gate_verdict(o: GateObservation) -> ModelGateVerdict {
+    if o.pending_readback && o.readback_rejections < ARTIFACT_READBACK_REJECTION_BOUND {
+        ModelGateVerdict::RejectUnread
+    } else if o.code_unverified {
+        if o.waiver {
+            ModelGateVerdict::AcceptUncredited
+        } else {
+            ModelGateVerdict::RejectUnverified
+        }
+    } else if o.written_after_pass {
+        ModelGateVerdict::AcceptWithProof
+    } else {
+        ModelGateVerdict::Accept
+    }
+}
+
 /// Proof that the CURRENT code state is covered by a passing verification
 /// even though the mutation counter moved past it (W8b accept-with-proof).
 ///
@@ -3030,7 +3110,79 @@ impl Agent {
             && announces_further_reading(&answer)
     }
 
+    /// The completion gate: `None` accepts the completion claim, `Some`
+    /// is the directive that refuses it.
+    ///
+    /// Runtime oracle (formal/VerificationGateBounds.lean): an accepted
+    /// claim must be one the model accepts on this agent's observation —
+    /// never an unread artifact below the readback bound (V4), never
+    /// unverified code without the not-run / pre-existing waiver (V1). A
+    /// violation panics in debug/test builds and is logged as an error in
+    /// release builds (the verdict stands there — like `lifecycle::Tracked`,
+    /// the oracle reports, it does not decide).
     pub(super) async fn check_completion_gate(&self) -> Option<String> {
+        let verdict = self.completion_gate_verdict().await;
+        if verdict.is_none() {
+            let observation = self.gate_observation();
+            let model = model_gate_verdict(observation);
+            if !model.accepts() {
+                let violation = format!(
+                    "completion gate oracle: the gate accepted a completion the model \
+                     refuses ({}) on {observation:?}",
+                    model.label()
+                );
+                debug_assert!(false, "{violation}");
+                tracing::error!("{violation}");
+            }
+        }
+        verdict
+    }
+
+    /// A pending readback is covered by accept-with-proof: on a mixed
+    /// task, a fresh authoritative pass ran after the artifact's last write.
+    fn readback_proven_by_pass(&self, readback: &NonCodeArtifactReadback) -> bool {
+        !readback.artifact_only
+            && readback.latest_missing_write_index.is_some_and(|write| {
+                self.fresh_authoritative_pass()
+                    .is_some_and(|proof| proof.pass_call_index > write)
+            })
+    }
+
+    /// This agent projected onto the W8b gate model
+    /// (formal/VerificationGateBounds.lean). Sound for the oracle: it
+    /// reports a pending readback / unverified code only where the gate's
+    /// own conditions for refusing hold.
+    pub(crate) fn gate_observation(&self) -> GateObservation {
+        let readback = self.non_code_artifact_readback();
+        let pending_readback = readback
+            .as_ref()
+            .is_some_and(|r| !r.missing_paths.is_empty() && !self.readback_proven_by_pass(r));
+        let artifact_only = readback.as_ref().is_some_and(|r| r.artifact_only);
+        // A deadline/budget step-aside ends the readback demand like the
+        // bound does.
+        let readback_rejections = if self.completion_gate_step_aside().is_some() {
+            ARTIFACT_READBACK_REJECTION_BOUND
+        } else {
+            self.consecutive_artifact_readback_rejections()
+        };
+        let code_unverified = !artifact_only
+            && self.has_written_any_file
+            && self.has_code_affecting_mutation()
+            && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
+            && !(self.has_successful_verification_tool_call()
+                && self.has_fresh_successful_verification());
+        GateObservation {
+            pending_readback,
+            readback_rejections,
+            code_unverified,
+            waiver: self.only_unrunnable_verification_at_current_revision()
+                || self.only_preexisting_failures_at_current_revision(),
+            written_after_pass: self.mutation_sequence
+                > self.last_successful_verification_mutation_sequence,
+        }
+    }
+
+    async fn completion_gate_verdict(&self) -> Option<String> {
         self.client
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
         if let Some(stop) = self.client.budget_stop() {
@@ -3076,11 +3228,7 @@ impl Agent {
                 // write already exercised the tree the artifact belongs to.
                 // Artifact-only tasks have no such run — they rely on the
                 // readback (or the bound below).
-                let proven = !readback.artifact_only
-                    && readback.latest_missing_write_index.is_some_and(|write| {
-                        self.fresh_authoritative_pass()
-                            .is_some_and(|proof| proof.pass_call_index > write)
-                    });
+                let proven = self.readback_proven_by_pass(&readback);
                 if proven {
                     info!(
                         "accept-with-proof (ArtifactReadbackRequired): a fresh passing \
