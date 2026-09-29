@@ -8968,6 +8968,16 @@ async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injecti
     // (`Agent::headless_shell_call_allowed`, `[reads]`), and stops on
     // anything that writes, runs project code (builds, tests, scripts) or
     // injects a program/output file through an option.
+    //
+    // The commands name paths relative to the process cwd (the crate root),
+    // and the read guard vets what they would reach there (`grep -rn fn
+    // src/lib.rs` walks `src/lib.rs`; with no existing operand it walks
+    // `.`). Hold the cwd lock: without it, a concurrent test that entered a
+    // temp dir holding `.env`
+    // (`headless_normal_recursive_read_of_a_denied_root_is_a_tool_error_not_a_stop`,
+    // its alphabetical neighbour) made `src/lib.rs` vanish and the grep
+    // vetted `.` — refused, on every 2-4-thread CI runner.
+    let _cwd = crate::test_support::CwdGuard::hold();
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = test_config(format!("{}/v1", server.url()));
     config.execution_mode = crate::config::ExecutionMode::Normal;
