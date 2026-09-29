@@ -94,7 +94,11 @@ closed.
 - **Evolution code review fixes** (derive injection matched by substring,
   compiler fixes applied twice or at wrong byte offsets, rustc paths that
   could rewrite files outside the project, a runner that never ran arms
-  and could panic on a NaN score).
+  and could panic on a NaN score). Arms now run a git ≥ 2.40 (which honours
+  `GIT_ATTR_SOURCE`) even where the system git is older, such as Apple Git
+  2.39 on macOS, where a repository's `.gitattributes` clean filter ran
+  inside an arm; if no such git exists the isolation report says the
+  attribute filters are not neutralised.
 - **Live-eval harness.** The agent under test sees only the harness
   toolchain and system directories on PATH.
 
@@ -121,6 +125,9 @@ closed.
   to absolute paths or open sockets; there is no Linux sandbox.
 - `restore_budget_extension` trusts the iteration cap stored in a
   checkpoint.
+- An evolution arm's build script that calls `/usr/bin/git` by absolute
+  path gets the system git; on git older than 2.40 attribute filters are
+  not neutralised for that call.
 
 ### Review notes (AGENTS.md rule 2)
 These change or loosen checks or visible behaviour. Each has maintainer
@@ -146,6 +153,10 @@ commit message:
 - **Live-eval scorer:** the independent citation check splits findings
   per citation and takes each quote from its own part, removing false
   "wrong" verdicts and catching real ones the old scorer missed.
+- **CI-found test fixes:** the quarantine fsmonitor test skips, with the
+  reason printed, only on a machine with no git ≥ 2.40 at all, after
+  asserting the report says the filters are not neutralised; a shell-exec
+  timeout test's limit went from 1 s to 3 s (assertions unchanged).
 
 ## [0.9.5] - 2026-09-28
 
