@@ -1677,6 +1677,19 @@ pub(crate) fn correction_directive(report: &CitationReport, round: usize) -> Str
     )
 }
 
+/// The directive fed back when a written review/report deliverable cites
+/// nothing (see `ungrounded_deliverable` in `Agent::citation_gate`).
+pub(crate) fn ungrounded_deliverable_directive(round: usize) -> String {
+    format!(
+        "CITATION CHECK — completion blocked (correction round {round} of \
+         {CITATION_GATE_REJECTION_BOUND}). The review deliverable you wrote contains no \
+         `path:line` citations, so none of its findings is grounded in a workspace file. \
+         Add a precise `path:line` citation to each finding, taken from files you read \
+         (ranged reads return numbered lines), and remove findings you cannot ground; then \
+         give your final answer again. Do not add citations you have not checked."
+    )
+}
+
 /// Per-task state of the citation completion gate.
 #[derive(Debug, Default)]
 pub(crate) struct CitationGateState {
@@ -1804,7 +1817,27 @@ impl super::Agent {
             report.merge(file_report);
         }
 
-        if report.total == 0 && !is_read_only {
+        let task = self.task_context_for_classification();
+        let citations_requested = super::task_policy::task_requests_citations(task);
+        // Held to the report standard only when the task is a report about
+        // this workspace's code (see `GroundingStatus::code_report`).
+        let code_report = is_read_only
+            && (report.total > 0 || super::task_policy::task_is_code_review(task) || {
+                let project_name = root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                super::task_policy::task_references_project_code(task, project_name)
+            });
+        // A written review/report deliverable (REVIEW.md, …) that cites
+        // nothing, on a task that asked for citations or is a report about
+        // this workspace's code: nothing in it is grounded in a file. It gets
+        // the same bounded correction rounds as wrong citations (then the
+        // run completes with the ⚠️ "none checkable" status, rule 3).
+        let ungrounded_deliverable =
+            report.total == 0 && !deliverables.is_empty() && (citations_requested || code_report);
+
+        if report.total == 0 && !is_read_only && !ungrounded_deliverable {
             // Nothing cited and not a review/report task: nothing to say.
             // This answer supersedes any draft rejected earlier.
             state.rejected_draft = None;
@@ -1814,33 +1847,44 @@ impl super::Agent {
         }
 
         let problems = report.problem_count();
+        let blocking = problems > 0 || ungrounded_deliverable;
+        // What is wrong, for the directive and the marker line.
+        let directive = |round: usize| {
+            if ungrounded_deliverable {
+                ungrounded_deliverable_directive(round)
+            } else {
+                correction_directive(&report, round)
+            }
+        };
+        let what = if ungrounded_deliverable {
+            "0 citations in the review deliverable".to_string()
+        } else {
+            format!("{problems} of {} wrong", report.total)
+        };
         // Limit step-aside: inside the deadline or budget reserve (or when
         // one more turn no longer fits), a correction round would end in a
         // TIMEOUT / BUDGET_EXHAUSTED with no answer at all. Accept this draft
         // with the wrong count and the "citations not corrected: deadline" /
         // "…: budget" note instead (rule 3).
-        let limit_step_aside = if problems > 0 && state.last_rejected_step != Some(step) {
+        let limit_step_aside = if blocking && state.last_rejected_step != Some(step) {
             self.completion_gate_step_aside()
         } else {
             None
         };
-        let (result, marker) = if problems == 0 {
+        let (result, marker) = if !blocking {
             (None, None)
         } else if state.last_rejected_step == Some(step) {
             // Same turn, re-evaluated content: same round, no new spend.
-            let round = state.rejections;
-            (Some(correction_directive(&report, round)), None)
+            (Some(directive(state.rejections)), None)
         } else if let Some(why) = &limit_step_aside {
             tracing::warn!(
-                "citation check: {problems} of {} citations wrong, but a correction round no \
-                 longer fits ({why}) — accepting the draft with the count reported",
-                report.total
+                "citation check: {what}, but a correction round no longer fits ({why}) — \
+                 accepting the draft with the count reported"
             );
             (
                 None,
                 Some(format!(
-                    "{problems} of {} wrong — {} ({}); completing with this warning",
-                    report.total,
+                    "{what} — {} ({}); completing with this warning",
                     super::deadline::citations_not_corrected_note(why.cause),
                     why.detail
                 )),
@@ -1850,45 +1894,28 @@ impl super::Agent {
             state.last_rejected_step = Some(step);
             let round = state.rejections;
             (
-                Some(correction_directive(&report, round)),
+                Some(directive(round)),
                 Some(format!(
-                    "{problems} of {} wrong — correction round {round}/{CITATION_GATE_REJECTION_BOUND}",
-                    report.total
+                    "{what} — correction round {round}/{CITATION_GATE_REJECTION_BOUND}"
                 )),
             )
         } else {
             tracing::warn!(
-                "citation check: {problems} of {} citations still wrong after {} correction \
-                 round(s) — stepping aside; the run completes with the count reported",
-                report.total,
+                "citation check: {what} still after {} correction round(s) — stepping aside; \
+                 the run completes with the count reported",
                 state.rejections
             );
             (
                 None,
                 Some(format!(
-                    "{problems} of {} still wrong after {} correction round(s) — completing with this warning",
-                    report.total, state.rejections
+                    "{what} still after {} correction round(s) — completing with this warning",
+                    state.rejections
                 )),
             )
         };
         let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
-        // Held to the report standard only when the task is a report about
-        // this workspace's code (see `GroundingStatus::code_report`).
-        status.citations_requested =
-            super::task_policy::task_requests_citations(self.task_context_for_classification());
-        status.code_report = is_read_only
-            && (report.total > 0
-                || super::task_policy::task_is_code_review(self.task_context_for_classification())
-                || {
-                    let project_name = root
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default();
-                    super::task_policy::task_references_project_code(
-                        self.task_context_for_classification(),
-                        project_name,
-                    )
-                });
+        status.citations_requested = citations_requested;
+        status.code_report = code_report;
         status.not_corrected = limit_step_aside
             .as_ref()
             .map(|w| w.cause.note_word().to_string());

@@ -3069,6 +3069,81 @@ mod completion_gate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn code_review_deliverables_with_zero_citations_refused_by_citation_gate() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.agent.min_completion_steps = 0;
+        let mut agent = Agent::new(config).await.expect("agent should build");
+        agent
+            .tools
+            .set_workspace_root(crate::tools::workspace_root::WorkspaceRoot::fixed(
+                ws.path(),
+            ));
+        agent.task_is_read_only = true;
+        agent.current_task_context =
+            "Review the codebase and write your findings to REVIEW.md. Do not edit code."
+                .to_string();
+
+        // Write a code review deliverable (REVIEW.md) with ZERO citations
+        let review_file = ws.path().join("REVIEW.md");
+        std::fs::write(
+            &review_file,
+            "# Security Audit Findings\n\nThe codebase has no critical flaws. All modules look good.\n",
+        )
+        .unwrap();
+
+        let mut cp = TaskCheckpoint::new(
+            "review".to_string(),
+            "Review the codebase and write your findings to REVIEW.md.".to_string(),
+        );
+        cp.log_tool_call(checkpoint_call(
+            "file_write",
+            json!({
+                "path": "REVIEW.md",
+                "content": "# Security Audit Findings\n\nThe codebase has no critical flaws. All modules look good.\n"
+            }),
+            true,
+        ));
+        agent.current_checkpoint = Some(cp);
+        agent.last_assistant_response =
+            "I have completed the review and written the report to REVIEW.md.".to_string();
+
+        // c) Code review deliverables with zero citations must be refused by citation gate
+        let refusal = agent.citation_gate(true);
+        assert!(
+            refusal.is_some(),
+            "citation gate must refuse review deliverable with zero citations"
+        );
+        let directive = refusal.unwrap();
+        assert!(
+            directive.contains("path:line"),
+            "rejection directive must require path:line citations: {directive}"
+        );
+        assert!(
+            directive.contains("review deliverable"),
+            "rejection directive must specify review deliverable: {directive}"
+        );
+
+        // After adding valid path:line citations to the deliverable, the gate accepts it
+        std::fs::create_dir_all(ws.path().join("src")).unwrap();
+        std::fs::write(
+            ws.path().join("src/lib.rs"),
+            "pub fn core_logic() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &review_file,
+            "# Security Audit Findings\n\n- `core_logic` (`src/lib.rs:1`) is implemented cleanly.\n",
+        )
+        .unwrap();
+        agent.reset_citation_gate();
+        let accepted = agent.citation_gate(true);
+        assert_eq!(
+            accepted, None,
+            "citation gate must accept review deliverable once citations are grounded"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---
