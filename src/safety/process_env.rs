@@ -66,6 +66,31 @@ pub fn sanitize_command_env_from<I, K, V>(
     }
 }
 
+/// The variables [`sanitize_command_env_from`] would give a child, as a
+/// list: for callers that assemble a whole environment themselves (the
+/// evolution arm quarantine, `crate::safety::quarantine`) and then replace
+/// locations such as `HOME`.
+pub fn sanitized_env_from<I, K, V>(
+    preserve: &[&str],
+    parent_env: I,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<std::ffi::OsString>,
+    V: Into<std::ffi::OsString>,
+{
+    let parent: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> = parent_env
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+    kept_env(preserve, |key| {
+        parent.get(std::ffi::OsStr::new(key)).cloned()
+    })
+    .into_iter()
+    .map(|(k, v)| (std::ffi::OsString::from(k), v))
+    .collect()
+}
+
 /// Session variables a container runtime CLI (docker/podman) legitimately
 /// needs to reach its daemon/socket and read its own configuration: remote
 /// or rootless daemon endpoints, the CLI config/context directory, TLS

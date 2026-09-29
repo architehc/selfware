@@ -341,8 +341,47 @@ pub fn shell_git_env(dir: &Path) -> Vec<(String, String)> {
     if repo_is_trusted(dir) {
         return Vec::new();
     }
+    config_env(neutral_overrides(dir, &[]))
+}
+
+/// The empty tree: an attribute source with no `.gitattributes`.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// [`shell_git_env`] WITHOUT the trust exemption, and stricter: the
+/// neutralisation for processes running untrusted code (evolution arms
+/// building model-written source, `crate::safety::quarantine`), where the
+/// repository's trust says nothing about the code being run and a nested
+/// `git` may run in ANY repository, not just `dir`:
+///
+/// - the [`shell_git_env`] overrides (fixed keys + `dir`'s exec keys);
+/// - `diff.external` always (a fixed key, so it is covered in every
+///   repository, not only `dir`);
+/// - `GIT_ATTR_SOURCE` = the empty tree (git 2.40+): no work-tree
+///   `.gitattributes` applies, so no attribute-selected diff driver,
+///   textconv or clean/smudge filter a repository defines can run.
+///
+/// Limits: per-driver keys selected from a repository's own
+/// `.git/info/attributes` are not covered for repositories other than
+/// `dir`; git older than 2.40 ignores `GIT_ATTR_SOURCE`. A program started
+/// that way still runs inside the caller's quarantine (same environment,
+/// process group and sandbox).
+pub fn quarantine_git_env(dir: &Path) -> Vec<(String, String)> {
+    let mut env = config_env(neutral_overrides(
+        dir,
+        &[("diff.external", NEUTRAL_EXTERNAL_DIFF)],
+    ));
+    env.push(("GIT_ATTR_SOURCE".to_string(), EMPTY_TREE.to_string()));
+    env
+}
+
+/// The always-on overrides plus `extra`, plus every exec-capable key `dir`'s
+/// repository sets, each with its inert value.
+fn neutral_overrides(dir: &Path, extra: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut overrides = always_on();
     overrides.push(("core.pager".to_string(), "cat".to_string()));
+    for (k, v) in extra {
+        overrides.push((k.to_string(), v.to_string()));
+    }
     for (key, _) in repo_exec_config(dir) {
         if let Some(v) = neutral_value(&key) {
             if !overrides.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
@@ -350,6 +389,12 @@ pub fn shell_git_env(dir: &Path) -> Vec<(String, String)> {
             }
         }
     }
+    overrides
+}
+
+/// `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` for
+/// `overrides`.
+fn config_env(overrides: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut env = vec![("GIT_CONFIG_COUNT".to_string(), overrides.len().to_string())];
     for (n, (k, v)) in overrides.into_iter().enumerate() {
         env.push((format!("GIT_CONFIG_KEY_{n}"), k));
