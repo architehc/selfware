@@ -1306,3 +1306,72 @@ fn model_redaction_of_whole_json_documents() {
     assert!(!out.content.contains("Sup3rS3cret9"));
     assert!(out.content.contains("/bin"));
 }
+
+/// formal/SafetyBounds.lean S4 on the model-facing redactor: a second
+/// pass changes nothing and redacts nothing (a marker is never classified
+/// as a secret again — the model's one assumption), on the secret corpus
+/// and on this crate's own source (code the redactor must leave alone).
+#[test]
+fn redact_for_model_is_idempotent_on_the_secret_and_code_corpora() {
+    let mut corpus: Vec<(String, RedactionContext)> = secret_corpus()
+        .into_iter()
+        .map(|(input, _, ctx)| (input, ctx))
+        .collect();
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                corpus.push((text, RedactionContext::Generic));
+            }
+        }
+    }
+    assert!(corpus.len() > 100, "the code corpus was found");
+    let mut redacted_inputs = 0;
+    for (input, ctx) in &corpus {
+        let first = redact_for_model(input, *ctx);
+        redacted_inputs += usize::from(first.redacted > 0);
+        let second = redact_for_model(&first.content, *ctx);
+        assert_eq!(
+            second.redacted, 0,
+            "a marker was redacted again in {input:.80?}"
+        );
+        assert_eq!(
+            second.content, first.content,
+            "not idempotent on {input:.80?}"
+        );
+        // Nothing is dropped or merged (a JSON result is re-serialized, so
+        // only text is held to its line count).
+        if !input.trim_start().starts_with(['{', '[']) {
+            assert_eq!(first.content.lines().count(), input.lines().count());
+        }
+    }
+    assert!(redacted_inputs > 10, "the secret corpus was redacted");
+}
+
+#[test]
+fn test_redact_secrets_idempotent_matches_lean_theorem() {
+    // The log redactor (`redact_secrets`) is idempotent too on these
+    // samples; the formal model's S4 is tied to the model-facing redactor
+    // above.
+    let samples = [
+        "api_key=sk_test_FAKEFAKEFAKEFAKE1234",
+        "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx and openai sk-1234567890123456789012",
+        "DATABASE_URL=postgres://user:password@localhost:5432/mydb",
+        "No secrets here, just plain text",
+        "AKIAIOSFODNN7EXAMPLE mixed with sk-ant-api03-12345678901234567890",
+    ];
+
+    for sample in samples {
+        let first_pass = redact_secrets(sample);
+        let second_pass = redact_secrets(&first_pass);
+        assert_eq!(
+            first_pass, second_pass,
+            "Redaction must be strictly idempotent: '{sample}'"
+        );
+    }
+}

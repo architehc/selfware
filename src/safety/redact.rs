@@ -1055,13 +1055,23 @@ struct KeyBlockState {
 /// lines, one marker per body line. Without an END (truncated output) a
 /// body runs while lines look like key material, so code after a BEGIN
 /// string literal stays readable.
+/// `text` is exactly one `[REDACTED:<kind>]` marker (surrounding
+/// whitespace aside).
+fn is_marker_only(text: &str) -> bool {
+    let t = text.trim();
+    t.strip_prefix(MODEL_REDACTION_MARKER_PREFIX)
+        .and_then(|rest| rest.strip_suffix(']'))
+        .is_some_and(|kind| !kind.is_empty() && !kind.contains(['[', ']']))
+}
+
 fn redact_key_blocks_in_line(line: &str, state: &mut KeyBlockState, count: &mut usize) -> String {
     let (Some(begin), Some(end)) = (pem_begin(), pem_end()) else {
         return line.to_string();
     };
     let prefix = logical_start(line);
     let whole_line = |count: &mut usize| {
-        if line[prefix..].trim().is_empty() {
+        // Blank, or already a marker (a second pass): nothing to redact.
+        if line[prefix..].trim().is_empty() || is_marker_only(&line[prefix..]) {
             line.to_string()
         } else {
             *count += 1;
@@ -1083,7 +1093,7 @@ fn redact_key_blocks_in_line(line: &str, state: &mut KeyBlockState, count: &mut 
                 let body = &rest[..e.start()];
                 let keep = prefix.min(body.len());
                 out.push_str(&body[..keep]);
-                if body[keep..].trim().is_empty() {
+                if body[keep..].trim().is_empty() || is_marker_only(&body[keep..]) {
                     out.push_str(&body[keep..]);
                 } else {
                     out.push_str(&marker("private_key"));
@@ -1105,7 +1115,7 @@ fn redact_key_blocks_in_line(line: &str, state: &mut KeyBlockState, count: &mut 
             Some(e) => (&after[..e.start()], Some(e)),
             None => (after, None),
         };
-        if carries_key_material(body) {
+        if carries_key_material(body) && !is_marker_only(body) {
             out.push_str(&marker("private_key"));
             *count += 1;
         } else {
@@ -1430,6 +1440,43 @@ fn url_userinfo_spans(line: &str, spans: &mut Vec<Span>) {
     }
 }
 
+/// `spans` minus every `[REDACTED:<kind>]` marker already on the line: a
+/// marker is never a secret, and re-redacting part of one (the Database URL
+/// detector read `connection_password]` in
+/// `postgres://app:[REDACTED:connection_password]@db` as the password) made
+/// a second pass change the text. The parts of a span outside every marker
+/// are kept — nothing that was redacted before is delivered now.
+fn outside_markers(line: &str, spans: Vec<Span>) -> Vec<Span> {
+    let mut markers: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(MODEL_REDACTION_MARKER_PREFIX) {
+        let start = from + rel;
+        let body = start + MODEL_REDACTION_MARKER_PREFIX.len();
+        let end = line[body..].find(']').map_or(line.len(), |i| body + i + 1);
+        markers.push((start, end));
+        from = end;
+    }
+    if markers.is_empty() {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for (mut start, end, kind) in spans {
+        for &(ms, me) in &markers {
+            if me <= start || ms >= end {
+                continue;
+            }
+            if ms > start {
+                out.push((start, ms, kind));
+            }
+            start = start.max(me);
+        }
+        if start < end {
+            out.push((start, end, kind));
+        }
+    }
+    out
+}
+
 /// Redact one line (no terminator inside).
 fn redact_line(line: &str, context: RedactionContext, count: &mut usize) -> String {
     // Collect secret spans (order = marker-kind priority), then splice.
@@ -1456,6 +1503,10 @@ fn redact_line(line: &str, context: RedactionContext, count: &mut usize) -> Stri
         }
     }
     assignment_spans(line, context, &mut spans);
+    if spans.is_empty() {
+        return line.to_string();
+    }
+    let mut spans = outside_markers(line, spans);
     if spans.is_empty() {
         return line.to_string();
     }

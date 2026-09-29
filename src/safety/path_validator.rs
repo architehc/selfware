@@ -992,17 +992,25 @@ fn strip_unc_prefix(path: &str) -> String {
 /// Use this only when the path may not exist on disk; otherwise prefer
 /// [`crate::safety::checker::normalize_path`], which canonicalizes through
 /// the filesystem and strips the Windows `\\?\` UNC prefix.
+///
+/// `..` at the root stays at the root (`/a/../..` is `/`, never an empty
+/// or relative path), and a leading `..` of a relative path is dropped —
+/// the same semantics as the validator's own lexical check and the formal
+/// model (`normalize` in formal/SafetyBounds.lean): no `..` survives.
 pub fn lexical_normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
     let mut components = Vec::new();
 
     for component in path.components() {
         match component {
-            std::path::Component::ParentDir => {
-                if !components.is_empty() {
+            Component::ParentDir => {
+                // Never pop the root (or a Windows drive prefix): an
+                // absolute path must stay absolute.
+                if matches!(components.last(), Some(Component::Normal(_))) {
                     components.pop();
                 }
             }
-            std::path::Component::CurDir => {}
+            Component::CurDir => {}
             c => components.push(c),
         }
     }

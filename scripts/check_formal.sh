@@ -75,8 +75,11 @@ if [ -n "${escapes}" ]; then
 fi
 echo "check_formal: no sorry/admit/axiom/native_decide/unsafe in formal/*.lean"
 
-echo "check_formal: lean formal/WorkflowBounds.lean"
-lean "${FORMAL}/WorkflowBounds.lean"
+# Models without an exported table: every theorem must re-prove.
+for model in WorkflowBounds.lean SafetyBounds.lean; do
+    echo "check_formal: lean formal/${model}"
+    lean "${FORMAL}/${model}"
+done
 
 # Elaborate one model that ends in `#eval exportTable`, decode the printed
 # table into JSON (one [state, event, next] row per line) and compare it with

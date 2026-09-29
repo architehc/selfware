@@ -45,9 +45,116 @@ fn test_normalize_multiple_dotdot() {
 #[cfg(unix)]
 #[test]
 fn test_normalize_dotdot_at_root() {
-    // When all components are popped, the result is an empty path
+    // `..` at the root stays at the root: an absolute path stays absolute.
+    // Rule 2 note: this asserted `""` (the root itself was popped), which
+    // turned `/ws/../../etc/passwd` into the RELATIVE `etc/passwd` —
+    // normalize_checkpoint_path then canonicalized it against the process
+    // cwd, a different file.
     let path = lexical_normalize_path(Path::new("/foo/../.."));
-    assert_eq!(path, PathBuf::from(""));
+    assert_eq!(path, PathBuf::from("/"));
+    assert_eq!(
+        lexical_normalize_path(Path::new("/ws/../../etc/passwd")),
+        PathBuf::from("/etc/passwd")
+    );
+}
+
+/// formal/SafetyBounds.lean S1/S2 on the real normalizer: no `..` survives,
+/// `..` never climbs above the root, a leading `..` of a relative path is
+/// dropped, and an absolute input stays absolute.
+#[cfg(unix)]
+#[test]
+fn lexical_normalize_path_matches_the_formal_model() {
+    for (input, expected) in [
+        ("/ws/../../etc/passwd", "/etc/passwd"),
+        ("/..", "/"),
+        ("/../..", "/"),
+        ("/ws/sub/../ok.txt", "/ws/ok.txt"),
+        ("../a", "a"),
+        ("a/../../b", "b"),
+        ("./a/./b/..", "a"),
+        ("/a/b/c/../../../..", "/"),
+    ] {
+        assert_eq!(
+            lexical_normalize_path(Path::new(input)),
+            PathBuf::from(expected),
+            "{input}"
+        );
+    }
+    // Every path of 1..=4 segments over {a, b, .., .}, absolute and
+    // relative: the model's invariants hold on the real function.
+    let segments = ["a", "b", "..", "."];
+    let mut paths: Vec<String> = segments.iter().map(|s| s.to_string()).collect();
+    let mut frontier = paths.clone();
+    for _ in 1..4 {
+        frontier = frontier
+            .iter()
+            .flat_map(|p| segments.iter().map(move |s| format!("{p}/{s}")))
+            .collect();
+        paths.extend(frontier.iter().cloned());
+    }
+    for rel in &paths {
+        for input in [rel.clone(), format!("/{rel}")] {
+            let out = lexical_normalize_path(Path::new(&input));
+            assert!(
+                !out.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)),
+                "{input} -> {out:?} keeps a `..`"
+            );
+            assert_eq!(
+                out.is_absolute(),
+                input.starts_with('/'),
+                "{input} -> {out:?}"
+            );
+            // Idempotent.
+            assert_eq!(lexical_normalize_path(&out), out, "{input}");
+        }
+    }
+}
+
+/// formal/SafetyBounds.lean S3 on the real validator: every built-in
+/// `denied_paths` entry refuses a concrete path it matches INSIDE the
+/// workspace — containment never re-allows a denied path.
+#[cfg(unix)]
+#[test]
+fn every_default_denied_path_is_refused_inside_the_workspace() {
+    let ws = tempfile::tempdir().unwrap();
+    let denied = crate::config::default_denied_paths();
+    let config = SafetyConfig {
+        denied_paths: denied.clone(),
+        ..make_config(vec![], vec![])
+    };
+    let validator = PathValidator::new(&config, ws.path().to_path_buf());
+    // Sanity: an ordinary file in the same workspace is allowed.
+    assert!(validator
+        .validate(&ws.path().join("src/main.rs").to_string_lossy())
+        .is_ok());
+    for pattern in &denied {
+        // A concrete instance of the glob: `**/` dropped, `/**/` and a
+        // trailing `/**` given one directory, `*` a filename part.
+        let instance = pattern
+            .trim_start_matches("**/")
+            .replace("/**/", "/x/")
+            .replace("/**", "/x")
+            .replace('*', "x");
+        let path = ws.path().join(&instance);
+        assert!(
+            validator.validate(&path.to_string_lossy()).is_err(),
+            "{pattern}: {instance} inside the workspace must be refused"
+        );
+    }
+}
+
+/// formal/SafetyBounds.lean S2 on the real validator: a `..` escape out of
+/// the workspace is refused, an inner `..` that stays inside is not.
+#[cfg(unix)]
+#[test]
+fn traversal_out_of_the_workspace_is_refused_and_inner_dotdot_is_not() {
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("sub")).unwrap();
+    let validator = PathValidator::new(&make_config(vec![], vec![]), ws.path().to_path_buf());
+    assert!(validator.validate("../outside.txt").is_err());
+    assert!(validator.validate("sub/../../outside.txt").is_err());
+    assert!(validator.validate("sub/../ok.txt").is_ok());
 }
 
 #[test]
