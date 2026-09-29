@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Re-check the formal lifecycle models and their exported transition tables.
 #
-#   1. `lean formal/WorkflowBounds.lean`, `formal/TaskFsm.lean` and
-#      `formal/ResourceFsm.lean` must elaborate with no errors (every theorem
-#      is re-proved).
-#   2. The tables TaskFsm.lean and ResourceFsm.lean print (`#eval
-#      exportTable`) are decoded into JSON and compared with the committed
-#      formal/task_table.json and formal/resource_table.json, which the Rust
-#      conformance tests (`lifecycle` tests) check src/lifecycle against.
+#   0. No model may contain a proof escape hatch: `sorry`, `admit`,
+#      `axiom`, `native_decide` or `unsafe` fail the check (a comment
+#      mentioning one is fine — only code is scanned).
+#   1. Every formal/*.lean model must elaborate with no errors (every
+#      theorem is re-proved).
+#   2. The tables the models print (`#eval exportTable`) are decoded into
+#      JSON and compared with the committed formal/*_table.json, which the
+#      Rust conformance tests check the code against:
+#        TaskFsm.lean              -> task_table.json (src/lifecycle)
+#        ResourceFsm.lean          -> resource_table.json (src/lifecycle)
+#        HarnessLoopBounds.lean    -> agent_state_table.json
+#                                     (src/agent/loop_control.rs)
 #
 # Usage: scripts/check_formal.sh [--write]
 #   --write   regenerate the committed tables instead of comparing.
@@ -47,6 +52,27 @@ fi
 
 echo "check_formal: $(lean --version)"
 
+# Proof escape hatches, in code only: strip `--` line comments and `/- … -/`
+# block comments first.
+escapes="$(python3 - "${FORMAL}" <<'PY'
+import pathlib, re, sys
+bad = []
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.lean")):
+    code = re.sub(r"/-.*?-/", "", path.read_text(), flags=re.S)
+    code = re.sub(r"--[^\n]*", "", code)
+    for word in ("sorry", "admit", "axiom", "native_decide", "unsafe"):
+        if re.search(r"\b" + word + r"\b", code):
+            bad.append(f"{path.name}: {word}")
+print("\n".join(bad))
+PY
+)"
+if [ -n "${escapes}" ]; then
+    echo "check_formal: FAILED — proof escape hatch(es) in formal/:" >&2
+    echo "${escapes}" >&2
+    exit 1
+fi
+echo "check_formal: no sorry/admit/axiom/native_decide/unsafe in formal/*.lean"
+
 echo "check_formal: lean formal/WorkflowBounds.lean"
 lean "${FORMAL}/WorkflowBounds.lean"
 
@@ -77,7 +103,7 @@ print("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]")
     if ! diff -u "${table}" "${generated}"; then
         rm -f "${generated}"
         echo "check_formal: FAILED — ${table#"${REPO_ROOT}/"} differs from ${model}'s export." >&2
-        echo "check_formal: if the model changed on purpose, rerun with --write and update src/lifecycle to match." >&2
+        echo "check_formal: if the model changed on purpose, rerun with --write and update the Rust side to match." >&2
         exit 1
     fi
     rm -f "${generated}"
@@ -86,6 +112,7 @@ print("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]")
 
 check_model TaskFsm.lean "${FORMAL}/task_table.json"
 check_model ResourceFsm.lean "${FORMAL}/resource_table.json"
+check_model HarnessLoopBounds.lean "${FORMAL}/agent_state_table.json"
 if [ "${WRITE}" -eq 0 ]; then
-    echo "check_formal: OK — all models check and both exported tables match."
+    echo "check_formal: OK — all models check and every exported table matches."
 fi

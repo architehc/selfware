@@ -2428,7 +2428,9 @@ impl Agent {
             // deep-review runs (qwen capstone: died at the 30-turn cap with
             // 23 productive tool calls and no derailment).
             let state = match state {
-                AgentState::Failed { ref reason } if reason == "Max iterations exceeded" => {
+                AgentState::Failed { ref reason }
+                    if reason == super::loop_control::MAX_ITERATIONS_STOP_REASON =>
+                {
                     match self.maybe_extend_iteration_budget() {
                         Some(resumed) => resumed,
                         None => state.clone(),
@@ -3437,7 +3439,7 @@ impl Agent {
                     {
                         return Ok(());
                     }
-                    if reason == "Max iterations exceeded" {
+                    if reason == super::loop_control::MAX_ITERATIONS_STOP_REASON {
                         if self.loop_control.auto_continue_count()
                             >= super::loop_control::MAX_AUTO_CONTINUES
                         {

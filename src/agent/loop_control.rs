@@ -57,6 +57,209 @@ impl std::fmt::Display for InvalidStateTransition {
 
 impl std::error::Error for InvalidStateTransition {}
 
+/// The formal model's view of an [`AgentState`] (`formal/HarnessLoopBounds.lean`).
+///
+/// `Failed` with [`MAX_ITERATIONS_STOP_REASON`] is [`ModelState::Capped`]: a
+/// budget stop, the only stop the adaptive extension and the auto-continue
+/// chain may resume. Every other `Failed` is [`ModelState::Failed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelState {
+    /// `AgentState::Planning`.
+    Planning,
+    /// `AgentState::Executing`.
+    Executing,
+    /// `AgentState::ErrorRecovery`.
+    ErrorRecovery,
+    /// `AgentState::Completed`.
+    Completed,
+    /// `AgentState::Failed` for any reason but the iteration cap.
+    Failed,
+    /// `AgentState::Failed` with [`MAX_ITERATIONS_STOP_REASON`].
+    Capped,
+}
+
+impl ModelState {
+    /// Every model state, in the Lean model's order.
+    pub const ALL: [ModelState; 6] = [
+        ModelState::Planning,
+        ModelState::Executing,
+        ModelState::ErrorRecovery,
+        ModelState::Completed,
+        ModelState::Failed,
+        ModelState::Capped,
+    ];
+
+    /// The model state `state` projects to.
+    pub fn of(state: &AgentState) -> Self {
+        match state {
+            AgentState::Planning => ModelState::Planning,
+            AgentState::Executing { .. } => ModelState::Executing,
+            AgentState::ErrorRecovery { .. } => ModelState::ErrorRecovery,
+            AgentState::Completed => ModelState::Completed,
+            AgentState::Failed { reason } if reason == MAX_ITERATIONS_STOP_REASON => {
+                ModelState::Capped
+            }
+            AgentState::Failed { .. } => ModelState::Failed,
+        }
+    }
+
+    /// The label in `formal/agent_state_table.json`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelState::Planning => "planning",
+            ModelState::Executing => "executing",
+            ModelState::ErrorRecovery => "error_recovery",
+            ModelState::Completed => "completed",
+            ModelState::Failed => "failed",
+            ModelState::Capped => "capped",
+        }
+    }
+
+    /// `completed`, `failed` or `capped`: [`AgentLoop::next_state`] leaves
+    /// the state unchanged.
+    pub fn is_stopped(self) -> bool {
+        matches!(
+            self,
+            ModelState::Completed | ModelState::Failed | ModelState::Capped
+        )
+    }
+}
+
+/// One write of `AgentLoop::state`, as the formal model names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LoopEvent {
+    /// Checked (`transition_to`): planning → executing.
+    StartExecution,
+    /// Checked: executing → executing (the next step).
+    Step,
+    /// Checked: → error_recovery.
+    Error,
+    /// Checked: error_recovery → executing.
+    Recover,
+    /// Checked: executing → completed.
+    Succeed,
+    /// Checked: → failed.
+    Fail,
+    /// [`AgentLoop::next_state`] refusing a slot past the cap.
+    CapTrip,
+    /// [`AgentLoop::resume_after_extension`].
+    ExtensionResume,
+    /// [`AgentLoop::reset_budget_for_resume`]: the auto-continue chain
+    /// (from the budget stop) or a plain budget reset of an active loop.
+    ChainResume,
+    /// [`AgentLoop::restore_progress`]: the resume path on a freshly built
+    /// loop, or a progress reset of an active loop.
+    RestoreProgress,
+    /// [`AgentLoop::reset_for_task`].
+    TaskReset,
+}
+
+impl LoopEvent {
+    /// Every event, in the Lean model's order.
+    pub const ALL: [LoopEvent; 11] = [
+        LoopEvent::StartExecution,
+        LoopEvent::Step,
+        LoopEvent::Error,
+        LoopEvent::Recover,
+        LoopEvent::Succeed,
+        LoopEvent::Fail,
+        LoopEvent::CapTrip,
+        LoopEvent::ExtensionResume,
+        LoopEvent::ChainResume,
+        LoopEvent::RestoreProgress,
+        LoopEvent::TaskReset,
+    ];
+
+    /// The label in `formal/agent_state_table.json`.
+    pub fn label(self) -> &'static str {
+        match self {
+            LoopEvent::StartExecution => "start_execution",
+            LoopEvent::Step => "step",
+            LoopEvent::Error => "error",
+            LoopEvent::Recover => "recover",
+            LoopEvent::Succeed => "succeed",
+            LoopEvent::Fail => "fail",
+            LoopEvent::CapTrip => "cap_trip",
+            LoopEvent::ExtensionResume => "extension_resume",
+            LoopEvent::ChainResume => "chain_resume",
+            LoopEvent::RestoreProgress => "restore_progress",
+            LoopEvent::TaskReset => "task_reset",
+        }
+    }
+
+    /// Whether the event is a checked `transition_to`.
+    pub fn is_checked(self) -> bool {
+        matches!(
+            self,
+            LoopEvent::StartExecution
+                | LoopEvent::Step
+                | LoopEvent::Error
+                | LoopEvent::Recover
+                | LoopEvent::Succeed
+                | LoopEvent::Fail
+        )
+    }
+}
+
+/// The formal model's transition function (`step` in
+/// `formal/HarnessLoopBounds.lean`), row for row; `None` is a refusal.
+pub fn model_step(state: ModelState, event: LoopEvent) -> Option<ModelState> {
+    use LoopEvent as E;
+    use ModelState as S;
+    match (state, event) {
+        (_, E::TaskReset) => Some(S::Planning),
+        (S::Planning, E::StartExecution) => Some(S::Executing),
+        (S::Planning, E::Error) => Some(S::ErrorRecovery),
+        (S::Planning, E::Fail) => Some(S::Failed),
+        (S::Planning, E::CapTrip) => Some(S::Capped),
+        (S::Planning | S::Executing | S::ErrorRecovery, E::RestoreProgress) => Some(S::Executing),
+        (S::Planning | S::Executing | S::ErrorRecovery, E::ChainResume) => Some(S::Executing),
+        (S::Executing, E::Step) => Some(S::Executing),
+        (S::Executing, E::Error) => Some(S::ErrorRecovery),
+        (S::Executing, E::Succeed) => Some(S::Completed),
+        (S::Executing, E::Fail) => Some(S::Failed),
+        (S::Executing, E::CapTrip) => Some(S::Capped),
+        (S::ErrorRecovery, E::Recover) => Some(S::Executing),
+        (S::ErrorRecovery, E::Fail) => Some(S::Failed),
+        (S::ErrorRecovery, E::CapTrip) => Some(S::Capped),
+        (S::Capped, E::ExtensionResume) => Some(S::Executing),
+        (S::Capped, E::ChainResume) => Some(S::Executing),
+        _ => None,
+    }
+}
+
+/// Every (state, event) pair of the model with its outcome, refusals
+/// included — what the conformance test compares with
+/// `formal/agent_state_table.json`.
+pub fn agent_state_table() -> Vec<(ModelState, LoopEvent, Option<ModelState>)> {
+    let mut rows = Vec::with_capacity(ModelState::ALL.len() * LoopEvent::ALL.len());
+    for s in ModelState::ALL {
+        for e in LoopEvent::ALL {
+            rows.push((s, e, model_step(s, e)));
+        }
+    }
+    rows
+}
+
+/// Runtime oracle on one write of the loop state: the model must have the
+/// row `from --event--> to`. A violation panics in debug/test builds and is
+/// logged as an error in release builds (the write still happens there —
+/// like `lifecycle::Tracked`, the oracle reports, it does not decide).
+fn check_model_step(from: &AgentState, event: LoopEvent, to: &AgentState) {
+    let (f, t) = (ModelState::of(from), ModelState::of(to));
+    if model_step(f, event) != Some(t) {
+        let violation = format!(
+            "agent loop oracle: {} --{}--> {} is not a transition of \
+             formal/HarnessLoopBounds.lean",
+            f.label(),
+            event.label(),
+            t.label()
+        );
+        debug_assert!(false, "{violation}");
+        tracing::error!("{violation}");
+    }
+}
+
 pub struct AgentLoop {
     state: AgentState,
     max_iterations: usize,
@@ -305,12 +508,27 @@ impl AgentLoop {
         self.iteration = 0;
         self.max_iterations = self.original_max;
         self.extensions_granted = 0;
-        self.state = AgentState::Executing {
-            step: self.current_step,
-        };
+        self.write_state(
+            LoopEvent::ChainResume,
+            AgentState::Executing {
+                step: self.current_step,
+            },
+        );
+    }
+
+    /// Write `state` as the model's `event`, checked by the runtime oracle.
+    fn write_state(&mut self, event: LoopEvent, state: AgentState) {
+        check_model_step(&self.state, event, &state);
+        self.state = state;
     }
 
     pub fn next_state(&mut self) -> Option<AgentState> {
+        // A stopped loop (completed, failed, or parked at the cap) stays
+        // where it is: a later call neither consumes a slot nor rewrites a
+        // real failure into a resumable budget stop (formal model L1b/L6).
+        if ModelState::of(&self.state).is_stopped() {
+            return Some(self.state.clone());
+        }
         // Planning does not consume an iteration slot — only non-Planning
         // states increment the counter. This gives the caller
         // `max_iterations` execution turns in addition to the initial
@@ -327,9 +545,12 @@ impl AgentLoop {
             self.iteration + 1
         };
         if next > self.max_iterations {
-            self.state = AgentState::Failed {
-                reason: MAX_ITERATIONS_STOP_REASON.to_string(),
-            };
+            self.write_state(
+                LoopEvent::CapTrip,
+                AgentState::Failed {
+                    reason: MAX_ITERATIONS_STOP_REASON.to_string(),
+                },
+            );
             return Some(self.state.clone());
         }
         self.iteration = next;
@@ -342,9 +563,12 @@ impl AgentLoop {
     pub fn resume_after_extension(&mut self) {
         debug_assert!(self.iteration < self.max_iterations);
         self.iteration = (self.iteration + 1).min(self.max_iterations);
-        self.state = AgentState::Executing {
-            step: self.current_step,
-        };
+        self.write_state(
+            LoopEvent::ExtensionResume,
+            AgentState::Executing {
+                step: self.current_step,
+            },
+        );
     }
 
     /// Returns a warning message when the loop is approaching the iteration
@@ -393,6 +617,12 @@ impl AgentLoop {
     }
 
     fn is_valid_transition(current: &AgentState, next: &AgentState) -> bool {
+        // The budget stop is written by `next_state` alone: a checked
+        // transition into it would make an arbitrary failure resumable by
+        // the extension / auto-continue paths (formal model L1b).
+        if ModelState::of(next) == ModelState::Capped {
+            return false;
+        }
         matches!(
             (current, next),
             (AgentState::Planning, AgentState::Executing { .. })
@@ -423,7 +653,26 @@ impl AgentLoop {
                 to: state.label(),
             });
         }
-        self.state = state;
+        // Runtime oracle: the accepted pair must be one checked event of
+        // the formal model.
+        let (from, to) = (ModelState::of(&self.state), ModelState::of(&state));
+        match LoopEvent::ALL
+            .into_iter()
+            .find(|e| e.is_checked() && model_step(from, *e) == Some(to))
+        {
+            Some(event) => self.write_state(event, state),
+            None => {
+                let violation = format!(
+                    "agent loop oracle: transition_to accepted {} -> {}, which no checked \
+                     event of formal/HarnessLoopBounds.lean produces",
+                    from.label(),
+                    to.label()
+                );
+                debug_assert!(false, "{violation}");
+                tracing::error!("{violation}");
+                self.state = state;
+            }
+        }
         Ok(())
     }
 
@@ -473,7 +722,7 @@ impl AgentLoop {
     pub fn restore_progress(&mut self, step: usize, iteration: usize) {
         self.current_step = step;
         self.iteration = iteration;
-        self.state = AgentState::Executing { step };
+        self.write_state(LoopEvent::RestoreProgress, AgentState::Executing { step });
     }
 
     /// Reset loop state for a new task, preserving max_iterations.
@@ -481,7 +730,7 @@ impl AgentLoop {
     /// Without this, queued tasks share the iteration counter from the previous
     /// task and may hit the max-iterations limit prematurely.
     pub fn reset_for_task(&mut self) {
-        self.state = AgentState::Planning;
+        self.write_state(LoopEvent::TaskReset, AgentState::Planning);
         self.current_step = 0;
         self.iteration = 0;
         self.prior_iterations = 0;
