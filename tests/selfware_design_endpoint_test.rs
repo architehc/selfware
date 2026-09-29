@@ -253,7 +253,14 @@ async fn test_selfware_design_sglang_server_info() {
         .get("tool_call_parser")
         .and_then(|v| v.as_str())
         .expect("expected tool_call_parser in /get_server_info");
-    assert_eq!(tool_parser, "qwen");
+    // docs/serving-sglang.md: `qwen3_coder` is the recommended parser (the
+    // `qwen` parser drops streamed tool calls for this model); `qwen` is the
+    // older deployment this test was written against.
+    assert!(
+        tool_parser == "qwen" || tool_parser == "qwen3_coder",
+        "expected 'qwen' or 'qwen3_coder' tool_call_parser, got: {}",
+        tool_parser
+    );
     let reasoning_parser = body
         .get("reasoning_parser")
         .and_then(|v| v.as_str())
