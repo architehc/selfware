@@ -65,7 +65,10 @@ finding. The
 harness checks citations itself against the pristine fixture
 (`fixture_citations_ok/near/wrong/unchecked`): a quoted expression that
 occurs once in the file pins the line; 1-2 lines off is `near`, further is
-`wrong`.
+`wrong`. A citation's quote is the code in its own part of the finding (a
+line leading with a citation, like "**`p.py:21`**", starts a part): its
+code spans that are not paths, and its first fenced code block (not a
+diff).
 
 Isolation: workspaces live under `$LIVE_EVAL_WORK_ROOT` (default: a
 directory in the system temp dir), which may not overlap the results dir or

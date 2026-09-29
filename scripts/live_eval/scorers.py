@@ -287,6 +287,52 @@ def _norm(line):
     return " ".join(line.split())
 
 
+# A line that opens a finding with its citation: "**`p.py:21`**",
+# "**2. `p.py:18`**", "- p.py:5 — ...", "`p.py:3`: ...".
+CITATION_LEAD_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*(?:\d+[.)]\s*)?`?")
+FENCE_RE = re.compile(r"^\s*(```+|~~~+)\s*([\w+-]*)")
+BARE_PATH_RE = re.compile(r"^[\w./-]+\.[A-Za-z0-9]{1,5}(?::\d+(?:-\d+)?)?$")
+
+
+def citation_parts(block):
+    """Split a finding into the parts each citation owns: a new part starts
+    at a line that LEADS with a citation (a bold "**`p:18`**" heading inside
+    one top-level item). Text before the first such line is its own part."""
+    parts, current = [], []
+    for line in (block or "").splitlines():
+        lead = CITATION_LEAD_RE.match(line)
+        if current and CITATION_RE.match(line, lead.end() if lead else 0):
+            parts.append("\n".join(current))
+            current = []
+        current.append(line)
+    if current:
+        parts.append("\n".join(current))
+    return parts
+
+
+def quoted_code(part):
+    """The code a citation part quotes: its backticked spans that are not
+    themselves a path or citation (`slugify/slugify.py` named in prose is
+    not code on a line), plus the lines of its first fenced code block
+    (not a diff), each >= 6 chars, whitespace-collapsed."""
+    spans = [s for s in code_snippets(part) if not BARE_PATH_RE.match(s)]
+    lines = (part or "").splitlines()
+    for i, line in enumerate(lines):
+        m = FENCE_RE.match(line)
+        if not m:
+            continue
+        if m.group(2).lower() in ("diff", "patch"):
+            break
+        for body in lines[i + 1:]:
+            if FENCE_RE.match(body) and not body.strip().strip(m.group(1)[0]):
+                break
+            norm = _norm(body)
+            if 6 <= len(norm) <= 200:
+                spans.append(norm)
+        break
+    return spans
+
+
 def match_planted(answer, key, prefixes=(), known_files=None, read_file=None):
     """Score a review answer against the planted-bug answer key.
 
@@ -371,16 +417,21 @@ def check_citations(answer, read_file, prefixes=(), known_files=None):
       names never make a citation wrong;
     - otherwise `unchecked` (nothing quoted, or several citations into the
       file so the quote cannot be tied to one of them).
+    A finding is split into the parts its citations lead (`citation_parts`),
+    and a part's quoted code is its code spans and first fenced block
+    (`quoted_code`): the 0.9.6 live answers wrote "**`p:21`**" + a fenced
+    block per finding, and the old rule tied a prose path span and a sibling
+    finding's `not in` to the wrong citation.
     `read_file(rel)` returns the file text or None.
     """
     ok = wrong = near = unchecked = 0
     detail = []
     seen = set()
-    for block in split_findings(answer):
+    for block in (p for b in split_findings(answer) for p in citation_parts(b)):
         cites = [c for c in extract_citations(block, prefixes) if c[2] - c[1] < MAX_CITED_SPAN]
         if known_files is not None:
             cites = [c for c in cites if any(_path_matches(c[0], f) for f in known_files)]
-        snippets = code_snippets(block)
+        snippets = quoted_code(block)
         for path, start, end in cites:
             if (path, start, end, tuple(snippets)) in seen:
                 continue

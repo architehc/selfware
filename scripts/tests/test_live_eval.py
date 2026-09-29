@@ -578,6 +578,39 @@ class ReviewScoringFixesTest(unittest.TestCase):
         )
         self.assertEqual(unquoted["fixture_citations_unchecked"], 1)
 
+    def test_citation_owns_the_fenced_block_below_it_not_prose_paths(self):
+        # 0.9.6 live shape: "**`path:line`**" + a fenced block per finding,
+        # several findings in one top-level item. The prose span
+        # `slugify/slugify.py` (in a docstring elsewhere) and a sibling
+        # finding's `not in` were tied to the wrong citation ("wrong").
+        files = {
+            "slugify/_legacy.py": "\n".join(
+                ["x"] * 4 + ["modern path (slugify/slugify.py)."] + ["x"] * 15
+                + ["HEX_PATTERN = re.compile(r'&#x([\\da-fA-F]+);')"] + ["x"] * 5),
+            "slugify/special.py": "\n".join(
+                ["x"] * 12 + ["        if upper_dict not in char_list:"] + ["x"] * 4
+                + ["        char_list.insert(0, upper_dict)"] + ["x"] * 3),
+        }
+        answer = (
+            "#### Low\n\n"
+            "**1. `slugify/_legacy.py:21`**\n\n```python\n"
+            "HEX_PATTERN = re.compile(r'&#x([\\da-fA-F]+);')\n```\n"
+            "Misses `&#X41;`; the modern path (`slugify/slugify.py`) uses `[xX]`; "
+            "a list `not in` check.\n\n"
+            "**2. `slugify/special.py:18`**\n\n```python\nchar_list.insert(0, upper_dict)\n```\n"
+            "Reverses the order.\n"
+        )
+        got = scorers.check_citations(answer, files.get)
+        self.assertEqual((got["fixture_citations_ok"], got["fixture_citations_wrong"]), (2, 0), got)
+        # The same blocks under citations of other lines are still wrong.
+        moved = answer.replace("_legacy.py:21", "_legacy.py:12").replace("special.py:18", "special.py:5")
+        got = scorers.check_citations(moved, files.get)
+        self.assertEqual(got["fixture_citations_wrong"], 2, got)
+        self.assertIn("slugify/_legacy.py:12 quotes code that is at line 21",
+                      got["fixture_citations_wrong_detail"])
+        self.assertIn("slugify/special.py:5 quotes code that is at line 18",
+                      got["fixture_citations_wrong_detail"])
+
     def test_planted_pass_requires_three_content_verified_citations(self):
         answer = "\n".join(
             f"- {b['file']}:{b['line']} bug" for b in self.key["bugs"]
