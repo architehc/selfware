@@ -1,0 +1,12 @@
+[
+  ["queued0", "dispatch", "flying0"],
+  ["queued0", "sweep", "not_run"],
+  ["flying0", "ok", "succeeded"],
+  ["flying0", "err", "queued1"],
+  ["flying0", "abort", "not_run"],
+  ["queued1", "dispatch", "flying1"],
+  ["queued1", "sweep", "not_run"],
+  ["flying1", "ok", "succeeded"],
+  ["flying1", "err", "failed"],
+  ["flying1", "abort", "not_run"]
+]

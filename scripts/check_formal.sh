@@ -119,6 +119,45 @@ check_model TaskFsm.lean "${FORMAL}/task_table.json"
 check_model ResourceFsm.lean "${FORMAL}/resource_table.json"
 check_model HarnessLoopBounds.lean "${FORMAL}/agent_state_table.json"
 check_model VerificationGateBounds.lean "${FORMAL}/verification_gate_table.json"
+
+# The review pipeline (formal/ReviewBounds.lean): one `#eval` prints the shard
+# state machine and the coverage-gate decision table as one JSON object; each
+# is compared with (or, with --write, written to) its committed table, which
+# the Rust conformance tests (review_*_formal_test.rs) check the code against.
+check_review_model() {
+    echo "check_formal: lean formal/ReviewBounds.lean"
+    local raw out
+    raw="$(lean "${FORMAL}/ReviewBounds.lean")"
+    out="$(mktemp -d)"
+    printf '%s\n' "${raw}" | tail -n 1 | python3 -c '
+import json, sys
+tables = json.loads(json.loads(sys.stdin.read()))
+widths = {"shard": 3, "gate": 12}
+assert sorted(tables) == sorted(widths), sorted(tables)
+for name, width in widths.items():
+    rows = tables[name]
+    assert rows and all(len(r) == width for r in rows), name
+    with open(sys.argv[1] + "/review_" + name + "_table.json", "w") as f:
+        f.write("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]\n")
+' "${out}"
+    local name
+    for name in shard gate; do
+        local table="${FORMAL}/review_${name}_table.json"
+        if [ "${WRITE}" -eq 1 ]; then
+            cp "${out}/review_${name}_table.json" "${table}"
+            echo "check_formal: wrote ${table} ($(grep -c '^  \[' "${table}") rows)"
+        elif ! diff -u "${table}" "${out}/review_${name}_table.json"; then
+            rm -rf "${out}"
+            echo "check_formal: FAILED — ${table#"${REPO_ROOT}/"} differs from ReviewBounds.lean's export." >&2
+            echo "check_formal: if the model changed on purpose, rerun with --write and update src/agent/review_* to match." >&2
+            exit 1
+        else
+            echo "check_formal: ${table#"${REPO_ROOT}/"} matches ($(grep -c '^  \[' "${table}") rows)."
+        fi
+    done
+    rm -rf "${out}"
+}
+check_review_model
 if [ "${WRITE}" -eq 0 ]; then
     echo "check_formal: OK — all models check and every exported table matches."
 fi
