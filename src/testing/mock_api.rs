@@ -178,6 +178,18 @@ pub struct MockServerConfig {
     pub model: String,
     /// Usage numbers included in the JSON response body.
     pub usage: MockUsage,
+    /// Requests whose body contains a route's marker are answered from that
+    /// route (first match), not from `responses`.
+    pub routes: Vec<MockRoute>,
+}
+
+/// Responses for the requests whose body contains `marker` (e.g. a side
+/// call's system prompt), served in FIFO order, then `default_response`.
+#[derive(Debug, Clone)]
+pub struct MockRoute {
+    pub marker: String,
+    pub responses: Vec<MockResponse>,
+    pub default_response: MockResponse,
 }
 
 impl Default for MockServerConfig {
@@ -192,6 +204,7 @@ impl Default for MockServerConfig {
                 completion_tokens: 5,
                 total_tokens: 15,
             },
+            routes: Vec::new(),
         }
     }
 }
@@ -296,6 +309,22 @@ impl MockLlmServerBuilder {
         self
     }
 
+    /// Answer the requests whose body contains `marker` from their own
+    /// queue (then `default_response`), leaving the main queue to the rest.
+    pub fn with_route(
+        mut self,
+        marker: impl Into<String>,
+        responses: Vec<MockResponse>,
+        default_response: MockResponse,
+    ) -> Self {
+        self.config.routes.push(MockRoute {
+            marker: marker.into(),
+            responses,
+            default_response,
+        });
+        self
+    }
+
     /// Set the fallback response used once the queued responses are exhausted.
     pub fn with_default_response(mut self, resp: MockResponse) -> Self {
         self.config.default_response = resp;
@@ -319,7 +348,7 @@ async fn accept_loop(
     mut shutdown_rx: watch::Receiver<bool>,
     captured_requests: Arc<Mutex<Vec<String>>>,
 ) {
-    let response_idx = Arc::new(Mutex::new(0usize));
+    let response_idx = Arc::new(Mutex::new(vec![0usize; config.routes.len() + 1]));
 
     loop {
         tokio::select! {
@@ -354,7 +383,7 @@ async fn accept_loop(
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     config: Arc<MockServerConfig>,
-    response_idx: Arc<Mutex<usize>>,
+    response_idx: Arc<Mutex<Vec<usize>>>,
     captured_requests: Arc<Mutex<Vec<String>>>,
 ) -> std::io::Result<()> {
     // Drain the full request (headers + content-length body) before responding:
@@ -417,15 +446,29 @@ async fn handle_connection(
         tokio::time::sleep(std::time::Duration::from_millis(config.latency_ms)).await;
     }
 
-    // Pick the next response
+    // Pick the next response: from the first route whose marker is in the
+    // body, else from the main queue (slot 0).
+    let body = request.get(body_start..).unwrap_or_default();
+    let route = config
+        .routes
+        .iter()
+        .position(|r| body.contains(r.marker.as_str()));
+    let (queue, default) = match route {
+        Some(r) => (
+            &config.routes[r].responses,
+            &config.routes[r].default_response,
+        ),
+        None => (&config.responses, &config.default_response),
+    };
+    let slot = route.map_or(0, |r| r + 1);
     let mock_response = {
         let mut idx = response_idx.lock().await;
-        if *idx < config.responses.len() {
-            let resp = config.responses[*idx].clone();
-            *idx += 1;
+        if idx[slot] < queue.len() {
+            let resp = queue[idx[slot]].clone();
+            idx[slot] += 1;
             resp
         } else {
-            config.default_response.clone()
+            default.clone()
         }
     };
 

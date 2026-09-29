@@ -35,6 +35,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<scenario>+agent.done_check=true`. Records carry `config_set`; the
   report counts done-checks as interventions (`done_checks`).
 
+### Fixed
+- **Review shard circuit breaker** (`ShardBreaker`, `src/agent/review_shards.rs`):
+  the 0.9.6 gate saw an endpoint answering "done" to everything run all 162
+  review shards twice (324 calls, every answer "not the JSON object asked
+  for") before the main loop started. The shard reader now stops
+  dispatching when shards fail systematically: the first N completed
+  attempts all failed (N = 2 × parallelism, 4–16) or 12 of the last 16 did;
+  reserve cuts are not counted. Thresholds from the recorded core reviews
+  (at most 1 failure at the start, at most 5 in any 16 attempts). In-flight
+  calls finish, nothing extra is credited, and the unread plan goes to the
+  main agent's `file_read` under the coverage gate. The summary says
+  `shard reading stopped after N/M shards: <reason>` (format vs. endpoint
+  failures named); JSON `review_coverage.shards.tripped` plus failure counts
+  by kind; `review_shards_breaker` in stream-json. Modelled in
+  formal/ReviewBounds.lean (RV7) with a new exported
+  `review_breaker_table.json` the Rust breaker is checked against.
+
 ## [0.9.5] - 2026-09-28
 
 A security and correctness release. An adversarial review of 0.9.4 found

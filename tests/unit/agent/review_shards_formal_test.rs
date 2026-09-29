@@ -39,17 +39,23 @@ enum Outcome {
 
 type CallFuture = Pin<Box<dyn Future<Output = Result<(), String>>>>;
 
-/// Run the real `schedule_shards` with scripted call outcomes and a gate
+/// Run the real `schedule_shards` with scripted call outcomes, a gate
 /// that stops after `stop_after` dispatches (or aborts while a call
-/// hangs). Returns the totals and every shard's observed events.
+/// hangs), and a breaker that trips at the `trip_after`-th completed
+/// attempt. Returns the totals and every shard's observed events; checks
+/// that nothing is dispatched once the breaker tripped (RV7
+/// `tripped_starts_nothing`).
 fn run_scenario(
     rt: &tokio::runtime::Runtime,
     cap: usize,
     outcomes: &[[Outcome; 2]],
     stop_after: Option<usize>,
+    trip_after: Option<usize>,
 ) -> (ScheduleTotals, Vec<Vec<&'static str>>) {
     let n = outcomes.len();
     let events: Rc<RefCell<Vec<Vec<&'static str>>>> = Rc::new(RefCell::new(vec![Vec::new(); n]));
+    let tripped = Rc::new(Cell::new(false));
+    let completed = Cell::new(0usize);
     let hanging = Rc::new(Cell::new(0usize));
     let goes = Cell::new(0usize);
     let gate = || {
@@ -63,6 +69,10 @@ fn run_scenario(
         Dispatch::Go
     };
     let call = |i: usize, attempt: u8| -> CallFuture {
+        assert!(
+            !tripped.get(),
+            "shard {i} attempt {attempt} dispatched after the breaker tripped"
+        );
         let ev = Rc::clone(&events);
         ev.borrow_mut()[i].push("dispatch");
         // Checked here, not only after the run: a scheduler that re-queues
@@ -90,6 +100,13 @@ fn run_scenario(
     let done = |i: usize, _attempt: u8, r: &Result<(), String>| {
         events.borrow_mut()[i].push(if r.is_ok() { "ok" } else { "err" });
     };
+    let breaker = |_: &Result<(), String>| {
+        completed.set(completed.get() + 1);
+        (trip_after == Some(completed.get())).then(|| {
+            tripped.set(true);
+            "breaker".to_string()
+        })
+    };
     let totals = rt.block_on(schedule_shards(
         n,
         cap,
@@ -97,7 +114,9 @@ fn run_scenario(
         gate,
         call,
         done,
+        breaker,
     ));
+    assert_eq!(totals.tripped.is_some(), tripped.get());
     let events = events.borrow().clone();
     (totals, events)
 }
@@ -126,10 +145,16 @@ fn the_real_scheduler_follows_the_lean_shard_machine() {
                 })
                 .collect();
             for cap in 1..=2usize {
-                for stop_after in [None, Some(0), Some(1), Some(3)] {
+                for (stop_after, trip_after) in [None, Some(0), Some(1), Some(3)]
+                    .into_iter()
+                    .flat_map(|s| [None, Some(1), Some(2)].map(|t| (s, t)))
+                {
                     scenarios += 1;
-                    let (totals, events) = run_scenario(&rt, cap, &outcomes, stop_after);
-                    let case = format!("n={n} cap={cap} stop={stop_after:?} {outcomes:?}");
+                    let (totals, events) =
+                        run_scenario(&rt, cap, &outcomes, stop_after, trip_after);
+                    let case = format!(
+                        "n={n} cap={cap} stop={stop_after:?} trip={trip_after:?} {outcomes:?}"
+                    );
                     assert!(
                         totals.peak_in_flight <= cap,
                         "{case}: peak {}",
@@ -195,12 +220,119 @@ fn the_real_scheduler_follows_the_lean_shard_machine() {
             }
         }
     }
-    assert!(scenarios > 5_000);
+    assert!(scenarios > 15_000);
     let all_rows: BTreeSet<(String, String)> = table.keys().cloned().collect();
     assert_eq!(
         rows_seen, all_rows,
         "every transition of the model was exercised"
     );
+}
+
+// ------------------------------------------------ RV7: the circuit breaker
+
+/// `formal/review_breaker_table.json`: `(parallelism, name, history, first
+/// trip)` — the history as `o` (succeeded), `x` (failed), `c` (reserve
+/// cut); the first trip is the 1-based attempt at which the breaker trips,
+/// or `none`.
+fn breaker_table() -> Vec<[String; 4]> {
+    let text = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/review_breaker_table.json"
+    ));
+    serde_json::from_str(text).expect("review_breaker_table.json")
+}
+
+/// The real `ShardBreaker` trips at exactly the attempt the Lean model
+/// does, for every exported history — the recorded healthy core reviews
+/// (never), an always-failing endpoint (at N), cuts (never counted), a
+/// mid-run collapse (12 of the last 16) — whatever kind each failure is.
+#[test]
+fn the_breaker_trips_where_the_lean_model_does() {
+    let rows = breaker_table();
+    assert!(rows.len() >= 60, "{} rows", rows.len());
+    let kinds = [
+        ShardFailure::Format,
+        ShardFailure::Transport,
+        ShardFailure::Timeout,
+    ];
+    let mut tripped_rows = 0;
+    for [cap, name, history, expected] in &rows {
+        let cap: usize = cap.parse().unwrap();
+        // The same history with every failure one kind, then mixed.
+        for variant in 0..=kinds.len() {
+            let mut breaker = ShardBreaker::new(cap);
+            let mut first = None;
+            for (k, c) in history.chars().enumerate() {
+                let outcome = match c {
+                    'o' => Ok(()),
+                    'x' => Err(kinds.get(variant).copied().unwrap_or(kinds[k % 3])),
+                    'c' => Err(ShardFailure::ReserveCut),
+                    other => panic!("history symbol {other:?}"),
+                };
+                if breaker.observe(outcome).is_some() {
+                    assert!(first.is_none(), "{name}: tripped twice");
+                    first = Some(k + 1);
+                }
+            }
+            let got = first.map_or_else(|| "none".to_string(), |k| k.to_string());
+            assert_eq!(
+                &got, expected,
+                "{name} at parallelism {cap} (variant {variant})"
+            );
+            assert_eq!(breaker.tripped().is_some(), first.is_some(), "{name}");
+        }
+        if expected != "none" {
+            tripped_rows += 1;
+        }
+    }
+    assert!(tripped_rows > 0 && tripped_rows < rows.len());
+    // The live runs are in the table and never trip.
+    assert!(rows
+        .iter()
+        .any(|r| r[1].starts_with("core_long_") && r[3] == "none"));
+    assert!(rows
+        .iter()
+        .filter(|r| r[1].starts_with("core_long_"))
+        .all(|r| r[3] == "none"));
+}
+
+/// The breaker's reason names what failed, and a trip is announced once.
+#[test]
+fn the_trip_reason_names_the_failure_kind() {
+    let mut b = ShardBreaker::new(2);
+    let mut reasons = Vec::new();
+    for _ in 0..10 {
+        reasons.extend(b.observe(Err(ShardFailure::Format)));
+    }
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(
+        reasons[0].contains("the first 4 shard attempts all failed")
+            && reasons[0].contains("4 answer(s) not in the JSON shard format")
+            && reasons[0].contains("does not follow the shard answer format"),
+        "{}",
+        reasons[0]
+    );
+    let mut b = ShardBreaker::new(6);
+    for _ in 0..40 {
+        b.observe(Ok(()));
+    }
+    let why = (0..12)
+        .find_map(|i| {
+            b.observe(Err(if i % 2 == 0 {
+                ShardFailure::Transport
+            } else {
+                ShardFailure::Timeout
+            }))
+        })
+        .expect("12 of the last 16 failed");
+    assert!(
+        why.contains("12 of the last 16 shard attempts failed")
+            && why.contains("6 request error(s)")
+            && why.contains("6 call(s) over the time cap")
+            && why.contains("the endpoint is failing"),
+        "{why}"
+    );
+    assert_eq!(b.failure_counts(), (0, 6, 6, 0));
 }
 
 // ---------------------------------------------- RV5: the synthesis reserve
@@ -269,6 +401,7 @@ fn simulate_phase(
             gate,
             call,
             |_, _, _: &Result<(), String>| {},
+            |_: &Result<(), String>| None,
         )
         .await;
         (remaining0, reserve, remaining(), totals.succeeded.len())

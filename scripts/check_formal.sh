@@ -121,7 +121,8 @@ check_model HarnessLoopBounds.lean "${FORMAL}/agent_state_table.json"
 check_model VerificationGateBounds.lean "${FORMAL}/verification_gate_table.json"
 
 # The review pipeline (formal/ReviewBounds.lean): one `#eval` prints the shard
-# state machine and the coverage-gate decision table as one JSON object; each
+# state machine, the coverage-gate decision table and the shard circuit
+# breaker's first-trip table as one JSON object; each
 # is compared with (or, with --write, written to) its committed table, which
 # the Rust conformance tests (review_*_formal_test.rs) check the code against.
 check_review_model() {
@@ -132,7 +133,7 @@ check_review_model() {
     printf '%s\n' "${raw}" | tail -n 1 | python3 -c '
 import json, sys
 tables = json.loads(json.loads(sys.stdin.read()))
-widths = {"shard": 3, "gate": 12}
+widths = {"shard": 3, "gate": 12, "breaker": 4}
 assert sorted(tables) == sorted(widths), sorted(tables)
 for name, width in widths.items():
     rows = tables[name]
@@ -141,7 +142,7 @@ for name, width in widths.items():
         f.write("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]\n")
 ' "${out}"
     local name
-    for name in shard gate; do
+    for name in shard gate breaker; do
         local table="${FORMAL}/review_${name}_table.json"
         if [ "${WRITE}" -eq 1 ]; then
             cp "${out}/review_${name}_table.json" "${table}"

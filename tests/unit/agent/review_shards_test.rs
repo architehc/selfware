@@ -144,6 +144,7 @@ async fn scheduler_never_exceeds_the_parallelism_cap() {
             }
         },
         |_, _, _| {},
+        |_| None,
     )
     .await;
     assert_eq!(totals.succeeded.len(), 20);
@@ -173,6 +174,7 @@ async fn a_failed_shard_is_retried_once_then_reported_unread() {
             }
         },
         |i, attempt, result| seen.push((i, attempt, result.is_ok())),
+        |_| None,
     )
     .await;
     let mut ok = totals.succeeded.clone();
@@ -204,6 +206,7 @@ async fn a_budget_stop_leaves_the_rest_not_run() {
         },
         |_i, _a| async { Ok::<(), String>(()) },
         |_, _, _| {},
+        |_| None,
     )
     .await;
     assert_eq!(totals.succeeded.len(), 3);
@@ -235,12 +238,125 @@ async fn an_abort_drops_calls_in_flight() {
             Ok::<(), String>(())
         },
         |_, _, _| {},
+        |_| None,
     )
     .await;
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(totals.succeeded.is_empty());
     assert_eq!(totals.not_run, vec![0, 1, 2]);
     assert_eq!(totals.stopped.as_deref(), Some("cancelled"));
+}
+
+// --------------------------------------------------------- circuit breaker
+
+/// The 0.9.6 gate failure, at the scheduler: an endpoint that never
+/// produces a usable answer. Without the breaker every one of 162 shards
+/// ran twice (324 calls); with it the phase stops after N = 12 failed
+/// attempts (6 in parallel) plus the calls still in flight, credits
+/// nothing, and leaves every shard for the main loop.
+#[tokio::test]
+async fn an_endpoint_that_never_answers_trips_the_breaker_early() {
+    let calls = AtomicUsize::new(0);
+    let mut breaker = ShardBreaker::new(6);
+    let totals = schedule_shards(
+        162,
+        6,
+        Duration::from_millis(5),
+        || Dispatch::Go,
+        |_i, _a| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                tokio::task::yield_now().await;
+                Err::<(), _>(ShardError::new(
+                    ShardFailure::Format,
+                    "answer is not the JSON object asked for: \"done\"",
+                ))
+            }
+        },
+        |_, _, _| {},
+        |r: &Result<(), ShardError>| breaker.observe(r.as_ref().map(|_| ()).map_err(|e| e.kind)),
+    )
+    .await;
+    let calls = calls.load(Ordering::SeqCst);
+    assert!(
+        (12..=12 + 5).contains(&calls),
+        "{calls} calls (N = 12, at most 5 more in flight)"
+    );
+    let why = totals.tripped.as_deref().expect("tripped");
+    assert!(
+        why.contains("the first 12 shard attempts all failed"),
+        "{why}"
+    );
+    assert!(totals.succeeded.is_empty());
+    assert_eq!(
+        totals.failed.len() + totals.not_run.len(),
+        162,
+        "every shard is accounted for"
+    );
+    assert!(totals.not_run.len() >= 162 - 17, "{totals:?}");
+    assert!(totals.stopped.is_none());
+}
+
+/// A transient fault — the whole first wave fails at once — whose retries
+/// and the following shards succeed never trips the breaker: everything is
+/// read.
+#[tokio::test]
+async fn a_transient_fault_that_recovers_never_trips() {
+    let calls = AtomicUsize::new(0);
+    let mut breaker = ShardBreaker::new(6);
+    let totals = schedule_shards(
+        40,
+        6,
+        Duration::from_millis(5),
+        || Dispatch::Go,
+        |_i, _a| {
+            let k = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if k < 6 {
+                    Err(ShardError::new(ShardFailure::Transport, "HTTP 503"))
+                } else {
+                    Ok(())
+                }
+            }
+        },
+        |_, _, _| {},
+        |r: &Result<(), ShardError>| breaker.observe(r.as_ref().map(|_| ()).map_err(|e| e.kind)),
+    )
+    .await;
+    assert!(totals.tripped.is_none(), "{totals:?}");
+    assert_eq!(totals.succeeded.len(), 40);
+    assert_eq!(totals.retried, 6);
+    assert_eq!(breaker.failure_counts(), (0, 6, 0, 0));
+}
+
+/// Reserve cuts are the harness's own doing: a phase whose every call is
+/// cut at the reserve never trips the breaker (the same number of format
+/// failures would, at the 4th).
+#[tokio::test(start_paused = true)]
+async fn reserve_cuts_never_trip_the_breaker() {
+    let cut = Some(tokio::time::Instant::now() + Duration::from_secs(100));
+    let mut breaker = ShardBreaker::new(2);
+    let totals = schedule_shards(
+        12,
+        2,
+        Duration::from_secs(10_000),
+        || Dispatch::Go,
+        |_i, _a| {
+            within_reserve(cut, async {
+                tokio::time::sleep(Duration::from_secs(3_000)).await;
+                Ok::<(), ShardError>(())
+            })
+        },
+        |_, _, _| {},
+        |r: &Result<(), ShardError>| breaker.observe(r.as_ref().map(|_| ()).map_err(|e| e.kind)),
+    )
+    .await;
+    assert!(totals.tripped.is_none(), "{totals:?}");
+    assert_eq!(totals.failed.len(), 12);
+    assert_eq!(breaker.failure_counts(), (0, 0, 0, 24));
+    let mut format = ShardBreaker::new(2);
+    let first = (1..=24).find(|_| format.observe(Err(ShardFailure::Format)).is_some());
+    assert_eq!(first, Some(4));
 }
 
 // ------------------------------------------------------ answers + findings
@@ -732,4 +848,165 @@ async fn a_broad_reread_of_a_shard_read_file_is_withheld_once() {
     let coverage = agent.review_coverage().unwrap();
     assert!(coverage.complete);
     assert_eq!(coverage.shards.unwrap().rereads_withheld, 1);
+}
+
+/// `n` modules of ~1,200 measured tokens each: one shard per file at the
+/// 2,000-token shard budget.
+fn many_module_fixture(root: &std::path::Path, n: usize) -> Vec<String> {
+    std::fs::create_dir_all(root.join("pkg")).unwrap();
+    (0..n)
+        .map(|k| {
+            let body: String = (1..=48)
+                .map(|i| format!("def f{k}_{i}(value, other):\n    return value + other * {i}\n"))
+                .collect();
+            let rel = format!("pkg/m{k}.py");
+            std::fs::write(root.join(&rel), body).unwrap();
+            rel
+        })
+        .collect()
+}
+
+fn breaker_config(url: &str) -> crate::config::Config {
+    let mut config = shard_config(url);
+    config.review.shard_parallelism = 2;
+    config.review.shard_tokens = 2_000;
+    config
+}
+
+/// The 0.9.6 gate failure, end to end: the endpoint answers "done" to
+/// every shard. The breaker stops the shard phase after N = 4 failed
+/// attempts (2 in parallel) instead of running all 10 shards twice; the
+/// main agent reads the plan itself with file_read and coverage counts
+/// only what it delivered.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn an_endpoint_that_cannot_answer_shards_trips_and_the_main_loop_reads() {
+    use crate::testing::mock_api::{MockLlmServer, MockResponse};
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_module_fixture(dir.path(), 10);
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let reads: String = files
+        .iter()
+        .map(|p| {
+            format!(
+                "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{p}\"}}</arguments>\n</tool>\n"
+            )
+        })
+        .collect();
+    let server = MockLlmServer::builder()
+        .with_route(
+            "You are one reader in a parallel code review",
+            Vec::new(),
+            MockResponse::Text("done".to_string()),
+        )
+        .with_response(reads)
+        .with_default_response(MockResponse::Text(
+            "Final review: pkg/m0.py:2 `return value + other * 1` — no defects found in the \
+             adders."
+                .to_string(),
+        ))
+        .build()
+        .await;
+    let mut agent = Agent::new(breaker_config(server.url())).await.unwrap();
+    let result = agent
+        .run_task("review this repository for bugs, cite file:line")
+        .await;
+    let bodies = server.captured_request_bodies().await;
+    server.stop().await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    let shard_calls = bodies
+        .iter()
+        .filter(|b| b.contains("You are one reader in a parallel code review"))
+        .count();
+    assert!(
+        (4..=5).contains(&shard_calls),
+        "{shard_calls} shard calls (N = 4, at most 1 more in flight; 20 without the breaker)"
+    );
+    let coverage = agent.review_coverage().expect("review session");
+    let shards = coverage.shards.clone().expect("shard report");
+    assert_eq!(shards.shards, 10, "{shards:?}");
+    assert_eq!(shards.succeeded, 0);
+    assert_eq!(shards.files_read, 0, "a tripped phase credits nothing");
+    assert!(shards.failed_format >= 4, "{shards:?}");
+    let why = shards.tripped.as_deref().expect("tripped");
+    assert!(
+        why.contains("the first 4 shard attempts all failed")
+            && why.contains("does not follow the shard answer format"),
+        "{why}"
+    );
+    assert!(
+        shards.line.contains(&format!(
+            "shard reading stopped after {}/10 shards",
+            shards.started
+        )),
+        "{}",
+        shards.line
+    );
+    let json = serde_json::to_value(&coverage).unwrap();
+    assert!(json["shards"]["tripped"].is_string(), "{json}");
+    let note = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .find(|t| t.contains("kind=review_shards"))
+        .expect("shard context note");
+    assert!(note.contains("Shard reading was stopped early"), "{note}");
+    assert!(note.contains("Still unread (10)"), "{note}");
+    // The main loop read everything itself; coverage is complete from its
+    // own file_read results only.
+    assert!(coverage.complete, "{coverage:?}");
+    assert_eq!((coverage.read_files, coverage.relevant_files), (10, 10));
+}
+
+/// An endpoint that fails the first few shard requests and then recovers
+/// never trips the breaker: the failed shards are retried and every file
+/// is read by the shards.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn an_endpoint_that_recovers_never_trips_the_breaker() {
+    use crate::testing::mock_api::{MockLlmServer, MockResponse};
+    let dir = tempfile::tempdir().unwrap();
+    many_module_fixture(dir.path(), 10);
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let answer = r#"{"files":[],"findings":[]}"#;
+    let bad = || MockResponse::Error {
+        status: 400,
+        body: r#"{"error":{"message":"transient"}}"#.to_string(),
+    };
+    let server = MockLlmServer::builder()
+        .with_route(
+            "You are one reader in a parallel code review",
+            vec![bad(), bad(), bad()],
+            MockResponse::Text(answer.to_string()),
+        )
+        .with_default_response(MockResponse::Text(
+            "Final review: pkg/m0.py:2 `return value + other * 1` — no defects found.".to_string(),
+        ))
+        .build()
+        .await;
+    let mut agent = Agent::new(breaker_config(server.url())).await.unwrap();
+    let result = agent
+        .run_task("review this repository for bugs, cite file:line")
+        .await;
+    server.stop().await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    let coverage = agent.review_coverage().expect("review session");
+    let shards = coverage.shards.clone().expect("shard report");
+    assert!(shards.tripped.is_none(), "{shards:?}");
+    assert_eq!((shards.shards, shards.succeeded), (10, 10), "{shards:?}");
+    assert!(shards.retried >= 1, "{shards:?}");
+    assert!(shards.failed_transport >= 1, "{shards:?}");
+    assert_eq!(shards.failed_format, 0, "{shards:?}");
+    assert!(
+        !shards.line.contains("shard reading stopped"),
+        "{}",
+        shards.line
+    );
+    assert!(coverage.complete, "{coverage:?}");
 }

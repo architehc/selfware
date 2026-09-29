@@ -493,6 +493,14 @@ impl ReviewSession {
                 report.findings_verified, report.findings_unverified
             ),
         ];
+        if let Some(why) = &report.tripped {
+            head.push(format!(
+                "Shard reading was stopped early after {} of {} shards: {why}. The files it did \
+                 not read are yours to read with file_read; coverage counts only what was \
+                 delivered.",
+                report.started, report.shards
+            ));
+        }
         if !cov.complete {
             head.push(format!(
                 "Still unread ({}): {}{} — read these with file_read.",

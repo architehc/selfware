@@ -27,7 +27,10 @@
 //!    governor (so `[concurrency] max_streams` still bounds the endpoint).
 //!    A failed shard (transport error, time cap, unparseable answer) is
 //!    re-queued once with thinking off; a second failure leaves its files
-//!    unread. Under a wall budget a shard starts only while the time left
+//!    unread. A circuit breaker (`ShardBreaker`) stops dispatching when
+//!    shards fail systematically — the model cannot produce the JSON answer,
+//!    or the endpoint only returns errors — and hands what is unread to the
+//!    main loop (formal/ReviewBounds.lean, RV7). Under a wall budget a shard starts only while the time left
 //!    covers the synthesis reserve plus the longest shard call so far, and
 //!    every call still running when the time left reaches the reserve is
 //!    dropped (`reserve_cut`), so the final answer keeps its time whatever
@@ -235,22 +238,206 @@ pub(crate) fn reserve_cut(
 
 /// Run one shard call, dropped at `cut` (see [`reserve_cut`]); `None` =
 /// no wall budget, no cut.
-pub(crate) async fn within_reserve<T, F>(
+pub(crate) async fn within_reserve<T, E, F>(
     cut: Option<tokio::time::Instant>,
     call: F,
-) -> Result<T, String>
+) -> Result<T, E>
 where
-    F: std::future::Future<Output = Result<T, String>>,
+    F: std::future::Future<Output = Result<T, E>>,
+    E: From<ReserveCut>,
 {
     match cut {
         None => call.await,
-        Some(at) => tokio::time::timeout_at(at, call).await.unwrap_or_else(|_| {
-            Err(
-                "cut at the synthesis reserve (the wall budget left is kept for the final \
-                 answer)"
-                    .to_string(),
-            )
-        }),
+        Some(at) => tokio::time::timeout_at(at, call)
+            .await
+            .unwrap_or_else(|_| Err(ReserveCut.into())),
+    }
+}
+
+/// A shard call dropped at the synthesis reserve ([`reserve_cut`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReserveCut;
+
+const RESERVE_CUT_MESSAGE: &str =
+    "cut at the synthesis reserve (the wall budget left is kept for the final answer)";
+
+impl From<ReserveCut> for String {
+    fn from(_: ReserveCut) -> String {
+        RESERVE_CUT_MESSAGE.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+/// Why one shard attempt failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ShardFailure {
+    /// The answer came back but is not the JSON object asked for: the
+    /// model cannot (or did not) follow the shard format.
+    Format,
+    /// The request failed: transport error, HTTP error, open client
+    /// circuit, concurrency governor.
+    Transport,
+    /// The side call ran into its wall-time cap.
+    Timeout,
+    /// Dropped at the synthesis reserve — the harness's own cut, no
+    /// evidence about the endpoint.
+    ReserveCut,
+}
+
+/// A failed shard attempt: its kind (for the breaker) and what happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShardError {
+    pub kind: ShardFailure,
+    pub detail: String,
+}
+
+impl ShardError {
+    fn new(kind: ShardFailure, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ShardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl From<ReserveCut> for ShardError {
+    fn from(_: ReserveCut) -> Self {
+        Self::new(ShardFailure::ReserveCut, RESERVE_CUT_MESSAGE)
+    }
+}
+
+/// Window of counted attempts the "collapsed" rule looks at, and the
+/// failures in it that trip the breaker (formal/ReviewBounds.lean,
+/// `breakerWindow`, `breakerFailures`).
+///
+/// Measured (the recorded 125-shard core reviews on llm.selfware.design, 6
+/// in parallel — 0.9.5 1f96, 0.9.6 dcbc/3c7d/2744/90a7): 8–12 first-attempt
+/// failures per run, retries clustered at the end, and never more than 5
+/// failures in any 16 consecutive attempts (4 in any 8). 12 of 16 (75 %)
+/// keeps more than twice that margin, and an endpoint that dies mid-run
+/// still trips it after 12 wasted attempts.
+pub(crate) const BREAKER_WINDOW: usize = 16;
+pub(crate) const BREAKER_WINDOW_FAILURES: usize = 12;
+
+/// N: failed attempts at the very start that trip the breaker ("never
+/// worked"). Two waves of the parallelism — the calls of one wave hit the
+/// endpoint at the same moment, so one failed wave is weak evidence — at
+/// least 4 and at most [`BREAKER_WINDOW`]. Measured: no recorded run (the
+/// core reviews above, and ~50 one-shard reviews) started with more than 1
+/// failure.
+pub(crate) fn breaker_streak(parallelism: usize) -> usize {
+    (2 * parallelism).clamp(4, BREAKER_WINDOW)
+}
+
+/// Stops the shard phase when shards fail systematically, not on isolated
+/// failures (formal/ReviewBounds.lean, RV7; `review_breaker_table.json`).
+///
+/// Live failure it answers (0.9.6 gate): an endpoint answering "done" to
+/// everything made a review run all 162 shards twice — 324 calls, every one
+/// "not the JSON object asked for" — before the main loop started.
+///
+/// Counted: completed attempts, success or failure; reserve cuts are not
+/// counted. It trips — once — when the first [`breaker_streak`] counted
+/// attempts all failed, or when [`BREAKER_WINDOW_FAILURES`] of the last
+/// [`BREAKER_WINDOW`] did.
+#[derive(Debug, Clone)]
+pub(crate) struct ShardBreaker {
+    streak: usize,
+    /// Counted attempts in completion order: `None` = succeeded.
+    counted: Vec<Option<ShardFailure>>,
+    reserve_cuts: usize,
+    tripped: Option<String>,
+}
+
+impl ShardBreaker {
+    pub(crate) fn new(parallelism: usize) -> Self {
+        Self {
+            streak: breaker_streak(parallelism.max(1)),
+            counted: Vec::new(),
+            reserve_cuts: 0,
+            tripped: None,
+        }
+    }
+
+    /// Record one completed attempt (`Err(kind)` = failed). Returns the
+    /// reason at the attempt that trips the breaker, `None` otherwise (and
+    /// after it tripped).
+    pub(crate) fn observe(&mut self, outcome: Result<(), ShardFailure>) -> Option<String> {
+        if self.tripped.is_some() {
+            return None;
+        }
+        match outcome {
+            Err(ShardFailure::ReserveCut) => {
+                self.reserve_cuts += 1;
+                return None;
+            }
+            Ok(()) => self.counted.push(None),
+            Err(kind) => self.counted.push(Some(kind)),
+        }
+        let len = self.counted.len();
+        let why = if len >= self.streak && self.counted[..self.streak].iter().all(Option::is_some) {
+            Some(format!(
+                "the first {} shard attempts all failed",
+                self.streak
+            ))
+        } else if len >= BREAKER_WINDOW {
+            let window = &self.counted[len - BREAKER_WINDOW..];
+            let failed = window.iter().filter(|o| o.is_some()).count();
+            (failed >= BREAKER_WINDOW_FAILURES)
+                .then(|| format!("{failed} of the last {BREAKER_WINDOW} shard attempts failed"))
+        } else {
+            None
+        }?;
+        let window = &self.counted[len.saturating_sub(BREAKER_WINDOW)..];
+        let count = |k: ShardFailure| window.iter().filter(|o| **o == Some(k)).count();
+        let (format, transport, timeout) = (
+            count(ShardFailure::Format),
+            count(ShardFailure::Transport),
+            count(ShardFailure::Timeout),
+        );
+        let mut kinds = Vec::new();
+        if format > 0 {
+            kinds.push(format!("{format} answer(s) not in the JSON shard format"));
+        }
+        if transport > 0 {
+            kinds.push(format!("{transport} request error(s)"));
+        }
+        if timeout > 0 {
+            kinds.push(format!("{timeout} call(s) over the time cap"));
+        }
+        let diagnosis = if format >= transport + timeout {
+            "the model does not follow the shard answer format"
+        } else {
+            "the endpoint is failing"
+        };
+        let reason = format!("{why} ({}) — {diagnosis}", kinds.join(", "));
+        self.tripped = Some(reason.clone());
+        Some(reason)
+    }
+
+    pub(crate) fn tripped(&self) -> Option<&str> {
+        self.tripped.as_deref()
+    }
+
+    /// Failed attempts by kind over the whole phase: (format, transport,
+    /// timeout, reserve cuts).
+    pub(crate) fn failure_counts(&self) -> (usize, usize, usize, usize) {
+        let count = |k: ShardFailure| self.counted.iter().filter(|o| **o == Some(k)).count();
+        (
+            count(ShardFailure::Format),
+            count(ShardFailure::Transport),
+            count(ShardFailure::Timeout),
+            self.reserve_cuts,
+        )
     }
 }
 
@@ -308,25 +495,33 @@ pub(crate) struct ScheduleTotals {
     pub retried: usize,
     pub peak_in_flight: usize,
     pub stopped: Option<String>,
+    /// Why the circuit breaker stopped dispatching (see [`ShardBreaker`]).
+    pub tripped: Option<String>,
+    /// Shards dispatched at least once.
+    pub started: usize,
 }
 
 /// Run `n` shard calls with at most `parallelism` in flight. `call(i,
 /// attempt)` is attempt 0 or 1; an `Err` on attempt 0 re-queues the shard
 /// once (at the back). `gate` is asked before every dispatch and every
-/// `tick`; `done` sees every completed attempt.
-pub(crate) async fn schedule_shards<T, C, Fut, G, D>(
+/// `tick`; `done` sees every completed attempt, then `breaker` does: a
+/// `Some(reason)` trips the scheduler — like a stop, nothing new starts and
+/// calls in flight finish (formal/ReviewBounds.lean, RV7).
+pub(crate) async fn schedule_shards<T, E, C, Fut, G, D, B>(
     n: usize,
     parallelism: usize,
     tick: Duration,
     mut gate: G,
     call: C,
     mut done: D,
+    mut breaker: B,
 ) -> ScheduleTotals
 where
     C: Fn(usize, u8) -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
+    Fut: std::future::Future<Output = Result<T, E>>,
     G: FnMut() -> Dispatch,
-    D: FnMut(usize, u8, &Result<T, String>),
+    D: FnMut(usize, u8, &Result<T, E>),
+    B: FnMut(&Result<T, E>) -> Option<String>,
 {
     let parallelism = parallelism.max(1);
     let mut totals = ScheduleTotals::default();
@@ -334,7 +529,8 @@ where
     let mut in_flight = FuturesUnordered::new();
     let mut flying: Vec<usize> = Vec::new();
     loop {
-        while in_flight.len() < parallelism && totals.stopped.is_none() {
+        while in_flight.len() < parallelism && totals.stopped.is_none() && totals.tripped.is_none()
+        {
             let Some(&(i, attempt)) = queue.front() else {
                 break;
             };
@@ -346,6 +542,9 @@ where
                 }
             }
             queue.pop_front();
+            if attempt == 0 {
+                totals.started += 1;
+            }
             flying.push(i);
             let fut = call(i, attempt);
             in_flight.push(async move { (i, attempt, fut.await) });
@@ -371,6 +570,9 @@ where
         };
         flying.retain(|&f| f != i);
         done(i, attempt, &result);
+        if let Some(why) = breaker(&result) {
+            totals.tripped.get_or_insert(why);
+        }
         match result {
             Ok(_) => totals.succeeded.push(i),
             Err(_) if attempt == 0 => {
@@ -614,6 +816,23 @@ pub struct ShardRunReport {
     pub tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
+    /// Why the circuit breaker stopped the shard reading early (shards
+    /// failing systematically); what is unread went to the main loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tripped: Option<String>,
+    /// Shards dispatched at least once.
+    #[serde(default)]
+    pub started: usize,
+    /// Failed attempts by kind: answer not in the shard format, request
+    /// error, time cap, cut at the synthesis reserve.
+    #[serde(default)]
+    pub failed_format: usize,
+    #[serde(default)]
+    pub failed_transport: usize,
+    #[serde(default)]
+    pub failed_timeout: usize,
+    #[serde(default)]
+    pub reserve_cuts: usize,
     /// Files the shards could not fetch (`path — error`), first 10.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
@@ -665,6 +884,13 @@ impl ShardRunReport {
         }
         if self.not_run > 0 {
             line.push_str(&format!("; {} not run", self.not_run));
+        }
+        if let Some(why) = &self.tripped {
+            line.push_str(&format!(
+                "; shard reading stopped after {}/{} shards: {why}; the main agent reads the \
+                 rest with file_read",
+                self.started, self.shards
+            ));
         }
         if let Some(why) = &self.stopped {
             line.push_str(&format!("; stopped: {why}"));
@@ -1104,10 +1330,12 @@ impl Agent {
             let messages = prompts[i].clone();
             let first = attempt == 0;
             within_reserve(cut, async move {
-                let _permit = governor
-                    .acquire_stream()
-                    .await
-                    .map_err(|e| format!("concurrency governor: {e}"))?;
+                let _permit = governor.acquire_stream().await.map_err(|e| {
+                    ShardError::new(
+                        ShardFailure::Transport,
+                        format!("concurrency governor: {e}"),
+                    )
+                })?;
                 let spec = crate::api::client::SideCall::new("review_shard")
                     .max_tokens(max_tokens)
                     .time_cap_secs(cap);
@@ -1120,10 +1348,17 @@ impl Agent {
                     spec.thinking_off()
                 };
                 let _longest = LongestGuard(longest_ref, tokio::time::Instant::now());
-                let response = client
-                    .side_chat(messages, spec)
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
+                let response = client.side_chat(messages, spec).await.map_err(|e| {
+                    let kind = if e
+                        .chain()
+                        .any(|c| c.is::<crate::api::client::SideCallTimeout>())
+                    {
+                        ShardFailure::Timeout
+                    } else {
+                        ShardFailure::Transport
+                    };
+                    ShardError::new(kind, format!("{e:#}"))
+                })?;
                 let text = response
                     .choices
                     .first()
@@ -1131,7 +1366,10 @@ impl Agent {
                     .unwrap_or_default();
                 parse_shard_answer(&text).ok_or_else(|| {
                     let head: String = text.chars().take(120).collect();
-                    format!("answer is not the JSON object asked for: {head:?}")
+                    ShardError::new(
+                        ShardFailure::Format,
+                        format!("answer is not the JSON object asked for: {head:?}"),
+                    )
                 })
             })
         };
@@ -1147,6 +1385,7 @@ impl Agent {
         };
         let mut all_unverified: Vec<String> = Vec::new();
         let mut completed = 0usize;
+        let mut breaker = ShardBreaker::new(parallelism);
         let totals = {
             let this = &*self;
             let report = &mut report;
@@ -1155,7 +1394,7 @@ impl Agent {
             let longest = &longest_shard_secs;
             let gate =
                 || this.review_shard_dispatch(longest.load(std::sync::atomic::Ordering::Relaxed));
-            let done = |i: usize, attempt: u8, result: &Result<ShardAnswer, String>| {
+            let done = |i: usize, attempt: u8, result: &Result<ShardAnswer, ShardError>| {
                 let refs: Vec<&Slice> = shards[i].iter().map(|&j| &slices[j]).collect();
                 let status = match result {
                     Ok(answer) => {
@@ -1198,7 +1437,7 @@ impl Agent {
                         )
                     }
                     Err(e) => {
-                        let e: String = e.chars().take(200).collect();
+                        let e: String = e.detail.chars().take(200).collect();
                         if attempt == 0 {
                             format!(
                                 "shard {}/{} failed ({e}); re-queued once",
@@ -1227,6 +1466,20 @@ impl Agent {
                 );
                 this.review_shard_progress("review_shard", &detail);
             };
+            let breaker = &mut breaker;
+            let shard_count = shards.len();
+            let trip = |result: &Result<ShardAnswer, ShardError>| {
+                let why = breaker.observe(result.as_ref().map(|_| ()).map_err(|e| e.kind))?;
+                this.review_shard_progress(
+                    "review_shards_breaker",
+                    &format!(
+                        "shard reading stopped ({why}); no new shard of {shard_count} starts, \
+                         calls in flight finish, the main agent reads what is unread with \
+                         file_read"
+                    ),
+                );
+                Some(why)
+            };
             schedule_shards(
                 shards.len(),
                 parallelism,
@@ -1234,6 +1487,7 @@ impl Agent {
                 gate,
                 call,
                 done,
+                trip,
             )
             .await
         };
@@ -1246,6 +1500,15 @@ impl Agent {
         report.retried = totals.retried;
         report.peak_in_flight = totals.peak_in_flight;
         report.stopped = totals.stopped;
+        report.tripped = totals.tripped;
+        report.started = totals.started;
+        (
+            report.failed_format,
+            report.failed_transport,
+            report.failed_timeout,
+            report.reserve_cuts,
+        ) = breaker.failure_counts();
+        debug_assert_eq!(report.tripped.as_deref(), breaker.tripped());
         report.wall_secs = started.elapsed().as_secs();
         report.tokens = self
             .client

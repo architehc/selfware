@@ -518,6 +518,20 @@ unverified). A shard that fails is retried once with thinking off, then its
 files stay unread and the main agent is sent to read them. The main agent
 keeps `file_read` for follow-up and writes the final review.
 
+A circuit breaker stops the shard reading when shards fail systematically —
+the model cannot produce the JSON shard answer, or the endpoint only returns
+errors or times out — instead of running every shard twice: when the first
+N completed attempts all failed (N = twice the parallelism, 4 to 16) or 12
+of the last 16 did. Calls cut at the synthesis reserve do not count. Calls
+in flight finish; nothing new starts; what is unread goes to the main agent
+exactly as for a shard that failed its retry. The recorded healthy reviews
+(125 shards, 6 in parallel) had at most 1 failure at the start and 5 in any
+16 attempts. The run summary says `shard reading stopped after N/M shards:
+<reason>`, the JSON result carries `review_coverage.shards.tripped` and the
+failed attempts by kind (`failed_format`, `failed_transport`,
+`failed_timeout`, `reserve_cuts`), and `stream-json` gets a
+`review_shards_breaker` turn decision.
+
 ```toml
 [review]
 shard_reading = true        # false: the main agent reads every file itself

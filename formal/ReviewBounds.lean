@@ -36,6 +36,19 @@
     the amount calls outrun their estimate (`reserve_by_dispatch_rule`), and
     that is not enough (`dispatch_rule_alone_can_eat_reserve`); the reserve
     cut keeps it for any call durations (`reserve_by_cut`).
+  * RV7 shard circuit breaker: the breaker trips only on evidence — at
+    least min(N, K) ≥ 4 counted failed attempts (`trip_needs_evidence`,
+    `sched_trip_needs_evidence`); reserve cuts never count
+    (`cuts_never_count`, `trip_guard_ignores_cuts`); the exported first
+    trip is where the scheduler's trip guard holds (`firstTrip_sound`); an endpoint that fails every attempt trips it at
+    exactly the N-th (`always_failing_trips_at_n`); the recorded live
+    core-review runs and a failed first wave that recovers never trip it
+    (`live_runs_never_trip`, `transient_burst_never_trips`). A tripped
+    scheduler stays tripped (`tripped_sticky`), starts nothing — a queued
+    shard stays queued or ends not run (`tripped_starts_nothing`) — and its
+    in-flight count only falls (`tripped_in_flight_never_grows`); the cap,
+    none-lost and credit-iff-success results of RV4 hold with the breaker
+    in the scheduler (per-shard machine unchanged).
   * RV6 findings: a recorded finding cites a delivered line inside the span
     where its quote matched; no match, no finding (`recorded_is_grounded`,
     `no_match_unverified`); the pre-fix rule could cite an unread line
@@ -56,8 +69,13 @@
     `review_limit_reached`: the completion-gate step-aside (deadline /
     budget) or `max − used ≤ 3`.
   * A4 `schedule_shards` is modelled per shard plus a global `stopped`
-    flag and the in-flight count; the Rust test drives the real scheduler
-    and folds the observed events through the exported table.
+    flag, a global `tripped` flag, the observed attempt outcomes and the
+    in-flight count; the Rust test drives the real scheduler and folds the
+    observed events through the exported table. The model lets the trip
+    happen at any later step while the evidence holds; the runtime trips at
+    the completion that first satisfies it (one of those behaviours). The
+    breaker's decision is exported per history (`review_breaker_table.json`)
+    and the Rust `ShardBreaker` is checked against it.
   * A5 Time is whole seconds. The reserve cut drops every shard call future
     at K (tokio `timeout_at`), K = phase start + remaining − reserve − 1 s
     (the extra second covers the whole-second floor of the elapsed clock).
@@ -596,6 +614,255 @@ theorem none_lost (s : Shard) (hf : s.flying = false) : (sweepAll s).terminal = 
 theorem sweep_is_step (s : Shard) (hq : s.queued = true) : sstep s .sweep = some (sweepAll s) := by
   cases s <;> simp_all [sweepAll, Shard.queued, sstep]
 
+/-! ## RV7 — the shard circuit breaker
+
+`ShardBreaker` (src/agent/review_shards.rs) watches completed shard
+attempts and stops dispatching when shards fail systematically — an
+endpoint that cannot produce the JSON shard answer, or one that only
+returns errors. Reserve cuts are the harness's own doing and are not
+evidence about the endpoint: they are left out. Two rules, over the
+counted attempts in completion order:
+
+* never worked: the first N all failed, N = min 16 (max 4 (2 · cap)) —
+  two waves of the parallelism, so one failed wave (its calls hit the
+  endpoint at the same moment) is not enough on its own;
+* collapsed: at least K = 12 of the last W = 16 failed.
+
+Measured on the recorded core reviews (125 shards, 6 in parallel): at most
+1 failure at the start of a run and at most 5 in any 16 consecutive
+attempts (`live_runs_never_trip`). -/
+
+inductive Out where
+  | ok | fail | cut
+  deriving DecidableEq, Repr
+
+/-- The attempts the breaker counts, in order: `true` = failed. -/
+def counted : List Out → List Bool
+  | [] => []
+  | .ok :: os => false :: counted os
+  | .fail :: os => true :: counted os
+  | .cut :: os => counted os
+
+def fails : List Bool → Nat
+  | [] => 0
+  | b :: bs => (if b then 1 else 0) + fails bs
+
+/-- N: failed attempts at the start of the phase that trip the breaker. -/
+def streakN (cap : Nat) : Nat := min 16 (max 4 (2 * cap))
+def breakerWindow : Nat := 16
+def breakerFailures : Nat := 12
+
+/-- The breaker's rule on the counted attempts `c` (in completion order). -/
+def tripNow (n : Nat) (c : List Bool) : Bool :=
+  (decide (n ≤ c.length) && (c.take n).all id) ||
+  (decide (breakerWindow ≤ c.length) &&
+    decide (breakerFailures ≤ fails (c.drop (c.length - breakerWindow))))
+
+/-- The 1-based index of the outcome at which the breaker first trips. -/
+def firstTripAux (n : Nat) : Nat → List Bool → List Out → Option Nat
+  | _, _, [] => none
+  | i, c, .ok :: os =>
+    if tripNow n (c ++ [false]) then some (i + 1) else firstTripAux n (i + 1) (c ++ [false]) os
+  | i, c, .fail :: os =>
+    if tripNow n (c ++ [true]) then some (i + 1) else firstTripAux n (i + 1) (c ++ [true]) os
+  | i, c, .cut :: os => firstTripAux n (i + 1) c os
+
+def firstTrip (cap : Nat) (h : List Out) : Option Nat := firstTripAux (streakN cap) 0 [] h
+
+theorem streakN_ge_four (cap : Nat) : 4 ≤ streakN cap := by
+  simp only [streakN]; omega
+
+theorem streakN_le_window (cap : Nat) : streakN cap ≤ breakerWindow := by
+  simp only [streakN, breakerWindow]; omega
+
+theorem fails_drop_le : ∀ (c : List Bool) (k : Nat), fails (c.drop k) ≤ fails c := by
+  intro c
+  induction c with
+  | nil => intro k; simp [fails]
+  | cons b bs ih =>
+    intro k
+    cases k with
+    | zero => simp
+    | succ k => simp only [List.drop, fails]; have := ih k; omega
+
+theorem take_all_fails : ∀ (c : List Bool) (n : Nat), n ≤ c.length →
+    (c.take n).all id = true → n ≤ fails c := by
+  intro c
+  induction c with
+  | nil => intro n h _; simp at h; omega
+  | cons b bs ih =>
+    intro n h hall
+    cases n with
+    | zero => omega
+    | succ m =>
+      simp only [List.take, List.all_cons, Bool.and_eq_true, id] at hall
+      obtain ⟨hb, hrest⟩ := hall
+      have hlen : m ≤ bs.length := by simp only [List.length_cons] at h; omega
+      have := ih m hlen hrest
+      simp [fails, hb]; omega
+
+/-- RV7: a trip needs at least min(N, K) counted failures — at least 4. -/
+theorem trip_needs_evidence (n : Nat) (c : List Bool) (h : tripNow n c = true) :
+    min n breakerFailures ≤ fails c := by
+  simp only [tripNow, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at h
+  rcases h with ⟨hlen, hall⟩ | ⟨_, hk⟩
+  · have := take_all_fails c n hlen hall; omega
+  · have := fails_drop_le c (c.length - breakerWindow); omega
+
+theorem four_le_evidence (cap : Nat) : 4 ≤ min (streakN cap) breakerFailures := by
+  have := streakN_ge_four cap; simp only [breakerFailures]; omega
+
+/-- RV7: reserve cuts never count — dropping every cut from the history
+    changes neither whether nor after how many counted attempts it trips. -/
+theorem cuts_never_count (n : Nat) : ∀ (h : List Out) (i j : Nat) (c : List Bool),
+    (firstTripAux n i c h).isSome = (firstTripAux n j c (h.filter (· != .cut))).isSome := by
+  intro h
+  induction h with
+  | nil => intro i j c; simp [firstTripAux]
+  | cons o os ih =>
+    intro i j c
+    cases o with
+    | cut => simp only [firstTripAux, List.filter_cons]; simpa using ih (i + 1) j c
+    | ok =>
+      simp only [firstTripAux, List.filter_cons]
+      simp only [bne_iff_ne, ne_eq, reduceCtorEq, not_false_eq_true, ↓reduceIte, firstTripAux]
+      split
+      · simp
+      · exact ih (i + 1) (j + 1) _
+    | fail =>
+      simp only [firstTripAux, List.filter_cons]
+      simp only [bne_iff_ne, ne_eq, reduceCtorEq, not_false_eq_true, ↓reduceIte, firstTripAux]
+      split
+      · simp
+      · exact ih (i + 1) (j + 1) _
+
+/-- RV7: a reserve cut adds nothing to what the scheduler's trip guard
+    (`Move.trip`) looks at. -/
+theorem counted_append : ∀ (a b : List Out), counted (a ++ b) = counted a ++ counted b := by
+  intro a
+  induction a with
+  | nil => intro b; simp [counted]
+  | cons o os ih => intro b; cases o <;> simp [counted, ih]
+
+theorem trip_guard_ignores_cuts (n : Nat) (obs : List Out) :
+    tripNow n (counted (obs ++ [.cut])) = tripNow n (counted obs) := by
+  simp [counted_append, counted]
+
+theorem firstTripAux_gt (n : Nat) : ∀ (h : List Out) (i : Nat) (c : List Bool) (k : Nat),
+    firstTripAux n i c h = some k → i < k := by
+  intro h
+  induction h with
+  | nil => intro i c k hk; simp [firstTripAux] at hk
+  | cons o os ih =>
+    intro i c k hk
+    cases o with
+    | cut => have := ih (i + 1) c k (by simpa [firstTripAux] using hk); omega
+    | ok =>
+      simp only [firstTripAux] at hk
+      split at hk
+      · simp at hk; omega
+      · have := ih (i + 1) _ k hk; omega
+    | fail =>
+      simp only [firstTripAux] at hk
+      split at hk
+      · simp at hk; omega
+      · have := ih (i + 1) _ k hk; omega
+
+/-- RV7: the exported first trip is where the scheduler's guard first
+    holds: after the first `k` outcomes, the counted attempts satisfy
+    `tripNow` (the `Move.trip` premise). -/
+theorem firstTrip_sound (n : Nat) : ∀ (h : List Out) (i : Nat) (c : List Bool) (k : Nat),
+    firstTripAux n i c h = some k → tripNow n (c ++ counted (h.take (k - i))) = true := by
+  intro h
+  induction h with
+  | nil => intro i c k hk; simp [firstTripAux] at hk
+  | cons o os ih =>
+    intro i c k hk
+    have hgt := firstTripAux_gt n (o :: os) i c k hk
+    obtain ⟨m, hm⟩ : ∃ m, k - i = m + 1 := ⟨k - i - 1, by omega⟩
+    rw [hm, List.take_succ_cons]
+    cases o with
+    | cut =>
+      have hk' : firstTripAux n (i + 1) c os = some k := by simpa [firstTripAux] using hk
+      have := ih (i + 1) c k hk'
+      have hm' : k - (i + 1) = m := by omega
+      simpa [counted, hm'] using this
+    | ok =>
+      simp only [firstTripAux] at hk
+      split at hk
+      · rename_i ht
+        simp at hk
+        have : m = 0 := by omega
+        subst this
+        simpa [counted] using ht
+      · have := ih (i + 1) _ k hk
+        have hm' : k - (i + 1) = m := by omega
+        simpa [counted, hm'] using this
+    | fail =>
+      simp only [firstTripAux] at hk
+      split at hk
+      · rename_i ht
+        simp at hk
+        have : m = 0 := by omega
+        subst this
+        simpa [counted] using ht
+      · have := ih (i + 1) _ k hk
+        have hm' : k - (i + 1) = m := by omega
+        simpa [counted, hm'] using this
+
+/-- Run-length encoding for the recorded histories below. -/
+def rle : List (Nat × Out) → List Out
+  | [] => []
+  | (k, o) :: rs => List.replicate k o ++ rle rs
+
+/-- Completed attempts of the recorded 125-shard core reviews on
+    llm.selfware.design (6 in parallel), from each run's `review_shard`
+    progress events: 8–12 first-attempt failures, 0–2 double failures,
+    retries clustered at the end (they are queued at the back). -/
+def liveRuns : List (String × List Out) := [
+  ("core_long_1f96", rle [(5, .ok), (1, .fail), (9, .ok), (1, .fail), (16, .ok), (1, .fail),
+    (8, .ok), (1, .fail), (26, .ok), (1, .fail), (4, .ok), (1, .fail), (42, .ok), (1, .fail),
+    (2, .ok), (1, .fail), (10, .ok), (1, .fail), (1, .ok), (1, .fail)]),
+  ("core_long_dcbc", rle [(3, .ok), (1, .fail), (2, .ok), (1, .fail), (7, .ok), (1, .fail),
+    (12, .ok), (1, .fail), (5, .ok), (1, .fail), (3, .ok), (1, .fail), (20, .ok), (1, .fail),
+    (5, .ok), (1, .fail), (57, .ok), (1, .fail), (2, .ok), (1, .fail), (3, .ok), (1, .fail),
+    (5, .ok), (1, .fail), (3, .ok)]),
+  ("core_long_3c7d", rle [(14, .ok), (1, .fail), (21, .ok), (1, .fail), (8, .ok), (1, .fail),
+    (28, .ok), (1, .fail), (16, .ok), (1, .fail), (31, .ok), (1, .fail), (7, .ok), (1, .fail),
+    (1, .ok), (1, .fail), (1, .ok), (2, .fail), (1, .ok)]),
+  ("core_long_2744", rle [(8, .ok), (1, .fail), (1, .ok), (1, .fail), (6, .ok), (1, .fail),
+    (23, .ok), (1, .fail), (5, .ok), (1, .fail), (3, .ok), (2, .fail), (14, .ok), (1, .fail),
+    (8, .ok), (1, .fail), (18, .ok), (1, .fail), (23, .ok), (1, .fail), (16, .ok)]),
+  ("core_long_90a7", rle [(3, .ok), (1, .fail), (2, .ok), (1, .fail), (8, .ok), (2, .fail),
+    (14, .ok), (1, .fail), (23, .ok), (1, .fail), (41, .ok), (1, .fail), (21, .ok),
+    (1, .fail), (13, .ok)]),
+  -- The small reviews' only failure pattern: one shard, retried once.
+  ("one_shard_retried", rle [(1, .fail), (1, .ok)])]
+
+/-- RV7: no recorded healthy run trips the breaker, at any parallelism. -/
+theorem live_runs_never_trip :
+    ∀ cap, cap < 9 → ∀ r ∈ liveRuns, firstTrip cap r.2 = none := by decide +kernel
+
+/-- RV7: an endpoint that fails every attempt trips the breaker at exactly
+    the N-th attempt, for every N the parallelism can give. -/
+theorem always_failing_trips_at_n :
+    ∀ n, n < 17 → 4 ≤ n → firstTripAux n 0 [] (List.replicate (n + 20) .fail) = some n := by
+  decide +kernel
+
+/-- RV7: a whole failed first wave (6 in parallel, a transient endpoint
+    fault) whose retries and followers then succeed never trips; neither
+    does one failure in two, sustained. -/
+theorem transient_burst_never_trips :
+    firstTrip 6 (rle [(6, .fail), (60, .ok), (6, .ok)]) = none ∧
+    firstTrip 6 (rle [(3, .ok), (8, .fail), (60, .ok)]) = none ∧
+    firstTrip 6 ((List.range 60).map (fun i => if i % 2 = 0 then .fail else .ok)) = none := by
+  decide +kernel
+
+/-- …while an endpoint that collapses mid-run trips once 12 of the last 16
+    attempts failed. -/
+theorem collapse_trips :
+    firstTrip 6 (rle [(40, .ok), (30, .fail)]) = some 52 := by decide +kernel
+
 /-! ### The concurrency cap over all shards -/
 
 def fl (s : Shard) : Nat := if s.flying then 1 else 0
@@ -625,26 +892,40 @@ theorem nFlying_setAt : ∀ (ss : List Shard) (i : Nat) (s t : Shard), getAt ss 
     | zero => simp [getAt] at h; subst h; simp [setAt, nFlying]; omega
     | succ i => simp [getAt] at h; simp [setAt, nFlying]; have := ih i s t h; omega
 
-/-- The scheduler: every shard's state, and whether dispatching stopped. -/
+/-- The scheduler: every shard's state, whether dispatching stopped
+    (budget, deadline, reserve, cancel), whether the breaker tripped, and
+    the outcomes of the attempts completed so far. -/
 structure Sched where
   shards : List Shard
   stopped : Bool
+  tripped : Bool
+  obs : List Out
+
+/-- What a completed attempt tells the breaker: `ok`; an error, or a
+    reserve cut (`cut`, not counted). -/
+def outcomeOk (e : SEvent) (o : Out) : Prop :=
+  (e = .ok ∧ o = .ok) ∨ (e = .err ∧ (o = .fail ∨ o = .cut))
 
 /-- `schedule_shards`' moves. A dispatch needs a free slot (`in_flight.len()
-    < parallelism`) and no stop; a stop (budget, deadline, reserve) only
-    ends dispatching; an abort drops everything in flight; the end sweep
-    runs once nothing is in flight. -/
+    < parallelism`), no stop and no trip; a stop (budget, deadline, reserve)
+    only ends dispatching; the breaker trips only while its rule holds on
+    the outcomes seen, and also only ends dispatching; an abort drops
+    everything in flight; the end sweep runs once nothing is in flight. -/
 inductive Move (cap : Nat) : Sched → Sched → Prop
   | dispatch (S : Sched) (i : Nat) (s t : Shard) :
-      S.stopped = false → nFlying S.shards < cap → getAt S.shards i = some s →
-      sstep s .dispatch = some t → Move cap S ⟨setAt S.shards i t, S.stopped⟩
-  | finish (S : Sched) (i : Nat) (s t : Shard) (e : SEvent) :
-      (e = .ok ∨ e = .err) → getAt S.shards i = some s → sstep s e = some t →
-      Move cap S ⟨setAt S.shards i t, S.stopped⟩
-  | stop (S : Sched) : Move cap S ⟨S.shards, true⟩
+      S.stopped = false → S.tripped = false → nFlying S.shards < cap →
+      getAt S.shards i = some s → sstep s .dispatch = some t →
+      Move cap S ⟨setAt S.shards i t, S.stopped, S.tripped, S.obs⟩
+  | finish (S : Sched) (i : Nat) (s t : Shard) (e : SEvent) (o : Out) :
+      outcomeOk e o → getAt S.shards i = some s → sstep s e = some t →
+      Move cap S ⟨setAt S.shards i t, S.stopped, S.tripped, S.obs ++ [o]⟩
+  | stop (S : Sched) : Move cap S ⟨S.shards, true, S.tripped, S.obs⟩
+  | trip (S : Sched) : tripNow (streakN cap) (counted S.obs) = true →
+      Move cap S ⟨S.shards, S.stopped, true, S.obs⟩
   | abort (S : Sched) :
-      Move cap S ⟨S.shards.map (fun s => if s.flying then .notRun else s), true⟩
-  | sweep (S : Sched) : nFlying S.shards = 0 → Move cap S ⟨S.shards.map sweepAll, S.stopped⟩
+      Move cap S ⟨S.shards.map (fun s => if s.flying then .notRun else s), true, S.tripped, S.obs⟩
+  | sweep (S : Sched) : nFlying S.shards = 0 →
+      Move cap S ⟨S.shards.map sweepAll, S.stopped, S.tripped, S.obs⟩
 
 theorem nFlying_map_abort : ∀ ss : List Shard,
     nFlying (ss.map (fun s => if s.flying then .notRun else s)) = 0 := by
@@ -661,18 +942,103 @@ theorem nFlying_map_sweep : ∀ ss : List Shard, nFlying (ss.map sweepAll) = nFl
 theorem cap_invariant (cap : Nat) (S S' : Sched) (hm : Move cap S S')
     (h : nFlying S.shards ≤ cap) : nFlying S'.shards ≤ cap := by
   cases hm with
-  | dispatch i s t _ hlt hg hst =>
+  | dispatch i s t _ _ hlt hg hst =>
     have := nFlying_setAt S.shards i s t hg
     simp only
     cases s <;> cases t <;> simp [sstep] at hst <;> simp [fl, Shard.flying] at this hlt ⊢ <;> omega
-  | finish i s t e he hg hst =>
+  | finish i s t e o he hg hst =>
     have := nFlying_setAt S.shards i s t hg
     simp only
-    rcases he with he | he <;> subst he <;>
+    rcases he with ⟨he, _⟩ | ⟨he, _⟩ <;> subst he <;>
       cases s <;> cases t <;> simp [sstep] at hst <;> simp [fl, Shard.flying] at this ⊢ <;> omega
   | stop => exact h
+  | trip _ => exact h
   | abort => simp [nFlying_map_abort]
   | sweep _ => simp [nFlying_map_sweep]; exact h
+
+/-- RV7: the breaker trips only on evidence — at least min(N, K) ≥ 4
+    counted failed attempts (`four_le_evidence`); cuts are not counted. -/
+theorem sched_trip_needs_evidence (cap : Nat) (S S' : Sched) (hm : Move cap S S')
+    (h0 : S.tripped = false) (h1 : S'.tripped = true) :
+    min (streakN cap) breakerFailures ≤ fails (counted S.obs) := by
+  cases hm with
+  | trip ht => exact trip_needs_evidence _ _ ht
+  | dispatch => simp_all
+  | finish => simp_all
+  | stop => simp_all
+  | abort => simp_all
+  | sweep => simp_all
+
+/-- RV7: once tripped, always tripped. -/
+theorem tripped_sticky (cap : Nat) (S S' : Sched) (hm : Move cap S S')
+    (h : S.tripped = true) : S'.tripped = true := by
+  cases hm <;> simp_all
+
+theorem getAt_setAt_other : ∀ (ss : List Shard) (i j : Nat) (t : Shard), j ≠ i →
+    getAt (setAt ss j t) i = getAt ss i := by
+  intro ss
+  induction ss with
+  | nil => intro i j t _; simp [setAt, getAt]
+  | cons x ss ih =>
+    intro i j t hne
+    cases j with
+    | zero => cases i with
+      | zero => exact absurd rfl hne
+      | succ i => simp [setAt, getAt]
+    | succ j => cases i with
+      | zero => simp [setAt, getAt]
+      | succ i => simp only [setAt, getAt]; exact ih i j t (by omega)
+
+theorem getAt_map (f : Shard → Shard) : ∀ (ss : List Shard) (i : Nat),
+    getAt (ss.map f) i = (getAt ss i).map f := by
+  intro ss
+  induction ss with
+  | nil => intro i; simp [getAt]
+  | cons x ss ih => intro i; cases i <;> simp [getAt, ih]
+
+/-- RV7: a tripped scheduler starts nothing: a queued shard (a first
+    attempt or a queued retry) stays queued, or the end sweep marks it not
+    run. Calls already in flight may still finish. -/
+theorem tripped_starts_nothing (cap : Nat) (S S' : Sched) (hm : Move cap S S')
+    (h : S.tripped = true) (i : Nat) (s : Shard) (hg : getAt S.shards i = some s)
+    (hq : s.queued = true) :
+    getAt S'.shards i = some s ∨ getAt S'.shards i = some .notRun := by
+  cases hm with
+  | dispatch => simp_all
+  | finish j s0 t0 e o he hg0 hst =>
+    left
+    simp only
+    by_cases hij : j = i
+    · subst hij
+      rw [hg] at hg0
+      cases hg0
+      rcases he with ⟨he, _⟩ | ⟨he, _⟩ <;> subst he <;> cases s <;> simp_all [sstep, Shard.queued]
+    · rw [getAt_setAt_other _ _ _ _ hij]; exact hg
+  | stop => left; exact hg
+  | trip _ => left; exact hg
+  | abort =>
+    left
+    simp only [getAt_map, hg, Option.map_some]
+    cases s <;> simp_all [Shard.queued, Shard.flying]
+  | sweep _ =>
+    right
+    simp only [getAt_map, hg, Option.map_some]
+    cases s <;> simp_all [Shard.queued, sweepAll]
+
+/-- RV7: once tripped, the number of calls in flight never grows. -/
+theorem tripped_in_flight_never_grows (cap : Nat) (S S' : Sched) (hm : Move cap S S')
+    (h : S.tripped = true) : nFlying S'.shards ≤ nFlying S.shards := by
+  cases hm with
+  | dispatch => simp_all
+  | finish i s t e o he hg hst =>
+    have := nFlying_setAt S.shards i s t hg
+    simp only
+    rcases he with ⟨he, _⟩ | ⟨he, _⟩ <;> subst he <;>
+      cases s <;> cases t <;> simp [sstep] at hst <;> simp [fl, Shard.flying] at this ⊢ <;> omega
+  | stop => exact Nat.le_refl _
+  | trip _ => exact Nat.le_refl _
+  | abort => simp [nFlying_map_abort]
+  | sweep _ => simp [nFlying_map_sweep]
 
 /-- RV4 (none lost, whole phase): after the end sweep with nothing in
     flight, every shard is terminal. -/
@@ -938,8 +1304,35 @@ def gateRows : List String := Id.run do
                   if g'.last = g.last then "unchanged" else "covered"]]
   return rows
 
+def Out.code : Out → String
+  | .ok => "o" | .fail => "x" | .cut => "c"
+
+def histCode (h : List Out) : String := String.join (h.map Out.code)
+
+/-- Histories the Rust `ShardBreaker` is checked against, each at several
+    parallelisms: the recorded runs, and the shapes that must (not) trip. -/
+def breakerHistories : List (String × List Out) :=
+  liveRuns ++ [
+    ("always_fails", List.replicate 40 .fail),
+    ("always_fails_with_cuts", rle [(1, .cut), (3, .fail), (2, .cut), (40, .fail)]),
+    ("only_cuts", List.replicate 40 .cut),
+    ("first_wave_fails_then_recovers", rle [(6, .fail), (60, .ok)]),
+    ("first_ok_then_fails", rle [(1, .ok), (40, .fail)]),
+    ("collapse_mid_run", rle [(40, .ok), (30, .fail)]),
+    ("collapse_with_cuts", rle [(40, .ok), (5, .fail), (10, .cut), (25, .fail)]),
+    ("half_fail", (List.range 60).map (fun i => if i % 2 = 0 then .fail else .ok)),
+    ("three_in_four_fail", (List.range 60).map (fun i => if i % 4 = 3 then .ok else .fail)),
+    ("eleven_of_sixteen", rle [(20, .ok), (11, .fail), (5, .ok), (11, .fail), (5, .ok)])]
+
+def breakerRows : List String :=
+  breakerHistories.foldr (fun (name, h) acc =>
+    [1, 2, 3, 6, 8, 32].foldr (fun cap acc2 =>
+      row [toString cap, name, histCode h,
+        match firstTrip cap h with | some k => toString k | none => "none"] :: acc2) acc) []
+
 def exportTables : String :=
-  "{\"shard\":[" ++ ",".intercalate shardRows ++ "],\"gate\":[" ++ ",".intercalate gateRows ++ "]}"
+  "{\"shard\":[" ++ ",".intercalate shardRows ++ "],\"gate\":[" ++ ",".intercalate gateRows ++
+  "],\"breaker\":[" ++ ",".intercalate breakerRows ++ "]}"
 
 end Review
 
