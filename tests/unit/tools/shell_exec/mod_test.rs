@@ -58,12 +58,14 @@ async fn test_shell_exec_accepts_cmd_alias() {
 async fn registered_shell_exec_timeout_reaps_process_group() {
     // The REGISTERED shell tool must reap the whole tree on timeout — a
     // backgrounded grandchild (`sleep 30 &`) must be killed, not orphaned.
+    // 3s (not 1s): the shell must have written the pid before the timeout
+    // kills it, even on a loaded CI runner.
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("gc.pid");
     let tool = ShellExec;
     let args = serde_json::json!({
         "command": format!("sleep 30 & echo $! > {}; wait", pidfile.display()),
-        "timeout_secs": 1
+        "timeout_secs": 3
     });
     let start = std::time::Instant::now();
     let result = tool.execute(args).await.unwrap();
@@ -99,21 +101,30 @@ async fn registered_shell_exec_future_cancellation_reaps_process_group() {
     });
     let mut fut = Box::pin(tool.execute(args));
 
-    for _ in 0..50 {
-        if pidfile.exists() {
-            break;
+    // `echo $! > file` creates (truncates) the file before it writes the
+    // pid, so "the file exists" can still read as empty (seen on a loaded
+    // CI runner: `ParseIntError { kind: Empty }`). Drive the future until
+    // the file holds a whole pid, bounded; the command sleeps 60s, so it
+    // finishing first is itself a failure.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let gc_pid: i32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .filter(|s| s.ends_with('\n'))
+            .and_then(|s| s.trim().parse().ok())
+        {
+            break pid;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "grandchild never wrote its pid within 30s: {:?}",
+            std::fs::read_to_string(&pidfile)
+        );
         tokio::select! {
-            _ = &mut fut => {}
+            r = &mut fut => panic!("the 60s command finished before it was cancelled: {r:?}"),
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
-    }
-
-    let gc_pid: i32 = std::fs::read_to_string(&pidfile)
-        .expect("grandchild wrote its pid")
-        .trim()
-        .parse()
-        .expect("valid pid");
+    };
 
     // Cancel / drop the future mid-execution
     drop(fut);
