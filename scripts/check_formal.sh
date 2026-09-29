@@ -76,7 +76,7 @@ fi
 echo "check_formal: no sorry/admit/axiom/native_decide/unsafe in formal/*.lean"
 
 # Models without an exported table: every theorem must re-prove.
-for model in WorkflowBounds.lean SafetyBounds.lean; do
+for model in WorkflowBounds.lean SafetyBounds.lean EvolutionBounds.lean; do
     echo "check_formal: lean formal/${model}"
     lean "${FORMAL}/${model}"
 done
