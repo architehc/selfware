@@ -435,6 +435,29 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.6
+
+0.9.6 makes repository review fast and grounded. The full list is in
+[CHANGELOG.md](CHANGELOG.md):
+
+- **Parallel review reading.** Reviews read their reading plan in parallel
+  shards: a full review of selfware's ~320-file core read 100% of lines
+  and answered in 1.37 h (0.9.4: 59% in 3.9 h), with 0 wrong citations. A
+  time reserve guarantees the answer; a circuit breaker stops wasted calls
+  on a failing endpoint.
+- **Citations checked against the quoted code.** A citation whose quote
+  sits at another line is caught and corrected; verified shard findings
+  carry their proof into the answer.
+- **Proved in Lean.** The review pipeline, the agent loop, the completion
+  gate, path/redaction safety and evolution arms are modelled and proved,
+  with every table checked against the Rust code; the proofs found and
+  fixed six real bugs.
+- **Quieter chat.** "hi" and "thanks" are answered without tools.
+- **Security.** Recursive reads of denied files, git programs in model
+  shells, and bracket special tokens are closed.
+- **Opt-in:** `[agent] done_check` (verified "are you done?") and
+  `selfware evolve --workflow arms` (quarantined candidate comparison).
+
 ## What's New in 0.9.5
 
 0.9.5 is a security release. **Upgrade if you run selfware on repositories

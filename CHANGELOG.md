@@ -5,52 +5,147 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.6] - 2026-09-29
+
+Repository review gets fast and grounded: the reading plan is read by
+parallel shards, a full ~320-file review completes with an answer, and
+citations are checked against the code they quote. The review pipeline is
+now proved in Lean, and the proofs found and fixed real bugs. Greetings no
+longer trigger tools, and the remaining 0.9.5 security known issues are
+closed.
 
 ### Added
-- **Done-check** (`src/agent/done_check.rs`), **off by default**
-  (`[agent] done_check = true` turns it on; off, a run behaves exactly as in
-  0.9.5). Live c24 runs showed honest verdicts but no pass-rate gain, so it
-  ships for measurement. When on: when the finish stall is detected, in the
-  last 3 iterations of a budget of at least 12, at the deadline/budget
-  wrap-up and at the iteration cap, the agent asks the model "are you done?" in one short side
-  request (thinking off, the `planning` quota's toggle) and gets a JSON
-  verdict per requirement (the task's numbered/bulleted steps, else the
-  whole task). The verdict is never trusted: each requirement marked met
-  needs evidence the harness recorded itself (a file a successful call
-  changed, a check that passed after the last change, a file read, the
-  final answer), and DONE is not verified while no file changed, a check
-  fails on the current tree or audit findings are open. A verified DONE
-  ends the run with the checked answer once it clears the completion gate;
-  otherwise one message names the unverified claims or the remaining work.
-  At most 3 per task, 3 turns apart. The run summary prints
-  `done-check: N asked (…); verified DONE at turn X …` and the headless
-  result carries `done_check`; every check is a `done_check` turn decision.
-  The check's prompt goes through the model-facing redactor.
-- **Live harness config variants**: a scenario can `extend` another with a
-  `config_set` (`c24-done-check`, `edit-tests-done-check` turn the
-  done-check on; the loop rotates them next to the plain scenarios, the
-  release gate skips them via `"gate": false`), and `run.py run
-  --config-set agent.done_check=true` does the same ad hoc under the name
-  `<scenario>+agent.done_check=true`. Records carry `config_set`; the
-  report counts done-checks as interventions (`done_checks`).
+- **Parallel shard reading for reviews.** A review's reading plan is split
+  into token-sized shards (big files by line range) and read by up to 6
+  parallel side calls, each returning findings with quoted evidence.
+  Coverage is credited through the same byte-faithful path as `file_read`,
+  only when a shard returns successfully. On the selfware core (~320
+  files) coverage went from 59% of lines in 3.9 h (0.9.4) to 100% in
+  1.37 h with an answer, 162 citations verified and 0 wrong (one run;
+  shared endpoint). `[review] shard_reading = false` restores 0.9.4
+  behaviour.
+  - A synthesis reserve stops new shards, and cuts running ones, when the
+    time left reaches what the final answer needs, so a review never runs
+    out of time before answering (it ends PARTIAL instead).
+  - A circuit breaker stops shard reading when shards fail systematically
+    (the first 12 attempts all failed, or 12 of the last 16, at 6
+    parallel; reserve cuts never count) and hands the unread plan to the
+    main loop. A dead endpoint now costs at most 17 calls instead of 324.
+  - The main agent is told not to re-read shard-covered files; the first
+    broad re-read returns the shard's note.
+- **Done-check (off by default).** `[agent] done_check = true` asks the
+  model once, cheaply, whether the task is done and verifies every "met"
+  claim against the harness's own evidence (changed files, checks on the
+  current tree, citations, coverage). Off, behaviour is identical to 0.9.5
+  (tested). The live harness runs every scenario with it on and off.
+- **Formal models.** `formal/ReviewBounds.lean` proves the review pipeline
+  (coverage monotone and honest, gate termination, shard scheduling and
+  breaker, the answer reserve, grounded findings), plus
+  `HarnessLoopBounds`, `VerificationGateBounds`, `SafetyBounds` and
+  `EvolutionBounds`. Every exported table is checked against the real Rust
+  functions, two tables run as runtime oracles, and `check_formal.sh`
+  rejects `sorry`, `admit`, `axiom`, `native_decide` and `unsafe`.
+- **Evolution arms (opt-in, `selfware evolve --workflow arms`).** Compares
+  candidate implementations in quarantined snapshots: each arm builds and
+  tests from a `git archive` snapshot with its own HOME, Cargo and Rust
+  homes, target dir, trimmed PATH, sanitized environment, neutralised git
+  and process-group kill; `--arm-sandbox` adds a macOS sandbox. Includes
+  AST scaffolding and a bounded compiler-suggestion repair loop.
+- **Stale-citation refresh.** When the agent edits a file that its own
+  notes cite, it is told once which references moved and where they are
+  now ("docs/NOTES.md cites context.rs:96 `compression_threshold` — now at
+  :100 after your edit").
 
 ### Fixed
-- **Review shard circuit breaker** (`ShardBreaker`, `src/agent/review_shards.rs`):
-  the 0.9.6 gate saw an endpoint answering "done" to everything run all 162
-  review shards twice (324 calls, every answer "not the JSON object asked
-  for") before the main loop started. The shard reader now stops
-  dispatching when shards fail systematically: the first N completed
-  attempts all failed (N = 2 × parallelism, 4–16) or 12 of the last 16 did;
-  reserve cuts are not counted. Thresholds from the recorded core reviews
-  (at most 1 failure at the start, at most 5 in any 16 attempts). In-flight
-  calls finish, nothing extra is credited, and the unread plan goes to the
-  main agent's `file_read` under the coverage gate. The summary says
-  `shard reading stopped after N/M shards: <reason>` (format vs. endpoint
-  failures named); JSON `review_coverage.shards.tripped` plus failure counts
-  by kind; `review_shards_breaker` in stream-json. Modelled in
-  formal/ReviewBounds.lean (RV7) with a new exported
-  `review_breaker_table.json` the Rust breaker is checked against.
+- **Citations are checked against the code they quote.** A fenced block
+  under a citation is now its quote (0.9.2 only looked at inline code on
+  the same line, so reviews showed "location-only" for correct
+  citations). A quote that sits at a different, unique line makes the
+  citation wrong and triggers the correction round. A citation matching a
+  shard-verified finding counts as verified only while the file is
+  unchanged, and is reported separately. Live slugify reviews: verified
+  citations per run 0,0,0 → 2,3,6, wrong 0.
+- **Bugs found by the proofs.**
+  - A first-wave shard could eat the answer's time before any call had
+    been measured (now cut at the reserve).
+  - A finding could cite a line no shard read (a quote matched across two
+    slices).
+  - A scope of only unreadable files could end ✅ (now 0%, PARTIAL).
+  - Path normalization dropped the root on `..`: `/ws/../../etc/passwd`
+    became `etc/passwd`, then resolved against the process directory.
+  - Redaction was not idempotent (a second pass mangled markers).
+  - Past the iteration cap, a genuine failure could be relabelled as a
+    resumable budget stop.
+- **Greetings.** "hi", "thanks" and "what can you do?" are answered without
+  tools (4/4 live; tools were called in about 2 of 3 runs before).
+- **Security (0.9.5 known issues).**
+  - Recursive readers (`grep -r`, `rg -uu`, `find -exec`, `cp -r`, …) are
+    refused when their search root contains a denied or sensitive file; in
+    headless mode the model gets a tool error pointing to `grep_search`
+    instead of the run stopping.
+  - Git commands the model runs in `shell_exec`, `pty_shell`, managed
+    processes and workflow steps are neutralised through `GIT_CONFIG_*` in
+    untrusted repositories (fsmonitor, hooks, pager, external diff,
+    textconv, filters), including nested scripts.
+  - Bracket-style special tokens (`[INST]`, `[TOOL_CALLS]`, …) in tool
+    output are neutralised, reversibly.
+  - A review scope with an unreadable file is PARTIAL, never complete.
+  - `introspect`'s impact analysis no longer reads denied files.
+- **Evolution code review fixes** (derive injection matched by substring,
+  compiler fixes applied twice or at wrong byte offsets, rustc paths that
+  could rewrite files outside the project, a runner that never ran arms
+  and could panic on a NaN score).
+- **Live-eval harness.** The agent under test sees only the harness
+  toolchain and system directories on PATH.
+
+### Behaviour changes to know when upgrading
+- Reviews read with parallel shards by default; `[review] shard_reading =
+  false` turns it off.
+- In an untrusted repository, a `git commit` the model runs through the
+  shell no longer runs the repository's hooks (as for the git tools since
+  0.9.5).
+- `grep -r pattern .` at a repository root is refused headless (it would
+  read `.git/config`); the model is pointed to `grep_search`.
+- `OptimizationArm.proposed_patch` is now `proposed_source` (the old name
+  still loads).
+
+### Known issues
+- c24 (24k-window documentation task) still does not pass on this
+  endpoint; the model often never writes the notes file.
+- Shard reading time depends on endpoint load: 1.37 h in the measured
+  core review, up to ~1.9 h when the endpoint is busier.
+- Git attribute filters and `diff.external` in a repository other than the
+  shell's starting one are not neutralised for model shells; a command
+  can deliberately undo the `GIT_CONFIG_*` settings.
+- Without `--arm-sandbox` (macOS only), evolution arm code can still write
+  to absolute paths or open sockets; there is no Linux sandbox.
+- `restore_budget_extension` trusts the iteration cap stored in a
+  checkpoint.
+
+### Review notes (AGENTS.md rule 2)
+These change or loosen checks or visible behaviour. Each has maintainer
+sign-off, given in the review conversation, and each is noted in its
+commit message:
+- **Security tightening:** a shell `git commit` in an untrusted repository
+  skips its hooks; recursive reads of a root holding a denied file are
+  refused (the pinned `rg -n x .` case moved to must-not-pass; headless
+  mode returns a tool error); the unreadable-file coverage test now
+  asserts PARTIAL; the neutral `GIT_CONFIG` values became working
+  stand-ins (`diff -u`, `cat`) because empty values make git fail.
+- **Proof restatements:** theorems imported from an earlier draft were
+  corrected to match the code (L1 resume paths, L4 below cap 4, L5, V1's
+  waiver as accept-without-credit, V4 as a bound). Two answer-guard
+  assertions now expect "caught"; the path-normalization test expects `/`;
+  the endpoint test accepts the `qwen3_coder` parser; draft loop tests were
+  replaced by conformance tests against the real loop.
+- **Review behaviour:** shard reading is on by default; shards are cut at
+  the answer reserve (PARTIAL instead of no answer); a line-mismatched
+  finding is moved, not verified; a quote found at another unique line
+  makes the citation wrong (one assertion changed, stricter). Mock test
+  configurations turn shard reading off.
+- **Live-eval scorer:** the independent citation check splits findings
+  per citation and takes each quote from its own part, removing false
+  "wrong" verdicts and catching real ones the old scorer missed.
 
 ## [0.9.5] - 2026-09-28
 
