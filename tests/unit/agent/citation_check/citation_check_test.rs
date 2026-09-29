@@ -1405,12 +1405,28 @@ fn quote_outcomes_are_verified_location_only_or_wrong() {
         check(&mut r, "src/lib.rs:184 `unwrap() … char::from_u32`"),
         CitationVerdict::LocationVerified { .. }
     ));
-    // Present in the file but not at the cited lines: a near miss or a
-    // paraphrase is not evidence either way — location-only, never wrong.
-    assert!(matches!(
-        check(&mut r, "src/lib.rs:600 `self.line_buf[0]`"),
-        CitationVerdict::LocationVerified { .. }
-    ));
+    // The exact quoted code is in the file, only at another line: the
+    // citation does not point at the code it quotes — wrong, with where the
+    // code is (0.9.6: before, this was location-only and a quote at the
+    // wrong line never reached the correction round).
+    let v = check(&mut r, "src/lib.rs:600 `self.line_buf[0]`");
+    assert_eq!(
+        v,
+        CitationVerdict::WrongLine {
+            file: "src/lib.rs".into(),
+            actual_line: 795
+        }
+    );
+    let described = CheckedCitation {
+        citation: parse_citations("src/lib.rs:600 `self.line_buf[0]`").remove(0),
+        verdict: v,
+        source: ANSWER_SOURCE.to_string(),
+    }
+    .describe();
+    assert!(
+        described.contains("quotes code that is at src/lib.rs:795"),
+        "{described}"
+    );
     // Paraphrase whose names exist in the file: location-only.
     assert!(matches!(
         check(&mut r, "src/lib.rs:795 `line_buf.first()`"),
@@ -1586,4 +1602,368 @@ fn citation_requests_are_detected_from_the_task_wording() {
     ] {
         assert!(!task_requests_citations(plain), "{plain}");
     }
+}
+
+// ── 0.9.6 live shapes (llm.selfware.design, review-slugify) ─────────────
+
+/// A slugify-shaped workspace with the lines the live answers cite (and the
+/// lines the harness mis-pinned: a docstring naming `slugify/slugify.py` at
+/// `_legacy.py:5`, the `not in` test at `special.py:13`) at their real
+/// positions.
+fn slugify_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pkg = dir.path().join("slugify");
+    fs::create_dir_all(&pkg).unwrap();
+    let write = |name: &str, lines: usize, at: &[(usize, &str)]| {
+        fs::write(pkg.join(name), fixture_file(lines, at)).unwrap();
+    };
+    write(
+        "_legacy.py",
+        200,
+        &[
+            (
+                5,
+                "change. All improvements belong in the modern path (slugify/slugify.py).",
+            ),
+            (20, "DECIMAL_PATTERN = re.compile(r'&#(\\d+);')"),
+            (21, "HEX_PATTERN = re.compile(r'&#x([\\da-fA-F]+);')"),
+            (22, "QUOTE_PATTERN = re.compile(r\"[']+\")"),
+            (
+                150,
+                "        excluded = [word.lower() for word in stopwords] if lowercase else stopwords",
+            ),
+            (
+                151,
+                "        words = [w for w in words if w not in excluded]",
+            ),
+        ],
+    );
+    write(
+        "special.py",
+        55,
+        &[
+            (
+                4,
+                "def add_uppercase_char(char_list: list[tuple[str, str]]) -> list[tuple[str, str]]:",
+            ),
+            (12, "        upper_dict = char.upper(), xlate.capitalize()"),
+            (
+                13,
+                "        if upper_dict not in char_list and char != upper_dict[0]:",
+            ),
+            (14, "            insertions.append(upper_dict)"),
+            (17, "    for upper_dict in insertions:"),
+            (18, "        char_list.insert(0, upper_dict)"),
+            (20, "    return char_list"),
+        ],
+    );
+    write(
+        "__main__.py",
+        112,
+        &[
+            (53, "    args = parser.parse_args(argv[1:])"),
+            (55, "    if args.input_string and args.stdin:"),
+            (
+                56,
+                "        parser.error(\"Input strings and --stdin cannot work together\")",
+            ),
+        ],
+    );
+    write("slugify.py", 219, &[]);
+    dir
+}
+
+/// Live runs 20260929T030417Z-2391 / 20260929T031448Z-6de8: every finding
+/// was "**`path:line`**" with the cited code in a fenced block below it.
+/// The 0.9.2 quote rule only looked at the citation's own line, so all were
+/// "location-only (content not checked)" — 0 verified on correct citations.
+/// The block is the citation's quote now: at the cited line → verified.
+#[tokio::test]
+async fn fenced_block_below_a_citation_is_its_quote_and_verifies() {
+    let text = include_str!("fixtures/slugify_review_2391.md");
+    let parsed = parse_citations(text);
+    let quoted: Vec<(String, usize, Option<&str>)> = parsed
+        .iter()
+        .filter(|c| c.path.contains(".py"))
+        .map(|c| (c.path.clone(), c.start, c.quote.as_deref()))
+        .collect();
+    assert_eq!(
+        quoted,
+        vec![
+            (
+                "slugify/_legacy.py".into(),
+                150,
+                Some("excluded = [word.lower() for word in stopwords] if lowercase else stopwords")
+            ),
+            (
+                "slugify/_legacy.py".into(),
+                21,
+                Some("HEX_PATTERN = re.compile(r'&#x([\\da-fA-F]+);')")
+            ),
+            // The quoted line is 55: within the ± tolerance of 53.
+            (
+                "slugify/__main__.py".into(),
+                53,
+                Some("if args.input_string and args.stdin:")
+            ),
+        ],
+        "{parsed:#?}"
+    );
+
+    let ws = slugify_workspace();
+    for fixture in [
+        include_str!("fixtures/slugify_review_2391.md"),
+        include_str!("fixtures/slugify_review_6de8.md"),
+    ] {
+        let mut agent = gate_agent(ws.path()).await;
+        answer(&mut agent, 1, fixture);
+        assert_eq!(agent.citation_gate(true), None);
+        let status = agent.grounding_status().expect("status recorded");
+        assert_eq!(status.problem_count(), 0, "{status:?}");
+        // Each fenced-block citation is content-verified (2391: 3 blocks,
+        // 6de8: 2), none location-only.
+        let blocks = parse_citations(fixture)
+            .iter()
+            .filter(|c| c.quote.is_some())
+            .count();
+        assert!(blocks >= 2, "{blocks}");
+        assert_eq!(status.verified, blocks, "{status:?}");
+        assert_eq!(status.total, blocks, "{status:?}");
+        assert_eq!(status.shard_verified, 0);
+    }
+}
+
+/// The two harness "wrong" cases, made actually wrong: the fenced block
+/// quotes code that is at another line than cited. The citation is wrong
+/// ("quotes code that is at …"), goes through the bounded correction round,
+/// and the corrected answer is accepted.
+#[tokio::test]
+async fn fenced_quote_at_another_line_is_wrong_and_corrected() {
+    let ws = slugify_workspace();
+    let wrong = "### Low\n\n**`slugify/_legacy.py:5`**\n```python\n\
+                 HEX_PATTERN = re.compile(r'&#x([\\da-fA-F]+);')\n```\nMisses `&#X41;`.\n\n\
+                 **2. `slugify/special.py:13`**\n\n```python\nchar_list.insert(0, upper_dict)\n```\n\
+                 Reverses the order.\n";
+    let mut agent = gate_agent(ws.path()).await;
+    answer(&mut agent, 1, wrong);
+    let directive = agent
+        .citation_gate(true)
+        .expect("a quote at another line blocks completion");
+    assert!(
+        directive.contains("quotes code that is at slugify/_legacy.py:21"),
+        "{directive}"
+    );
+    assert!(
+        directive.contains("quotes code that is at slugify/special.py:18"),
+        "{directive}"
+    );
+    let status = agent.grounding_status().expect("status");
+    assert_eq!((status.wrong_line, status.verified), (2, 0), "{status:?}");
+
+    let fixed = wrong
+        .replace("_legacy.py:5", "_legacy.py:21")
+        .replace("special.py:13", "special.py:18");
+    answer(&mut agent, 2, &fixed);
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("status");
+    assert_eq!(
+        (status.total, status.verified, status.problem_count()),
+        (2, 2, 0),
+        "{status:?}"
+    );
+    assert_eq!(status.correction_rounds, 1);
+}
+
+#[test]
+fn fenced_quote_association_rules() {
+    let q = |text: &str| {
+        parse_citations(text)
+            .into_iter()
+            .map(|c| c.quote)
+            .collect::<Vec<_>>()
+    };
+    let block = "```py\nreturn x / n\n```";
+    // Directly below, or after one blank line; trailing prose on the
+    // citation's line is fine.
+    assert_eq!(
+        q(&format!("- a.py:2 — divides by n:\n{block}")),
+        vec![Some("return x / n".to_string())]
+    );
+    assert_eq!(
+        q(&format!("**`a.py:2`**\n\n{block}")),
+        vec![Some("return x / n".to_string())]
+    );
+    // Indented under a list item, `~~~` fences.
+    assert_eq!(
+        q("1. a.py:2\n   ~~~\n   return x / n\n   ~~~"),
+        vec![Some("   return x / n".to_string())]
+    );
+    // Two citations on the line: the block belongs to neither.
+    assert_eq!(q(&format!("a.py:2 and a.py:9\n{block}")), vec![None, None]);
+    // Prose between the citation and the block, too many blank lines, an
+    // unclosed fence, a diff: not a quote.
+    assert_eq!(q(&format!("a.py:2\nThe code:\n{block}")), vec![None]);
+    assert_eq!(q(&format!("a.py:2\n\n\n\n{block}")), vec![None]);
+    assert_eq!(q("a.py:2\n```py\nreturn x / n\n"), vec![None]);
+    assert_eq!(
+        q("a.py:2\n```diff\n-return x / n\n+return x / (n or 1)\n```"),
+        vec![None]
+    );
+    // Copied line-number prefixes are stripped when every line has one.
+    assert_eq!(
+        q("a.py:2\n```\n2\treturn x / n\n3:  pass\n```"),
+        vec![Some("return x / n\n  pass".to_string())]
+    );
+    // An inline quote on the citation's line wins over a block below.
+    assert_eq!(
+        q(&format!("a.py:2 `x / n`\n{block}")),
+        vec![Some("x / n".to_string())]
+    );
+}
+
+/// A multi-line block whose cited line is in its middle verifies; the same
+/// block cited far away is wrong at the block's first line.
+#[test]
+fn multi_line_fenced_quote_spans_the_cited_line() {
+    let ws = slugify_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    let block = "```python\nupper_dict = char.upper(), xlate.capitalize()\n\
+                 if upper_dict not in char_list and char != upper_dict[0]:\n\n\
+                 \x20   insertions.append(upper_dict)\n```";
+    let check = |r: &mut CitationResolver, line: usize| {
+        let c = parse_citations(&format!("slugify/special.py:{line}\n{block}")).remove(0);
+        r.check(&c)
+    };
+    assert!(matches!(
+        check(&mut r, 13),
+        CitationVerdict::Verified { .. }
+    ));
+    assert!(matches!(
+        check(&mut r, 14),
+        CitationVerdict::Verified { .. }
+    ));
+    assert_eq!(
+        check(&mut r, 40),
+        CitationVerdict::WrongLine {
+            file: "slugify/special.py".into(),
+            actual_line: 12
+        }
+    );
+}
+
+fn special_evidence(ws: &Path, line: usize, quote: &str) -> ShardEvidence {
+    let mut r = CitationResolver::new(ws);
+    let (path, fingerprint) = r
+        .file_fingerprint("slugify/special.py")
+        .expect("fixture file");
+    ShardEvidence {
+        path,
+        line,
+        quote: quote.to_string(),
+        fingerprint,
+    }
+}
+
+/// A plain citation (no quote of its own) of a line the shard reader
+/// verified by its evidence quote is content-verified — and says so.
+#[test]
+fn citation_of_a_shard_verified_finding_is_credited() {
+    let ws = slugify_workspace();
+    let evidence = special_evidence(ws.path(), 18, "char_list.insert(0, upper_dict)");
+    let mut r = CitationResolver::new(ws.path()).with_shard_evidence(vec![evidence]);
+    let report = r.verify_text(
+        "- slugify/special.py:18 — uppercase pairs are inserted in reverse order.",
+        ANSWER_SOURCE,
+    );
+    assert_eq!(
+        (report.total, report.verified, report.shard_verified),
+        (1, 1, 1),
+        "{report:?}"
+    );
+    let status = GroundingStatus::from_report(&report, 0, Vec::new());
+    assert!(
+        status
+            .counts_line()
+            .contains("1 verified (1 by the review shard's evidence quote)"),
+        "{}",
+        status.counts_line()
+    );
+    assert_eq!(status.shard_verified, 1);
+}
+
+/// No credit without the evidence: another line, a wide range, a finding
+/// whose file was edited after the shard read (fingerprint differs, even
+/// though the quoted line is still there), a quote no longer at the line,
+/// and a citation carrying its own (paraphrased) quote.
+#[test]
+fn shard_credit_needs_the_same_line_and_the_unchanged_file() {
+    let ws = slugify_workspace();
+    let at18 = special_evidence(ws.path(), 18, "char_list.insert(0, upper_dict)");
+    let verdict = |evidence: Vec<ShardEvidence>, text: &str| {
+        let mut r = CitationResolver::new(ws.path()).with_shard_evidence(evidence);
+        r.check(&parse_citations(text).remove(0))
+    };
+    let location_only = |v: &CitationVerdict| matches!(v, CitationVerdict::LocationVerified { .. });
+    assert!(location_only(&verdict(
+        vec![at18.clone()],
+        "slugify/special.py:12 reversed"
+    )));
+    assert!(location_only(&verdict(
+        vec![at18.clone()],
+        "slugify/special.py:4-30 reversed"
+    )));
+    assert!(location_only(&verdict(
+        vec![ShardEvidence {
+            quote: "insertions.append(upper_dict)".into(),
+            ..at18.clone()
+        }],
+        "slugify/special.py:18 reversed"
+    )));
+    assert!(location_only(&verdict(
+        vec![at18.clone()],
+        "slugify/special.py:18 `upper_dict.reverse()` reversed"
+    )));
+    assert!(matches!(
+        verdict(vec![at18.clone()], "slugify/special.py:18 reversed"),
+        CitationVerdict::ShardVerified { line: 18, .. }
+    ));
+
+    // The file is edited after the shard read (a comment appended; line 18
+    // unchanged): the evidence no longer describes this file.
+    let path = ws.path().join("slugify/special.py");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\n# edited after the shard read\n");
+    fs::write(&path, text).unwrap();
+    assert!(location_only(&verdict(
+        vec![at18],
+        "slugify/special.py:18 reversed"
+    )));
+}
+
+/// Only a quoted EXPRESSION that occurs exactly once pins a line: a bare
+/// name is defined on one line and used on others, and an expression found
+/// at several lines does not say which one was meant — neither makes the
+/// citation wrong (location-only).
+#[test]
+fn bare_names_and_repeated_expressions_never_make_a_citation_wrong() {
+    let ws = slugify_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    let mut check = |text: &str| r.check(&parse_citations(text).remove(0));
+    for text in [
+        "slugify/special.py:30 `add_uppercase_char` mutates its argument",
+        "slugify/special.py:30 `add_uppercase_char()` mutates its argument",
+        "slugify/special.py:40 `upper_dict)` is passed on (lines 14 and 18)",
+    ] {
+        assert!(
+            matches!(check(text), CitationVerdict::LocationVerified { .. }),
+            "{text}"
+        );
+    }
+    assert!(matches!(
+        check("slugify/special.py:40 `insertions.append(upper_dict)`"),
+        CitationVerdict::WrongLine {
+            actual_line: 14,
+            ..
+        }
+    ));
 }

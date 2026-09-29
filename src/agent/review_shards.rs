@@ -938,6 +938,9 @@ struct Slice {
 struct ShardOutcome {
     notes: Vec<(String, String)>,
     verified: Vec<String>,
+    /// `(path, line, evidence quote)` of each verified (or line-corrected)
+    /// finding, for the citation gate's credit (`ShardEvidence`).
+    evidence: Vec<(String, usize, String)>,
     relocated: usize,
     unverified: Vec<String>,
 }
@@ -1007,10 +1010,16 @@ fn verify_answer(slices: &[&Slice], answer: &ShardAnswer) -> ShardOutcome {
             quote.clone()
         };
         match verify_quote(&lines, line, &f.evidence_quote) {
-            QuoteVerdict::Verified => out.verified.push(format!(
-                "FINDING: {path}:{line} `{quote_short}` — [{sev}] {title}"
-            )),
+            QuoteVerdict::Verified => {
+                out.evidence
+                    .push((path.clone(), line, f.evidence_quote.clone()));
+                out.verified.push(format!(
+                    "FINDING: {path}:{line} `{quote_short}` — [{sev}] {title}"
+                ));
+            }
             QuoteVerdict::Relocated(at) => {
+                out.evidence
+                    .push((path.clone(), at, f.evidence_quote.clone()));
                 out.relocated += 1;
                 out.verified.push(format!(
                     "FINDING: {path}:{at} `{quote_short}` — [{sev}] {title}"
@@ -1414,7 +1423,33 @@ impl Agent {
                             })
                             .collect();
                         this.review_commit_reads(&delivered);
+                        // Fingerprint each verified finding's file now, as
+                        // the shard read it: an edit after this read means
+                        // the credit no longer applies.
+                        let evidence: Vec<super::citation_check::ShardEvidence> = {
+                            let root = this.tools.workspace_root().path();
+                            let mut resolver = super::citation_check::CitationResolver::with_policy(
+                                &root,
+                                &this.config.safety,
+                            );
+                            outcome
+                                .evidence
+                                .iter()
+                                .filter_map(|(path, line, quote)| {
+                                    let (file, fingerprint) = resolver.file_fingerprint(path)?;
+                                    Some(super::citation_check::ShardEvidence {
+                                        path: file,
+                                        line: *line,
+                                        quote: quote.clone(),
+                                        fingerprint,
+                                    })
+                                })
+                                .collect()
+                        };
                         this.with_review_session(|session| {
+                            for e in evidence {
+                                session.add_shard_evidence(e);
+                            }
                             for (path, range) in &delivered {
                                 session.record_shard_delivery(path, *range);
                             }

@@ -28,13 +28,21 @@
 //! file, outside the workspace/policy) are **not checkable**.
 //!
 //! A citation followed by an inline code quote ("src/lib.rs:795
-//! `self.line_buf[0]`") names content too: the quote (whitespace ignored,
+//! `self.line_buf[0]`"), or by a fenced code block on the next lines
+//! ("**`p:21`**" then a ```python block — `fenced_quote_after` has the
+//! association rule), names content too: the quote (whitespace ignored,
 //! `..` / `...` / `…` as wildcards between fragments) must occur, fragments
-//! in order, within the cited range (± `LINE_TOLERANCE`) to verify. A quote
-//! that is not there is wrong only when it is confidently absent from the
-//! whole file (it looks like code and none of its identifiers occur in the
-//! file); otherwise the citation stays location-only — a paraphrase or a
-//! near miss is not evidence either way (see `QuotePattern`).
+//! in order, at the cited range (± `LINE_TOLERANCE`) to verify. A
+//! code-shaped quote found only ELSEWHERE in the file makes the citation
+//! wrong ("quotes code that is at N", fed to the correction round); one
+//! that is confidently absent from the whole file (none of its identifiers
+//! occur) is wrong too; otherwise — a paraphrase or a near miss — the
+//! citation stays location-only (see `QuotePattern`).
+//!
+//! A citation naming no content of its own is credited as verified only by
+//! evidence: a finding the review shard reader verified by its quote at that
+//! exact line, in a file whose content is unchanged since that read (see
+//! `ShardEvidence`); the credit is counted separately (`shard_verified`).
 //!
 //! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
 //! the model for at most `CITATION_GATE_REJECTION_BOUND` correction rounds
@@ -107,7 +115,14 @@ pub enum CitationVerdict {
     /// The named symbol, or the quoted code, appears within the cited range
     /// (± tolerance).
     Verified { file: String },
-    /// The symbol is elsewhere in the file; `actual_line` is where.
+    /// Nothing next to the citation names content, but the review shard
+    /// reader verified a finding's evidence quote at exactly this line, and
+    /// the file is unchanged since that read (same content fingerprint) and
+    /// still carries the quote there (see `ShardEvidence`). Counted as
+    /// verified; reported separately so the credit is never anonymous.
+    ShardVerified { file: String, line: usize },
+    /// The symbol (or the quoted code) is elsewhere in the file;
+    /// `actual_line` is where.
     WrongLine { file: String, actual_line: usize },
     /// The symbol does not occur anywhere in the resolved file.
     SymbolNotFound { file: String },
@@ -126,6 +141,15 @@ pub enum CitationVerdict {
 }
 
 impl CitationVerdict {
+    /// Named content confirmed at the cited line (by the answer's own
+    /// symbol/quote, or by a shard-verified finding's quote).
+    pub fn is_verified(&self) -> bool {
+        matches!(
+            self,
+            CitationVerdict::Verified { .. } | CitationVerdict::ShardVerified { .. }
+        )
+    }
+
     /// Whether the citation was shown to be wrong.
     pub fn is_problem(&self) -> bool {
         matches!(
@@ -153,10 +177,13 @@ impl CheckedCitation {
         let c = &self.citation;
         let what = match (&c.symbol, &c.quote) {
             (Some(sym), _) => format!("`{sym}` cited at {}", c.display()),
-            (None, Some(quote)) => format!("`{}` quoting `{quote}`", c.display()),
+            (None, Some(quote)) => format!("`{}` quoting `{}`", c.display(), quote_display(quote)),
             (None, None) => format!("`{}`", c.display()),
         };
         let body = match &self.verdict {
+            CitationVerdict::WrongLine { file, actual_line } if c.symbol.is_none() => {
+                format!("{what} but quotes code that is at {file}:{actual_line}")
+            }
             CitationVerdict::WrongLine { file, actual_line } => {
                 format!("{what} but found at {file}:{actual_line}")
             }
@@ -171,6 +198,9 @@ impl CheckedCitation {
                 format!("{what} — outside {file}, which has {line_count} lines")
             }
             CitationVerdict::Verified { file } => format!("{what} — verified in {file}"),
+            CitationVerdict::ShardVerified { file, line } => format!(
+                "{what} — verified in {file}: the review shard's evidence quote is at line {line}"
+            ),
             CitationVerdict::LocationVerified { file } => {
                 format!("{what} — line exists in {file}, content not checked")
             }
@@ -200,8 +230,12 @@ pub(crate) const ANSWER_SOURCE: &str = "final answer";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CitationReport {
     pub total: usize,
-    /// Named content confirmed inside the cited range.
+    /// Named content confirmed inside the cited range (includes
+    /// `shard_verified`).
     pub verified: usize,
+    /// Of `verified`: credited by a shard-verified finding's quote
+    /// ([`CitationVerdict::ShardVerified`]).
+    pub shard_verified: usize,
     /// File and range exist; content not checked (nothing named).
     pub location_verified: usize,
     pub wrong_line: Vec<CheckedCitation>,
@@ -217,6 +251,10 @@ impl CitationReport {
         self.total += 1;
         match &checked.verdict {
             CitationVerdict::Verified { .. } => self.verified += 1,
+            CitationVerdict::ShardVerified { .. } => {
+                self.verified += 1;
+                self.shard_verified += 1;
+            }
             CitationVerdict::LocationVerified { .. } => self.location_verified += 1,
             CitationVerdict::Unverifiable { .. } => self.unverifiable += 1,
             CitationVerdict::WrongLine { .. } => self.wrong_line.push(checked),
@@ -230,6 +268,7 @@ impl CitationReport {
     pub fn merge(&mut self, other: CitationReport) {
         self.total += other.total;
         self.verified += other.verified;
+        self.shard_verified += other.shard_verified;
         self.location_verified += other.location_verified;
         self.unverifiable += other.unverifiable;
         self.wrong_line.extend(other.wrong_line);
@@ -262,8 +301,12 @@ pub struct GroundingStatus {
     /// Distinct citations checked (final answer + written deliverables).
     pub total: usize,
     /// Named content (symbol or quoted code) confirmed inside the cited
-    /// range.
+    /// range (includes `shard_verified`).
     pub verified: usize,
+    /// Of `verified`: citations naming no content themselves, credited by a
+    /// finding the review shard reader verified by its evidence quote at
+    /// that line of the unchanged file.
+    pub shard_verified: usize,
     /// File exists and the cited range lies inside it, but nothing named
     /// content to check: location checked, content NOT checked.
     pub location_verified: usize,
@@ -314,6 +357,7 @@ impl GroundingStatus {
         GroundingStatus {
             total: report.total,
             verified: report.verified,
+            shard_verified: report.shard_verified,
             location_verified: report.location_verified,
             unverifiable: report.unverifiable,
             wrong_line: report.wrong_line.len(),
@@ -484,8 +528,16 @@ impl GroundingStatus {
     /// checked), W wrong[, K not checkable]` — the counts the gate marker and
     /// the Grounding line share.
     pub fn counts_line(&self) -> String {
+        let shard = if self.shard_verified > 0 {
+            format!(
+                " ({} by the review shard's evidence quote)",
+                self.shard_verified
+            )
+        } else {
+            String::new()
+        };
         let mut line = format!(
-            "{} checked: {} verified, {} location-only (line exists, content not checked), {} wrong",
+            "{} checked: {} verified{shard}, {} location-only (line exists, content not checked), {} wrong",
             self.total,
             self.verified,
             self.location_verified,
@@ -567,7 +619,8 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
         let end = num("e").or_else(|| num("he")).unwrap_or(start);
         let path = m.as_str().trim_start_matches("./").to_string();
         let symbol = symbol_before(before);
-        let quote = quote_after(&text[whole.end()..], before.ends_with('`'));
+        let quote = quote_after(&text[whole.end()..], before.ends_with('`'))
+            .or_else(|| fenced_quote_after(text, whole.start(), whole.end()));
         let key = (path.clone(), start, end, symbol.clone(), quote.clone());
         if !seen.insert(key) {
             continue;
@@ -848,6 +901,104 @@ fn quote_after(after: &str, in_span: bool) -> Option<String> {
     Some(quote.to_string())
 }
 
+/// Most lines of a fenced code block taken as a citation's quote; a longer
+/// block is a listing, not a quote of the cited line.
+const MAX_FENCED_QUOTE_LINES: usize = 40;
+
+/// Blank lines allowed between a citation's line and the fenced block that
+/// quotes it.
+const MAX_BLANK_BEFORE_FENCE: usize = 2;
+
+/// The fenced code block quoted right below a citation (0.9.6 live review,
+/// review-slugify: every finding was written as
+/// "**`slugify/_legacy.py:21`**" followed by a ```python block holding the
+/// cited line; `quote_after` looks at the citation's own line only, so all
+/// of them were counted location-only — "content not checked").
+///
+/// Association rule: the citation is the only `path:line` on its line (two
+/// citations on one line leave the block unowned), and the next non-blank
+/// line (at most [`MAX_BLANK_BEFORE_FENCE`] blank lines between) opens a
+/// ```` ``` ```` / `~~~` fence that is closed within
+/// [`MAX_FENCED_QUOTE_LINES`] lines. `diff`/`patch` blocks are proposed
+/// changes, not quotes. Copied `N<TAB>` / `N:` / `N|` line-number prefixes
+/// are stripped when every non-blank line carries one.
+fn fenced_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<String> {
+    let line_start = text[..cite_start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[cite_end..]
+        .find('\n')
+        .map_or(text.len(), |i| cite_end + i);
+    if citation_regex()
+        .find_iter(&text[line_start..line_end])
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let mut rest = text.get(line_end + 1..)?.lines();
+    let mut blank = 0;
+    let open = loop {
+        let l = rest.next()?;
+        if !l.trim().is_empty() {
+            break l.trim();
+        }
+        blank += 1;
+        if blank > MAX_BLANK_BEFORE_FENCE {
+            return None;
+        }
+    };
+    let fence_char = open.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let fence_len = open.chars().take_while(|&c| c == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    let info = open[fence_len..].trim().to_ascii_lowercase();
+    if info.contains(fence_char) || matches!(info.as_str(), "diff" | "patch") {
+        return None;
+    }
+    let mut body: Vec<&str> = Vec::new();
+    loop {
+        let l = rest.next()?;
+        let t = l.trim();
+        if t.len() >= fence_len && t.chars().all(|c| c == fence_char) {
+            break;
+        }
+        body.push(l);
+        if body.len() > MAX_FENCED_QUOTE_LINES {
+            return None;
+        }
+    }
+    let nonblank: Vec<&str> = body.into_iter().filter(|l| !l.trim().is_empty()).collect();
+    if nonblank.is_empty() {
+        return None;
+    }
+    let numbered = nonblank.iter().all(|l| number_prefix_len(l).is_some());
+    let lines: Vec<&str> = nonblank
+        .iter()
+        .map(|l| match number_prefix_len(l) {
+            Some(n) if numbered => &l[n..],
+            _ => l,
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
+/// Byte length of a copied line-number prefix (`12\t`, `12:`, `12|`,
+/// optional leading whitespace), or `None`.
+fn number_prefix_len(line: &str) -> Option<usize> {
+    let lead = line.len() - line.trim_start().len();
+    let digits = line[lead..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let after = &line[lead + digits..];
+    let sep = after.trim_start_matches(' ');
+    sep.starts_with(['\t', ':', '|'])
+        .then(|| line.len() - sep.len() + 1)
+}
+
 /// A code quote prepared for matching (see the module docs): whitespace
 /// removed, split into ordered fragments at `..` / `...` / `…`.
 struct QuotePattern {
@@ -858,7 +1009,21 @@ struct QuotePattern {
     /// not a flag or a prose phrase — required before an absent quote is
     /// judged wrong.
     code_shaped: bool,
+    /// Non-blank lines of the quote (a fenced block quotes several).
+    lines: usize,
+    /// Only a name (`add_uppercase_char`, `self.cache`, `render()`): defined
+    /// on one line and used on others, so it never pins a line.
+    bare_name: bool,
 }
+
+/// Squashed (whitespace-free) characters a quote needs before being found
+/// ELSEWHERE in the file makes its citation wrong (`x.y()` is too common).
+const MIN_PINNING_QUOTE_CHARS: usize = 6;
+
+/// Occurrences of a quote collected per file (the nearest one is reported).
+const MAX_QUOTE_LOCATIONS: usize = 64;
+/// Bound on candidate starts tried per file when locating a quote.
+const MAX_QUOTE_TRIES: usize = 10_000;
 
 impl QuotePattern {
     /// `None` when the quote is too weak to check (fewer than 3 identifier
@@ -887,11 +1052,88 @@ impl QuotePattern {
         let code_shaped = quote.contains(['(', '[', '{', '=', ';', '.', '<'])
             || quote.contains("::")
             || identifiers.iter().any(|w| w.contains('_'));
+        let lines = quote.lines().filter(|l| !l.trim().is_empty()).count();
+        let name = quote.trim().trim_end_matches("()");
+        let bare_name = name
+            .chars()
+            .all(|c| is_ident_char(c) || c == '.' || c == ':');
         Some(QuotePattern {
             fragments,
             identifiers,
-            code_shaped,
+            code_shaped: code_shaped || lines > 1,
+            lines: lines.max(1),
+            bare_name,
         })
+    }
+
+    /// Strong enough that finding it ELSEWHERE in the file refutes the
+    /// cited line: a code-shaped expression (not a bare name) of at least
+    /// [`MIN_PINNING_QUOTE_CHARS`] non-whitespace characters. The caller
+    /// also requires it to occur exactly once.
+    fn pins_a_line(&self) -> bool {
+        self.code_shaped
+            && !self.bare_name
+            && self.fragments.iter().map(String::len).sum::<usize>() >= MIN_PINNING_QUOTE_CHARS
+    }
+
+    /// Every place (1-based first and last line) the quote occurs in
+    /// `lines`, fragments in order, spanning at most the quote's own line
+    /// count plus twice [`LINE_TOLERANCE`] (a `..` wildcard does not reach
+    /// across half the file). At most [`MAX_QUOTE_LOCATIONS`].
+    fn locate(&self, lines: &[String]) -> Vec<(usize, usize)> {
+        let mut squashed = String::new();
+        let mut starts = Vec::with_capacity(lines.len());
+        for l in lines {
+            starts.push(squashed.len());
+            squashed.extend(l.chars().filter(|c| !c.is_whitespace()));
+        }
+        // 1-based line holding squashed byte `off`.
+        let line_at = |off: usize| starts.partition_point(|&s| s <= off);
+        let max_span = self.lines - 1 + 2 * LINE_TOLERANCE;
+        let Some((first, rest)) = self.fragments.split_first() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let mut from = 0;
+        let mut tries = 0;
+        while let Some(at) = squashed[from..].find(first.as_str()) {
+            tries += 1;
+            if tries > MAX_QUOTE_TRIES {
+                break;
+            }
+            let start = from + at;
+            let mut end = start + first.len();
+            for frag in rest {
+                match squashed[end..].find(frag.as_str()) {
+                    Some(a) => end += a + frag.len(),
+                    // Not after this start: not after any later one either.
+                    None => return out,
+                }
+            }
+            let (s, e) = (line_at(start), line_at(end - 1));
+            if e - s <= max_span && out.last().is_none_or(|&(ls, _)| ls != s) {
+                out.push((s, e));
+                if out.len() >= MAX_QUOTE_LOCATIONS {
+                    break;
+                }
+            }
+            from = start + squashed[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        out
+    }
+
+    /// The quote is at the cited range `lo..=hi` (tolerance applied by the
+    /// caller): its fragments occur in order within the window — widened by
+    /// the quote's extra lines — or one of its occurrences overlaps the
+    /// window (a block quoting the lines around a cited line in its middle).
+    fn at_range(&self, lines: &[String], lo: usize, hi: usize) -> bool {
+        let wide_hi = (hi + self.lines - 1).min(lines.len());
+        let window: String = lines[lo - 1..wide_hi]
+            .iter()
+            .flat_map(|l| l.chars())
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        self.matches(&window) || self.locate(lines).iter().any(|&(s, e)| s <= hi && e >= lo)
     }
 
     /// The fragments occur, in order, in `hay` (whitespace already removed).
@@ -1068,6 +1310,8 @@ pub struct CitationResolver {
     mentioned: Vec<String>,
     index: Option<Vec<PathBuf>>,
     files: HashMap<PathBuf, Loaded>,
+    /// Findings the review shard reader verified (see [`ShardEvidence`]).
+    shard_evidence: std::sync::Arc<[ShardEvidence]>,
 }
 
 /// A candidate file after confinement and (maybe) reading.
@@ -1116,6 +1360,27 @@ impl CitationResolver {
             mentioned: Vec::new(),
             index: None,
             files: HashMap::new(),
+            shard_evidence: std::sync::Arc::from(Vec::new()),
+        }
+    }
+
+    /// Credit citations that name no content by these shard-verified
+    /// findings (see [`CitationVerdict::ShardVerified`]).
+    pub(crate) fn with_shard_evidence(mut self, evidence: Vec<ShardEvidence>) -> Self {
+        self.shard_evidence = std::sync::Arc::from(evidence);
+        self
+    }
+
+    /// The workspace-relative display and content fingerprint of the file
+    /// `cited` names (confined like a check), for recording shard evidence.
+    pub(crate) fn file_fingerprint(&mut self, cited: &str) -> Option<(String, u64)> {
+        let Resolution::Found(path) = self.resolve(cited) else {
+            return None;
+        };
+        let file = self.relative_display(&path);
+        match self.lines(&path) {
+            Loaded::Lines(lines) => Some((file, lines_fingerprint(lines))),
+            Loaded::Refused | Loaded::Unreadable => None,
         }
     }
 
@@ -1310,6 +1575,7 @@ impl CitationResolver {
 
     fn check_in_file(&mut self, path: &Path, c: &Citation) -> CitationVerdict {
         let file = self.relative_display(path);
+        let evidence = std::sync::Arc::clone(&self.shard_evidence);
         let lines = match self.lines(path) {
             Loaded::Lines(lines) => lines,
             Loaded::Refused => {
@@ -1330,16 +1596,7 @@ impl CitationResolver {
         let lo = c.start.saturating_sub(LINE_TOLERANCE).max(1);
         let hi = (c.end + LINE_TOLERANCE).min(line_count);
         let quote = c.quote.as_deref().and_then(QuotePattern::new);
-        let quote_in_range = || {
-            quote.as_ref().is_some_and(|q| {
-                let window: String = lines[lo - 1..hi]
-                    .iter()
-                    .flat_map(|l| l.chars())
-                    .filter(|ch| !ch.is_whitespace())
-                    .collect();
-                q.matches(&window)
-            })
-        };
+        let quote_in_range = || quote.as_ref().is_some_and(|q| q.at_range(lines, lo, hi));
         if let Some(sym) = &c.symbol {
             if (lo..=hi).any(|n| contains_word(&lines[n - 1], sym)) || quote_in_range() {
                 return CitationVerdict::Verified { file };
@@ -1349,12 +1606,32 @@ impl CitationResolver {
                 None => CitationVerdict::SymbolNotFound { file },
             };
         }
-        match &quote {
-            Some(_) if quote_in_range() => CitationVerdict::Verified { file },
-            Some(q) if q.absent_from(lines) => CitationVerdict::SymbolNotFound { file },
-            // The line exists; nothing checkable names content there (or the
-            // quote is a paraphrase / near miss — not evidence either way).
-            _ => CitationVerdict::LocationVerified { file },
+        if let Some(q) = &quote {
+            if q.at_range(lines, lo, hi) {
+                return CitationVerdict::Verified { file };
+            }
+            // The quoted expression occurs exactly once in the file, and not
+            // at the cited lines: the citation points somewhere else than
+            // the code it quotes. (Several occurrences: which one was meant
+            // is unknown — not evidence either way.)
+            if q.pins_a_line() {
+                if let [(actual_line, _)] = q.locate(lines)[..] {
+                    return CitationVerdict::WrongLine { file, actual_line };
+                }
+            }
+            if q.absent_from(lines) {
+                return CitationVerdict::SymbolNotFound { file };
+            }
+            // A paraphrase / near miss: not evidence either way, and it is
+            // the answer's own content claim — shard evidence does not
+            // override it.
+            return CitationVerdict::LocationVerified { file };
+        }
+        // Nothing checkable names content at the line: credited only by a
+        // shard-verified finding at this line of the unchanged file.
+        match shard_credit(&evidence, &file, lines, c) {
+            Some(line) => CitationVerdict::ShardVerified { file, line },
+            None => CitationVerdict::LocationVerified { file },
         }
     }
 
@@ -1372,7 +1649,7 @@ impl CitationResolver {
                 let verified: Vec<CitationVerdict> = candidates
                     .iter()
                     .map(|p| self.check_in_file(p, c))
-                    .filter(|v| matches!(v, CitationVerdict::Verified { .. }))
+                    .filter(CitationVerdict::is_verified)
                     .collect();
                 if verified.len() == 1 {
                     verified.into_iter().next().expect("one verdict")
@@ -1402,6 +1679,69 @@ impl CitationResolver {
             });
         }
         report
+    }
+}
+
+/// A finding the review shard reader verified by its evidence quote
+/// (`review_shards::verify_quote`: the quote is on the cited line of the
+/// delivered numbered lines), kept so the final answer's citation of the
+/// same line is credited — the answer need not repeat the quote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShardEvidence {
+    /// Workspace-relative path, as [`CitationResolver`] displays it.
+    pub path: String,
+    /// The verified (or line-corrected) line, 1-based.
+    pub line: usize,
+    /// The shard's evidence quote.
+    pub quote: String,
+    /// [`lines_fingerprint`] of the file when the finding was verified.
+    pub fingerprint: u64,
+}
+
+/// A citation range wider than this names a region, not the finding's line:
+/// never credited by shard evidence.
+const MAX_SHARD_CREDIT_SPAN: usize = 10;
+
+/// Content fingerprint of a file's lines (as the resolver loads them).
+pub(crate) fn lines_fingerprint(lines: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    lines.hash(&mut h);
+    h.finish()
+}
+
+/// The shard-verified line crediting `c` in `file`, if any: same path, the
+/// finding's line inside the (narrow) cited range, the file's content
+/// unchanged since the shard read (fingerprint), and the finding's quote
+/// still at that line now. No evidence, no credit.
+fn shard_credit(
+    evidence: &[ShardEvidence],
+    file: &str,
+    lines: &[String],
+    c: &Citation,
+) -> Option<usize> {
+    if c.end - c.start >= MAX_SHARD_CREDIT_SPAN {
+        return None;
+    }
+    let mut candidates = evidence
+        .iter()
+        .filter(|e| e.path == file && (c.start..=c.end).contains(&e.line))
+        .peekable();
+    candidates.peek()?;
+    let fingerprint = lines_fingerprint(lines);
+    candidates
+        .filter(|e| e.fingerprint == fingerprint && e.line <= lines.len())
+        .find(|e| QuotePattern::new(&e.quote).is_some_and(|q| q.at_range(lines, e.line, e.line)))
+        .map(|e| e.line)
+}
+
+/// A quote for a one-line message: whitespace collapsed, at most 100 chars.
+fn quote_display(quote: &str) -> String {
+    let flat = quote.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 100 {
+        format!("{}…", flat.chars().take(99).collect::<String>())
+    } else {
+        flat
     }
 }
 
@@ -1509,12 +1849,7 @@ pub(crate) fn citation_anchor(lines: &[String], c: &Citation) -> Option<usize> {
             .min_by_key(|&n| (n.abs_diff(c.start), n));
     }
     let quote = c.quote.as_deref().and_then(QuotePattern::new)?;
-    let window: String = lines[lo - 1..hi]
-        .iter()
-        .flat_map(|l| l.chars())
-        .filter(|ch| !ch.is_whitespace())
-        .collect();
-    quote.matches(&window).then_some(c.start)
+    quote.at_range(lines, lo, hi).then_some(c.start)
 }
 
 /// For every line of `old` (0-based) that an edit left unchanged, its index
@@ -1606,7 +1941,7 @@ impl MovedCitation {
         let c = &self.citation;
         let what = match (&c.symbol, &c.quote) {
             (Some(sym), _) => format!(" `{sym}`"),
-            (None, Some(quote)) => format!(" `{quote}`"),
+            (None, Some(quote)) => format!(" `{}`", quote_display(quote)),
             (None, None) => String::new(),
         };
         let (old, new) = if c.start == c.end {
@@ -1785,7 +2120,10 @@ impl super::Agent {
         // under the same workspace + file-tool policy confinement as the
         // citations themselves (a file written then swapped for a symlink
         // is skipped, never followed).
-        let mut resolver = CitationResolver::with_policy(&root, &self.config.safety);
+        // Findings the shard reader verified credit the answer's plain
+        // citations of the same lines (never without that evidence).
+        let mut resolver = CitationResolver::with_policy(&root, &self.config.safety)
+            .with_shard_evidence(self.review_shard_evidence());
         let deliverables: Vec<(String, String)> = self
             .written_deliverables()
             .into_iter()

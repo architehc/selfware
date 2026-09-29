@@ -623,6 +623,19 @@ async fn a_review_is_read_by_shards_and_findings_are_verified() {
         "the main agent ran file_read"
     );
     assert!(agent.last_assistant_response.contains("Final review"));
+    // The answer's plain citations name the lines the shard verified by
+    // quote (b.py:3 after the line correction), in files unchanged since:
+    // content-verified, and reported as the shard's credit.
+    let grounding = agent.grounding_status().expect("grounding");
+    assert_eq!(
+        (
+            grounding.total,
+            grounding.verified,
+            grounding.shard_verified
+        ),
+        (2, 2, 2),
+        "{grounding:?}"
+    );
 }
 
 /// A shard whose answer is unusable twice credits nothing: its files stay

@@ -201,6 +201,11 @@ pub(crate) struct ReviewSession {
     /// Files whose broad re-read was withheld once (a second request for
     /// the same file is delivered).
     reread_withheld: HashSet<String>,
+    /// Findings the shard reader verified by their evidence quote, with
+    /// the file's fingerprint at that read: the final answer's citation of
+    /// the same line is credited by the citation gate
+    /// (`citation_check::ShardEvidence`).
+    shard_evidence: Vec<super::citation_check::ShardEvidence>,
 }
 
 static FINDING_LINE: Lazy<Regex> = Lazy::new(|| {
@@ -347,6 +352,7 @@ impl ReviewSession {
             shard_report: None,
             shard_delivered: HashMap::new(),
             reread_withheld: HashSet::new(),
+            shard_evidence: Vec::new(),
         }
     }
 
@@ -461,6 +467,18 @@ impl ReviewSession {
     /// the start of a new task — never again on a continued segment).
     pub(crate) fn shards_ran(&self) -> bool {
         self.shard_report.is_some()
+    }
+
+    /// Record a shard-verified finding (see `shard_evidence`).
+    pub(crate) fn add_shard_evidence(&mut self, evidence: super::citation_check::ShardEvidence) {
+        if !self.shard_evidence.contains(&evidence) {
+            self.shard_evidence.push(evidence);
+        }
+    }
+
+    /// Every shard-verified finding recorded this session.
+    pub(crate) fn shard_evidence(&self) -> &[super::citation_check::ShardEvidence] {
+        &self.shard_evidence
     }
 
     pub(crate) fn set_shard_report(&mut self, report: super::review_shards::ShardRunReport) {
@@ -1184,6 +1202,13 @@ impl Agent {
     fn with_review<R>(&self, f: impl FnOnce(&mut ReviewSession) -> R) -> Option<R> {
         let mut state = self.review.lock().unwrap_or_else(|e| e.into_inner());
         state.session.as_deref_mut().map(f)
+    }
+
+    /// Findings the review shard reader verified this task (empty outside
+    /// a review session).
+    pub(super) fn review_shard_evidence(&self) -> Vec<super::citation_check::ShardEvidence> {
+        self.with_review(|s| s.shard_evidence().to_vec())
+            .unwrap_or_default()
     }
 
     /// [`Self::with_review`] for the sibling review modules.
