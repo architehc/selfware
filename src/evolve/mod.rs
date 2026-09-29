@@ -37,6 +37,10 @@ pub mod logical;
 pub mod r#loop;
 pub mod map;
 pub mod module_graph;
+// Scores arms with the evolution protected-path policy and the daemon's
+// test-summary parser, so it exists only with the self-improvement feature.
+#[cfg(feature = "self-improvement")]
+pub mod multi_arm_runner;
 pub mod ontology;
 pub mod ontology_evolver;
 pub mod pair_suggest;
