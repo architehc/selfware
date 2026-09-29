@@ -28,6 +28,12 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
             ..Default::default()
         },
         execution_mode: ExecutionMode::Yolo,
+        // Scripted mock responses: keep review tasks off the shard reader
+        // (as test_support::mock_agent_config does).
+        review: crate::config::ReviewConfig {
+            shard_reading: false,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
