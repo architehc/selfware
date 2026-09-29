@@ -572,9 +572,36 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Workflow to use: "default" for evolution daemon, "rsi" for RSI orchestrator, "replay" for offline policy replay, "investigate" for active structural audit
+        /// Workflow to use: "default" for evolution daemon, "rsi" for RSI orchestrator, "replay" for offline policy replay, "investigate" for active structural audit, "arms" for a quarantined multi-arm comparison (see docs/evolution-arms.md)
         #[arg(long, default_value = "default")]
         workflow: String,
+
+        /// `--workflow arms`: JSON file with the candidate arms
+        /// (`[{arm_id, name, target_file, proposed_source}]`)
+        #[arg(long)]
+        arms_file: Option<std::path::PathBuf>,
+
+        /// `--workflow arms`: passing arms required for consensus
+        #[arg(long, default_value = "2", value_parser = parse_nonzero_usize)]
+        consensus: usize,
+
+        /// `--workflow arms`: measured benchmark runs per arm and baseline
+        #[arg(long, default_value = "3", value_parser = parse_nonzero_usize)]
+        replicates: usize,
+
+        /// `--workflow arms`: benchmark command run in every snapshot (its
+        /// wall time is the fitness); without it no arm can pass
+        #[arg(long)]
+        bench_cmd: Option<String>,
+
+        /// `--workflow arms`: run arms under the macOS sandbox-exec profile
+        /// (writes confined to the arm, no network); errors elsewhere
+        #[arg(long)]
+        arm_sandbox: bool,
+
+        /// `--workflow arms`: keep the arm directories after the run
+        #[arg(long)]
+        keep_arms: bool,
     },
 
     /// Manage MCP servers (`mcp list` shows the configured ones)

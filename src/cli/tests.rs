@@ -3336,3 +3336,55 @@ fn render_run_summary_never_calls_a_partial_review_completed() {
         "{rendered}"
     );
 }
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn evolve_arms_workflow_flags_parse_and_default_workflow_is_unchanged() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "evolve"]).unwrap();
+    match cli.command {
+        Some(Commands::Evolve {
+            workflow,
+            arms_file,
+            arm_sandbox,
+            ..
+        }) => {
+            assert_eq!(workflow, "default");
+            assert!(arms_file.is_none() && !arm_sandbox);
+        }
+        _ => panic!("expected evolve"),
+    }
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "evolve",
+        "--workflow",
+        "arms",
+        "--arms-file",
+        "arms.json",
+        "--consensus",
+        "1",
+        "--replicates",
+        "5",
+        "--bench-cmd",
+        "cargo bench",
+        "--arm-sandbox",
+    ])
+    .unwrap();
+    match cli.command {
+        Some(Commands::Evolve {
+            arms_file,
+            consensus,
+            replicates,
+            bench_cmd,
+            arm_sandbox,
+            ..
+        }) => {
+            assert_eq!(arms_file.as_deref(), Some(Path::new("arms.json")));
+            assert_eq!((consensus, replicates), (1, 5));
+            assert_eq!(bench_cmd.as_deref(), Some("cargo bench"));
+            assert!(arm_sandbox);
+        }
+        _ => panic!("expected evolve"),
+    }
+    assert!(Cli::try_parse_from(["selfware", "evolve", "--consensus", "0"]).is_err());
+}

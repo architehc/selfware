@@ -4166,6 +4166,12 @@ async fn handle_command(
             parallel,
             dry_run,
             workflow,
+            arms_file,
+            consensus,
+            replicates,
+            bench_cmd,
+            arm_sandbox,
+            keep_arms,
         } => {
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -4552,6 +4558,19 @@ async fn handle_command(
                 let _ = std::fs::write(&report_path, report_json);
 
                 return Ok(());
+            } else if workflow == "arms" {
+                return run_evolve_arms(EvolveArmsArgs {
+                    repo_root,
+                    arms_file,
+                    consensus,
+                    replicates,
+                    parallel,
+                    bench_cmd,
+                    arm_sandbox,
+                    keep_arms,
+                    dry_run,
+                })
+                .await;
             } else if workflow == "investigate" {
                 use crate::evolution::investigate::{export_markdown, investigate_attempts_file};
 
@@ -8322,4 +8341,101 @@ fn resolve_preset_task(preset: Option<String>, task: Option<String>) -> Result<S
         (None, Some(task)) => Ok(task),
         (None, None) => anyhow::bail!("a task or --preset <id> is required"),
     }
+}
+
+#[cfg(feature = "self-improvement")]
+struct EvolveArmsArgs {
+    repo_root: std::path::PathBuf,
+    arms_file: Option<std::path::PathBuf>,
+    consensus: usize,
+    replicates: usize,
+    parallel: usize,
+    bench_cmd: Option<String>,
+    arm_sandbox: bool,
+    keep_arms: bool,
+    dry_run: bool,
+}
+
+/// `selfware evolve --workflow arms`: build, test and benchmark candidate
+/// arms against the baseline in quarantined snapshots and report the
+/// verdict. Nothing is applied to the repository.
+#[cfg(feature = "self-improvement")]
+async fn run_evolve_arms(a: EvolveArmsArgs) -> Result<()> {
+    use crate::evolve::multi_arm_runner::{
+        MultiArmConfig, MultiArmEvolutionRunner, OptimizationArm,
+    };
+    use crate::safety::quarantine::{HostToolchain, QuarantineOptions, RegistryMode};
+    use anyhow::Context as _;
+
+    let arms_file = a
+        .arms_file
+        .ok_or_else(|| anyhow::anyhow!("--workflow arms needs --arms-file <arms.json>"))?;
+    let arms: Vec<OptimizationArm> = serde_json::from_str(
+        &std::fs::read_to_string(&arms_file)
+            .with_context(|| format!("reading {}", arms_file.display()))?,
+    )
+    .with_context(|| format!("parsing {}", arms_file.display()))?;
+    let bench_command = match a.bench_cmd {
+        Some(cmd) => Some(
+            shlex::split(&cmd)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--bench-cmd `{cmd}` is not a valid command line")
+                })?,
+        ),
+        None => None,
+    };
+    let config = MultiArmConfig {
+        consensus_threshold: a.consensus,
+        replicates: a.replicates,
+        bench_command,
+        parallel: a.parallel.max(1),
+        quarantine: QuarantineOptions {
+            registry: RegistryMode::CloneOrEmpty,
+            sandbox: a.arm_sandbox,
+        },
+        keep_arms: a.keep_arms,
+        ..Default::default()
+    };
+    let scratch = std::env::temp_dir().join("selfware-evolve-arms");
+    println!(
+        "   {} arm(s) from {}; consensus {}; {} benchmark replicate(s); bench: {}; sandbox: {}",
+        arms.len(),
+        arms_file.display(),
+        config.consensus_threshold,
+        config.replicates,
+        config.bench_command.as_ref().map_or(
+            "none (no fitness is measured; no arm can pass)".to_string(),
+            |c| c.join(" ")
+        ),
+        if a.arm_sandbox {
+            "sandbox-exec"
+        } else {
+            "off (no filesystem sandbox)"
+        },
+    );
+    if a.dry_run {
+        println!(
+            "   Dry-run mode: nothing built. Arm directories would go under {}",
+            scratch.display()
+        );
+        return Ok(());
+    }
+    let host = HostToolchain::detect(&a.repo_root)?;
+    let report = MultiArmEvolutionRunner::new(config.consensus_threshold, &scratch)
+        .run_quarantined(&a.repo_root, "HEAD", &arms, &host, &config)
+        .await?;
+    println!("{}", report.to_pr_markdown());
+    let dir = a.repo_root.join(".selfware").join("evolve-arms");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!(
+        "{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+    std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+    println!(
+        "   Report: {} (nothing was applied to the repository; the winning diff is in the report)",
+        path.display()
+    );
+    Ok(())
 }
