@@ -633,10 +633,15 @@ impl RepoInventory {
             excluded_note(&plan.scope),
         )];
         if !plan.unreadable.is_empty() {
+            let unreadable = plan
+                .unreadable
+                .iter()
+                .map(|item| crate::safety::source_context::quote_untrusted_label(item))
+                .collect::<Vec<_>>();
             head.push(format!(
                 "Unreadable, not counted ({} code files in scope): {}.",
                 plan.unreadable.len(),
-                list_with_more(&plan.unreadable, 5)
+                list_with_more(&unreadable, 5)
             ));
         }
         let langs: Vec<String> = self
@@ -656,7 +661,13 @@ impl RepoInventory {
                 self.most_central
                     .iter()
                     .take(5)
-                    .map(|f| format!("{} ({})", f.path, f.in_degree))
+                    .map(|f| {
+                        format!(
+                            "{} ({})",
+                            crate::safety::source_context::quote_untrusted_label(&f.path),
+                            f.in_degree
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -668,7 +679,12 @@ impl RepoInventory {
         let mut text = head.join("\n");
         let mut shown = 0;
         for e in &plan.plan {
-            let line = format!("\n- {} ({}){}", e.path, e.lines, reason_tag(e));
+            let line = format!(
+                "\n- {} ({}){}",
+                crate::safety::source_context::quote_untrusted_label(&e.path),
+                e.lines,
+                reason_tag(e)
+            );
             let rest = plan.plan.len() - shown - 1;
             let tail = if rest > 0 {
                 format!("\n… +{rest} more files (the per-turn review status names the next ones)")
@@ -2185,7 +2201,7 @@ mod tests {
         let inv = RepoInventory::scan(dir.path()).unwrap();
         let plan = inv.review_plan(ReviewScope::whole_repository());
         let full = inv.render_compact(&plan, 10_000);
-        assert!(full.contains("- src/b/mod.rs (6)"));
+        assert!(full.contains("- \"src/b/mod.rs\" (6)"));
         let tight = inv.render_compact(&plan, 120);
         assert!(
             crate::token_count::estimate_content_tokens(&tight) <= 160,

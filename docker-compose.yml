@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SELFWARE_GIT_SHA: ${SELFWARE_GIT_SHA:-unknown}
     image: selfware:latest
     container_name: selfware
     working_dir: /workspace

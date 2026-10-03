@@ -42,6 +42,71 @@ fn persists_atomically_and_reloads() {
 }
 
 #[test]
+fn windows_style_existing_destination_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("resources.json");
+    let src = dir.path().join("resources.tmp");
+    std::fs::write(&dst, "old").unwrap();
+    std::fs::write(&src, "new").unwrap();
+    let mut calls = 0;
+
+    crate::session::checkpoint::replace_atomically_with(&src, &dst, |from, to| {
+        calls += 1;
+        if calls == 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Windows destination exists",
+            ));
+        }
+        std::fs::rename(from, to)
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new");
+    assert!(!src.exists());
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn failed_windows_style_retry_restores_previous_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("resources.json");
+    let src = dir.path().join("resources.tmp");
+    std::fs::write(&dst, "last valid").unwrap();
+    std::fs::write(&src, "replacement").unwrap();
+    let mut calls = 0;
+
+    let error = crate::session::checkpoint::replace_atomically_with(&src, &dst, |from, to| {
+        calls += 1;
+        if calls == 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Windows destination exists",
+            ));
+        }
+        if calls == 3 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "transient retry failure",
+            ));
+        }
+        std::fs::rename(from, to)
+    })
+    .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "last valid");
+    assert!(!src.exists());
+    assert_eq!(calls, 4);
+    let remaining: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(remaining, vec![dst]);
+}
+
+#[test]
 fn two_sessions_sharing_the_file_keep_each_others_entries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("resources.json");

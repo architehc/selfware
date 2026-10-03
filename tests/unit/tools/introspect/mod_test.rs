@@ -86,6 +86,76 @@ async fn test_code_query_scope_in_workspace_ok() {
     }
 }
 
+#[tokio::test]
+async fn relative_introspection_paths_follow_the_active_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("scoped_only.rs"),
+        "pub fn scoped_anchor_symbol() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("caller.rs"),
+        "pub fn caller() { scoped_only::scoped_anchor_symbol(); }\n",
+    )
+    .unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let expected_target = dir.path().join("scoped_only.rs");
+    let expected_caller = dir.path().join("caller.rs");
+
+    crate::tools::workspace_root::scope(root, async {
+        let outline: IntrospectResult = serde_json::from_value(
+            CodeIntrospect::new()
+                .execute(json!({"target": ".", "max_tokens": 20_000}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outline.coverage.files_total, 2);
+        assert!(outline.content.contains("scoped_anchor_symbol"));
+
+        let query = CodeQuery::new()
+            .execute(json!({"query": "scoped_anchor_symbol", "scope": "."}))
+            .await
+            .unwrap();
+        let query_file = std::path::Path::new(query["results"][0]["file"].as_str().unwrap());
+        assert!(query_file.starts_with(dir.path()), "{query}");
+        assert_eq!(query_file.file_name().unwrap(), "scoped_only.rs");
+
+        let plan = CodePlan::new()
+            .execute(json!({
+                "goal": "modify scoped_anchor_symbol",
+                "codebase_root": "."
+            }))
+            .await
+            .unwrap();
+        let rendered_plan = serde_json::to_string(&plan).unwrap();
+        assert!(rendered_plan.contains(&dir.path().to_string_lossy().to_string()));
+        assert!(rendered_plan.contains("scoped_only.rs"));
+
+        let impact = CodeDiffPlan::new()
+            .execute(json!({
+                "target_file": "scoped_only.rs",
+                "change_type": "modify",
+                "affected_symbol": "scoped_anchor_symbol",
+                "codebase_root": "."
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            impact["target_file"],
+            expected_target.to_string_lossy().as_ref()
+        );
+        let caller = std::path::Path::new(impact["direct_callers"][0]["file"].as_str().unwrap());
+        assert!(caller.starts_with(dir.path()), "{impact}");
+        assert_eq!(
+            caller.file_name().unwrap(),
+            expected_caller.file_name().unwrap()
+        );
+    })
+    .await;
+}
+
 // ── Recursive-walk validation (2026-09-21 review, P2) ────────────────────
 //
 // The introspection walkers validated only the ROOT target: denied source
@@ -626,6 +696,19 @@ fn dependency_tree_fixture() -> (tempfile::TempDir, CodeIntrospect) {
     write_file(root, "env/pyvenv.cfg", "home = /usr\n");
     write_file(root, "env/lib/site-packages/six.py", "def f(): pass\n");
     write_file(root, "scratchpad/copy/src/lib.rs", "pub fn dup() {}\n");
+    for (dir, function) in [
+        (".claude", "claude_private"),
+        (".codex", "codex_private"),
+        (".agents", "agents_private"),
+        (".qwen", "qwen_private"),
+        (".superpowers", "superpowers_private"),
+    ] {
+        write_file(
+            root,
+            &format!("{dir}/state/private.rs"),
+            &format!("pub fn {function}() {{}}\n"),
+        );
+    }
     (dir, tool)
 }
 
@@ -647,6 +730,11 @@ async fn introspect_skips_dependency_trees_at_the_top_level() {
         "only src/lib.rs is project code, got {paths:?}"
     );
     assert!(paths[0].ends_with("src/lib.rs"));
+    assert!(paths.iter().all(|path| {
+        ![".claude", ".codex", ".agents", ".qwen", ".superpowers"]
+            .iter()
+            .any(|dir| path.contains(dir))
+    }));
     assert!(!result.coverage.gitignore_applied, "not a git work tree");
 }
 
@@ -657,13 +745,27 @@ async fn code_query_uses_the_same_skips() {
     let tool = CodeQuery::with_safety_config(config);
     let out = tool
         .execute(
-            json!({"query": "get pad gen real dup six", "scope": dir.path().to_string_lossy()}),
+            json!({
+                "query": "get pad gen real dup six claude_private codex_private agents_private qwen_private superpowers_private",
+                "scope": dir.path().to_string_lossy()
+            }),
         )
         .await
         .unwrap();
     let results = serde_json::to_string(&out["results"]).unwrap();
     assert!(results.contains("real"), "{results}");
-    for foreign in ["pad", "\"get\"", "gen", "dup", "six"] {
+    for foreign in [
+        "pad",
+        "\"get\"",
+        "gen",
+        "dup",
+        "six",
+        "claude_private",
+        "codex_private",
+        "agents_private",
+        "qwen_private",
+        "superpowers_private",
+    ] {
         assert!(
             !results.contains(foreign),
             "{foreign} comes from a skipped tree: {results}"
@@ -673,24 +775,30 @@ async fn code_query_uses_the_same_skips() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn introspect_walks_a_symlink_cycle_once() {
+async fn introspection_never_traverses_directory_symlinks() {
     let (dir, tool) = walk_fixture();
     let root = dir.path();
     write_file(root, "src/lib.rs", "pub fn alpha_walk() {}\n");
     write_file(root, "src/nested/b.rs", "pub fn beta_walk() {}\n");
+    write_file(
+        root,
+        "outside/secret.rs",
+        "pub fn symlink_only_secret() {}\n",
+    );
     // src/nested/up -> .. (src): a cycle inside the workspace.
     std::os::unix::fs::symlink("..", root.join("src/nested/up")).unwrap();
-    // A second link to the same tree.
-    std::os::unix::fs::symlink("src", root.join("alias")).unwrap();
+    // A normal-looking alias to a source directory outside the selected root
+    // must not make that source an implicit input.
+    std::os::unix::fs::symlink("../outside", root.join("src/alias")).unwrap();
     let result = introspect(
         &tool,
-        json!({"target": root.to_string_lossy(), "max_tokens": 20000}),
+        json!({"target": root.join("src").to_string_lossy(), "max_tokens": 20000}),
     )
     .await;
     assert_eq!(
         result.coverage.files_total,
         2,
-        "each file once: {:?}",
+        "only real files beneath the selected root: {:?}",
         result
             .files_included
             .iter()
@@ -698,13 +806,47 @@ async fn introspect_walks_a_symlink_cycle_once() {
             .collect::<Vec<_>>()
     );
     assert_eq!(result.coverage.dirs_not_walked, 0);
+    assert!(!result.content.contains("symlink_only_secret"));
 
     let config = scoped_config(format!("{}/**", root.to_string_lossy()), vec![]);
-    let out = CodeQuery::with_safety_config(config)
-        .execute(json!({"query": "alpha_walk beta_walk", "scope": root.to_string_lossy()}))
+    let out = CodeQuery::with_safety_config(config.clone())
+        .execute(json!({
+            "query": "alpha_walk beta_walk symlink_only_secret",
+            "scope": root.join("src").to_string_lossy()
+        }))
         .await
         .unwrap();
-    assert_eq!(out["total_matches"], 2, "code_query terminates and dedups");
+    assert_eq!(out["total_matches"], 2, "code_query skips every symlink");
+    assert!(!serde_json::to_string(&out["results"])
+        .unwrap()
+        .contains("symlink_only_secret"));
+
+    let plan = CodePlan::with_safety_config(config.clone())
+        .execute(json!({
+            "goal": "fix symlink_only_secret",
+            "codebase_root": root.join("src").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    assert!(plan["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|phase| phase["target"].as_str())
+        .all(|target| !target.contains("alias") && !target.contains("secret.rs")));
+
+    let impact = CodeDiffPlan::with_safety_config(config)
+        .execute(json!({
+            "target_file": root.join("src/lib.rs").to_string_lossy(),
+            "change_type": "modify",
+            "affected_symbol": "symlink_only_secret",
+            "codebase_root": root.join("src").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(impact["estimated_files_to_update"], 0);
+    assert_eq!(impact["direct_callers"], json!([]));
+    assert_eq!(impact["tests_affected"], json!([]));
 }
 
 #[tokio::test]

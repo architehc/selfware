@@ -1171,6 +1171,69 @@ impl Agent {
         }
     }
 
+    /// Complete the lifecycle and drain the current task after the supervisor
+    /// had to drop `run_task` while it was blocked in an unresponsive call.
+    /// The ordinary `run_task` epilogue cannot execute once its future is
+    /// dropped, so this is the explicit hard-cancellation continuation.
+    pub(crate) async fn finish_forced_cancel(&mut self, result: &Result<()>) {
+        let effects = self.lifecycle_finish(result);
+        let Some(task_id) = self
+            .current_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.task_id.clone())
+        else {
+            return;
+        };
+        let owner = crate::resources::Owner::for_task(task_id).with_agent(self.agent_id.clone());
+        let fallback = super::lifecycle_wiring::teardown_fallback_reason(
+            &effects,
+            self.task_lifecycle_state(),
+        );
+        if let Some(why) = &fallback {
+            let owned = crate::resources::ResourceRegistry::global()
+                .owned_by(owner.task().as_deref().unwrap_or_default())
+                .len();
+            if owned > 0 {
+                warn!(
+                    "resources: forced cancellation ended without a teardown effect ({why}); draining the {owned} resource(s) anyway"
+                );
+            }
+        }
+
+        self.resource_teardown = None;
+        let Some(task) = owner.task() else {
+            return;
+        };
+        let registry = crate::resources::ResourceRegistry::global();
+        if registry.owned_by(&task).is_empty() {
+            return;
+        }
+        let policy = crate::resources::TeardownPolicy::with_deadline(
+            std::time::Duration::from_secs(self.config.resources.teardown_deadline_secs),
+        );
+        let budget = policy.deadline + policy.force_grace;
+        let report = crate::resources::teardown::teardown_task_within(
+            registry,
+            &crate::resources::SystemDriver::default(),
+            &task,
+            policy,
+            budget,
+        )
+        .await;
+        if let Some(outcome) = report.outcome() {
+            if report.leaked.is_empty() && report.undrained.is_empty() {
+                tracing::info!("{}", outcome.summary);
+            } else {
+                warn!(
+                    "{} [{} leak alarm(s)]",
+                    outcome.summary,
+                    report.leak_alarms.len()
+                );
+            }
+            self.resource_teardown = Some(outcome);
+        }
+    }
+
     /// The run ended: drain what the task owns. Normally triggered by the
     /// `TeardownOwned` effect of the task's terminal transition; when that
     /// effect is absent (no tracker, the task already terminal, a refused
@@ -1834,12 +1897,17 @@ impl Agent {
 
     /// Review code in a specific file
     pub async fn review(&mut self, file_path: &str) -> Result<()> {
-        self.validate_context_path(std::path::Path::new(file_path))?;
-        let content = tokio::fs::read_to_string(file_path)
+        let anchored = self
+            .tools
+            .workspace_root()
+            .anchor_path(std::path::Path::new(file_path));
+        let root = self.tools.workspace_root().clone();
+        crate::tools::workspace_root::sync_scope(root, || self.validate_context_path(&anchored))?;
+        let content = tokio::fs::read_to_string(&anchored)
             .await
             .with_context(|| format!("Failed to read file: {}", file_path))?;
 
-        let content = self.sanitize_context_data(std::path::Path::new(file_path), &content);
+        let content = self.sanitize_context_data(&anchored, &content);
         let task = Planner::review_prompt(file_path, &content);
         self.run_task(&task).await
     }

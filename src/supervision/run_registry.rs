@@ -143,10 +143,9 @@ impl RunRegistry {
     /// Write (or overwrite) a run record atomically (temp file + rename).
     pub fn write(&self, record: &RunRecord) -> Result<()> {
         let path = self.record_path(&record.id);
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(record).context("serialize run record")?;
-        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
+        crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o600)
+            .with_context(|| format!("atomically write {}", path.display()))?;
         Ok(())
     }
 

@@ -121,7 +121,6 @@ async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
     use futures::StreamExt;
 
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let partial = dest.with_extension("partial");
     println!(
         "  Downloading boot-assistant model ({} MB) from HuggingFace...",
         MODEL_SIZE_BYTES / 1_000_000
@@ -137,28 +136,38 @@ async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
     if !resp.status().is_success() {
         bail!("model download returned HTTP {}", resp.status());
     }
-    let mut file = std::fs::File::create(&partial)
-        .with_context(|| format!("creating {}", partial.display()))?;
-    let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
-    let mut next_report: u64 = 64 * 1024 * 1024;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("model download stream")?;
-        file.write_all(&chunk)?;
-        downloaded += chunk.len() as u64;
-        if downloaded >= next_report {
-            println!(
-                "    {} MB / {} MB",
-                downloaded / 1_000_000,
-                MODEL_SIZE_BYTES / 1_000_000
-            );
-            next_report += 256 * 1024 * 1024;
+    let (partial, mut file) = crate::session::checkpoint::create_atomic_temp_file(dest, 0o600)
+        .with_context(|| format!("creating a temporary model beside {}", dest.display()))?;
+    let download_result = async {
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut next_report: u64 = 64 * 1024 * 1024;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("model download stream")?;
+            file.write_all(&chunk)?;
+            downloaded += chunk.len() as u64;
+            if downloaded >= next_report {
+                println!(
+                    "    {} MB / {} MB",
+                    downloaded / 1_000_000,
+                    MODEL_SIZE_BYTES / 1_000_000
+                );
+                next_report += 256 * 1024 * 1024;
+            }
         }
+        file.sync_all()?;
+        Ok::<(), anyhow::Error>(())
     }
-    file.flush()?;
+    .await;
     drop(file);
-    std::fs::rename(&partial, dest)
-        .with_context(|| format!("moving {} into place", dest.display()))?;
+    if let Err(error) = download_result {
+        let _ = std::fs::remove_file(&partial);
+        return Err(error);
+    }
+    if let Err(error) = crate::session::checkpoint::replace_atomically(&partial, dest) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(error).with_context(|| format!("moving {} into place", dest.display()));
+    }
     Ok(())
 }
 

@@ -427,9 +427,8 @@ impl ResourceRegistry {
         prune(&mut inner.file, &self.session.id);
         inner.file.version = 1;
         let json = serde_json::to_string_pretty(&inner.file)?;
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
+        crate::session::checkpoint::write_bytes_atomically(path, json.as_bytes(), 0o600)
+            .with_context(|| format!("atomically write {}", path.display()))?;
         let _ = lock.unlock();
         Ok(())
     }

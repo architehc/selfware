@@ -207,13 +207,7 @@ impl Tool for ProcessStart {
         let keep = args.get("keep").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let manager = PROCESS_MANAGER.read().await;
-        let summary = manager.start(config).await?;
-        if matches!(
-            summary.status,
-            crate::process_manager::ProcessStatus::Running
-        ) {
-            record_managed(&summary, keep);
-        }
+        let summary = manager.start_tracked(config, keep).await?;
 
         // Double-check: the process manager should now return Err for failure
         // states, but guard against future regressions by checking status here.
@@ -405,9 +399,7 @@ impl Tool for ProcessRestart {
             .context("Missing required parameter: id")?;
 
         let manager = PROCESS_MANAGER.read().await;
-        let summary = manager.restart(id).await?;
-        // New pid: refresh the registry handle (keeps the original owner).
-        record_managed(&summary, false);
+        let summary = manager.restart_tracked(id).await?;
 
         Ok(serde_json::to_value(summary)?)
     }
@@ -543,44 +535,6 @@ impl Tool for PortCheck {
 
 fn managed_entry(id: &str) -> Option<crate::resources::Resource> {
     crate::resources::managed_process_entry(crate::resources::ResourceRegistry::global(), id)
-}
-
-/// Record a running managed process in the resource registry, or refresh
-/// the pid of its existing entry (reuse, restart).
-fn record_managed(summary: &crate::process_manager::ProcessSummary, keep: bool) {
-    use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
-    let Some(pid) = summary.pid else {
-        return;
-    };
-    let handle = ResourceHandle::Process {
-        pid,
-        pgid: cfg!(unix).then_some(pid),
-        start_time: crate::resources::driver::process_start_time(pid),
-        managed_id: Some(summary.id.clone()),
-    };
-    let registry = ResourceRegistry::global();
-    match managed_entry(&summary.id) {
-        Some(_) => {
-            let ResourceHandle::Process { start_time, .. } = handle else {
-                return;
-            };
-            crate::resources::refresh_managed_process(registry, &summary.id, pid, start_time);
-        }
-        None => {
-            let label = std::iter::once(summary.command.as_str())
-                .chain(summary.args.iter().map(String::as_str))
-                .collect::<Vec<_>>()
-                .join(" ");
-            registry.register(
-                NewResource::new(
-                    ResourceKind::Process,
-                    handle,
-                    format!("{}: {label}", summary.id),
-                )
-                .keep(keep),
-            );
-        }
-    }
 }
 
 /// Mark a managed process's registry entry released (after a confirmed stop).

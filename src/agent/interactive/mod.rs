@@ -1144,16 +1144,12 @@ impl Agent {
                             continue;
                         }
                     }
-                    // Atomic write: temp file + rename, never a torn write.
-                    let tmp = path.with_extension(format!(
-                        "{}.undo-tmp",
-                        path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
-                    ));
-                    let written = tokio::fs::write(&tmp, &snapshot.content).await.is_ok()
-                        && tokio::fs::rename(&tmp, path).await.is_ok();
-                    if !written {
-                        let _ = tokio::fs::remove_file(&tmp).await;
-                    }
+                    let written = crate::session::checkpoint::write_bytes_atomically(
+                        path,
+                        snapshot.content.as_bytes(),
+                        0o666,
+                    )
+                    .is_ok();
                     if written {
                         println!(
                             "  {} Restored {}",
@@ -1310,7 +1306,16 @@ impl Agent {
                         .chat_store
                         .save(name, &self.messages, &self.config.model)
                     {
-                        Ok(()) => println!("{} Chat '{}' saved", "💾".bright_green(), name),
+                        Ok(crate::session::chat_store::ChatSaveStatus::Encrypted) => println!(
+                            "{} Chat '{}' saved with encryption",
+                            "💾".bright_green(),
+                            name
+                        ),
+                        Ok(crate::session::chat_store::ChatSaveStatus::Plaintext) => println!(
+                            "{} Chat '{}' saved in plaintext (encryption unavailable)",
+                            "⚠".bright_yellow(),
+                            name
+                        ),
                         Err(e) => println!("{} Save failed: {}", "✗".bright_red(), e),
                     }
                 }
@@ -1913,8 +1918,11 @@ impl Agent {
             .strip_prefix("--curriculum ")
             .or_else(|| args.strip_prefix("--curriculum="))
         {
-            let dir_path = std::path::Path::new(dir_str.trim());
-            if !tokio::fs::try_exists(dir_path).await.unwrap_or(false) {
+            let dir_path = self
+                .tools
+                .workspace_root()
+                .anchor_path(std::path::Path::new(dir_str.trim()));
+            if !tokio::fs::try_exists(&dir_path).await.unwrap_or(false) {
                 println!(
                     "{} Directory not found: {}",
                     "!!".bright_red(),
@@ -1922,7 +1930,7 @@ impl Agent {
                 );
                 return;
             }
-            if !tokio::fs::metadata(dir_path)
+            if !tokio::fs::metadata(&dir_path)
                 .await
                 .map(|m| m.is_dir())
                 .unwrap_or(false)
@@ -1934,7 +1942,7 @@ impl Agent {
             let extractor = ConceptExtractor::new();
             let mut all_concepts = Vec::new();
 
-            if let Ok(mut entries) = tokio::fs::read_dir(dir_path).await {
+            if let Ok(mut entries) = tokio::fs::read_dir(&dir_path).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("rs") {
@@ -2007,18 +2015,21 @@ impl Agent {
         }
 
         // /explain <path> — explain a file
-        let file_path = std::path::Path::new(args);
-        if let Err(error) = self.validate_context_path(file_path) {
+        let file_path = self
+            .tools
+            .workspace_root()
+            .anchor_path(std::path::Path::new(args));
+        if let Err(error) = self.validate_context_path(&file_path) {
             println!("{} Cannot load file: {}", "!!".bright_red(), error);
             return;
         }
-        if !tokio::fs::try_exists(file_path).await.unwrap_or(false) {
+        if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
             println!("{} File not found: {}", "!!".bright_red(), args);
             return;
         }
 
-        let content = match tokio::fs::read_to_string(file_path).await {
-            Ok(c) => self.sanitize_context_data(file_path, &c),
+        let content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(c) => self.sanitize_context_data(&file_path, &c),
             Err(e) => {
                 println!("{} Cannot read file: {}", "!!".bright_red(), e);
                 return;
@@ -2677,7 +2688,16 @@ impl Agent {
                         .chat_store
                         .save(name, &self.messages, &self.config.model)
                     {
-                        Ok(()) => println!("{} Chat '{}' saved", "💾".bright_green(), name),
+                        Ok(crate::session::chat_store::ChatSaveStatus::Encrypted) => println!(
+                            "{} Chat '{}' saved with encryption",
+                            "💾".bright_green(),
+                            name
+                        ),
+                        Ok(crate::session::chat_store::ChatSaveStatus::Plaintext) => println!(
+                            "{} Chat '{}' saved in plaintext (encryption unavailable)",
+                            "⚠".bright_yellow(),
+                            name
+                        ),
                         Err(e) => println!("{} Save failed: {}", "✗".bright_red(), e),
                     }
                 }
@@ -3411,9 +3431,9 @@ impl Agent {
 
         let provider = if let Some(profile) = self.config.resolve_model(Some("embedding")) {
             // Use HTTP embedding backend from [models.embedding] config
-            let dim = profile.context_length.min(4096); // context_length doubles as dimension hint
-                                                        // Profile key wins; fall back to the top-level api_key (e.g. the
-                                                        // same OpenRouter key usually serves both chat and embeddings).
+            // The endpoint's first response establishes the vector dimension.
+            // A model context window is measured in tokens and must never be
+            // reused as an embedding dimension.
             let api_key = profile
                 .api_key
                 .as_ref()
@@ -3423,7 +3443,7 @@ impl Agent {
                 crate::analysis::vector_store::HttpEmbeddingProvider::new(
                     &profile.endpoint,
                     &profile.model,
-                    if dim > 0 && dim <= 4096 { dim } else { 768 },
+                    0,
                 )
                 .with_api_key(api_key),
             ))

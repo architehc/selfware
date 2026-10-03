@@ -247,6 +247,55 @@ async fn test_hierarchical_memory_query_specific_tier() {
 }
 
 #[tokio::test]
+async fn test_hierarchical_memory_query_includes_archive() {
+    let hm = HierarchicalMemory::default().await.unwrap();
+    let id = hm
+        .store("archived needle", MemoryTier::Archive)
+        .await
+        .unwrap();
+
+    let results = hm.query(MemoryQuery::new("needle")).await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, id);
+    assert_eq!(results[0].tier, MemoryTier::Archive);
+    assert_eq!(hm.index().get_by_tier(MemoryTier::Archive).await, vec![id]);
+}
+
+#[tokio::test]
+async fn tier_transition_moves_the_shared_index() {
+    let hm = HierarchicalMemory::default().await.unwrap();
+    let id = hm.store("move me", MemoryTier::Working).await.unwrap();
+
+    assert_eq!(hm.index().get_by_tier(MemoryTier::Working).await, vec![id]);
+    hm.demote(id).await.unwrap();
+    assert!(hm.index().get_by_tier(MemoryTier::Working).await.is_empty());
+    assert_eq!(
+        hm.index().get_by_tier(MemoryTier::ShortTerm).await,
+        vec![id]
+    );
+}
+
+#[tokio::test]
+async fn archive_participates_in_adjacent_tier_transitions() {
+    let hm = HierarchicalMemory::default().await.unwrap();
+    let id = hm.store("cold memory", MemoryTier::LongTerm).await.unwrap();
+
+    hm.demote(id).await.unwrap();
+    assert_eq!(hm.retrieve(id).await.unwrap().tier, MemoryTier::Archive);
+    assert!(hm
+        .index()
+        .get_by_tier(MemoryTier::LongTerm)
+        .await
+        .is_empty());
+    assert_eq!(hm.index().get_by_tier(MemoryTier::Archive).await, vec![id]);
+
+    hm.promote(id).await.unwrap();
+    assert_eq!(hm.retrieve(id).await.unwrap().tier, MemoryTier::LongTerm);
+    assert!(hm.index().get_by_tier(MemoryTier::Archive).await.is_empty());
+    assert_eq!(hm.index().get_by_tier(MemoryTier::LongTerm).await, vec![id]);
+}
+
+#[tokio::test]
 async fn test_hierarchical_memory_query_with_limit() {
     let hm = HierarchicalMemory::default().await.unwrap();
     for i in 0..5 {
@@ -381,8 +430,29 @@ async fn test_hierarchical_memory_stats_tracks_demotions() {
 #[tokio::test]
 async fn test_hierarchical_memory_get_stats() {
     let hm = HierarchicalMemory::default().await.unwrap();
+    hm.store("archived", MemoryTier::Archive).await.unwrap();
     let stats = hm.get_stats().await;
-    assert_eq!(stats.total_inserts, 0);
+    assert_eq!(stats.total_inserts, 1);
+    assert_eq!(stats.archive_count, 1);
+}
+
+#[tokio::test]
+async fn failed_store_is_not_counted_as_an_insert() {
+    let config = MemoryConfig {
+        working_capacity: 0,
+        ..MemoryConfig::default()
+    };
+    let hm = HierarchicalMemory::new(
+        config,
+        std::sync::Arc::new(crate::analysis::vector_store::EmbeddingBackend::Mock(
+            crate::analysis::vector_store::MockEmbeddingProvider::default(),
+        )),
+    )
+    .await
+    .unwrap();
+
+    assert!(hm.store("cannot fit", MemoryTier::Working).await.is_err());
+    assert_eq!(hm.get_stats().await.total_inserts, 0);
 }
 
 #[tokio::test]

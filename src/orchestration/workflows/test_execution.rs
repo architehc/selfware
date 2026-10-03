@@ -748,6 +748,35 @@ async fn test_llm_step_live_with_handler() {
 }
 
 #[tokio::test]
+async fn test_sync_llm_handler_inherits_workspace_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    std::fs::write(workspace.join("marker.txt"), "scoped workspace").unwrap();
+
+    let executor = WorkflowExecutor::new().with_llm_handler(|_: &str, _: &[String]| {
+        let marker = crate::tools::workspace_root::current_path().join("marker.txt");
+        Ok(std::fs::read_to_string(marker)?)
+    });
+    let step_type = StepType::Llm {
+        prompt: "read marker".into(),
+        context: vec![],
+    };
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(&workspace);
+    let mut ctx = WorkflowContext::new(&workspace);
+    let result = crate::tools::workspace_root::scope(
+        root,
+        executor.execute_step_inner(&step_type, &mut ctx),
+    )
+    .await
+    .unwrap();
+
+    match result {
+        VarValue::String(value) => assert_eq!(value, "scoped workspace"),
+        other => panic!("expected string workflow result, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_llm_step_dryrun_substitution() {
     let mut ctx = WorkflowContext::new("/tmp");
     ctx.set_var("code", "fn main() {}");

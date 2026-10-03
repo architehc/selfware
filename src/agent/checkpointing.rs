@@ -37,6 +37,140 @@ pub(crate) fn backend_mismatch_warning(
     })
 }
 
+const RESTORED_PRIVATE_STATE_WITHHELD: &str =
+    "[trust-gate: restored repository output withheld because it referenced private coding-tool state that broad scans no longer read]";
+const RESTORED_PRIVATE_CONTEXT_WITHHELD: &str =
+    "[trust-gate: restored context file withheld because automatic context loading no longer reads private coding-tool state]";
+
+/// Check path-like tokens rather than substrings so ordinary names such as
+/// `.claude-example.md` do not turn an unrelated restored message into a
+/// false positive. Tool output can be JSON, a tree, or plain text, hence the
+/// small tokenizer instead of parsing one particular result schema.
+fn references_private_tool_state_path(text: &str) -> bool {
+    text.split(|character: char| {
+        !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | '\\' | '~'))
+    })
+    .filter(|token| !token.is_empty())
+    .any(|token| {
+        token.split(['/', '\\']).any(|component| {
+            crate::safety::source_context::is_private_tool_state_dir_name(std::ffi::OsStr::new(
+                component,
+            ))
+        })
+    })
+}
+
+fn generated_context_references_private_state(message: &Message, text: &str) -> bool {
+    let internally_named = message
+        .name
+        .as_deref()
+        .is_some_and(|name| name.starts_with("selfware_ctx_"));
+    let legacy_header = text
+        .starts_with("\n// ═══════════════════════════════════════════\n// FILE: ")
+        && text.contains("\n// ═══════════════════════════════════════════\n");
+    if !internally_named && !legacy_header {
+        return false;
+    }
+
+    // Inspect the generated header's path, not the file body: a public source
+    // such as the policy implementation itself legitimately contains strings
+    // like `.claude` and must survive a resume. New headers JSON-quote the
+    // label; old checkpoints stored it verbatim.
+    if let Some(label) = text.lines().find_map(|line| line.strip_prefix("// FILE: ")) {
+        let decoded = serde_json::from_str::<String>(label).unwrap_or_else(|_| label.to_string());
+        return references_private_tool_state_path(&decoded);
+    }
+
+    // An internally named generated message without its required header is
+    // malformed. If its remaining body names private state, fail closed.
+    internally_named && references_private_tool_state_path(text)
+}
+
+/// Repository-derived tools that could have persisted private paths or source
+/// before the shared walker policy excluded coding-tool state.
+fn is_repository_wide_reader(tool_name: &str) -> bool {
+    tool_name.starts_with("lsp_")
+        || matches!(
+            tool_name,
+            "directory_tree"
+                | "grep_search"
+                | "glob_find"
+                | "symbol_search"
+                | "search"
+                | "context_bulk_read"
+                | "context_load_skeleton"
+                | "code_introspect"
+                | "code_query"
+                | "code_plan"
+                | "analyze"
+                | "tech_debt_report"
+                | "code_map"
+                | "code_metrics"
+                | "localize_issue"
+                | "graph_summary"
+                | "hotspots"
+                | "context_pack"
+                | "impact"
+                | "neighbors"
+                | "test_map"
+                | "cycles"
+                | "dups"
+        )
+}
+
+fn value_explicitly_selects_private_state(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => references_private_tool_state_path(value),
+        serde_json::Value::Array(values) => {
+            values.iter().any(value_explicitly_selects_private_state)
+        }
+        _ => false,
+    }
+}
+
+/// A private directory remains readable when the caller explicitly selected
+/// it. Preserve that intent across resume, but do not mistake a search query
+/// for a selected root (for example grep pattern `.claude` under `.`).
+fn arguments_explicitly_select_private_state(tool_name: &str, arguments: &str) -> bool {
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return false;
+    };
+    const PATH_KEYS: &[&str] = &[
+        "path",
+        "file_path",
+        "file",
+        "filename",
+        "target",
+        "root",
+        "scope",
+        "directory",
+        "dir",
+        "paths",
+        "files",
+        "node",
+        "node_id",
+    ];
+    if PATH_KEYS.iter().any(|key| {
+        arguments
+            .get(*key)
+            .is_some_and(value_explicitly_selects_private_state)
+    }) {
+        return true;
+    }
+    matches!(tool_name, "glob_find" | "context_bulk_read")
+        && arguments
+            .get("pattern")
+            .is_some_and(value_explicitly_selects_private_state)
+}
+
+fn replace_restored_message_content(message: &mut Message, replacement: &str, xml: bool) {
+    message.content = if xml {
+        format!("<tool_result>{replacement}</tool_result>").into()
+    } else {
+        replacement.to_string().into()
+    };
+}
+
 impl Agent {
     /// Re-apply today's source policy to persisted tool data. User-authored
     /// instructions are not a sanitization target: legacy XML results require
@@ -73,6 +207,20 @@ impl Agent {
             let xml_body = text
                 .strip_prefix("<tool_result>")
                 .and_then(|body| body.strip_suffix("</tool_result>"));
+            // `/ctx load` historically stored generated file bodies as user
+            // messages. They have no adjacent tool call to recover provenance
+            // from, so withhold only the internally identifiable message whose
+            // body names private state; ordinary user text remains untouched.
+            if generated_context_references_private_state(message, &text) {
+                replace_restored_message_content(message, RESTORED_PRIVATE_CONTEXT_WITHHELD, false);
+                self.trust_gate_findings = self.trust_gate_findings.saturating_add(1);
+                warn!(
+                    message_name = ?message.name,
+                    "Withheld restored automatic context from private coding-tool state"
+                );
+                pending_xml.clear();
+                continue;
+            }
             let provenance = if message.role == "tool" {
                 Some(
                     message
@@ -108,6 +256,28 @@ impl Agent {
             let Some((tool_name, arguments)) = provenance else {
                 continue;
             };
+            // A legacy broad repository result can pass today's path check via
+            // its allowed root (`.`) while its persisted payload still names
+            // nested private state. Keep explicit private-root reads, whose
+            // provenance proves user selection; fail closed when provenance
+            // is absent or the old tool walked a broader root.
+            if references_private_tool_state_path(&text)
+                && ((tool_name == "restored_tool")
+                    || (is_repository_wide_reader(&tool_name)
+                        && !arguments_explicitly_select_private_state(&tool_name, &arguments)))
+            {
+                replace_restored_message_content(
+                    message,
+                    RESTORED_PRIVATE_STATE_WITHHELD,
+                    xml_body.is_some(),
+                );
+                self.trust_gate_findings = self.trust_gate_findings.saturating_add(1);
+                warn!(
+                    tool = %tool_name,
+                    "Withheld restored broad repository output that referenced private coding-tool state"
+                );
+                continue;
+            }
             // A remote/MCP tool's `path` may be an API resource identifier,
             // not a host filesystem source. Only known local readers/writers
             // inherit the workspace path policy.
@@ -1249,31 +1419,12 @@ impl Agent {
                         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
                 }
             }
-            // Atomic + owner-only: episodic memory holds raw task data. Write to
-            // a process-unique temp, chmod 0600 BEFORE it is visible under the
-            // real name, then rename over the target.
-            static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tmp_path =
-                memory_path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
-            if let Err(e) = tokio::fs::write(&tmp_path, &content).await {
-                tracing::warn!("Failed to write episodic memory temp: {}", e);
-                return;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-                {
-                    tracing::warn!("Failed to chmod episodic memory temp: {}", e);
-                    let _ = tokio::fs::remove_file(&tmp_path).await;
-                    return;
-                }
-            }
-            if let Err(e) = tokio::fs::rename(&tmp_path, &memory_path).await {
-                tracing::warn!("Failed to rename episodic memory into place: {}", e);
-                let _ = tokio::fs::remove_file(&tmp_path).await;
+            if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+                &memory_path,
+                content.as_bytes(),
+                0o600,
+            ) {
+                tracing::warn!("Failed to atomically save episodic memory: {}", e);
             } else {
                 tracing::info!("Saved global episodic memory (background, atomic 0600)");
             }

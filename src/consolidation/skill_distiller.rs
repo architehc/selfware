@@ -221,17 +221,11 @@ impl SkillDistiller {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(ledger)?;
-        let tmp_path = self.ledger_file.with_extension("tmp");
-        if let Ok(meta) = tmp_path.symlink_metadata() {
-            if meta.file_type().is_symlink() {
-                return Err(anyhow!(
-                    "Ledger temporary destination is a symlink: {:?}",
-                    tmp_path
-                ));
-            }
-        }
-        fs::write(&tmp_path, json)?;
-        fs::rename(tmp_path, &self.ledger_file)?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &self.ledger_file,
+            json.as_bytes(),
+            0o600,
+        )?;
         Ok(())
     }
 

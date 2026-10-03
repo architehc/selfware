@@ -199,7 +199,7 @@ impl AdmissionLedger {
             let mut file = open_opts.open(&temp_path)?;
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
-            std::fs::rename(&temp_path, &ledger_path)?;
+            crate::session::checkpoint::replace_atomically(&temp_path, &ledger_path)?;
             Ok(())
         })();
 
@@ -1009,7 +1009,7 @@ impl SkillRegistry {
                 let mut file = open_opts.open(&temp_file_path)?;
                 file.write_all(rendered.as_bytes())?;
                 file.sync_all()?;
-                std::fs::rename(&temp_file_path, &target_file)?;
+                crate::session::checkpoint::replace_atomically(&temp_file_path, &target_file)?;
                 Ok(())
             })();
 

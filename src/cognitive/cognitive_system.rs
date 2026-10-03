@@ -462,7 +462,13 @@ impl LlmContext {
             for file in &self.semantic.files {
                 prompt.push_str(&format!(
                     "### {} (relevance: {:.2})\n{}\n\n",
-                    file.path, file.relevance_score, file.content
+                    crate::safety::source_context::quote_untrusted_label(&file.path),
+                    file.relevance_score,
+                    crate::cognitive::memory_system::frame_untrusted_file(
+                        "semantic_code_file",
+                        &file.path,
+                        &file.content,
+                    )
                 ));
             }
         }
@@ -471,7 +477,10 @@ impl LlmContext {
         if !self.working.active_code.is_empty() {
             prompt.push_str("## Active Code Files\n");
             for code in &self.working.active_code {
-                prompt.push_str(&format!("- {}\n", code.path));
+                prompt.push_str(&format!(
+                    "- {}\n",
+                    crate::safety::source_context::quote_untrusted_label(&code.path)
+                ));
             }
             prompt.push('\n');
         }

@@ -91,10 +91,13 @@ pub async fn output_in_process_group(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     let mut guard = ProcessGroupGuard::new(child.id());
-    // On `Err` (or a drop while awaiting) the armed guard kills the group.
-    let output = child.wait_with_output().await?;
+    // Keep the leader unreaped until inherited output pipes have reached EOF.
+    // Otherwise a descendant can hold a pipe open after the leader was reaped,
+    // and an outer timeout can drop the still-armed guard after that numeric
+    // pgid has already been reused by an unrelated process group.
+    let output = wait_with_output_without_reaping(&mut child).await?;
     guard.disarm();
     Ok(output)
 }
@@ -208,6 +211,136 @@ pub(crate) async fn collect_drains_until(
     tokio::join!(one(deadline, stdout), one(deadline, stderr));
 }
 
+/// Wait until a child has exited while keeping its process id reserved on
+/// Unix. The returned status is `None` there because the child deliberately
+/// remains an unreaped zombie; callers must reap it with [`tokio::process::Child::wait`]
+/// after they have finished any process-group cleanup. On other platforms the
+/// child is reaped here and its status is returned.
+///
+/// Keeping the leader unreaped matters when a descendant inherits a captured
+/// stdout/stderr pipe. If the leader were reaped before a bounded drain wait,
+/// its pid could be reused and a later `killpg(stored_pid)` could signal an
+/// unrelated process group.
+pub(crate) async fn wait_for_exit_without_reaping(
+    child: &mut tokio::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(unix)]
+    {
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot observe an already-reaped child",
+            )
+        })?;
+        loop {
+            if process_has_exited_without_reaping(pid)? {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.wait().await.map(Some)
+    }
+}
+
+/// Observe a mutex-owned long-lived child exiting without holding its mutex
+/// for the whole lifetime of the process. On Unix the normal path uses
+/// `WNOWAIT`, preserving the leader until its owner can tear down descendants;
+/// if that probe fails, `try_wait` either proves the child is still live or
+/// reaps it before this function reports completion.
+pub(crate) async fn wait_for_locked_child_exit(child: &tokio::sync::Mutex<tokio::process::Child>) {
+    loop {
+        let exited = {
+            let mut child = child.lock().await;
+            #[cfg(unix)]
+            {
+                match child.id() {
+                    None => true,
+                    Some(pid) => match process_has_exited_without_reaping(pid) {
+                        Ok(exited) => exited,
+                        Err(_) => matches!(child.try_wait(), Ok(Some(_))),
+                    },
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                matches!(child.try_wait(), Ok(Some(_)))
+            }
+        };
+        if exited {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Collect a child's piped stdout/stderr while keeping its process-group
+/// leader unreaped until both pipes reach EOF.
+///
+/// This has the same successful result as `Child::wait_with_output`, but is
+/// safe to use while a [`ProcessGroupGuard`] retains the child's pid. Tokio's
+/// helper may reap the direct child before a background descendant closes an
+/// inherited pipe; cancellation during that interval would otherwise let the
+/// guard signal a recycled process-group id.
+pub(crate) async fn wait_with_output_without_reaping(
+    child: &mut tokio::process::Child,
+) -> std::io::Result<std::process::Output> {
+    async fn read_all<R: tokio::io::AsyncRead + Unpin>(
+        pipe: Option<R>,
+    ) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (status_before_reap, stdout, stderr) = tokio::try_join!(
+        wait_for_exit_without_reaping(child),
+        read_all(stdout),
+        read_all(stderr),
+    )?;
+    let status = match status_before_reap {
+        Some(status) => status,
+        None => child.wait().await?,
+    };
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// One nonblocking `waitid(WNOWAIT)` probe. Keeping `siginfo_t` inside this
+/// synchronous helper also ensures the async waiter remains `Send`: several
+/// libc targets represent siginfo with raw pointers.
+#[cfg(unix)]
+pub(crate) fn process_has_exited_without_reaping(pid: u32) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// Execute a command with bounded output memory, process-group isolation,
 /// and timeout enforcement.
 ///
@@ -249,9 +382,9 @@ pub async fn run_command_bounded(
         }
     });
 
-    let wait_res = tokio::time::timeout(timeout, child.wait()).await;
-    let status = match wait_res {
-        Ok(Ok(st)) => st,
+    let wait_res = tokio::time::timeout(timeout, wait_for_exit_without_reaping(&mut child)).await;
+    let status_before_drain = match wait_res {
+        Ok(Ok(status)) => status,
         Ok(Err(e)) => {
             pg_guard.kill();
             let _ = child.kill().await;
@@ -309,6 +442,14 @@ pub async fn run_command_bounded(
     }
     let stdout_bytes = stdout_slot.unwrap_or_default();
     let mut stderr_bytes = stderr_slot.unwrap_or_default();
+
+    // On Unix the leader stayed unreaped until every possible `killpg` above
+    // was complete, so its process-group identity could not be recycled. Other
+    // platforms already returned the reaped status from the wait helper.
+    let status = match status_before_drain {
+        Some(status) => status,
+        None => child.wait().await.map_err(CommandRunError::Io)?,
+    };
 
     pg_guard.disarm();
 
@@ -566,6 +707,42 @@ pub(crate) mod tests {
             .await
             .expect("pid");
         assert!(all_gone(&[child, grandchild]).await);
+    }
+
+    /// Regression: `Child::wait_with_output` can reap the group leader first
+    /// and then wait on a pipe inherited by a background child. If an outer
+    /// timeout fires in that interval, an armed guard must still have a live
+    /// (zombie) leader pinning the pgid it signals.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn output_timeout_after_parent_exit_kills_pipe_holding_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let sleep_pidfile = dir.path().join("sleep.pid");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 60 & echo $! > '{}'; exit 0",
+            sleep_pidfile.display()
+        ));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            output_in_process_group(&mut cmd),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "inherited stdout/stderr should keep output collection pending"
+        );
+        let descendant = wait_for_pidfile(
+            &sleep_pidfile,
+            std::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("shell recorded background pid");
+        assert!(
+            all_gone(&[descendant]).await,
+            "timeout must kill pipe-holding descendant {descendant}"
+        );
     }
 
     /// Same guarantee for `run_command_bounded` (cargo_*, npm/pip/yarn, hook

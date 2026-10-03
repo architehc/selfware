@@ -1264,10 +1264,13 @@ impl Tool for DirectoryTree {
                 .max_depth(max_depth)
                 .into_iter()
                 .filter_entry(|e| {
-                    if include_hidden {
+                    if e.depth() == 0 {
                         return true;
                     }
-                    if e.depth() == 0 {
+                    if !crate::evolve::graph::retain_repository_entry(e) {
+                        return false;
+                    }
+                    if include_hidden {
                         return true;
                     }
                     let name = e.file_name().to_str().unwrap_or("");

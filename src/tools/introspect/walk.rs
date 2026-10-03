@@ -6,21 +6,20 @@
 //! top-level `node_modules`/`.venv`/`target` straight into the deep walk and
 //! — with path-sorted output — those files consumed the budget first. The
 //! three walkers also each had their own list (`code_query`'s lacked
-//! `.venv`), and all of them followed directory symlinks with no visited
-//! set, so an in-workspace `link -> ..` recursed until ELOOP failed the
-//! tool. This module is the single walk:
+//! `.venv`), and all of them followed directory symlinks, so an in-workspace
+//! `link -> ..` recursed until ELOOP failed the tool. This module is the
+//! single walk:
 //!
 //! - one skip predicate ([`is_skipped_dir`]) for every directory at every
 //!   level, the target's direct children included — the repository
 //!   inventory's exclusions plus `scratchpad` and any Python virtualenv
 //!   (a directory holding `pyvenv.cfg`, whatever its name);
-//! - a visited set of canonicalized directories, so a symlink cycle or two
-//!   links to the same tree are walked once;
+//! - no symlink traversal: symlinked files and directories never become
+//!   implicit source inputs;
 //! - `.gitignore` respected through the repository inventory's
 //!   `git ls-files` listing when the target is inside a git work tree.
 
 use anyhow::Result;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::SafetyConfig;
@@ -60,7 +59,18 @@ pub(crate) fn source_files(
 ) -> Result<SourceWalk> {
     let mut walk = SourceWalk::default();
     let is_code = super::CodeIntrospect::is_source_file;
-    if target.is_file() {
+    let Ok(target_metadata) = std::fs::symlink_metadata(target) else {
+        return Ok(walk);
+    };
+    if target_metadata.file_type().is_symlink() {
+        if target.exists() {
+            if let Some(safety) = safety {
+                validate_tool_path(&target.to_string_lossy(), safety)?;
+            }
+        }
+        return Ok(walk);
+    }
+    if target_metadata.is_file() {
         if is_code(target) {
             if let Some(safety) = safety {
                 validate_tool_path(&target.to_string_lossy(), safety)?;
@@ -69,45 +79,47 @@ pub(crate) fn source_files(
         }
         return Ok(walk);
     }
-    if !target.is_dir() {
+    if !target_metadata.is_dir() {
         return Ok(walk);
     }
 
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    if let Ok(canon) = target.canonicalize() {
-        visited.insert(canon);
-    }
     // Explicit stack: (directory, its depth below target).
     let mut stack = vec![(target.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok())
             .collect();
-        entries.sort();
-        for path in entries {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if path.is_file() {
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                // Preserve the established fail-closed path-policy behavior
+                // for a live link that escapes the workspace, but never read
+                // or descend through any symlink (including an allowed one).
+                if path.exists() {
+                    if let Some(safety) = safety {
+                        validate_tool_path(&path.to_string_lossy(), safety)?;
+                    }
+                }
+                continue;
+            }
+            if file_type.is_file() {
                 if is_code(&path) {
                     if let Some(safety) = safety {
                         validate_tool_path(&path.to_string_lossy(), safety)?;
                     }
                     walk.files.push(path);
                 }
-            } else if path.is_dir() {
+            } else if file_type.is_dir() {
                 if is_skipped_dir(&name, &path) {
                     continue;
                 }
                 if let Some(safety) = safety {
                     validate_tool_path(&path.to_string_lossy(), safety)?;
-                }
-                // A directory reached twice (symlink cycle, or two links to
-                // one tree) is walked once.
-                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
-                if !visited.insert(canon) {
-                    continue;
                 }
                 if depth + 1 > max_depth {
                     walk.dirs_not_walked += 1;

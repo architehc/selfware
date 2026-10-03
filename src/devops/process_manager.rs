@@ -19,8 +19,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::Arc;
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -91,6 +92,13 @@ pub struct ManagedProcess {
     pub log_buffer: VecDeque<LogLine>,
     pub health_matched: bool,
     pub restart_count: u32,
+    /// Identifies this installation of an id so stale monitor/output tasks
+    /// cannot mutate a later process that reused the same id.
+    generation: u64,
+    /// Identifies the child currently installed within one auto-restarting
+    /// generation so buffered output from an exited child cannot mark its
+    /// replacement healthy.
+    incarnation: u64,
     child_handle: Option<Arc<RwLock<Option<Child>>>>,
 }
 
@@ -156,6 +164,8 @@ impl ManagedProcess {
             log_buffer: VecDeque::with_capacity(MAX_LOG_LINES),
             health_matched: false,
             restart_count: 0,
+            generation: 0,
+            incarnation: 0,
             child_handle: None,
         }
     }
@@ -210,10 +220,19 @@ impl ManagedProcess {
     }
 }
 
+fn is_expected_manual_restart(proc: &ManagedProcess, generation: Option<u64>) -> bool {
+    generation.is_some_and(|generation| {
+        proc.generation == generation
+            && matches!(proc.status, ProcessStatus::Restarting { attempt: 0 })
+    })
+}
+
 /// Manager for background processes
 pub struct ProcessManager {
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
     port_reservations: Arc<Mutex<HashMap<u16, PortReservation>>>,
+    start_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    next_generation: AtomicU64,
 }
 
 impl ProcessManager {
@@ -221,6 +240,8 @@ impl ProcessManager {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
             port_reservations: Arc::new(Mutex::new(HashMap::new())),
+            start_locks: Mutex::new(HashMap::new()),
+            next_generation: AtomicU64::new(1),
         }
     }
 
@@ -366,6 +387,7 @@ impl ProcessManager {
                 | ProcessStatus::Crashed { .. } => inventory.inactive += 1,
             }
         }
+        drop(processes);
 
         let reservations = self.port_reservations.lock().await;
         inventory.reserved_ports = reservations.keys().copied().collect();
@@ -418,12 +440,36 @@ impl ProcessManager {
         };
 
         for id in ids {
-            let child_handle = {
+            let (child_handle, pid, generation, status) = {
                 let processes = self.processes.read().await;
-                processes
-                    .get(&id)
-                    .and_then(|proc| proc.child_handle.clone())
+                let Some(proc) = processes.get(&id) else {
+                    continue;
+                };
+                // The monitor deliberately keeps the exited child's handle while
+                // it owns an auto-restart backoff. Reaping/clearing that state
+                // here lets a second reconcile misclassify the pending restart as
+                // orphaned and cancel it.
+                if matches!(proc.status, ProcessStatus::Restarting { .. }) {
+                    continue;
+                }
+                (
+                    proc.child_handle.clone(),
+                    proc.pid,
+                    proc.generation,
+                    proc.status.clone(),
+                )
             };
+
+            // A live child is owned by its monitor. Reconcile must not reap
+            // the exit first or the monitor will see an empty handle and lose
+            // the auto-restart transition.
+            if matches!(status, ProcessStatus::Running | ProcessStatus::Starting) {
+                if let Some(handle) = &child_handle {
+                    if handle.read().await.is_some() {
+                        continue;
+                    }
+                }
+            }
 
             let mut observed_exit_code = None;
             let mut cleared_handle = false;
@@ -432,7 +478,7 @@ impl ProcessManager {
             if let Some(handle) = child_handle {
                 let mut child_guard = handle.write().await;
                 if let Some(child) = child_guard.as_mut() {
-                    if let Some(status) = child.try_wait().ok().flatten() {
+                    if let Some(status) = try_wait_managed(child).ok().flatten() {
                         observed_exit_code = Some(status.code());
                         *child_guard = None;
                         cleared_handle = true;
@@ -445,7 +491,10 @@ impl ProcessManager {
             }
 
             let mut processes = self.processes.write().await;
-            if let Some(proc) = processes.get_mut(&id) {
+            if let Some(proc) = processes
+                .get_mut(&id)
+                .filter(|proc| proc.generation == generation && proc.pid == pid)
+            {
                 if let Some(exit_code) = observed_exit_code {
                     report.exited_processes += 1;
                     if cleared_handle {
@@ -455,7 +504,9 @@ impl ProcessManager {
                     proc.pid = None;
                     if !matches!(
                         proc.status,
-                        ProcessStatus::Stopped | ProcessStatus::HealthCheckFailed
+                        ProcessStatus::Stopped
+                            | ProcessStatus::HealthCheckFailed
+                            | ProcessStatus::Restarting { .. }
                     ) {
                         proc.status = ProcessStatus::Crashed { exit_code };
                     }
@@ -494,29 +545,24 @@ impl ProcessManager {
 
     /// Start a new managed process
     pub async fn start(&self, config: ProcessConfig) -> Result<ProcessSummary> {
-        let id = config.id.clone();
+        self.start_inner(config, None, None).await
+    }
 
-        // Check if process with this ID already exists and is running
-        {
-            let processes = self.processes.read().await;
-            if let Some(existing) = processes.get(&id) {
-                if matches!(
-                    existing.status,
-                    ProcessStatus::Running
-                        | ProcessStatus::Starting
-                        | ProcessStatus::Restarting { .. }
-                ) {
-                    if existing.config == config {
-                        info!("Reusing existing managed process '{}'", id);
-                        return Ok(existing.to_summary(50));
-                    }
-                    anyhow::bail!(
-                        "Process '{}' is already running with a different configuration",
-                        id
-                    );
-                }
-            }
-        }
+    /// Start a managed process and register it with the task/session resource
+    /// owner as soon as the child exists. This closes the startup window where
+    /// cancellation or an early crash could leave an auto-restarted child
+    /// outside resource teardown.
+    pub async fn start_tracked(&self, config: ProcessConfig, keep: bool) -> Result<ProcessSummary> {
+        self.start_inner(config, Some(keep), None).await
+    }
+
+    async fn start_inner(
+        &self,
+        config: ProcessConfig,
+        track_keep: Option<bool>,
+        expected_restart_generation: Option<u64>,
+    ) -> Result<ProcessSummary> {
+        let id = config.id.clone();
 
         let health_pattern = config
             .health_check_pattern
@@ -528,6 +574,65 @@ impl ProcessManager {
         let health_timeout = config
             .health_check_timeout_secs
             .unwrap_or(HEALTH_CHECK_TIMEOUT_SECS);
+
+        // Serialize the complete startup protocol per id, including port
+        // acquisition and readiness. A concurrent identical request waits
+        // and then reuses the first child; a different configuration gets a
+        // deterministic conflict instead of racing two spawns.
+        let start_lock = {
+            let mut locks = self.start_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(id.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _start_guard = start_lock.lock().await;
+
+        {
+            let processes = self.processes.read().await;
+            if let Some(existing) = processes.get(&id) {
+                let expected_restart =
+                    is_expected_manual_restart(existing, expected_restart_generation);
+                if expected_restart_generation.is_some() && !expected_restart {
+                    anyhow::bail!(
+                        "Process '{}' manual restart was cancelled or superseded",
+                        id
+                    );
+                }
+                if expected_restart_generation.is_none()
+                    && matches!(existing.status, ProcessStatus::Restarting { attempt: 0 })
+                {
+                    anyhow::bail!("Process '{}' is being restarted", id);
+                }
+                if !expected_restart
+                    && matches!(
+                        existing.status,
+                        ProcessStatus::Running
+                            | ProcessStatus::Starting
+                            | ProcessStatus::Restarting { .. }
+                    )
+                {
+                    if existing.config != config {
+                        anyhow::bail!(
+                            "Process '{}' is already running with a different configuration",
+                            id
+                        );
+                    }
+                    let summary = existing.to_summary(50);
+                    if let (Some(keep), Some(pid)) = (track_keep, summary.pid) {
+                        record_managed_process(&config, pid, keep);
+                    }
+                    info!("Reusing existing managed process '{}'", id);
+                    return Ok(summary);
+                }
+            } else if expected_restart_generation.is_some() {
+                anyhow::bail!("Process '{}' disappeared while it was restarting", id);
+            }
+        }
 
         let reserved_port_listener = match config.expected_port {
             Some(port) => Some(self.acquire_startup_port_listener(port).await?),
@@ -566,31 +671,103 @@ impl ProcessManager {
             id, config.command, config.args
         );
 
-        // Release the reservation at the last possible moment before spawning the child
-        // so the process can bind to the port immediately.
-        drop(reserved_port_listener);
-
-        let child = cmd.spawn().with_context(|| {
-            format!(
-                "Failed to spawn process: {} {:?}",
-                config.command, config.args
-            )
-        })?;
-
-        let pid = child.id();
-        let child_handle = Arc::new(RwLock::new(Some(child)));
-
-        // Create the managed process entry
-        let mut managed = ManagedProcess::new(config.clone());
-        managed.status = ProcessStatus::Starting;
-        managed.pid = pid;
-        managed.started_at = Some(Utc::now());
-        managed.child_handle = Some(child_handle.clone());
-
-        // Store the process
-        {
+        // Hold the id map's write lock across the synchronous spawn and
+        // insertion. Two concurrent starts of the same id can no longer both
+        // create children and overwrite one handle with the other.
+        let (pid, child_handle, generation, reused) = {
             let mut processes = self.processes.write().await;
-            processes.insert(id.clone(), managed);
+            if let Some(existing) = processes.get(&id) {
+                let expected_restart =
+                    is_expected_manual_restart(existing, expected_restart_generation);
+                if expected_restart_generation.is_some() && !expected_restart {
+                    anyhow::bail!(
+                        "Process '{}' manual restart was cancelled or superseded",
+                        id
+                    );
+                }
+                if expected_restart_generation.is_none()
+                    && matches!(existing.status, ProcessStatus::Restarting { attempt: 0 })
+                {
+                    anyhow::bail!("Process '{}' is being restarted", id);
+                }
+                if !expected_restart
+                    && matches!(
+                        existing.status,
+                        ProcessStatus::Running
+                            | ProcessStatus::Starting
+                            | ProcessStatus::Restarting { .. }
+                    )
+                {
+                    if existing.config == config {
+                        info!("Reusing existing managed process '{}'", id);
+                        (
+                            existing.pid,
+                            existing
+                                .child_handle
+                                .clone()
+                                .context("active process has no child handle")?,
+                            existing.generation,
+                            Some(existing.to_summary(50)),
+                        )
+                    } else {
+                        anyhow::bail!(
+                            "Process '{}' is already running with a different configuration",
+                            id
+                        );
+                    }
+                } else {
+                    let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                    drop(reserved_port_listener);
+                    let child = cmd.spawn().with_context(|| {
+                        format!(
+                            "Failed to spawn process: {} {:?}",
+                            config.command, config.args
+                        )
+                    })?;
+                    let pid = child.id();
+                    let child_handle = Arc::new(RwLock::new(Some(child)));
+                    let mut managed = ManagedProcess::new(config.clone());
+                    managed.status = ProcessStatus::Starting;
+                    managed.pid = pid;
+                    managed.started_at = Some(Utc::now());
+                    managed.generation = generation;
+                    managed.child_handle = Some(child_handle.clone());
+                    processes.insert(id.clone(), managed);
+                    (pid, child_handle, generation, None)
+                }
+            } else {
+                if expected_restart_generation.is_some() {
+                    anyhow::bail!("Process '{}' disappeared while it was restarting", id);
+                }
+                let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                drop(reserved_port_listener);
+                let child = cmd.spawn().with_context(|| {
+                    format!(
+                        "Failed to spawn process: {} {:?}",
+                        config.command, config.args
+                    )
+                })?;
+                let pid = child.id();
+                let child_handle = Arc::new(RwLock::new(Some(child)));
+                let mut managed = ManagedProcess::new(config.clone());
+                managed.status = ProcessStatus::Starting;
+                managed.pid = pid;
+                managed.started_at = Some(Utc::now());
+                managed.generation = generation;
+                managed.child_handle = Some(child_handle.clone());
+                processes.insert(id.clone(), managed);
+                (pid, child_handle, generation, None)
+            }
+        };
+
+        if let Some(summary) = reused {
+            if let (Some(keep), Some(pid)) = (track_keep, summary.pid) {
+                record_managed_process(&config, pid, keep);
+            }
+            return Ok(summary);
+        }
+        if let (Some(keep), Some(pid)) = (track_keep, pid) {
+            record_managed_process(&config, pid, keep);
         }
 
         // Spawn log collection tasks
@@ -609,6 +786,8 @@ impl ProcessManager {
                     collect_output(
                         processes,
                         id,
+                        generation,
+                        0,
                         stdout,
                         LogStream::Stdout,
                         health_pattern_clone,
@@ -622,7 +801,16 @@ impl ProcessManager {
                 let id = id_clone.clone();
 
                 tokio::spawn(async move {
-                    collect_output(processes, id, stderr, LogStream::Stderr, None).await;
+                    collect_output(
+                        processes,
+                        id,
+                        generation,
+                        0,
+                        stderr,
+                        LogStream::Stderr,
+                        None,
+                    )
+                    .await;
                 });
             }
         }
@@ -640,6 +828,7 @@ impl ProcessManager {
                 processes_monitor,
                 id_monitor,
                 child_handle_monitor,
+                generation,
                 auto_restart,
                 max_restarts,
             )
@@ -658,15 +847,16 @@ impl ProcessManager {
                     let (exit_code, timed_out_while_running) = {
                         let mut child_guard = child_handle.write().await;
                         if let Some(mut child) = child_guard.take() {
-                            if let Some(status) = child.try_wait().ok().flatten() {
+                            let current_pid = child.id().or(pid);
+                            if let Some(status) = try_wait_managed(&mut child).ok().flatten() {
                                 (status.code(), false)
                             } else {
                                 warn!(
                                     "Process '{}' failed health check and will be terminated",
                                     id
                                 );
-                                let _ = child.kill().await;
-                                let exit_code = child.wait().await.ok().and_then(|s| s.code());
+                                let exit_code =
+                                    force_kill_process_tree(&mut child, current_pid).await;
                                 (exit_code, true)
                             }
                         } else {
@@ -675,7 +865,10 @@ impl ProcessManager {
                     };
 
                     let mut processes = self.processes.write().await;
-                    if let Some(proc) = processes.get_mut(&id) {
+                    if let Some(proc) = processes
+                        .get_mut(&id)
+                        .filter(|proc| proc.generation == generation)
+                    {
                         proc.child_handle = None;
                         proc.pid = None;
                         if timed_out_while_running {
@@ -693,7 +886,10 @@ impl ProcessManager {
 
                 {
                     let processes = self.processes.read().await;
-                    if let Some(proc) = processes.get(&id) {
+                    if let Some(proc) = processes
+                        .get(&id)
+                        .filter(|proc| proc.generation == generation)
+                    {
                         if proc.health_matched {
                             info!("Process '{}' passed health check", id);
                             break;
@@ -711,51 +907,39 @@ impl ProcessManager {
             }
         } else {
             // No health check: give the process a brief window to settle, but
-            // POLL for an early exit throughout it instead of taking a single
-            // snapshot at the end. A single 500 ms snapshot was flaky: under a
-            // saturated CPU the child could exit slightly later, and the
-            // concurrent `monitor_process` task races us to reap it (whoever
-            // calls `try_wait` first gets the code, the other gets `None`), so
-            // an immediately-crashing process was sometimes mis-marked Running.
-            // Break as soon as either we or the monitor observe the exit.
+            // poll the monitor-owned status throughout it instead of taking a
+            // single snapshot at the end. The startup path must not compete
+            // with the monitor to reap an immediately-crashing child.
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(800);
-            let mut exit_code = None;
             loop {
-                {
-                    let mut child_guard = child_handle.write().await;
-                    if let Some(ref mut child) = *child_guard {
-                        if let Some(code) = child.try_wait().ok().flatten().and_then(|s| s.code()) {
-                            exit_code = Some(code);
-                        }
-                    }
-                }
-                // The monitor task may have reaped + recorded the exit first.
+                // The monitor is the sole exit observer. If startup reaped
+                // the child too, reconciliation could prune the transient
+                // terminal record before the monitor publishes auto-restart.
                 let monitor_saw_exit = {
                     let processes = self.processes.read().await;
-                    processes.get(&id).is_some_and(|p| {
-                        matches!(
-                            p.status,
-                            ProcessStatus::Crashed { .. } | ProcessStatus::Stopped
-                        )
+                    processes.get(&id).is_none_or(|p| {
+                        p.generation != generation
+                            || matches!(
+                                p.status,
+                                ProcessStatus::Crashed { .. }
+                                    | ProcessStatus::Stopped
+                                    | ProcessStatus::Restarting { .. }
+                            )
                     })
                 };
-                if exit_code.is_some()
-                    || monitor_saw_exit
-                    || tokio::time::Instant::now() >= deadline
-                {
+                if monitor_saw_exit || tokio::time::Instant::now() >= deadline {
                     break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
 
             let mut processes = self.processes.write().await;
-            if let Some(proc) = processes.get_mut(&id) {
-                if let Some(code) = exit_code {
-                    proc.status = ProcessStatus::Crashed {
-                        exit_code: Some(code),
-                    };
-                } else if matches!(proc.status, ProcessStatus::Starting) {
-                    // Neither we nor the monitor saw an exit within the window.
+            if let Some(proc) = processes
+                .get_mut(&id)
+                .filter(|proc| proc.generation == generation)
+            {
+                if matches!(proc.status, ProcessStatus::Starting) {
+                    // The monitor saw no exit within the startup window.
                     proc.status = ProcessStatus::Running;
                     proc.health_matched = true;
                 }
@@ -767,6 +951,7 @@ impl ProcessManager {
         let processes = self.processes.read().await;
         let proc = processes
             .get(&id)
+            .filter(|proc| proc.generation == generation)
             .ok_or_else(|| anyhow::anyhow!("Process disappeared after start"))?;
 
         let summary = proc.to_summary(50);
@@ -813,49 +998,99 @@ impl ProcessManager {
 
     /// Stop a managed process
     pub async fn stop(&self, id: &str, force: bool) -> Result<ProcessSummary> {
-        let mut processes = self.processes.write().await;
-        let proc = processes
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("Process '{}' not found", id))?;
+        self.stop_with_status(id, force, ProcessStatus::Stopped, None)
+            .await
+    }
 
-        if matches!(
-            proc.status,
-            ProcessStatus::Stopped | ProcessStatus::Crashed { .. }
-        ) {
-            return Ok(proc.to_summary(20));
-        }
+    async fn stop_for_restart(&self, id: &str, generation: u64) -> Result<ProcessSummary> {
+        self.stop_with_status(
+            id,
+            false,
+            ProcessStatus::Restarting { attempt: 0 },
+            Some(generation),
+        )
+        .await
+    }
 
-        info!("Stopping process '{}' (force={})", id, force);
+    async fn stop_with_status(
+        &self,
+        id: &str,
+        force: bool,
+        final_status: ProcessStatus,
+        expected_generation: Option<u64>,
+    ) -> Result<ProcessSummary> {
+        let (child_handle, pid, generation, mut stopped_summary) = {
+            let mut processes = self.processes.write().await;
+            let proc = processes
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("Process '{}' not found", id))?;
 
-        if let Some(ref child_handle) = proc.child_handle {
+            if expected_generation.is_some_and(|generation| proc.generation != generation) {
+                anyhow::bail!("Process '{}' changed while it was restarting", id);
+            }
+
+            if matches!(
+                proc.status,
+                ProcessStatus::Stopped | ProcessStatus::Crashed { .. }
+            ) && matches!(&final_status, ProcessStatus::Stopped)
+            {
+                return Ok(proc.to_summary(20));
+            }
+
+            info!("Stopping process '{}' (force={})", id, force);
+            // Publish the terminal/restart intent before awaiting child
+            // shutdown. The monitor cannot auto-restart it, and resource
+            // teardown can turn a manual Restarting marker into Stopped to
+            // cancel the pending spawn.
+            proc.status = final_status;
+            (
+                proc.child_handle.clone(),
+                proc.pid,
+                proc.generation,
+                proc.to_summary(20),
+            )
+        };
+
+        // Child shutdown can take the full graceful timeout. Keep that wait
+        // outside the process-map lock so unrelated get/list/start/stop calls
+        // remain available.
+        if let Some(child_handle) = child_handle {
             let mut child_guard = child_handle.write().await;
             if let Some(ref mut child) = *child_guard {
-                if force {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await; // reap zombie
-                } else {
-                    // Try graceful shutdown first
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{kill, Signal};
-                        use nix::unistd::Pid;
-                        if let Some(pid) = proc.pid {
-                            if let Ok(raw_pid) = i32::try_from(pid) {
-                                // The child leads its own group (see
-                                // `start`): SIGTERM the whole tree, falling
-                                // back to the pid alone.
-                                if nix::sys::signal::killpg(Pid::from_raw(raw_pid), Signal::SIGTERM)
+                let already_exited = try_wait_managed(child)
+                    .with_context(|| format!("inspect process '{id}' before stop"))?
+                    .is_some();
+                let pid = child.id().or(pid);
+                if !already_exited {
+                    if force {
+                        let _ = force_kill_process_tree(child, pid).await;
+                    } else {
+                        // Try graceful shutdown first
+                        #[cfg(unix)]
+                        {
+                            use nix::sys::signal::{kill, Signal};
+                            use nix::unistd::Pid;
+                            if let Some(pid) = pid {
+                                if let Ok(raw_pid) = i32::try_from(pid) {
+                                    // The child leads its own group (see
+                                    // `start`): SIGTERM the whole tree, falling
+                                    // back to the pid alone.
+                                    if nix::sys::signal::killpg(
+                                        Pid::from_raw(raw_pid),
+                                        Signal::SIGTERM,
+                                    )
                                     .is_err()
-                                {
-                                    let _ = kill(Pid::from_raw(raw_pid), Signal::SIGTERM);
-                                }
-                            } else {
-                                warn!(
+                                    {
+                                        let _ = kill(Pid::from_raw(raw_pid), Signal::SIGTERM);
+                                    }
+                                } else {
+                                    warn!(
                                     "Skipping SIGTERM for pid {}: does not fit into platform pid_t",
                                     pid
                                 );
-                                let _ = child.kill().await;
-                                let _ = child.wait().await;
+                                    let _ = child.kill().await;
+                                    let _ = child.wait().await;
+                                }
                             }
                         }
                     }
@@ -865,29 +1100,46 @@ impl ProcessManager {
                         let _ = child.wait().await;
                     }
 
-                    // Wait up to 3 seconds for graceful exit, then force kill
-                    match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
-                        .await
-                    {
-                        Ok(_) => {} // Process exited
-                        Err(_) => {
-                            // Timeout — force kill and reap
-                            warn!(
-                                "Process '{}' did not exit after SIGTERM, sending SIGKILL",
-                                id
-                            );
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
+                    // Poll without reaping first so an exited leader keeps its
+                    // pid pinned until `try_wait_managed` kills any
+                    // TERM-ignoring descendants in the group.
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    loop {
+                        match try_wait_managed(child) {
+                            Ok(Some(_)) => break,
+                            Ok(None) if tokio::time::Instant::now() < deadline => {
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            }
+                            Ok(None) | Err(_) => {
+                                warn!(
+                                    "Process '{}' did not exit after SIGTERM, sending SIGKILL",
+                                    id
+                                );
+                                let _ = force_kill_process_tree(child, pid).await;
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
 
-        proc.status = ProcessStatus::Stopped;
-        proc.pid = None;
+        let mut processes = self.processes.write().await;
+        if let Some(proc) = processes
+            .get_mut(id)
+            .filter(|proc| proc.generation == generation)
+        {
+            // Do not overwrite status here: signal() may have changed a
+            // Restarting marker to Stopped while shutdown was in flight.
+            proc.pid = None;
+            return Ok(proc.to_summary(20));
+        }
 
-        Ok(proc.to_summary(20))
+        // A remove followed by a new start may replace this generation while
+        // its old child is shutting down. Report the completed stop without
+        // mutating the replacement record.
+        stopped_summary.pid = None;
+        Ok(stopped_summary)
     }
 
     /// Signal a managed process (its whole process group) without waiting:
@@ -895,19 +1147,22 @@ impl ProcessManager {
     /// so the monitor never auto-restarts a process being torn down.
     /// Returns `Ok(false)` when `id` is not managed here.
     pub async fn signal(&self, id: &str, force: bool) -> Result<bool> {
-        let mut processes = self.processes.write().await;
-        let Some(proc) = processes.get_mut(id) else {
-            return Ok(false);
+        let handle = {
+            let mut processes = self.processes.write().await;
+            let Some(proc) = processes.get_mut(id) else {
+                return Ok(false);
+            };
+            proc.status = ProcessStatus::Stopped;
+            proc.child_handle.clone()
         };
-        proc.status = ProcessStatus::Stopped;
-        let Some(handle) = proc.child_handle.clone() else {
+        let Some(handle) = handle else {
             return Ok(true);
         };
         let mut guard = handle.write().await;
         let Some(child) = guard.as_mut() else {
             return Ok(true);
         };
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        if matches!(try_wait_managed(child), Ok(Some(_))) {
             return Ok(true);
         }
         // The child is unreaped, so its pid (and the group it leads) cannot
@@ -936,21 +1191,34 @@ impl ProcessManager {
     /// Whether the managed process has exited (reaping it if so). `None`
     /// when `id` is unknown here or its state cannot be read.
     pub async fn has_exited(&self, id: &str) -> Option<bool> {
-        let processes = self.processes.read().await;
-        let proc = processes.get(id)?;
-        let Some(handle) = proc.child_handle.clone() else {
+        let handle = {
+            let processes = self.processes.read().await;
+            let proc = processes.get(id)?;
+            // An active lifecycle state is authoritative for teardown. In
+            // particular Restarting has no live child during backoff, but must be
+            // reported Running so the resource driver calls signal(), marks it
+            // Stopped, and cancels the pending restart before releasing it.
+            if matches!(
+                proc.status,
+                ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Restarting { .. }
+            ) {
+                return Some(false);
+            }
+            proc.child_handle.clone()
+        };
+        let Some(handle) = handle else {
             return Some(true);
         };
-        drop(processes);
         let mut guard = handle.write().await;
-        match guard.as_mut() {
+        let result = match guard.as_mut() {
             None => Some(true),
-            Some(child) => match child.try_wait() {
+            Some(child) => match try_wait_managed(child) {
                 Ok(Some(_)) => Some(true),
                 Ok(None) => Some(false),
                 Err(_) => None,
             },
-        }
+        };
+        result
     }
 
     /// Stop all running managed processes gracefully.
@@ -1032,7 +1300,7 @@ impl ProcessManager {
 
         if matches!(
             proc.status,
-            ProcessStatus::Running | ProcessStatus::Starting
+            ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Restarting { .. }
         ) {
             anyhow::bail!("Cannot remove running process '{}'. Stop it first.", id);
         }
@@ -1043,26 +1311,47 @@ impl ProcessManager {
 
     /// Restart a process
     pub async fn restart(&self, id: &str) -> Result<ProcessSummary> {
-        let config = {
+        self.restart_inner(id, None).await
+    }
+
+    /// Restart a tool-owned process while preserving its resource entry and
+    /// refreshing that entry immediately after the replacement child exists.
+    pub async fn restart_tracked(&self, id: &str) -> Result<ProcessSummary> {
+        let keep = crate::resources::managed_process_entry(
+            crate::resources::ResourceRegistry::global(),
+            id,
+        )
+        .is_some_and(|entry| entry.keep);
+        self.restart_inner(id, Some(keep)).await
+    }
+
+    async fn restart_inner(&self, id: &str, track_keep: Option<bool>) -> Result<ProcessSummary> {
+        let (config, generation) = {
             let processes = self.processes.read().await;
             let proc = processes
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("Process '{}' not found", id))?;
-            proc.config.clone()
+            (proc.config.clone(), proc.generation)
         };
 
-        // Stop if running
-        let _ = self.stop(id, false).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        // Remove old entry
-        {
+        // Keep a monitor-visible Restarting marker for the whole gap between
+        // children. Resource teardown sees it as active, calls signal(), and
+        // changes it to Stopped; the expected-generation check in start_inner
+        // then refuses to resurrect the process.
+        self.stop_for_restart(id, generation).await?;
+        let result = self.start_inner(config, track_keep, Some(generation)).await;
+        if result.is_err() {
             let mut processes = self.processes.write().await;
-            processes.remove(id);
+            if let Some(proc) = processes.get_mut(id).filter(|proc| {
+                proc.generation == generation
+                    && matches!(proc.status, ProcessStatus::Restarting { attempt: 0 })
+            }) {
+                proc.status = ProcessStatus::Crashed { exit_code: None };
+                proc.pid = None;
+                proc.child_handle = None;
+            }
         }
-
-        // Start fresh
-        self.start(config).await
+        result
     }
 }
 
@@ -1070,6 +1359,35 @@ impl Default for ProcessManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn record_managed_process(config: &ProcessConfig, pid: u32, keep: bool) {
+    use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+
+    let registry = ResourceRegistry::global();
+    let start_time = crate::resources::driver::process_start_time(pid);
+    if crate::resources::managed_process_entry(registry, &config.id).is_some() {
+        crate::resources::refresh_managed_process(registry, &config.id, pid, start_time);
+        return;
+    }
+
+    let label = std::iter::once(config.command.as_str())
+        .chain(config.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    registry.register(
+        NewResource::new(
+            ResourceKind::Process,
+            ResourceHandle::Process {
+                pid,
+                pgid: cfg!(unix).then_some(pid),
+                start_time,
+                managed_id: Some(config.id.clone()),
+            },
+            format!("{}: {label}", config.id),
+        )
+        .keep(keep),
+    );
 }
 
 /// Spawn a child process from config (used by start and restart)
@@ -1129,10 +1447,70 @@ async fn spawn_child_process(
     Ok((pid, child_handle))
 }
 
+/// SIGKILL a process group that selfware created for a managed child. The
+/// leader's pid is the pgid on Unix; other platforms fall back to Child::kill.
+fn force_kill_process_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(raw) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+        if raw > 1 {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Observe a managed child exit without first releasing its pid, kill any
+/// descendants in the process group while the zombie leader still pins that
+/// identity, then reap the leader. A plain `Child::try_wait` followed by
+/// `killpg(stored_pid)` can signal an unrelated group if the pid is reused in
+/// between those operations.
+fn try_wait_managed(child: &mut Child) -> std::io::Result<Option<ExitStatus>> {
+    #[cfg(unix)]
+    {
+        let Some(pid) = child.id() else {
+            return child.try_wait();
+        };
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        force_kill_process_group(Some(pid));
+        child.try_wait()
+    }
+    #[cfg(not(unix))]
+    {
+        child.try_wait()
+    }
+}
+
+/// Kill the complete managed process tree and reap its direct child.
+async fn force_kill_process_tree(child: &mut Child, _pid: Option<u32>) -> Option<i32> {
+    force_kill_process_group(child.id());
+    let _ = child.start_kill();
+    child.wait().await.ok().and_then(|status| status.code())
+}
+
 /// Collect output from a process stream
 async fn collect_output<R: tokio::io::AsyncRead + Unpin>(
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
     id: String,
+    generation: u64,
+    incarnation: u64,
     reader: R,
     stream: LogStream,
     health_pattern: Option<Regex>,
@@ -1146,8 +1524,11 @@ async fn collect_output<R: tokio::io::AsyncRead + Unpin>(
         if let Some(ref pattern) = health_pattern {
             if pattern.is_match(&line) {
                 let mut procs = processes.write().await;
-                if let Some(proc) = procs.get_mut(&id) {
-                    if !proc.health_matched {
+                if let Some(proc) = procs
+                    .get_mut(&id)
+                    .filter(|proc| proc.generation == generation && proc.incarnation == incarnation)
+                {
+                    if !proc.health_matched && matches!(proc.status, ProcessStatus::Starting) {
                         proc.health_matched = true;
                         proc.status = ProcessStatus::Running;
                         info!("Process '{}' health check passed: {}", id, line);
@@ -1158,7 +1539,10 @@ async fn collect_output<R: tokio::io::AsyncRead + Unpin>(
 
         // Store log line
         let mut procs = processes.write().await;
-        if let Some(proc) = procs.get_mut(&id) {
+        if let Some(proc) = procs
+            .get_mut(&id)
+            .filter(|proc| proc.generation == generation && proc.incarnation == incarnation)
+        {
             proc.add_log(stream.clone(), line);
         }
     }
@@ -1169,6 +1553,7 @@ async fn monitor_process(
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
     id: String,
     child_handle: Arc<RwLock<Option<Child>>>,
+    generation: u64,
     auto_restart: bool,
     max_restarts: u32,
 ) {
@@ -1181,7 +1566,7 @@ async fn monitor_process(
             let try_result = {
                 let mut child_guard = child_handle.write().await;
                 if let Some(ref mut child) = *child_guard {
-                    child.try_wait().ok().flatten()
+                    try_wait_managed(child).ok().flatten()
                 } else {
                     // Child was taken/killed by stop(), treat as stopped
                     break None;
@@ -1196,10 +1581,12 @@ async fn monitor_process(
             // Check if process was marked as stopped by stop()
             {
                 let procs = processes.read().await;
-                if let Some(proc) = procs.get(&id) {
+                if let Some(proc) = procs.get(&id).filter(|proc| proc.generation == generation) {
                     if matches!(proc.status, ProcessStatus::Stopped) {
                         break None;
                     }
+                } else {
+                    break None;
                 }
             }
 
@@ -1217,10 +1604,16 @@ async fn monitor_process(
         warn!("Process '{}' exited with code: {:?}", id, exit_code);
 
         let mut procs = processes.write().await;
-        if let Some(proc) = procs.get_mut(&id) {
+        if let Some(proc) = procs
+            .get_mut(&id)
+            .filter(|proc| proc.generation == generation)
+        {
             let should_restart = auto_restart
                 && (max_restarts == 0 || proc.restart_count < max_restarts)
-                && !matches!(proc.status, ProcessStatus::Stopped);
+                && !matches!(
+                    proc.status,
+                    ProcessStatus::Stopped | ProcessStatus::Restarting { .. }
+                );
 
             if should_restart {
                 proc.restart_count += 1;
@@ -1245,13 +1638,74 @@ async fn monitor_process(
                 drop(procs);
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
 
+                // stop/remove/restart may have changed the record during the
+                // backoff. Only this exact generation and attempt may spawn.
+                let still_requested = {
+                    let procs = processes.read().await;
+                    procs.get(&id).is_some_and(|proc| {
+                        proc.generation == generation
+                            && matches!(
+                                proc.status,
+                                ProcessStatus::Restarting { attempt }
+                                    if attempt == restart_attempt
+                            )
+                    })
+                };
+                if !still_requested {
+                    break;
+                }
+
                 // Actually restart the process
                 match spawn_child_process(&config).await {
                     Ok((pid, new_child_handle)) => {
+                        let (mut spawned, stdout, stderr) = {
+                            let mut guard = new_child_handle.write().await;
+                            let mut spawned = guard.take().expect("spawn returned a child");
+                            let stdout = spawned.stdout.take();
+                            let stderr = spawned.stderr.take();
+                            (Some(spawned), stdout, stderr)
+                        };
+
+                        // Hold the per-child lock while validating and
+                        // installing the replacement. stop() publishes its
+                        // intent in the process map before taking this lock,
+                        // so it either cancels this install or kills the
+                        // accepted replacement. Never await this child lock
+                        // while retaining the global process-map lock.
+                        let installed = {
+                            let mut child_guard = child_handle.write().await;
+                            let mut procs = processes.write().await;
+                            match procs.get_mut(&id) {
+                                Some(proc)
+                                    if proc.generation == generation
+                                        && matches!(
+                                            proc.status,
+                                            ProcessStatus::Restarting { attempt }
+                                                if attempt == restart_attempt
+                                        ) =>
+                                {
+                                    *child_guard = spawned.take();
+                                    proc.pid = pid;
+                                    proc.started_at = Some(Utc::now());
+                                    proc.incarnation = u64::from(restart_attempt);
+                                    proc.status = ProcessStatus::Starting;
+                                    proc.health_matched = false;
+                                    proc.child_handle = Some(child_handle.clone());
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if !installed {
+                            if let Some(mut child) = spawned {
+                                let _ = force_kill_process_tree(&mut child, pid).await;
+                            }
+                            break;
+                        }
+
                         // The resource registry entry of a tool-started
                         // process still names the crashed pid: point it at
-                        // the restarted one so teardown and a post-crash
-                        // reap stop the process that is actually running.
+                        // the accepted replacement.
                         if let Some(pid) = pid {
                             crate::resources::refresh_managed_process(
                                 crate::resources::ResourceRegistry::global(),
@@ -1260,78 +1714,48 @@ async fn monitor_process(
                                 crate::resources::driver::process_start_time(pid),
                             );
                         }
-                        // Update process state
-                        {
-                            let mut procs = processes.write().await;
-                            if let Some(proc) = procs.get_mut(&id) {
-                                proc.pid = pid;
-                                proc.started_at = Some(Utc::now());
-                                proc.status = ProcessStatus::Starting;
-                                proc.health_matched = false;
-                                // Point the managed process at the MONITOR's
-                                // `child_handle`, not `new_child_handle`: the
-                                // move just below empties `new_child_handle`,
-                                // so a reference to it would become `None`
-                                // while the live restarted child is owned by
-                                // the monitor here. With the handle emptied,
-                                // every kill path (stop/stop_all/remove) found
-                                // `None`, skipped the kill, and the restarted
-                                // process kept running orphaned behind a
-                                // Stopped record (2026-09-21 review finding).
-                                proc.child_handle = Some(child_handle.clone());
-                            }
-                        }
 
-                        // Setup output collection for the new process
-                        {
-                            let mut child_guard = new_child_handle.write().await;
-                            if let Some(ref mut child) = *child_guard {
-                                if let Some(stdout) = child.stdout.take() {
-                                    let procs = processes.clone();
-                                    let proc_id = id.clone();
-                                    let hp = health_pattern.clone();
-                                    tokio::spawn(async move {
-                                        collect_output(
-                                            procs,
-                                            proc_id,
-                                            stdout,
-                                            LogStream::Stdout,
-                                            hp,
-                                        )
-                                        .await;
-                                    });
-                                }
-                                if let Some(stderr) = child.stderr.take() {
-                                    let procs = processes.clone();
-                                    let proc_id = id.clone();
-                                    tokio::spawn(async move {
-                                        collect_output(
-                                            procs,
-                                            proc_id,
-                                            stderr,
-                                            LogStream::Stderr,
-                                            None,
-                                        )
-                                        .await;
-                                    });
-                                }
-                            }
+                        if let Some(stdout) = stdout {
+                            let procs = processes.clone();
+                            let proc_id = id.clone();
+                            let hp = health_pattern.clone();
+                            tokio::spawn(async move {
+                                collect_output(
+                                    procs,
+                                    proc_id,
+                                    generation,
+                                    u64::from(restart_attempt),
+                                    stdout,
+                                    LogStream::Stdout,
+                                    hp,
+                                )
+                                .await;
+                            });
                         }
-
-                        // Move the child into the monitor's original
-                        // `child_handle` (the one `proc.child_handle` now
-                        // points at) so the monitor keeps polling the
-                        // restarted process. `new_child_handle` is emptied by
-                        // the take and dropped — it must not be referenced by
-                        // `proc.child_handle` anymore (see the assignment
-                        // above).
-                        let new_child = new_child_handle.write().await.take();
-                        *child_handle.write().await = new_child;
+                        if let Some(stderr) = stderr {
+                            let procs = processes.clone();
+                            let proc_id = id.clone();
+                            tokio::spawn(async move {
+                                collect_output(
+                                    procs,
+                                    proc_id,
+                                    generation,
+                                    u64::from(restart_attempt),
+                                    stderr,
+                                    LogStream::Stderr,
+                                    None,
+                                )
+                                .await;
+                            });
+                        }
 
                         // Mark as running after brief startup
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         let mut procs = processes.write().await;
-                        if let Some(proc) = procs.get_mut(&id) {
+                        if let Some(proc) = procs.get_mut(&id).filter(|proc| {
+                            proc.generation == generation
+                                && proc.incarnation == u64::from(restart_attempt)
+                        }) {
                             if matches!(proc.status, ProcessStatus::Starting)
                                 && health_pattern.is_none()
                             {
@@ -1350,12 +1774,22 @@ async fn monitor_process(
                     Err(e) => {
                         warn!("Failed to restart process '{}': {}", id, e);
                         let mut procs = processes.write().await;
-                        if let Some(proc) = procs.get_mut(&id) {
+                        if let Some(proc) = procs.get_mut(&id).filter(|proc| {
+                            proc.generation == generation
+                                && matches!(
+                                    proc.status,
+                                    ProcessStatus::Restarting { attempt }
+                                        if attempt == restart_attempt
+                                )
+                        }) {
                             proc.status = ProcessStatus::Crashed { exit_code };
                         }
                     }
                 }
-            } else if !matches!(proc.status, ProcessStatus::Stopped) {
+            } else if !matches!(
+                proc.status,
+                ProcessStatus::Stopped | ProcessStatus::Restarting { .. }
+            ) {
                 proc.status = ProcessStatus::Crashed { exit_code };
             }
         }

@@ -424,3 +424,24 @@ fn test_estimate_messages_tokens_counts_reasoning_content() {
         "estimate_messages_tokens must count reasoning_content when present"
     );
 }
+
+#[test]
+fn test_estimate_messages_tokens_counts_sender_name() {
+    use crate::api::types::Message;
+
+    let mut named = Message::user("context payload");
+    named.name = Some("selfware_ctx_0123456789abcdef".to_string());
+    named.reasoning_content = Some("retained reasoning".to_string());
+    let unnamed = Message::user("context payload");
+
+    assert_eq!(
+        estimate_messages_tokens(std::slice::from_ref(&named))
+            - estimate_messages_tokens(&[unnamed]),
+        estimate_tokens("selfware_ctx_0123456789abcdef") + estimate_tokens("retained reasoning")
+    );
+    assert_eq!(
+        crate::agent::context::estimate_message_tokens(&named),
+        estimate_messages_tokens(std::slice::from_ref(&named)),
+        "single-message and conversation estimators must count the same serialized fields"
+    );
+}

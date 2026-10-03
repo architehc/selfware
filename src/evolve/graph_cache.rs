@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::graph_index::GraphIndex;
-use super::OntologyStore;
+use super::{Graph, OntologyStore};
 
 struct CachedIndex {
     path: PathBuf,
@@ -74,6 +74,7 @@ fn cached_or_load<'a>(
     let graph = OntologyStore::new(path)
         .load()
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    reject_private_tool_state(path, &graph)?;
     let index = Arc::new(GraphIndex::from_graph(Arc::new(graph), &yaml_hash));
     *slot = Some(CachedIndex {
         path: path.to_path_buf(),
@@ -82,6 +83,40 @@ fn cached_or_load<'a>(
         index,
     });
     Ok(&slot.as_ref().expect("just populated").index)
+}
+
+/// Reject graphs built before repository discovery pruned private coding-tool
+/// state.  Removing nodes here would also require repairing hierarchy and
+/// dependency edges, so the only honest recovery is a fresh graph build.
+fn reject_private_tool_state(path: &Path, graph: &Graph) -> Result<()> {
+    let private_node = graph.nodes.iter().any(|node| {
+        node.path.as_deref().is_some_and(|node_path| {
+            crate::safety::source_context::path_contains_private_tool_state(Path::new(node_path))
+                || graph_label_contains_private_tool_state(node_path)
+        }) || graph_label_contains_private_tool_state(&node.id)
+    });
+    let private_edge = graph.edges.iter().any(|edge| {
+        graph_label_contains_private_tool_state(&edge.from)
+            || graph_label_contains_private_tool_state(&edge.to)
+    });
+    if private_node || private_edge {
+        anyhow::bail!(
+            "evolve graph at {} contains private tool-state paths from an older build; run `selfware self-evolve` to rebuild it",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn graph_label_contains_private_tool_state(label: &str) -> bool {
+    label
+        .split(['/', '\\', ':'])
+        .filter(|component| !component.is_empty())
+        .any(|component| {
+            crate::safety::source_context::is_private_tool_state_dir_name(std::ffi::OsStr::new(
+                component,
+            ))
+        })
 }
 
 #[cfg(test)]

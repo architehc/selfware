@@ -81,7 +81,14 @@ test_version() {
 
     if output=$(selfware --version 2>&1); then
         SELFWARE_VERSION=$(echo "$output" | head -1)
-        record_pass "selfware --version" "$SELFWARE_VERSION"
+        if [ -n "${SELFWARE_EXPECTED_GIT_SHA:-}" ] && \
+           [ "${SELFWARE_EXPECTED_GIT_SHA}" != "unknown" ] && \
+           [[ "$SELFWARE_VERSION" != *"+g${SELFWARE_EXPECTED_GIT_SHA}"* ]]; then
+            record_fail "selfware --version" \
+                "missing expected provenance +g${SELFWARE_EXPECTED_GIT_SHA}: ${SELFWARE_VERSION}"
+        else
+            record_pass "selfware --version" "$SELFWARE_VERSION"
+        fi
     else
         record_fail "selfware --version" "exit code $?"
     fi
@@ -115,14 +122,199 @@ test_doctor() {
     echo "3. Doctor Mode"
     separator
 
-    if output=$(selfware doctor 2>&1); then
-        # Doctor returns 0 even when optional deps are missing.
-        # Count how many checks passed from the output.
-        pass_lines=$(echo "$output" | grep -c "OK\|PASS\|✓\|ok\|available" || true)
-        record_pass "selfware doctor" "${pass_lines} checks reported"
+    # `doctor` verifies both the local toolchain and the configured model. Keep
+    # that model check deterministic and hermetic: a tiny local server exercises
+    # the same OpenAI-compatible routes without depending on a public endpoint.
+    local doctor_dir="$VALIDATION_DIR/doctor-test"
+    local port_file="$doctor_dir/mock-port"
+    local mock_log="$doctor_dir/mock.log"
+    local mock_pid=""
+    local mock_port=""
+    local doctor_exit=0
+    mkdir -p "$doctor_dir"
+
+    cat > "$doctor_dir/mock_llm.py" << 'PYEOF'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+MODEL = "docker-doctor-text-model"
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        # Keep a request audit trail so the journey can prove it reached the
+        # completion route, rather than passing on system checks alone.
+        sys.stderr.write("%s\n" % (format % args))
+        sys.stderr.flush()
+
+    def send_body(self, body, content_type):
+        encoded = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("X-vLLM-Version", "docker-validation-mock")
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self.send_body(
+                json.dumps(
+                    {
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": MODEL,
+                                "object": "model",
+                                "owned_by": "vllm",
+                                "max_model_len": 32768,
+                            }
+                        ],
+                    }
+                ),
+                "application/json",
+            )
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        if self.path != "/v1/chat/completions":
+            self.send_error(404)
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length) or b"{}")
+        has_tools = bool(request.get("tools"))
+
+        if request.get("stream"):
+            if has_tools:
+                event = {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_docker_validation",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "calculator",
+                                            "arguments": '{"expression":"2+2"}',
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+            else:
+                event = {
+                    "choices": [
+                        {"delta": {"content": "hi"}, "finish_reason": None}
+                    ]
+                }
+            self.send_body(
+                "data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n",
+                "text/event-stream",
+            )
+            return
+
+        message = {"role": "assistant", "content": "hello"}
+        if has_tools:
+            message["content"] = None
+            message["tool_calls"] = [
+                {
+                    "id": "call_docker_validation",
+                    "type": "function",
+                    "function": {
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    },
+                }
+            ]
+        self.send_body(
+            json.dumps(
+                {
+                    "choices": [{"message": message, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1},
+                }
+            ),
+            "application/json",
+        )
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(sys.argv[1], "w", encoding="utf-8") as port_output:
+    port_output.write(str(server.server_port))
+server.serve_forever()
+PYEOF
+
+    python3 "$doctor_dir/mock_llm.py" "$port_file" >"$mock_log" 2>&1 &
+    mock_pid=$!
+
+    # Wait for both the selected port and the listening socket. A dynamic port
+    # avoids collisions with a developer's service when this runs locally.
+    for _ in $(seq 1 50); do
+        if [ -s "$port_file" ]; then
+            mock_port=$(cat "$port_file")
+            if curl --silent --fail "http://127.0.0.1:${mock_port}/v1/models" >/dev/null; then
+                break
+            fi
+        fi
+        sleep 0.1
+    done
+
+    if [ -z "$mock_port" ] || ! kill -0 "$mock_pid" 2>/dev/null || \
+       ! curl --silent --fail "http://127.0.0.1:${mock_port}/v1/models" >/dev/null; then
+        kill "$mock_pid" 2>/dev/null || true
+        wait "$mock_pid" 2>/dev/null || true
+        record_fail "selfware doctor" "local model fixture failed to start"
+        return
+    fi
+
+    cat > "$doctor_dir/selfware.toml" << TOMLEOF
+endpoint = "http://127.0.0.1:${mock_port}/v1"
+model = "docker-doctor-text-model"
+max_tokens = 4096
+context_length = 32768
+temperature = 0.0
+
+[safety]
+allowed_paths = ["/home/validator"]
+
+[agent]
+native_function_calling = true
+TOMLEOF
+
+    if output=$(npm_config_offline=true selfware --no-color --ascii \
+        --config "$doctor_dir/selfware.toml" doctor 2>&1); then
+        kill "$mock_pid" 2>/dev/null || true
+        wait "$mock_pid" 2>/dev/null || true
+
+        # A zero exit alone is insufficient: require evidence from both halves
+        # of the command and from the mock's completion-route audit trail.
+        if echo "$output" | grep -Fq "[PASS] rustc" && \
+           echo "$output" | grep -Fq "[PASS] cargo" && \
+           echo "$output" | grep -Fq "[PASS] endpoint reachable" && \
+           echo "$output" | grep -Fq "[PASS] configured model available" && \
+           grep -Fq 'POST /v1/chat/completions' "$mock_log"; then
+            pass_lines=$(echo "$output" | grep -c "\[PASS\]" || true)
+            record_pass "selfware doctor" \
+                "${pass_lines} checks passed, including a local model round-trip"
+        else
+            record_fail "selfware doctor" \
+                "command exited 0 without complete system and model-probe evidence"
+        fi
     else
-        # Doctor may exit non-zero if critical deps missing — still useful info
-        record_fail "selfware doctor" "exit code $?"
+        doctor_exit=$?
+        kill "$mock_pid" 2>/dev/null || true
+        wait "$mock_pid" 2>/dev/null || true
+        record_fail "selfware doctor" "exit code ${doctor_exit}"
     fi
 }
 
@@ -146,17 +338,18 @@ max_iterations = 20
 native_function_calling = false
 TOMLEOF
 
-    if [ -f "$VALIDATION_DIR/config-test/selfware.toml" ]; then
-        # Verify the config is valid TOML and contains expected keys
-        if grep -q "endpoint" "$VALIDATION_DIR/config-test/selfware.toml" && \
-           grep -q "model" "$VALIDATION_DIR/config-test/selfware.toml" && \
-           grep -q "max_tokens" "$VALIDATION_DIR/config-test/selfware.toml"; then
-            record_pass "Config creation" "selfware.toml written with endpoint, model, max_tokens"
-        else
-            record_fail "Config creation" "config file missing expected keys"
-        fi
-    else
+    if [ ! -f "$VALIDATION_DIR/config-test/selfware.toml" ]; then
         record_fail "Config creation" "selfware.toml not created"
+        return
+    fi
+
+    # Exercise Selfware's real loader and invariant checks. Grepping key names
+    # cannot prove that the generated file is valid TOML or usable config.
+    if selfware --config "$VALIDATION_DIR/config-test/selfware.toml" \
+        --validate-config >/dev/null 2>&1; then
+        record_pass "Config creation" "selfware.toml loaded and validated"
+    else
+        record_fail "Config creation" "selfware.toml failed config validation"
     fi
 }
 
@@ -208,7 +401,8 @@ test_template_scaffold() {
             record_fail "Template scaffold (Node.js)" "selfware init --template node failed"
         fi
     else
-        record_skip "Template scaffold (Node.js)" "node not available"
+        record_fail "Template scaffold (Node.js)" \
+            "node missing from validation image"
     fi
 
     # --- Minimal template ---
@@ -250,10 +444,49 @@ TOMLEOF
     fi
 
     # --- Status JSON output ---
-    if (cd "$status_dir" && selfware status --output-format json 2>&1); then
-        record_pass "selfware status --output-format json" "JSON output mode works"
+    local status_json
+    if status_json=$(cd "$status_dir" && \
+        selfware --no-color --ascii status --output-format json \
+            2>"$status_dir/status-json.stderr"); then
+        if STATUS_JSON="$status_json" python3 - << 'PYEOF'
+import json
+import os
+
+status = json.loads(os.environ["STATUS_JSON"])
+required = {
+    "model",
+    "endpoint",
+    "is_local",
+    "endpoint_reachable",
+    "endpoint_status",
+    "project_path",
+    "execution_mode",
+    "journal",
+}
+assert required <= status.keys()
+assert status["model"] == "test-model"
+assert status["endpoint"] == "http://localhost:9999/v1"
+assert type(status["is_local"]) is bool
+assert type(status["endpoint_reachable"]) is bool
+assert isinstance(status["endpoint_status"], str)
+assert isinstance(status["project_path"], str)
+assert isinstance(status["execution_mode"], str)
+assert isinstance(status["journal"], dict)
+assert {"total", "completed", "in_progress"} <= status["journal"].keys()
+assert all(
+    type(status["journal"][key]) is int
+    for key in ("total", "completed", "in_progress")
+)
+PYEOF
+        then
+            record_pass "selfware status --output-format json" \
+                "valid status schema and selected config values"
+        else
+            record_fail "selfware status --output-format json" \
+                "stdout was not the expected JSON status schema"
+        fi
     else
-        record_fail "selfware status --output-format json" "JSON output failed"
+        record_fail "selfware status --output-format json" "command failed"
     fi
 }
 
@@ -283,9 +516,14 @@ test_git_integration() {
         record_fail "Git log" "commit not found"
     fi
 
-    # Verify git status works
-    if (cd "$git_dir" && git status --porcelain 2>&1); then
-        record_pass "Git status" "clean working tree"
+    # Verify git status succeeds and actually reports a clean working tree.
+    local git_status
+    if git_status=$(cd "$git_dir" && git status --porcelain 2>&1); then
+        if [ -z "$git_status" ]; then
+            record_pass "Git status" "clean working tree"
+        else
+            record_fail "Git status" "unexpected changes: ${git_status}"
+        fi
     else
         record_fail "Git status" "git status failed"
     fi
@@ -311,11 +549,12 @@ test_shell_tools() {
         fi
     done
 
-    # Optional: node
+    # Node is installed by tests/Dockerfile.validation and is part of the
+    # validation runtime contract.
     if command -v node >/dev/null 2>&1; then
         record_pass "Shell tool: node" "$(node --version 2>&1)"
     else
-        record_skip "Shell tool: node" "not installed"
+        record_fail "Shell tool: node" "missing from validation image"
     fi
 }
 
@@ -441,7 +680,7 @@ test_language_toolchains() {
             record_fail "Python3 execution" "could not run test script"
         fi
     else
-        record_skip "Python3 execution" "python3 not available"
+        record_fail "Python3 execution" "python3 missing from validation image"
     fi
 
     # Node.js
@@ -453,7 +692,7 @@ test_language_toolchains() {
             record_fail "Node.js execution" "could not run test script"
         fi
     else
-        record_skip "Node.js execution" "node not available"
+        record_fail "Node.js execution" "node missing from validation image"
     fi
 
     # npm
@@ -461,7 +700,7 @@ test_language_toolchains() {
         npm_version=$(npm --version 2>&1)
         record_pass "npm available" "v${npm_version}"
     else
-        record_skip "npm available" "npm not installed"
+        record_fail "npm available" "npm missing from validation image"
     fi
 }
 
@@ -485,28 +724,31 @@ temperature = 0.7
 
 [safety]
 allowed_paths = ["."]
-blocked_commands = ["rm -rf /"]
+denied_paths = ["**/.env", "**/.git/**"]
+protected_branches = ["main"]
+require_confirmation = []
 
 [agent]
 max_iterations = 50
 native_function_calling = false
 
-[hooks]
-pre_tool_use = []
-post_tool_use = []
-
-[mcp]
-servers = []
-
 [qa]
-enabled = false
+profile = "standard"
+auto_fix_iterations = 3
+test_retry_iterations = 2
+
+[[hooks]]
+event = "PostToolUse"
+match_tools = ["file_write"]
+command = "true"
 TOMLEOF
 
-    # Run --help in directory with this config (should not crash on config load)
-    if (cd "$cfg_dir" && selfware --help >/dev/null 2>&1); then
-        record_pass "Config parsing (full config)" "parsed without crash"
+    # --validate-config runs after Config::load and invariant validation. `--help`
+    # exits inside clap before the config is read and cannot test this path.
+    if selfware --config "$cfg_dir/selfware.toml" --validate-config >/dev/null 2>&1; then
+        record_pass "Config parsing (full config)" "loaded and validated"
     else
-        record_fail "Config parsing (full config)" "selfware crashed on config load"
+        record_fail "Config parsing (full config)" "selfware rejected the valid config"
     fi
 
     # Minimal config
@@ -515,10 +757,22 @@ endpoint = "http://localhost:8080/v1"
 model = "test"
 TOMLEOF
 
-    if (cd "$cfg_dir" && selfware --help >/dev/null 2>&1); then
-        record_pass "Config parsing (minimal config)" "parsed without crash"
+    if selfware --config "$cfg_dir/selfware.toml" --validate-config >/dev/null 2>&1; then
+        record_pass "Config parsing (minimal config)" "loaded and validated"
     else
-        record_fail "Config parsing (minimal config)" "selfware crashed on minimal config"
+        record_fail "Config parsing (minimal config)" "selfware rejected the valid minimal config"
+    fi
+
+    # Negative control: this must fail, proving the command above did not take
+    # an early-exit path that ignores the selected file.
+    cat > "$cfg_dir/invalid.toml" << 'TOMLEOF'
+endpoint = ["unterminated"
+TOMLEOF
+
+    if selfware --config "$cfg_dir/invalid.toml" --validate-config >/dev/null 2>&1; then
+        record_fail "Config parsing (malformed config)" "invalid TOML was accepted"
+    else
+        record_pass "Config parsing (malformed config)" "invalid TOML rejected"
     fi
 }
 

@@ -16,12 +16,78 @@ fn test_save_and_load() {
         Message::system("system prompt".to_string()),
         Message::user("hello".to_string()),
     ];
-    store.save("test-chat", &messages, "test-model").unwrap();
+    let status = store.save("test-chat", &messages, "test-model").unwrap();
+    assert_eq!(status, ChatSaveStatus::Plaintext);
 
     let loaded = store.load("test-chat").unwrap();
     assert_eq!(loaded.name, "test-chat");
     assert_eq!(loaded.model, "test-model");
     assert_eq!(loaded.messages.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_plaintext_save_enforces_owner_only_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (store, dir) = test_store();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let status = store
+        .save("private", &[Message::user("secret".to_string())], "m")
+        .unwrap();
+    assert_eq!(status, ChatSaveStatus::Plaintext);
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(store.chat_path("private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "atomic temp files must be cleaned up");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_save_refuses_symlink_chat_directory() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let target = root.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let link = root.path().join("chats");
+    symlink(&target, &link).unwrap();
+    let store = ChatStore { chats_dir: link };
+    let error = store
+        .save("secret", &[Message::user("secret".to_string())], "m")
+        .unwrap_err();
+    assert!(error.to_string().contains("symlink"), "{error:#}");
+    assert!(std::fs::read_dir(target).unwrap().next().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_save_refuses_symlink_chat_file() {
+    use std::os::unix::fs::symlink;
+
+    let (store, dir) = test_store();
+    let outside = dir.path().join("outside");
+    std::fs::write(&outside, b"untouched").unwrap();
+    symlink(&outside, store.chat_path("linked")).unwrap();
+    let error = store
+        .save("linked", &[Message::user("secret".to_string())], "m")
+        .unwrap_err();
+    assert!(error.to_string().contains("symlink"), "{error:#}");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
 }
 
 #[test]

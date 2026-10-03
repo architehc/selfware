@@ -20,7 +20,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use crate::api::types::Message;
 use crate::session::checkpoint::{replace_atomically, FileLock};
@@ -52,6 +53,16 @@ pub struct ChatSummary {
     pub message_count: usize,
 }
 
+/// What protection was actually applied to a saved chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatSaveStatus {
+    /// The serialized chat was encrypted with the active keychain-derived key.
+    Encrypted,
+    /// No encryption manager was available; the file is plaintext with
+    /// owner-only filesystem permissions.
+    Plaintext,
+}
+
 /// Persistent chat store backed by the filesystem
 pub struct ChatStore {
     chats_dir: PathBuf,
@@ -64,14 +75,22 @@ impl ChatStore {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("selfware")
             .join("chats");
-        std::fs::create_dir_all(&base).context("Failed to create chats directory")?;
+        ensure_private_dir(&base)?;
         Ok(Self { chats_dir: base })
     }
 
     /// Fallback constructor that uses a temp directory (for when default location fails)
     pub fn fallback() -> Self {
+        #[cfg(unix)]
+        let suffix = unsafe { libc::geteuid() }.to_string();
+        #[cfg(not(unix))]
+        let suffix: String = whoami::username()
+            .unwrap_or_else(|_| "selfware_user".to_string())
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
         Self {
-            chats_dir: std::env::temp_dir().join("selfware_chats"),
+            chats_dir: std::env::temp_dir().join(format!("selfware_chats_{suffix}")),
         }
     }
 
@@ -90,7 +109,7 @@ impl ChatStore {
     }
 
     /// Save a chat with the given name
-    pub fn save(&self, name: &str, messages: &[Message], model: &str) -> Result<()> {
+    pub fn save(&self, name: &str, messages: &[Message], model: &str) -> Result<ChatSaveStatus> {
         if name.trim().is_empty() {
             anyhow::bail!("chat name must not be empty");
         }
@@ -105,7 +124,7 @@ impl ChatStore {
         }
 
         // Ensure directory exists (especially for fallback mode)
-        std::fs::create_dir_all(&self.chats_dir).context("Failed to create chats directory")?;
+        ensure_private_dir(&self.chats_dir)?;
 
         // Advisory lock held across the read (identity check) → modify → atomic
         // write cycle so concurrent CLI/daemon instances saving the same chat
@@ -117,7 +136,8 @@ impl ChatStore {
         // sanitizer collision: e.g. a pre-fix `my session` landed in
         // `my_session.json`). `load` below verifies file identity, so only a
         // file that genuinely belongs to `name` (or does not exist) passes.
-        if path.exists() {
+        if path.symlink_metadata().is_ok() {
+            ensure_regular_chat_file(&path)?;
             self.load(name).with_context(|| {
                 format!(
                     "refusing to overwrite chat file '{}' because it does not verify as session '{}'",
@@ -135,8 +155,11 @@ impl ChatStore {
         };
         let json = serde_json::to_string_pretty(&chat)?;
 
-        let data = if let Some(encryption) = EncryptionManager::get() {
-            encryption.encrypt(json.as_bytes())?
+        let (data, status) = if let Some(encryption) = EncryptionManager::get() {
+            (
+                encryption.encrypt(json.as_bytes())?,
+                ChatSaveStatus::Encrypted,
+            )
         } else {
             // Never silently degrade to plaintext (AGENTS.md §3): the user
             // asked for keychain-backed encryption when initializing; if it
@@ -145,34 +168,34 @@ impl ChatStore {
                 "encryption unavailable — saving chat '{}' in plaintext",
                 name
             );
-            json.into_bytes()
+            (json.into_bytes(), ChatSaveStatus::Plaintext)
         };
 
         // Atomic write: write to temp file then rename, preventing corruption
         // if the process crashes mid-write or another instance writes concurrently.
-        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp_path)
-                .context("Failed to create chat temp file")?;
-            f.write_all(&data)
-                .context("Failed to write chat temp file")?;
-            f.sync_all().context("Failed to sync chat temp file")?;
+        let tmp_path = self.chats_dir.join(format!(
+            ".{}.tmp.{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("chat"),
+            Uuid::new_v4()
+        ));
+        write_private_temp_file(&tmp_path, &data)?;
+        // Shared atomic replace with the preserve/install/restore fallback
+        // for Windows rename semantics.
+        if let Err(error) = replace_atomically(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error).context("Failed to atomically replace chat file");
         }
-        // Shared atomic replace with the remove-destination-then-retry
-        // fallback (Windows rename cannot overwrite an existing destination;
-        // the same convention checkpoint.rs uses for full checkpoint writes).
-        replace_atomically(&tmp_path, &path).context("Failed to atomically replace chat file")?;
+        set_owner_only_file_permissions(&path)?;
 
-        Ok(())
+        Ok(status)
     }
 
     /// Load a saved chat by name
     pub fn load(&self, name: &str) -> Result<SavedChat> {
         let path = self.chat_path(name);
+        ensure_regular_chat_file(&path)?;
         let data = std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
 
         let json = if let Some(encryption) = EncryptionManager::get() {
@@ -212,6 +235,9 @@ impl ChatStore {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if ensure_regular_chat_file(&path).is_err() {
+                        continue;
+                    }
                     if let Ok(data) = std::fs::read(&path) {
                         let json_opt = if let Some(encryption) = EncryptionManager::get() {
                             // Fail closed: skip files that fail decryption.
@@ -260,9 +286,10 @@ impl ChatStore {
     /// unreadable) is left on disk and the delete refuses.
     pub fn delete(&self, name: &str) -> Result<()> {
         let path = self.chat_path(name);
-        if !path.exists() {
+        if path.symlink_metadata().is_err() {
             return Err(anyhow::anyhow!("Chat '{}' not found", name));
         }
+        ensure_regular_chat_file(&path)?;
         // Same advisory lock as save: a delete must not interleave with a
         // concurrent read→modify→write cycle on this chat.
         let _lock = FileLock::acquire(&path)?;
@@ -301,6 +328,102 @@ impl ChatStore {
             .collect();
         self.chats_dir.join(format!("{}.json", safe_name))
     }
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!(
+                    "refusing chat directory that is a symlink or non-directory: {}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path)
+                .with_context(|| format!("Failed to create chats directory {}", path.display()))?;
+        }
+        Err(error) => return Err(error).context("Failed to inspect chats directory"),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| {
+                format!("Failed to securely open chats directory {}", path.display())
+            })?;
+        let metadata = directory.metadata()?;
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid {
+            anyhow::bail!(
+                "refusing chats directory not owned by the current user: {}",
+                path.display()
+            );
+        }
+        directory
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .with_context(|| {
+                format!("Failed to set owner-only permissions on {}", path.display())
+            })?;
+    }
+    Ok(())
+}
+
+fn ensure_regular_chat_file(path: &Path) -> Result<()> {
+    let metadata = path
+        .symlink_metadata()
+        .with_context(|| format!("Chat file not found: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "refusing chat path that is a symlink or non-regular file: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn write_private_temp_file(path: &Path, data: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(path)
+            .with_context(|| format!("Failed to create chat temp file {}", path.display()))?;
+        file.write_all(data)
+            .context("Failed to write chat temp file")?;
+        file.sync_all().context("Failed to sync chat temp file")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn set_owner_only_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "Failed to set owner-only permissions on chat file {}",
+                    path.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

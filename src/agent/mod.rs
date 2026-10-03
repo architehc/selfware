@@ -769,6 +769,10 @@ struct FileTracker {
     root: std::path::PathBuf,
 }
 
+/// Keep context-file tracking and stale-file tracking under the same bounded
+/// cardinality used by direct file reads and `/ctx load`.
+const MAX_TRACKED_CONTEXT_FILES: usize = 500;
+
 impl FileTracker {
     fn new(root: std::path::PathBuf) -> Self {
         Self {
@@ -789,7 +793,7 @@ impl FileTracker {
     }
 
     fn mark_stale(&mut self, path: &str) {
-        if self.stale_files.len() < 500 && !self.is_stale(path) {
+        if self.stale_files.len() < MAX_TRACKED_CONTEXT_FILES && !self.is_stale(path) {
             self.stale_files.insert(path.to_string());
         }
     }
@@ -2605,11 +2609,13 @@ To call a tool, use this EXACT XML structure:
                 let mut out = Vec::new();
                 for entry in walkdir::WalkDir::new(&folder_path)
                     .max_depth(3)
+                    .follow_links(false)
                     .into_iter()
+                    .filter_entry(crate::evolve::graph::retain_repository_entry)
                     .filter_map(Result::ok)
                 {
                     let path = entry.path();
-                    if !entry.file_type().is_file() {
+                    if !entry.file_type().is_file() || entry.path_is_symlink() {
                         continue;
                     }
                     let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -2661,7 +2667,11 @@ To call a tool, use this EXACT XML structure:
             else {
                 continue;
             };
-            let section = format!("\n--- {} ---\n{}\n", relative, content);
+            let section = format!(
+                "\n--- {} ---\n{}\n",
+                crate::safety::source_context::quote_untrusted_label(&relative),
+                content
+            );
             file_context.push_str(&self.sanitize_context_data(&full, &section));
         }
 
@@ -2681,7 +2691,11 @@ To call a tool, use this EXACT XML structure:
                 continue;
             }
             if let Some(content) = self.context_map.full_content(path) {
-                let section = format!("\n--- {} ---\n{}\n", path.display(), content);
+                let section = format!(
+                    "\n--- {} ---\n{}\n",
+                    crate::safety::source_context::quote_untrusted_label(&path.to_string_lossy()),
+                    content
+                );
                 file_context.push_str(&self.sanitize_context_data(path, &section));
             }
         }
@@ -2698,7 +2712,9 @@ To call a tool, use this EXACT XML structure:
                 if let Some(skeleton) = self.context_map.skeleton(path) {
                     let section = format!(
                         "\n--- {} (signatures) ---\n{}\n",
-                        path.display(),
+                        crate::safety::source_context::quote_untrusted_label(
+                            &path.to_string_lossy()
+                        ),
                         skeleton.render()
                     );
                     file_context.push_str(&self.sanitize_context_data(path, &section));

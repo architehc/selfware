@@ -255,8 +255,8 @@ impl MemorySystem {
         for file in files {
             let path = file.path.display().to_string();
             parts.push(format!(
-                "### From `{}`\n{}",
-                path,
+                "### From {}\n{}",
+                crate::safety::source_context::quote_untrusted_label(&path),
                 frame_untrusted_file(MEMORY_FILE_TAG, &path, &file.content)
             ));
         }
@@ -311,8 +311,8 @@ impl MemorySystem {
         for file in files {
             let path = file.path.display().to_string();
             parts.push(format!(
-                "### From `{}`\n{}",
-                path,
+                "### From {}\n{}",
+                crate::safety::source_context::quote_untrusted_label(&path),
                 frame_untrusted_file(WORKSPACE_GUIDANCE_TAG, &path, &file.content)
             ));
         }
@@ -330,7 +330,7 @@ impl MemorySystem {
             let path = memory.path.display().to_string();
             parts.push(format!(
                 "### Project: {}\n{}",
-                memory.project_key,
+                crate::safety::source_context::quote_untrusted_label(&memory.project_key),
                 frame_untrusted_file(CONSOLIDATED_MEMORY_TAG, &path, &memory.content)
             ));
         }

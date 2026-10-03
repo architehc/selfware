@@ -8,7 +8,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Recursively copy a directory tree, skipping any entry named `skip_name`.
+/// Recursively copy a directory tree, skipping any entry named `skip_name`,
+/// private coding-agent state, and every symlink.
 fn copy_dir_recursive(src: &Path, dst: &Path, skip_name: Option<&str>) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -20,13 +21,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path, skip_name: Option<&str>) -> std::i
                 continue;
             }
         }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink()
+            || (file_type.is_dir()
+                && crate::safety::source_context::is_private_tool_state_dir_name(&name))
+        {
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(&name);
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path, skip_name)?;
-        } else {
-            // Symlinks are copied as regular files pointing to target content.
-            // This avoids following symlinks outside the repo root.
+        } else if file_type.is_file() {
             if let Err(e) = std::fs::copy(&src_path, &dst_path) {
                 // Best-effort: skip files we can't copy (e.g. permission issues)
                 // rather than failing the entire sandbox setup.

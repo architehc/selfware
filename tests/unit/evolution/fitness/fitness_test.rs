@@ -29,6 +29,49 @@ fn test_parse_sab_deadline_default_override_and_disable() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn sab_guard_cleans_background_group_before_reaping_leader() {
+    use std::os::unix::process::CommandExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let pidfile = temp.path().join("background.pid");
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!(
+            "sleep 30 & echo $! > '{}'; exit 0",
+            pidfile.display()
+        ))
+        .process_group(0);
+    let child = cmd.spawn().unwrap();
+    let mut guard = SabProcessGroupGuard { child: Some(child) };
+
+    let status = loop {
+        if let Some(status) = guard.try_finish().unwrap() {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+    assert!(guard.child.is_none(), "completed child must be reaped");
+
+    let pid: i32 = std::fs::read_to_string(pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for _ in 0..100 {
+        if matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        ) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("background SAB descendant {pid} survived normal runner exit");
+}
+
 #[test]
 fn test_rating_thresholds() {
     let make_result = |score: f64| SabResult {

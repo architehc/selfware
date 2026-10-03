@@ -382,6 +382,33 @@ fn slow() -> TeardownPolicy {
 }
 
 #[tokio::test]
+async fn bounded_task_drain_uses_one_budget_across_all_resources() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let untouched = register(&reg, process(80), "other-task");
+    let pending = register(&reg, process(81), "cancelled-task");
+    driver.script("pid 82", Behavior::NeverStops);
+    let stuck = register(&reg, process(82), "cancelled-task");
+
+    let report = teardown_task_within(
+        &reg,
+        &driver,
+        "cancelled-task",
+        slow(),
+        Duration::from_millis(150),
+    )
+    .await;
+
+    assert!(!reg.get(&stuck).unwrap().state.is_released());
+    assert!(report
+        .undrained
+        .iter()
+        .any(|resource| resource.id == pending));
+    assert_eq!(reg.get(&untouched).unwrap().state, ResourceState::Live);
+    assert!(driver.calls_with("polite:pid 80").is_empty());
+}
+
+#[tokio::test]
 async fn bounded_session_drain_with_room_releases_everything() {
     let reg = ResourceRegistry::in_memory();
     let driver = FakeDriver::new();

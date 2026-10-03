@@ -7,8 +7,9 @@ static TEST_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
 
 /// Close all sessions in the global store (used between tests).
 async fn clear_all_sessions() {
-    let mut sessions = SESSIONS.write().await;
-    for (_, mut session) in sessions.drain() {
+    let sessions: Vec<_> = SESSIONS.write().await.drain().map(|(_, s)| s).collect();
+    for shared in sessions {
+        let mut session = shared.lock().await;
         session.close().await;
     }
 }
@@ -31,21 +32,37 @@ fn test_strip_ansi_multiple() {
     assert_eq!(strip_ansi(input), "bold green and underline");
 }
 
+#[cfg(unix)]
 #[test]
-fn test_parse_marker_valid() {
-    assert_eq!(PtySession::parse_marker("__SELFWARE_CMD_DONE_0__"), Some(0));
-    assert_eq!(PtySession::parse_marker("__SELFWARE_CMD_DONE_1__"), Some(1));
-    assert_eq!(
-        PtySession::parse_marker("__SELFWARE_CMD_DONE_127__"),
-        Some(127)
-    );
+fn test_parse_control_code_valid() {
+    assert_eq!(PtySession::parse_control_code("0\n"), Some(0));
+    assert_eq!(PtySession::parse_control_code("1"), Some(1));
+    assert_eq!(PtySession::parse_control_code("127\r\n"), Some(127));
 }
 
+#[cfg(unix)]
 #[test]
-fn test_parse_marker_invalid() {
-    assert_eq!(PtySession::parse_marker("not a marker"), None);
-    assert_eq!(PtySession::parse_marker("__SELFWARE_CMD_DONE_abc__"), None);
-    assert_eq!(PtySession::parse_marker(""), None);
+fn test_parse_control_code_invalid() {
+    assert_eq!(PtySession::parse_control_code("not a status"), None);
+    assert_eq!(PtySession::parse_control_code("0 trailing"), None);
+    assert_eq!(PtySession::parse_control_code(""), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_control_code_requires_the_current_nonce() {
+    assert_eq!(
+        PtySession::parse_command_control_code("current:17\n", "current"),
+        Some(17)
+    );
+    assert_eq!(
+        PtySession::parse_command_control_code("stale:0\n", "current"),
+        None
+    );
+    assert_eq!(
+        PtySession::parse_command_control_code("current:not-a-code\n", "current"),
+        None
+    );
 }
 
 #[test]
@@ -127,6 +144,23 @@ fn test_validate_shell_argument_refuses_empty_and_null() {
     assert!(validate_shell_argument("/bin/b\0ash", &config).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_unsafe_shell_environment_falls_back_but_explicit_path_is_rejected() {
+    let config = SafetyConfig::default();
+    assert_eq!(
+        select_shell_argument(None, Some("/etc/selfware-attacker-shell"), &config, false).unwrap(),
+        "/bin/bash"
+    );
+    assert!(select_shell_argument(
+        Some("/etc/selfware-attacker-shell"),
+        Some("/bin/sh"),
+        &config,
+        false
+    )
+    .is_err());
+}
+
 #[test]
 fn test_validate_shell_argument_accepts_workspace_path_with_allowlist() {
     let config = SafetyConfig {
@@ -143,6 +177,20 @@ fn test_collect_output_truncation() {
     let output = PtySession::collect_output(&long_lines);
     // Should be within bounds.
     assert!(output.len() <= MAX_OUTPUT_BYTES + 100); // allow for truncation message
+}
+
+#[test]
+fn test_nonunix_cd_parser_preserves_windows_backslashes() {
+    assert_eq!(
+        parse_nonunix_standalone_cd(r#"cd C:\work\project"#),
+        Some(Some(r#"C:\work\project"#.to_string()))
+    );
+    assert_eq!(
+        parse_nonunix_standalone_cd(r#"CD "C:\Program Files\project""#),
+        Some(Some(r#"C:\Program Files\project"#.to_string()))
+    );
+    assert_eq!(parse_nonunix_standalone_cd("cd"), Some(None));
+    assert_eq!(parse_nonunix_standalone_cd(r#"cd C:\safe & whoami"#), None);
 }
 
 #[test]
@@ -240,6 +288,228 @@ async fn test_send_stderr_flood_does_not_deadlock() {
         .await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_newline_free_output_is_drained_with_bounded_capture() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let tool = PtyShellTool::new();
+    let started = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": session_id,
+            "command": "awk 'BEGIN { for (i=0;i<262144;i++) printf \"x\" }'; awk 'BEGIN { for (i=0;i<262144;i++) printf \"y\" }' >&2",
+            "timeout_secs": 10
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["timed_out"], false);
+    for stream in ["stdout", "stderr"] {
+        let captured = result[stream].as_str().unwrap();
+        assert!(
+            captured.len() <= MAX_OUTPUT_BYTES + 100,
+            "{stream} was not bounded"
+        );
+        assert!(
+            captured.contains("output truncated"),
+            "{stream}: {captured}"
+        );
+    }
+
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_stdout_marker_text_cannot_forge_completion() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let tool = PtyShellTool::new();
+    let started = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": session_id,
+            "command": "printf '__SELFWARE_CMD_DONE_0__\\n'; exit 7",
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"], 7);
+    assert_eq!(result["timed_out"], false);
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("__SELFWARE_CMD_DONE_0__"));
+
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_state_cannot_poison_later_calls() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let tool = PtyShellTool::new();
+    let started = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let first = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": session_id,
+            "command": "SELFWARE_PERSIST_TEST=poison; export SELFWARE_PERSIST_TEST; PATH=/attacker; export PATH; poison() { echo forged; }",
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    assert_eq!(first["exit_code"], 0);
+
+    let second = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": session_id,
+            "command": "printf 'state=%s\\n' \"${SELFWARE_PERSIST_TEST-unset}\"; printf 'path=%s\\n' \"$PATH\"; command -v poison || true",
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    let stdout = second["stdout"].as_str().unwrap();
+    assert!(stdout.contains("state=unset"), "{stdout}");
+    assert!(!stdout.contains("path=/attacker"), "{stdout}");
+    assert!(!stdout.contains("forged"), "{stdout}");
+
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_only_validated_standalone_cd_persists() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let child = workspace.path().join("child dir");
+    std::fs::create_dir(&child).unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(workspace.path().to_path_buf());
+
+    crate::tools::workspace_root::scope(root, async {
+        let tool = PtyShellTool::new();
+        let started = tool
+            .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+            .await
+            .unwrap();
+        let session_id = started["session_id"].as_str().unwrap();
+
+        let changed = tool
+            .execute(serde_json::json!({
+                "action": "send",
+                "session_id": session_id,
+                "command": "cd 'child dir'"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(changed["exit_code"], 0);
+        let pwd = tool
+            .execute(serde_json::json!({
+                "action": "send",
+                "session_id": session_id,
+                "command": "pwd"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(pwd["stdout"].as_str().unwrap()),
+            child.canonicalize().unwrap()
+        );
+
+        let rejected = tool
+            .execute(serde_json::json!({
+                "action": "send",
+                "session_id": session_id,
+                "command": "cd /etc"
+            }))
+            .await;
+        assert!(
+            rejected.is_err(),
+            "protected cwd transition must be rejected"
+        );
+        let _ = tool
+            .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+            .await;
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_persistent_cwd_is_revalidated_before_each_command() {
+    use std::os::unix::fs::symlink;
+
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path().join("cwd");
+    std::fs::create_dir(&cwd).unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(workspace.path().to_path_buf());
+
+    crate::tools::workspace_root::scope(root, async {
+        let tool = PtyShellTool::new();
+        let started = tool
+            .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+            .await
+            .unwrap();
+        let session_id = started["session_id"].as_str().unwrap();
+        tool.execute(serde_json::json!({
+            "action": "send",
+            "session_id": session_id,
+            "command": "cd cwd"
+        }))
+        .await
+        .unwrap();
+
+        std::fs::remove_dir(&cwd).unwrap();
+        symlink("/etc", &cwd).unwrap();
+        let error = tool
+            .execute(serde_json::json!({
+                "action": "send",
+                "session_id": session_id,
+                "command": "pwd"
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("PTY cwd target rejected"),
+            "{error:#}"
+        );
+
+        let _ = tool
+            .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+            .await;
+    })
+    .await;
+}
+
 #[cfg(not(target_os = "windows"))]
 #[tokio::test]
 async fn test_send_echo_command() {
@@ -279,6 +549,59 @@ async fn test_send_echo_command() {
             "session_id": &session_id
         }))
         .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_long_command_does_not_block_a_different_session() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+    let tool = PtyShellTool::new();
+    let first = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let second = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let first_id = first["session_id"].as_str().unwrap().to_string();
+    let second_id = second["session_id"].as_str().unwrap().to_string();
+
+    let mut slow = Box::pin(tool.execute(serde_json::json!({
+        "action": "send",
+        "session_id": &first_id,
+        "command": "sleep 2; echo slow-finished",
+        "timeout_secs": 5
+    })));
+    tokio::select! {
+        result = &mut slow => panic!("slow command returned unexpectedly: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+
+    let quick = tokio::time::timeout(
+        Duration::from_secs(1),
+        tool.execute(serde_json::json!({
+            "action": "send",
+            "session_id": &second_id,
+            "command": "echo independent",
+            "timeout_secs": 5
+        })),
+    )
+    .await
+    .expect("a command on one session blocked an unrelated session")
+    .unwrap();
+    assert!(quick["stdout"].as_str().unwrap().contains("independent"));
+    assert!(slow.await.unwrap()["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("slow-finished"));
+
+    for session_id in [first_id, second_id] {
+        let _ = tool
+            .execute(serde_json::json!({ "action": "close", "session_id": session_id }))
+            .await;
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -477,22 +800,62 @@ async fn wait_until_group_gone(pgid: i32) -> bool {
     false
 }
 
-/// The session shell is its own process-group leader (see `PtySession::new`),
-/// so the group id equals the shell pid.
 #[cfg(unix)]
-async fn session_process_group(session_id: &str) -> i32 {
-    let sessions = SESSIONS.read().await;
-    sessions
-        .get(session_id)
-        .expect("session should exist after start")
-        .child
-        .id()
-        .expect("session child should have a pid") as i32
+#[tokio::test]
+async fn close_consumes_process_group_ownership_before_drop() {
+    let _guard = TEST_LOCK.lock().await;
+    let mut session = PtySession::new(None, SafetyConfig::default())
+        .await
+        .unwrap();
+    assert!(session.pgid.is_some());
+
+    session.close().await;
+
+    assert!(
+        session.pgid.is_none(),
+        "a closed session must not retain a reusable process-group id"
+    );
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_timeout_terminates_stuck_child() {
+async fn observing_supervisor_exit_consumes_pgid_before_reap() {
+    let _guard = TEST_LOCK.lock().await;
+    let mut session = PtySession::new(None, SafetyConfig::default())
+        .await
+        .unwrap();
+    session.stdin.write_all(b"exit\n").await.unwrap();
+    session.stdin.flush().await.unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while session.is_alive() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(!session.is_alive(), "supervisor shell should have exited");
+    assert!(
+        session.pgid.is_none(),
+        "reaping an exited supervisor must consume its process-group id"
+    );
+}
+
+/// The session shell is its own process-group leader (see `PtySession::new`),
+/// so the group id equals the shell pid.
+#[cfg(unix)]
+async fn session_process_group(session_id: &str) -> i32 {
+    let shared = SESSIONS
+        .read()
+        .await
+        .get(session_id)
+        .expect("session should exist after start")
+        .clone();
+    let session = shared.lock().await;
+    session.child.id().expect("session child should have a pid") as i32
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_child_stdin_cannot_consume_completion_protocol() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
@@ -503,13 +866,9 @@ async fn test_timeout_terminates_stuck_child() {
         .await
         .unwrap();
     let session_id = result["session_id"].as_str().unwrap().to_string();
-    let shell_pid = session_process_group(&session_id).await;
-
-    // `exec cat` replaces the shell with a process that reads stdin forever
-    // and never runs the completion marker — the exact "interactive child
-    // consumes the marker" hang from the review finding. (A bare `cat` would
-    // not be reliable: bash buffers the pipe read-ahead, so the marker lines
-    // could still be executed by the shell itself.)
+    // User commands receive /dev/null, while completion travels over a
+    // descriptor available only to the trusted parent shell. `exec cat` can
+    // therefore neither consume the protocol nor hang the session.
     let result = tool
         .execute(serde_json::json!({
             "action": "send",
@@ -519,44 +878,31 @@ async fn test_timeout_terminates_stuck_child() {
         }))
         .await
         .unwrap();
-    assert_eq!(result["timed_out"], true);
-    assert_eq!(result["exit_code"], -1);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["exit_code"], 0);
 
-    // The stuck child must have been terminated by the timeout path...
+    // The persistent parent remains usable after the child exits.
     {
-        let mut sessions = SESSIONS.write().await;
-        let session = sessions
-            .get_mut(&session_id)
-            .expect("session should still be present after timeout");
+        let shared = SESSIONS.read().await.get(&session_id).unwrap().clone();
+        let mut session = shared.lock().await;
         assert!(
-            !session.is_alive(),
-            "stuck interactive child should be terminated after timeout"
+            session.is_alive(),
+            "trusted parent shell should remain alive"
         );
     }
-
-    // ...and the whole process group with it, not left running behind the
-    // session.
-    assert!(
-        wait_until_group_gone(shell_pid).await,
-        "process group of the stuck session should be killed, not left running"
-    );
-
-    // The session is dead and is reclaimed on the next use instead of feeding
-    // a hanging process.
     let result = tool
         .execute(serde_json::json!({
             "action": "send",
             "session_id": &session_id,
-            "command": "echo never_runs",
+            "command": "echo still_usable",
             "timeout_secs": 5
         }))
+        .await
+        .unwrap();
+    assert!(result["stdout"].as_str().unwrap().contains("still_usable"));
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": &session_id }))
         .await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("has terminated"));
-    assert!(
-        !SESSIONS.read().await.contains_key(&session_id),
-        "dead session should be removed from the store on next use"
-    );
 }
 
 #[cfg(unix)]
@@ -581,12 +927,20 @@ async fn test_timeout_kills_grandchild_tree_and_close_works() {
         .execute(serde_json::json!({
             "action": "send",
             "session_id": &session_id,
-            "command": "sleep 30",
+            "command": "printf 'before-timeout-stdout\\n'; printf 'before-timeout-stderr\\n' >&2; sleep 30",
             "timeout_secs": 1
         }))
         .await
         .unwrap();
     assert_eq!(result["timed_out"], true);
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("before-timeout-stdout"));
+    assert!(result["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("before-timeout-stderr"));
 
     // The whole group (bash + sleep) is gone — the grandchild is not orphaned.
     assert!(
@@ -605,23 +959,8 @@ async fn test_timeout_kills_grandchild_tree_and_close_works() {
     assert_eq!(result["status"], "closed");
 }
 
-/// Poll until the process group appears (a backgrounded descendant exists).
-#[cfg(unix)]
-async fn wait_until_group_exists(pgid: i32) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        if process_group_exists(pgid) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-/// A shell that backgrounds a child and then exits must not leak the
-/// grandchild: the session remembers the process-group id from spawn, so
-/// `close()` can kill the surviving background job even after the direct
-/// shell has been reaped (when `Child::id()` returns `None`).
+/// A command shell that backgrounds a child and exits must not leak the
+/// grandchild: `close()` kills the persistent session process group.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_close_reaps_background_grandchild_after_shell_exits() {
@@ -635,42 +974,37 @@ async fn test_close_reaps_background_grandchild_after_shell_exits() {
         .await
         .unwrap();
     let session_id = result["session_id"].as_str().unwrap().to_string();
-    // Capture the pgid BEFORE the shell exits/reaps.
     let shell_pid = session_process_group(&session_id).await;
 
-    // `sleep 300 >/dev/null 2>&1 & exit` backgrounds a long-lived grandchild,
-    // then the shell exits immediately. The completion marker is never echoed
-    // (bash exits with it still buffered), stdout reaches EOF once the shell
-    // dies (the sleep holds no pipe fd), so the send returns promptly without
-    // a timeout — and without any timeout-path cleanup.
+    // The isolated child shell exits, but the trusted parent remains to report
+    // completion over its private descriptor.
     let result = tool
         .execute(serde_json::json!({
             "action": "send",
             "session_id": &session_id,
-            "command": "sleep 300 >/dev/null 2>&1 & exit",
+            "command": "sleep 300 >/dev/null 2>&1 & echo $!",
             "timeout_secs": 5
         }))
         .await
         .unwrap();
     assert_eq!(result["timed_out"], false);
+    let background_pid: i32 = result["stdout"].as_str().unwrap().trim().parse().unwrap();
 
-    // Inspecting the session reaps the shell...
     {
-        let mut sessions = SESSIONS.write().await;
-        let session = sessions
-            .get_mut(&session_id)
-            .expect("session should still be present");
-        assert!(!session.is_alive(), "shell should have exited");
+        let shared = SESSIONS.read().await.get(&session_id).unwrap().clone();
+        let mut session = shared.lock().await;
+        assert!(
+            session.is_alive(),
+            "trusted parent shell should remain alive"
+        );
     }
 
-    // ...while the background grandchild is still running in the group.
     assert!(
-        wait_until_group_exists(shell_pid).await,
-        "background sleep grandchild should be alive after the shell exits"
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(background_pid), None).is_ok(),
+        "background sleep child should be alive before session close"
     );
 
-    // Closing the session must now terminate the surviving grandchild even
-    // though the direct shell pid is gone.
+    // Closing the session must terminate the surviving background child.
     let result = tool
         .execute(serde_json::json!({
             "action": "close",
@@ -685,13 +1019,11 @@ async fn test_close_reaps_background_grandchild_after_shell_exits() {
     );
 }
 
-/// The timeout path must also reap background descendants that outlived the
-/// direct shell: the shell exits, the grandchild keeps the pipes open (so no
-/// EOF and the read loop hits the deadline), and the group kill must still
-/// fire using the pgid captured at spawn.
+/// A background child holding stdout open cannot delay completion: status is
+/// reported on a separate descriptor. Closing still reaps the process group.
 #[cfg(unix)]
 #[tokio::test]
-async fn test_timeout_reaps_background_grandchild_after_shell_exits() {
+async fn test_control_channel_ignores_background_stdout_and_close_reaps_child() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
@@ -704,32 +1036,52 @@ async fn test_timeout_reaps_background_grandchild_after_shell_exits() {
     let session_id = result["session_id"].as_str().unwrap().to_string();
     let shell_pid = session_process_group(&session_id).await;
 
-    // Unlike the close-path test, `sleep 300 & exit` leaves the sleep holding
-    // the session's stdout open, so the read loop never sees EOF: it runs to
-    // the deadline and the timeout cleanup must kill the whole group even
-    // though the shell itself has already exited by then.
+    // `sleep` retains stdout, but cannot retain or forge the control fd.
     let result = tool
         .execute(serde_json::json!({
             "action": "send",
             "session_id": &session_id,
-            "command": "sleep 300 & exit",
+            "command": "sleep 300 & echo $!",
             "timeout_secs": 1
         }))
         .await
         .unwrap();
-    assert_eq!(result["timed_out"], true);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["exit_code"], 0);
+    let background_pid: i32 = result["stdout"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(background_pid), None).is_ok(),
+        "background child should still be alive when completion arrives"
+    );
 
     {
-        let mut sessions = SESSIONS.write().await;
-        let session = sessions
-            .get_mut(&session_id)
-            .expect("session should still be present");
-        assert!(!session.is_alive(), "shell should have exited");
+        let shared = SESSIONS.read().await.get(&session_id).unwrap().clone();
+        let mut session = shared.lock().await;
+        assert!(
+            session.is_alive(),
+            "trusted parent shell should remain alive"
+        );
     }
 
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "close",
+            "session_id": &session_id
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "closed");
     assert!(
         wait_until_group_gone(shell_pid).await,
-        "background sleeping grandchild should be killed on the timeout path"
+        "background sleeping child should be killed when the session closes"
     );
 }
 
@@ -747,7 +1099,13 @@ async fn pty_git_in_an_untrusted_repository_runs_nothing_it_configured() {
     };
     std::fs::write(tmp.path().join("g.sh"), "git diff\n").unwrap();
     let root = crate::tools::workspace_root::WorkspaceRoot::fixed(tmp.path().to_path_buf());
-    let tool = PtyShellTool::new();
+    let tool = PtyShellTool::with_safety_config(SafetyConfig {
+        allowed_paths: vec![
+            tmp.path().display().to_string(),
+            format!("{}/**", tmp.path().display()),
+        ],
+        ..SafetyConfig::default()
+    });
     let started = crate::tools::workspace_root::scope(
         root.clone(),
         tool.execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" })),

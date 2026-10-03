@@ -4474,6 +4474,7 @@ dependencies = [
  "wait-timeout",
  "walkdir",
  "whoami",
+ "windows-sys 0.59.0",
  "xcap",
  "zeroize",
  "zstd",

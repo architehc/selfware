@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 # Install build dependencies
 # - libssl-dev: Required for reqwest/native-tls
@@ -30,8 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create a new empty project for dependency caching
 WORKDIR /app
 
-# Copy manifests first for better layer caching
-COPY Cargo.toml Cargo.lock ./
+# Copy manifests and the package build script first for better layer caching.
+# Omitting build.rs silently drops the git-SHA version metadata.
+COPY Cargo.toml Cargo.lock build.rs ./
 
 # Create dummy source files and directories to build dependencies
 RUN mkdir -p src/bin && \
@@ -59,6 +60,12 @@ COPY benches ./benches
 COPY examples ./examples
 COPY templates ./templates
 COPY selfware-qa-schema.yaml ./selfware-qa-schema.yaml
+
+# `.git` is intentionally outside the Docker context. CI passes the immutable
+# source revision explicitly so build.rs can retain provenance in --version;
+# local builds remain honest and report the plain package version. Declare it
+# after the dependency layer so a new commit does not invalidate that cache.
+ARG SELFWARE_GIT_SHA=unknown
 
 # Touch source files to ensure cargo rebuilds with actual code
 RUN touch src/main.rs src/lib.rs

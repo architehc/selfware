@@ -719,11 +719,12 @@ async fn full_compact_with_safety(
             super::current_project_root(),
         );
         for path in recent_files {
-            if validator.validate(&path).is_err() {
+            let anchored = crate::tools::workspace_root::anchor(&path);
+            if validator.validate(&anchored).is_err() {
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let args = serde_json::json!({"path": path}).to_string();
+            if let Ok(content) = tokio::fs::read_to_string(&anchored).await {
+                let args = serde_json::json!({"path": anchored}).to_string();
                 let content = super::tool_dispatch::sanitize_tool_context(
                     "compact_file",
                     &args,
@@ -741,7 +742,11 @@ async fn full_compact_with_safety(
                 } else {
                     content
                 };
-                let section = format!("\n### {}\n```\n{}\n```\n", path, truncated);
+                let section = format!(
+                    "\n### {}\n```\n{}\n```\n",
+                    crate::safety::source_context::quote_untrusted_label(&path),
+                    truncated
+                );
                 file_context.push_str(
                     &super::tool_dispatch::sanitize_tool_context(
                         "compact_file",
@@ -752,7 +757,10 @@ async fn full_compact_with_safety(
                     .content,
                 );
             } else {
-                file_context.push_str(&format!("\n### {} (unavailable)\n", path));
+                file_context.push_str(&format!(
+                    "\n### {} (unavailable)\n",
+                    crate::safety::source_context::quote_untrusted_label(&path)
+                ));
             }
         }
         compressed.push(Message::user(file_context));

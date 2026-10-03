@@ -56,6 +56,11 @@ async fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
         "// dep\n",
     )
     .unwrap();
+    for state_dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        let nested = go_repo.path().join(state_dir).join("worktrees");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("private.rs"), "fn private_state() {}\n").unwrap();
+    }
     cwd.switch_to(go_repo.path());
     assert_eq!(count_source_files_in_workdir(5).await, 0);
 
@@ -3423,6 +3428,37 @@ pub fn other() -> i32 {
     let (path, _) = extract_code_and_path(content).await.unwrap();
     assert_eq!(path, "src/lib.rs");
     // cwd restored on drop of `_guard`.
+}
+
+#[tokio::test]
+async fn extract_code_and_path_rust_fallback_follows_the_active_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='scoped'\n").unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let content = r#"```rust
+pub fn scoped_answer() -> i32 {
+    42
+}
+
+pub fn other() -> i32 {
+    scoped_answer()
+}
+```"#;
+
+    let extracted = crate::tools::workspace_root::scope(root, async {
+        assert_eq!(crate::tools::workspace_root::current_path(), dir.path());
+        assert!(
+            tokio::fs::try_exists(crate::tools::workspace_root::anchor_path(
+                std::path::Path::new("Cargo.toml")
+            ))
+            .await
+            .unwrap()
+        );
+        extract_code_and_path(content).await
+    })
+    .await;
+
+    assert_eq!(extracted.unwrap().0, "src/lib.rs");
 }
 
 #[tokio::test]

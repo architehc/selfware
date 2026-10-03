@@ -38,6 +38,54 @@ static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> = Lazy::new(|| Mutex::ne
 /// Timeout for a single grep search operation.
 const GREP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Directory globs passed to ripgrep after caller-supplied globs so an
+/// include pattern cannot re-admit private state, generated output, or
+/// dependency trees during broad discovery. These mirror the shared
+/// `retain_repository_entry` policy used by the built-in backend. An
+/// explicitly selected excluded directory remains readable because ripgrep
+/// evaluates these patterns relative to that selected root.
+const REPOSITORY_EXCLUSION_GLOBS: &[&str] = &[
+    "!.git/",
+    "!.claude/",
+    "!.codex/",
+    "!.agents/",
+    "!.qwen/",
+    "!.superpowers/",
+    "!.selfware/",
+    "!.worktrees/",
+    "!target/",
+    "!*_target/",
+    "!.fingerprint/",
+    "!node_modules/",
+    "!vendor/",
+    "!dist/",
+    "!build/",
+    "!out/",
+    "!coverage/",
+    "!artifacts/",
+    "!__pycache__/",
+    "!.next/",
+    "!.nuxt/",
+    "!.svelte-kit/",
+    "!.turbo/",
+    "!.cache/",
+    "!.pytest_cache/",
+    "!.mypy_cache/",
+    "!.ruff_cache/",
+    "!.venv/",
+    "!venv/",
+    "!.ssh/",
+    "!.aws/",
+    "!.gnupg/",
+];
+
+/// Root-aware pruning for the built-in backend. Depth zero is the path the
+/// caller explicitly selected; matching private directories below it are
+/// discovery noise and are pruned before descent.
+fn retain_grep_entry(entry: &walkdir::DirEntry) -> bool {
+    crate::evolve::graph::retain_repository_entry(entry)
+}
+
 /// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
 pub(crate) fn cached_regex(pattern: &str) -> Result<Regex> {
     if pattern.len() > MAX_PATTERN_LENGTH {
@@ -107,20 +155,7 @@ fn build_rg_command(
         .arg("--max-columns")
         .arg("500")
         .arg("--max-filesize")
-        .arg("10M")
-        // Exclude common VCS / build directories automatically.
-        .arg("-g")
-        .arg("!target/")
-        .arg("-g")
-        .arg("!.git/")
-        .arg("-g")
-        .arg("!node_modules/")
-        .arg("-g")
-        .arg("!.venv/")
-        .arg("-g")
-        .arg("!dist/")
-        .arg("-g")
-        .arg("!build/");
+        .arg("10M");
 
     if case_insensitive {
         cmd.arg("-i");
@@ -130,6 +165,12 @@ fn build_rg_command(
     }
     if let Some(exclude) = exclude_pattern {
         cmd.arg(format!("--glob=!{}", exclude));
+    }
+
+    // Keep these last: ripgrep resolves overlapping glob rules by precedence,
+    // so a caller's broad include must not re-admit private state.
+    for excluded_glob in REPOSITORY_EXCLUSION_GLOBS {
+        cmd.arg("-g").arg(excluded_glob);
     }
 
     // Pattern bound to its flag; path after the option terminator.
@@ -586,9 +627,11 @@ fn run_builtin_grep(
         };
 
         walker
+            .follow_links(false)
             .into_iter()
+            .filter_entry(retain_grep_entry)
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
             .filter(|e| {
                 let file_name = e.file_name().to_string_lossy();
                 if file_name.starts_with('.') {
@@ -734,6 +777,122 @@ pub fn grep_search(
             total_matches: 0,
             file_count: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod private_state_walk_tests {
+    use super::*;
+    use std::fs;
+
+    fn permissive_safety() -> SafetyConfig {
+        SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..SafetyConfig::default()
+        }
+    }
+
+    fn write(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(path, content).expect("write fixture");
+    }
+
+    #[tokio::test]
+    async fn broad_grep_prunes_private_state_but_explicit_root_remains_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write(&temp.path().join("public.txt"), "private_state_marker\n");
+        for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+            write(
+                &temp.path().join(dir).join("private.txt"),
+                "private_state_marker\n",
+            );
+        }
+
+        let tool = GrepSearch::with_safety_config(permissive_safety());
+        let broad = tool
+            .execute(serde_json::json!({
+                "pattern": "private_state_marker",
+                "path": temp.path(),
+                "include": "*.txt"
+            }))
+            .await
+            .expect("broad grep");
+        let matches = broad["matches"].as_array().expect("matches");
+        assert_eq!(matches.len(), 1, "{broad}");
+        assert!(matches[0]["file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("public.txt")));
+
+        let explicit_root = temp.path().join(".claude");
+        let explicit = tool
+            .execute(serde_json::json!({
+                "pattern": "private_state_marker",
+                "path": explicit_root,
+                "include": "*.txt"
+            }))
+            .await
+            .expect("explicit private grep root");
+        assert_eq!(explicit["matches"].as_array().expect("matches").len(), 1);
+
+        let builtin_root = temp.path().to_path_buf();
+        let builtin = tokio::task::spawn_blocking(move || {
+            let safety = permissive_safety();
+            run_builtin_grep(
+                "private_state_marker",
+                builtin_root.to_str().expect("utf8 root"),
+                true,
+                false,
+                0,
+                20,
+                0,
+                Some("*.txt"),
+                None,
+                Some(&safety),
+            )
+        })
+        .await
+        .expect("builtin task")
+        .expect("builtin broad grep");
+        assert_eq!(builtin.matches.len(), 1);
+        let builtin = tokio::task::spawn_blocking(move || {
+            let safety = permissive_safety();
+            run_builtin_grep(
+                "private_state_marker",
+                explicit_root.to_str().expect("utf8 private root"),
+                true,
+                false,
+                0,
+                20,
+                0,
+                Some("*.txt"),
+                None,
+                Some(&safety),
+            )
+        })
+        .await
+        .expect("builtin task")
+        .expect("builtin explicit private grep");
+        assert_eq!(builtin.matches.len(), 1);
+    }
+
+    #[test]
+    fn repository_exclusions_follow_caller_globs() {
+        let command = build_rg_command("needle", ".", false, Some("*"), None);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let include = args
+            .iter()
+            .position(|arg| arg == "--glob=*")
+            .expect("caller include");
+        for private in REPOSITORY_EXCLUSION_GLOBS {
+            let position = args
+                .iter()
+                .position(|arg| arg == private)
+                .unwrap_or_else(|| panic!("missing private exclusion {private}: {args:?}"));
+            assert!(position > include, "{args:?}");
+        }
     }
 }
 

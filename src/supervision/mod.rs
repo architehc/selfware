@@ -235,7 +235,7 @@ impl Supervisor {
             .map(|_| format!("supervisor-{:p}", &self))
             .unwrap_or_default();
 
-        tokio::spawn(async move {
+        crate::tools::workspace_root::spawn(async move {
             info!("Supervision tree started");
 
             // Start all permanent children initially

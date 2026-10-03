@@ -1825,28 +1825,7 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
 
-    // Unique per write: pid alone collides when two agents in the same
-    // process save concurrently.
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_path = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp.{}.{}", std::process::id(), seq)),
-        None => path.with_extension(format!("tmp.{}.{}", std::process::id(), seq)),
-    };
-
-    std::fs::write(&tmp_path, bytes)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    // Atomic replace. On failure, clean up the temp file.
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    crate::session::checkpoint::write_bytes_atomically(path, bytes, 0o600)?;
     Ok(())
 }
 

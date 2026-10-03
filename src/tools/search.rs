@@ -15,6 +15,12 @@ use crate::tools::grep_search::cached_regex;
 #[cfg(test)]
 use crate::tools::grep_search::MAX_PATTERN_LENGTH;
 
+/// Keep an explicitly selected search root readable, but never discover
+/// repository-local coding-agent state beneath a broader search root.
+fn retain_search_entry(entry: &walkdir::DirEntry) -> bool {
+    crate::evolve::graph::retain_repository_entry(entry)
+}
+
 /// Re-export the canonical `grep_search` tool from `tools::grep_search` so
 /// there is only one `GrepSearch` implementation in the codebase.
 pub use crate::tools::grep_search::{GrepMatch, GrepSearch, GrepSearchResult};
@@ -168,9 +174,11 @@ impl Tool for GlobFind {
 
             // Walk directory and match against pattern
             for entry in WalkDir::new(base_path)
+                .follow_links(false)
                 .into_iter()
+                .filter_entry(retain_search_entry)
                 .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
+                .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
             {
                 if files.len() >= max_results {
                     break;
@@ -306,10 +314,13 @@ impl Tool for SymbolSearch {
 
             // Walk Rust files
             for entry in WalkDir::new(base_path)
+                .follow_links(false)
                 .into_iter()
+                .filter_entry(retain_search_entry)
                 .filter_map(|e| e.ok())
                 .filter(|e| {
                     e.file_type().is_file()
+                        && !e.path_is_symlink()
                         && e.path().extension().map(|ext| ext == "rs").unwrap_or(false)
                 })
             {
@@ -443,6 +454,126 @@ fn build_symbol_patterns(
 }
 
 #[cfg(test)]
+mod private_state_walk_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn permissive_safety() -> SafetyConfig {
+        SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..SafetyConfig::default()
+        }
+    }
+
+    fn write(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(path, content).expect("write fixture");
+    }
+
+    #[tokio::test]
+    async fn broad_searches_prune_private_state_but_explicit_root_remains_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write(
+            &temp.path().join("visible.rs"),
+            "pub fn shared_search_marker() {}\n",
+        );
+        for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+            write(
+                &temp.path().join(dir).join("private.rs"),
+                "pub fn shared_search_marker() {}\n",
+            );
+        }
+
+        let glob = GlobFind::with_safety_config(permissive_safety());
+        let broad = glob
+            .execute(json!({"pattern": "**/*.rs", "path": temp.path()}))
+            .await
+            .expect("broad glob");
+        let broad_files = broad["files"].as_array().expect("files");
+        assert_eq!(broad_files.len(), 1, "{broad}");
+        assert!(broad_files[0]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("visible.rs")));
+
+        let explicit_root = temp.path().join(".claude");
+        let explicit = glob
+            .execute(json!({"pattern": "**/*.rs", "path": explicit_root}))
+            .await
+            .expect("explicit private glob root");
+        assert_eq!(explicit["files"].as_array().expect("files").len(), 1);
+
+        let symbols = SymbolSearch::with_safety_config(permissive_safety());
+        let broad = symbols
+            .execute(json!({"name": "shared_search_marker", "path": temp.path()}))
+            .await
+            .expect("broad symbol search");
+        let broad_symbols = broad["symbols"].as_array().expect("symbols");
+        assert_eq!(broad_symbols.len(), 1, "{broad}");
+        assert!(broad_symbols[0]["file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("visible.rs")));
+
+        let explicit = symbols
+            .execute(json!({"name": "shared_search_marker", "path": explicit_root}))
+            .await
+            .expect("explicit private symbol root");
+        assert_eq!(explicit["symbols"].as_array().expect("symbols").len(), 1);
+
+        let standalone = grep_search(
+            "shared_search_marker",
+            temp.path().to_str().expect("utf8 root"),
+            true,
+            20,
+            0,
+        );
+        assert_eq!(standalone.file_count, 1);
+        assert_eq!(standalone.total_matches, 1);
+        let explicit = grep_search(
+            "shared_search_marker",
+            explicit_root.to_str().expect("utf8 private root"),
+            true,
+            20,
+            0,
+        );
+        assert_eq!(explicit.file_count, 1);
+        assert_eq!(explicit.total_matches, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovered_symlink_files_and_directories_are_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        write(
+            &outside.path().join("outside.rs"),
+            "pub fn symlink_only_marker() {}\n",
+        );
+        symlink(outside.path(), root.path().join("linked_dir")).expect("dir symlink");
+        symlink(
+            outside.path().join("outside.rs"),
+            root.path().join("linked_file.rs"),
+        )
+        .expect("file symlink");
+
+        let glob = GlobFind::with_safety_config(permissive_safety());
+        let found = glob
+            .execute(json!({"pattern": "**/*.rs", "path": root.path()}))
+            .await
+            .expect("glob");
+        assert!(found["files"].as_array().expect("files").is_empty());
+
+        let symbols = SymbolSearch::with_safety_config(permissive_safety());
+        let found = symbols
+            .execute(json!({"name": "symlink_only_marker", "path": root.path()}))
+            .await
+            .expect("symbol search");
+        assert!(found["symbols"].as_array().expect("symbols").is_empty());
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 #[path = "../../tests/unit/tools/search/search_test.rs"]
 mod tests;
@@ -495,8 +626,13 @@ pub fn grep_search(
         file_count = 1;
     } else if recursive {
         // Search directory recursively
-        for entry in WalkDir::new(path).into_iter().flatten() {
-            if entry.file_type().is_file() {
+        for entry in WalkDir::new(path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(retain_search_entry)
+            .flatten()
+        {
+            if entry.file_type().is_file() && !entry.path_is_symlink() {
                 let path_str = entry.path().to_string_lossy();
                 let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
                 let lines: Vec<&str> = content.lines().collect();

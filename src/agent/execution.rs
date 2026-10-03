@@ -100,7 +100,7 @@ pub(super) async fn with_esc_listener_paused<T: Send + 'static>(
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
     }
     let _ = crossterm::terminal::disable_raw_mode();
-    let result = tokio::task::spawn_blocking(f)
+    let result = crate::tools::workspace_root::spawn_blocking(f)
         .await
         .unwrap_or_else(|e| Err(std::io::Error::other(e)));
     esc_paused.store(false, Ordering::Release);
@@ -224,7 +224,8 @@ pub(super) async fn count_source_files_in_workdir(cap: usize) -> usize {
                 if e.depth() == 0 {
                     return true;
                 }
-                !EXCLUDED_DIRS.contains(&name.as_ref())
+                crate::evolve::graph::retain_repository_entry(e)
+                    && !EXCLUDED_DIRS.contains(&name.as_ref())
             });
 
         for entry in walker.flatten() {
@@ -2385,7 +2386,12 @@ pub(super) async fn extract_code_and_path(content: &str) -> Option<(String, Stri
     let explicit_path = path_re.captures(&stripped).map(|c| c[1].to_string());
     let path = if let Some(path) = explicit_path {
         path
-    } else if tokio::fs::try_exists("Cargo.toml").await.unwrap_or(false) {
+    } else if tokio::fs::try_exists(crate::tools::workspace_root::anchor_path(
+        std::path::Path::new("Cargo.toml"),
+    ))
+    .await
+    .unwrap_or(false)
+    {
         // Rust-only fallback for SAB-style scratch projects.
         if stripped.contains("fn main(") {
             "src/main.rs".to_string()

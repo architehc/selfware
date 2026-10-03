@@ -5,7 +5,7 @@
 //! error path goes through the public `shared_graph_index`.
 
 use super::*;
-use crate::evolve::{Graph, Node};
+use crate::evolve::{Edge, EdgeType, Graph, Node};
 
 fn tiny_graph(id: &str) -> Graph {
     Graph {
@@ -83,6 +83,61 @@ fn different_paths_do_not_share_a_slot() {
         !Arc::ptr_eq(&first, &second),
         "a slot keyed to path A must not serve path B"
     );
+}
+
+#[test]
+fn graph_with_private_tool_state_nodes_is_rejected_for_rebuild() {
+    for private_dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let private_id = format!("tool::{private_dir}::state::private");
+        let graph = Graph {
+            nodes: vec![
+                Node::code("crate::alpha", "src/alpha.rs"),
+                Node::code(&private_id, &format!("{private_dir}/state/private.rs")),
+            ],
+            edges: vec![Edge {
+                from: "crate::alpha".to_string(),
+                to: private_id,
+                edge_type: EdgeType::DependsOn,
+            }],
+        };
+        let path = save(temp.path(), &graph);
+        let mut slot = None;
+        let error = cached_or_load(&mut slot, &path).expect_err("stale graph must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("private tool-state"), "got: {message}");
+        assert!(message.contains("selfware self-evolve"), "got: {message}");
+        assert!(slot.is_none());
+    }
+}
+
+#[test]
+fn graph_with_private_tool_state_edge_endpoint_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let graph = Graph {
+        nodes: vec![Node::code("crate::alpha", "src/alpha.rs")],
+        edges: vec![Edge {
+            from: "crate::alpha".to_string(),
+            to: "tool::.codex::state::private".to_string(),
+            edge_type: EdgeType::DependsOn,
+        }],
+    };
+    let path = save(temp.path(), &graph);
+    let mut slot = None;
+    let error = cached_or_load(&mut slot, &path).expect_err("private edge must be rejected");
+    assert!(error.to_string().contains("selfware self-evolve"));
+    assert!(slot.is_none());
+}
+
+#[test]
+fn graph_under_explicitly_selected_private_named_root_still_loads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join(".claude");
+    std::fs::create_dir(&root).expect("mkdir selected root");
+    let path = save(&root, &tiny_graph("crate::alpha"));
+    let mut slot = None;
+    let index = cached_or_load(&mut slot, &path).expect("selected root is allowed");
+    assert!(index.node("crate::alpha").is_some());
 }
 
 #[test]

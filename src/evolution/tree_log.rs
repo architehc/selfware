@@ -761,17 +761,12 @@ impl AttemptTree {
             std::fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = target_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-        {
-            let mut file = File::create(&tmp_path)?;
-            for node in &self.nodes {
-                let serialized = serde_json::to_string(node)?;
-                writeln!(file, "{}", serialized)?;
-            }
-            file.sync_all()?;
+        let mut contents = Vec::new();
+        for node in &self.nodes {
+            let serialized = serde_json::to_string(node)?;
+            writeln!(contents, "{}", serialized)?;
         }
-
-        std::fs::rename(&tmp_path, target_path)?;
+        crate::session::checkpoint::write_bytes_atomically(target_path, &contents, 0o600)?;
         Ok(())
     }
 
@@ -822,15 +817,11 @@ impl AttemptTree {
             return Err(TreeLogError::NodeNotFound(id.to_string()));
         }
 
-        let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-        {
-            let mut file = File::create(&tmp_path)?;
-            for line in updated_lines {
-                writeln!(file, "{}", line)?;
-            }
-            file.sync_all()?;
+        let mut contents = Vec::new();
+        for line in updated_lines {
+            writeln!(contents, "{}", line)?;
         }
-        std::fs::rename(&tmp_path, path)?;
+        crate::session::checkpoint::write_bytes_atomically(path, &contents, 0o600)?;
 
         Ok(())
     }

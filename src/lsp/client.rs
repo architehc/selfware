@@ -237,13 +237,22 @@ fn remediation_hint(server: &str, stderr: &[String]) -> Option<String> {
 async fn describe_exit(
     server: &str,
     child: &Mutex<Child>,
+    process_group: Option<u32>,
     stderr_tail: &StderrTail,
     stderr_done: &AtomicBool,
 ) -> String {
     let mut status = None;
+    let mut group_killed = false;
     for _ in 0..30 {
         if status.is_none() {
             if let Ok(mut c) = child.try_lock() {
+                // stdout EOF makes the connection unusable. Kill workers
+                // before try_wait reaps the leader; while Child::id() is
+                // still present its pid/pgid cannot have been reused.
+                if !group_killed {
+                    kill_lsp_process_group(&c, process_group);
+                    group_killed = true;
+                }
                 if let Ok(Some(s)) = c.try_wait() {
                     status = Some(s);
                 }
@@ -271,6 +280,24 @@ async fn describe_exit(
         detail.push_str(&format!("; stderr: {}", tail.join(" | ")));
     }
     detail
+}
+
+fn kill_lsp_process_group(child: &Child, process_group: Option<u32>) {
+    #[cfg(unix)]
+    if let (Some(pid), Some(pgid)) = (child.id(), process_group) {
+        if pid == pgid {
+            if let Ok(raw) = i32::try_from(pgid) {
+                if raw > 1 {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(raw),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (child, process_group);
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +412,9 @@ struct LspServerConnection {
     indexing: Arc<std::sync::Mutex<IndexingState>>,
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
+    /// Process group led by the server. Language servers commonly spawn
+    /// workers that must be stopped with the server itself.
+    process_group: Option<u32>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     language: Language,
     root_uri: String,
@@ -437,6 +467,9 @@ impl LspServerConnection {
             }
         }
 
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn LSP server: {} {:?}", command, args))?;
@@ -444,12 +477,13 @@ impl LspServerConnection {
         // Like MCP servers, a language server is started lazily and then
         // serves every later task: owned by the session, so session end (and
         // the reaper after a crash) stops it, never a task teardown.
+        let process_group = cfg!(unix).then_some(child.id()).flatten();
         let resource_id = child.id().map(|pid| {
             crate::resources::register_session_process(
                 crate::resources::ResourceRegistry::global(),
                 crate::resources::ResourceKind::Process,
                 pid,
-                None,
+                process_group,
                 format!("LSP server {command} ({language:?})"),
             )
         });
@@ -529,8 +563,14 @@ impl LspServerConnection {
                             Self::dispatch_message(msg, &pending, &diagnostics, &indexing).await;
                         }
                         Ok(None) => {
-                            let detail =
-                                describe_exit(&server, &child, &stderr_tail, &stderr_done).await;
+                            let detail = describe_exit(
+                                &server,
+                                &child,
+                                process_group,
+                                &stderr_tail,
+                                &stderr_done,
+                            )
+                            .await;
                             warn!("LSP server '{}' closed its output{}", server, detail);
                             mark_dead(
                                 &pending,
@@ -544,6 +584,12 @@ impl LspServerConnection {
                             break;
                         }
                         Err(e) => {
+                            // A broken/framing-failed stdout also makes this
+                            // transport unusable; stop its worker tree before
+                            // recording the typed failure.
+                            if let Ok(child) = child.try_lock() {
+                                kill_lsp_process_group(&child, process_group);
+                            }
                             warn!("LSP server '{}' stdout read/framing error: {:#}", server, e);
                             mark_dead(
                                 &pending,
@@ -574,6 +620,7 @@ impl LspServerConnection {
             indexing,
             next_id: AtomicU64::new(1),
             child,
+            process_group,
             reader_handle: Mutex::new(Some(reader_handle)),
             language,
             root_uri,
@@ -765,25 +812,43 @@ impl LspServerConnection {
     }
 
     /// Classify a stdin write failure, mark the connection dead, and return
-    /// the recorded cause (the reader's `ServerExited` may win the race — it
-    /// is equally fatal and carries the exit status).
+    /// the recorded cause.
     async fn write_failed(&self, err: &anyhow::Error) -> LspTransportError {
-        let cause = if is_broken_pipe(err) {
-            LspTransportError::BrokenPipe {
+        if is_broken_pipe(err) {
+            // Record the observed EPIPE before cleanup closes stdout. Without
+            // this ordering the reader can race ahead and replace the more
+            // precise BrokenPipe cause with ServerExited.
+            let initial = LspTransportError::BrokenPipe {
                 server: self.server_name.clone(),
-                detail: describe_exit(
-                    &self.server_name,
-                    &self.child,
-                    &self.stderr_tail,
-                    &self.stderr_done,
-                )
-                .await,
-            }
-        } else {
-            LspTransportError::WriteFailed {
+                detail: String::new(),
+            };
+            mark_dead(&self.pending, &self.dead, initial).await;
+            let detail = describe_exit(
+                &self.server_name,
+                &self.child,
+                self.process_group,
+                &self.stderr_tail,
+                &self.stderr_done,
+            )
+            .await;
+            let detailed = LspTransportError::BrokenPipe {
                 server: self.server_name.clone(),
-                message: format!("{err:#}"),
+                detail,
+            };
+            let mut slot = self
+                .dead
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(slot.as_ref(), Some(LspTransportError::BrokenPipe { server, .. }) if server == &self.server_name)
+            {
+                *slot = Some(detailed.clone());
             }
+            return slot.clone().unwrap_or(detailed);
+        }
+
+        let cause = LspTransportError::WriteFailed {
+            server: self.server_name.clone(),
+            message: format!("{err:#}"),
         };
         mark_dead(&self.pending, &self.dead, cause.clone()).await;
         self.dead_cause().unwrap_or(cause)
@@ -865,8 +930,18 @@ impl LspServerConnection {
     /// finished starting, so a hung server is not waited on again.
     async fn kill_now(&self) {
         let mut child = self.child.lock().await;
-        let _ = child.kill().await;
-        if let (Some(id), Ok(Some(_))) = (&self.resource_id, child.try_wait()) {
+        // Child::id() becomes None after the handle reaps the leader. Gate
+        // the raw pgid on that live/unreaped identity so a later shutdown can
+        // never signal a group that reused the numeric id.
+        kill_lsp_process_group(&child, self.process_group);
+        let reaped = match child.try_wait() {
+            Ok(Some(_)) => true,
+            _ => {
+                let _ = child.kill().await;
+                child.wait().await.is_ok()
+            }
+        };
+        if let (Some(id), true) = (&self.resource_id, reaped) {
             crate::resources::ResourceRegistry::global().release(id, "LSP server shut down");
         }
         drop(child);
@@ -1657,9 +1732,11 @@ async fn detect_dominant_language(root: &Path) -> Option<Language> {
 
     for entry in walkdir::WalkDir::new(root)
         .max_depth(3)
+        .follow_links(false)
         .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
     {
         if let Some(lang) = Language::from_path(entry.path().to_string_lossy().as_ref()) {
             *counts.entry(lang).or_insert(0) += 1;

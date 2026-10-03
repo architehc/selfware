@@ -785,8 +785,8 @@ fn test_llm_context_to_prompt_with_active_code() {
 
     let prompt = ctx.to_prompt();
     assert!(prompt.contains("## Active Code Files"));
-    assert!(prompt.contains("- src/main.rs"));
-    assert!(prompt.contains("- src/lib.rs"));
+    assert!(prompt.contains("- \"src/main.rs\""));
+    assert!(prompt.contains("- \"src/lib.rs\""));
 }
 
 // --- LlmContext::to_prompt with self_context ---
@@ -1014,9 +1014,9 @@ fn test_llm_context_to_prompt_multiple_semantic_files() {
 
     let prompt = ctx.to_prompt();
     assert!(prompt.contains("## Relevant Code"));
-    assert!(prompt.contains("### src/a.rs (relevance: 0.99)"));
-    assert!(prompt.contains("### src/b.rs (relevance: 0.50)"));
-    assert!(prompt.contains("### src/c.rs (relevance: 0.10)"));
+    assert!(prompt.contains("### \"src/a.rs\" (relevance: 0.99)"));
+    assert!(prompt.contains("### \"src/b.rs\" (relevance: 0.50)"));
+    assert!(prompt.contains("### \"src/c.rs\" (relevance: 0.10)"));
     assert!(prompt.contains("fn a() {}"));
     assert!(prompt.contains("fn b() {}"));
     assert!(prompt.contains("fn c() {}"));
@@ -1099,7 +1099,7 @@ fn test_llm_context_to_prompt_all_sections() {
     assert!(prompt.contains("## Relevant Code"));
     assert!(prompt.contains("src/semantic.rs"));
     assert!(prompt.contains("## Active Code Files"));
-    assert!(prompt.contains("- src/memory.rs"));
+    assert!(prompt.contains("- \"src/memory.rs\""));
 }
 
 // --- LlmContext::summary edge cases ---

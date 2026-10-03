@@ -587,3 +587,20 @@ fn tended_fraction_is_measured_or_absent() {
         "nothing scanned, nothing claimed"
     );
 }
+
+#[test]
+fn directory_scan_prunes_private_tool_state() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("visible.rs"), "fn visible() {}\n").unwrap();
+    let private = root.path().join(".claude/worktrees");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(private.join("private.rs"), "fn private_state() {}\n").unwrap();
+
+    let garden = scan_directory(root.path());
+    assert_eq!(garden.total_plants, 1);
+    assert!(garden
+        .beds
+        .values()
+        .flat_map(|bed| &bed.plants)
+        .all(|plant| !plant.path.contains(".claude")));
+}

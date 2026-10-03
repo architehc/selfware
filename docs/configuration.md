@@ -469,18 +469,20 @@ A `"default"` profile is auto-generated from the top-level `endpoint`/`model`/`a
 
 ### `[models.embedding]` -- Vector Search Embeddings
 
-The RAG index (`/rag` in chat) embeds code chunks with an OpenAI-compatible
+The RAG index (`/scan` in chat) embeds code chunks with an OpenAI-compatible
 `/v1/embeddings` endpoint when an `[models.embedding]` profile is defined,
-falling back to offline TF-IDF otherwise. `context_length` doubles as the
-embedding dimension hint (clamped to ≤ 4096). The profile's `api_key` is sent
-as a bearer token; if unset, the top-level `api_key` is used (e.g. the same
-OpenRouter key usually serves both chat and embeddings).
+falling back to offline TF-IDF otherwise. The vector dimension is discovered
+from the endpoint's first successful response and then enforced for the life
+of the index. `context_length` retains its normal meaning: model context tokens.
+The profile's `api_key` is sent as a bearer token; if unset, the top-level
+`api_key` is used (e.g. the same OpenRouter key usually serves both chat and
+embeddings).
 
 ```toml
 [models.embedding]
 endpoint = "https://openrouter.ai/api/v1"
 model = "qwen/qwen3-embedding-8b"
-context_length = 4096   # embedding dimension
+context_length = 32768  # model context window, in tokens
 ```
 
 Verified against OpenRouter `qwen/qwen3-embedding-8b` (4096-dim): semantically
@@ -609,7 +611,7 @@ Other machines should leave the section out or set only the rules they need.
 
 Selfware uses Cargo feature flags to gate optional modules. Enable them with `cargo build --features <flag>` (or `cargo install --git https://github.com/architehc/selfware --features <flag>`).
 
-Enabled by default: `tui`, `resilience`, `execution-modes`, `log-analysis`, `tokens`, `self-improvement`, `consolidation`.
+Enabled by default: `tui`, `resilience`, `execution-modes`, `log-analysis`, `self-improvement`, `consolidation`.
 
 | Feature | Description |
 |---------|-------------|
@@ -618,7 +620,6 @@ Enabled by default: `tui`, `resilience`, `execution-modes`, `log-analysis`, `tok
 | `resilience` | Error recovery and self-healing |
 | `execution-modes` | Auto-edit, yolo, daemon modes |
 | `log-analysis` | Log file analysis tools |
-| `tokens` | Token counting and budget tracking |
 | `self-improvement` | Evolution and self-improvement daemon |
 | `consolidation` | Memory consolidation ("sleep") system |
 | `hot-reload` | Dynamic library hot-reload (security-sensitive, off by default) |
@@ -627,12 +628,15 @@ Enabled by default: `tui`, `resilience`, `execution-modes`, `log-analysis`, `tok
 | `redis` | Redis backend for workflow state (requires a Redis server) |
 | `vendored-openssl` | Vendored OpenSSL for cross-compilation (used by release builds) |
 | `system-tests` | System-level E2E tests (require a live LLM endpoint; not included in `extras`) |
-| `integration` | Integration tests (not included in `extras`) |
+| `integration` | Endpoint-dependent integration tests (not included in `extras`) |
 | `context-select`, `tool-verify` | Benchmark experiments under `experiments/` |
 
 The `system-tests` feature is intended for manual testing against a live backend. It is not enabled by default or by `extras` because it requires a running LLM endpoint.
 
-Avoid `--all-features`: it additionally compiles the test-only features above and is not covered by CI (which builds and tests with `--features extras`).
+CI tests the endpoint-free `extras` configuration and compiles/lints
+`--all-features`. Do not use `cargo test --all-features` as a local substitute:
+it also runs the `integration` and `system-tests` suites, which require their
+external services. Enable those suites deliberately when the services exist.
 
 ## Environment Variables
 

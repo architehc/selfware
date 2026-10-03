@@ -1,5 +1,5 @@
 use selfware::evolve::dedup::{jaccard, DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
-use selfware::evolve::{Graph, Node};
+use selfware::evolve::{Graph, Node, NodeLayer};
 use std::collections::HashSet;
 
 #[test]
@@ -33,6 +33,39 @@ fn test_dedup_finds_exact_duplicates() {
     };
     let dedup = DeduplicationAnalyzer::new();
     let dupes = dedup.find_duplicates(&graph).unwrap();
+    assert_eq!(
+        dupes,
+        vec![DuplicatePair {
+            first: "a".to_string(),
+            second: "b".to_string(),
+            kind: DuplicateKind::Exact,
+        }]
+    );
+}
+
+#[test]
+fn test_dedup_excludes_symbols_that_share_the_parent_file_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.rs");
+    let b = dir.path().join("b.rs");
+    std::fs::write(&a, "pub fn same() {}\n").unwrap();
+    std::fs::write(&b, "pub fn same() {}\n").unwrap();
+
+    let mut symbol = Node::code("a::same", a.to_str().unwrap());
+    symbol.layer = NodeLayer::Symbol;
+    symbol.parent_id = Some("a".to_string());
+    let graph = Graph {
+        nodes: vec![
+            Node::code("a", a.to_str().unwrap()),
+            symbol,
+            Node::code("b", b.to_str().unwrap()),
+        ],
+        edges: vec![],
+    };
+
+    let dupes = DeduplicationAnalyzer::new()
+        .find_duplicates(&graph)
+        .unwrap();
     assert_eq!(
         dupes,
         vec![DuplicatePair {

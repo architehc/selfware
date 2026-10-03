@@ -20,7 +20,7 @@ cd selfware
 # Build in debug mode
 cargo build
 
-# Build with all optional features (what CI tests)
+# Build with the endpoint-free optional feature set CI tests
 cargo build --features extras
 
 # Build release
@@ -30,10 +30,10 @@ cargo build --release
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run the default endpoint-free tests
 cargo test
 
-# Run tests with all optional features (what CI runs)
+# Run the endpoint-free optional feature set (what CI runs)
 cargo test --features extras
 
 # Run specific test file
@@ -51,8 +51,9 @@ We use `rustfmt` for formatting and `clippy` for linting:
 # Format code
 cargo fmt
 
-# Run clippy (same invocation as CI)
-cargo clippy --all-targets --features extras -- -D warnings
+# Run both CI lint configurations
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Making Changes
@@ -225,18 +226,17 @@ Available feature flags in `Cargo.toml`:
 | `resilience` | Self-healing, error classification, recovery strategies (default) |
 | `execution-modes` | Execution control (dry-run, confirm, yolo) (default) |
 | `log-analysis` | Log analysis and diagnostics (default) |
-| `tokens` | Token counting and management (default) |
 | `self-improvement` | Evolution engine and self-improvement daemon (default) |
 | `consolidation` | Memory consolidation ("sleep") system (default) |
 | `extras` | Convenience flag enabling all defaults plus `hot-reload`, `vlm-bench`, `bench-harness` |
 | `hot-reload` | Dynamic library hot-reload (security-sensitive, off by default) |
 | `vlm-bench` | VLM benchmark suite |
 | `bench-harness` | Concurrent benchmark harness |
-| `integration` | Enables integration tests |
+| `integration` | Enables endpoint-dependent integration tests |
 | `system-tests` | System-level E2E tests (require a live LLM endpoint) |
 
 ```bash
-# Build with all optional features (what CI tests)
+# Build with the endpoint-free optional feature set CI tests
 cargo build --features extras
 
 # Build with specific features
@@ -246,7 +246,9 @@ cargo build --features "resilience,tui"
 cargo test --features resilience
 ```
 
-Avoid `--all-features`: it also enables test-only features (`system-tests`, `integration`, ...) that require a live LLM endpoint, and CI does not test that combination.
+CI compiles and lints `--all-features`, but its ordinary test jobs use the
+endpoint-free `extras` set. Run `system-tests` and `integration` deliberately
+only when their external services are configured.
 
 ## Questions?
 

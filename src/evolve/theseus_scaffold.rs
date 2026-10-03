@@ -199,16 +199,14 @@ impl TheseusScaffold {
         shadow_root: &Path,
         base_root: &Path,
     ) -> Result<ScaffoldReport> {
-        let theseus_dir = shadow_root.join(".selfware/theseus");
-        if let Ok(meta) = theseus_dir.symlink_metadata() {
-            if meta.file_type().is_symlink() {
-                anyhow::bail!(
-                    "Theseus destination directory is a symlink: {:?}",
-                    theseus_dir
-                );
-            }
-        }
-        fs::create_dir_all(&theseus_dir)?;
+        // Create each destination component separately and reject symlinks at
+        // every level. Checking only the leaf still follows a hostile
+        // `.selfware` symlink when `create_dir_all` or the later writes run.
+        ensure_real_directory(shadow_root)?;
+        let selfware_dir = shadow_root.join(".selfware");
+        ensure_real_directory(&selfware_dir)?;
+        let theseus_dir = selfware_dir.join("theseus");
+        ensure_real_directory(&theseus_dir)?;
 
         // 1. Generate and write Collection Map
         let collection_map = Self::generate_collection_map(base_root)
@@ -281,6 +279,27 @@ impl TheseusScaffold {
     }
 }
 
+fn ensure_real_directory(path: &Path) -> Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("Theseus destination directory is a symlink: {:?}", path)
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            anyhow::bail!("Theseus destination is not a directory: {:?}", path)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            let metadata = path.symlink_metadata()?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!("Theseus destination is not a real directory: {:?}", path);
+            }
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn collect_rs_files(dir: &Path, rs_files: &mut Vec<PathBuf>, depth_left: usize) {
     if depth_left == 0 {
         return;
@@ -290,12 +309,20 @@ fn collect_rs_files(dir: &Path, rs_files: &mut Vec<PathBuf>, depth_left: usize) 
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // Collection maps become model context. Never follow a repository
+        // symlink into another checkout or private directory.
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !name.starts_with('.') && name != "target" {
                 collect_rs_files(&path, rs_files, depth_left - 1);
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
             rs_files.push(path);
         }
     }

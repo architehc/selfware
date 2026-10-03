@@ -1341,9 +1341,11 @@ impl WorkflowExecutor {
             let prompt = prompt.to_string();
             let context = context.to_vec();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || handler(&prompt, &context).map(Into::into))
-                    .await
-                    .map_err(|e| anyhow!("LLM handler task failed: {}", e))?
+                crate::tools::workspace_root::spawn_blocking(move || {
+                    handler(&prompt, &context).map(Into::into)
+                })
+                .await
+                .map_err(|e| anyhow!("LLM handler task failed: {}", e))?
             })
         }));
         self

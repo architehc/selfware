@@ -516,21 +516,25 @@ impl Tool for ShellExec {
         // drain (review finding: a descendant holding the pipes open kept the
         // tool waiting past timeout_secs even after the parent exited).
         let deadline = std::time::Instant::now() + Duration::from_secs(args.timeout_secs);
-        let wait_result =
-            tokio::time::timeout(Duration::from_secs(args.timeout_secs), child.wait()).await;
+        let wait_result = tokio::time::timeout(
+            Duration::from_secs(args.timeout_secs),
+            crate::tools::process_guard::wait_for_exit_without_reaping(&mut child),
+        )
+        .await;
 
-        let (exit_code, mut timed_out) = match wait_result {
-            Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
+        let (status_before_drain, mut timed_out) = match wait_result {
+            Ok(Ok(status)) => (status, false),
             Ok(Err(e)) => {
                 pg_guard.kill();
                 return Err(e.into());
             }
             Err(_) => {
-                // Timed out: kill the whole process group, then reap the child.
+                // Timed out: kill the whole process group, but retain the
+                // unreaped leader until drain cleanup has finished so its pgid
+                // cannot be recycled underneath a later group signal.
                 pg_guard.kill();
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                (-1, true)
+                let _ = child.start_kill();
+                (None, true)
             }
         };
 
@@ -597,6 +601,16 @@ impl Tool for ShellExec {
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        let status = match status_before_drain {
+            Some(status) => status,
+            None => child.wait().await?,
+        };
+        let exit_code = if timed_out {
+            -1
+        } else {
+            status.code().unwrap_or(-1)
+        };
 
         let (stdout_page, stdout_pagination) =
             super::truncate_with_pagination(&stdout, args.output_offset, args.output_limit);

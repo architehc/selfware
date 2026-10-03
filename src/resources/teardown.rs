@@ -176,6 +176,39 @@ pub async fn teardown_task(
     report
 }
 
+/// [`teardown_task`] with one overall budget shared by every owned resource.
+/// Work not reached before the budget remains registered in `undrained` for
+/// the reaper; a caller can therefore settle a forced cancellation without
+/// dropping teardown halfway through an unbounded per-resource sequence.
+pub async fn teardown_task_within(
+    registry: &ResourceRegistry,
+    driver: &dyn ResourceDriver,
+    task: &str,
+    policy: TeardownPolicy,
+    budget: Duration,
+) -> DrainReport {
+    let owned = registry.owned_by(task);
+    let mut report = DrainReport::default();
+    let mut to_drain = Vec::new();
+    for resource in owned {
+        if resource.keep {
+            registry.reown(&resource.id, session_owner());
+            report
+                .kept
+                .push(registry.get(&resource.id).unwrap_or(resource));
+        } else {
+            to_drain.push(resource);
+        }
+    }
+    to_drain.reverse();
+    let drained = drain_within(registry, driver, to_drain, policy, budget).await;
+    report.released = drained.released;
+    report.leaked = drained.leaked;
+    report.leak_alarms = drained.leak_alarms;
+    report.undrained = drained.undrained;
+    report
+}
+
 /// Drain `resources` in the given order.
 pub async fn drain(
     registry: &ResourceRegistry,
@@ -442,9 +475,19 @@ pub async fn teardown_session_within(
         .filter(|r| r.session == session && r.kind.is_drainable())
         .collect();
     owned.reverse();
+    drain_within(registry, driver, owned, policy, budget).await
+}
+
+async fn drain_within(
+    registry: &ResourceRegistry,
+    driver: &dyn ResourceDriver,
+    resources: Vec<Resource>,
+    policy: TeardownPolicy,
+    budget: Duration,
+) -> DrainReport {
     let end = tokio::time::Instant::now() + budget;
     let mut report = DrainReport::default();
-    let mut pending = owned.into_iter();
+    let mut pending = resources.into_iter();
     while let Some(resource) = pending.next() {
         let left = end.saturating_duration_since(tokio::time::Instant::now());
         if left.is_zero() {

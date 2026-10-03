@@ -686,7 +686,7 @@ fn test_first_edit_with_files_is_undoable_and_restores_tip() {
 }
 
 // ── restore_checkpoint_guarded (undo restore path; uses the shared
-//    atomic-replace with the Windows remove-then-retry fallback) ─────
+//    atomic-replace with the Windows preserve/install/restore fallback) ─────
 
 #[tokio::test]
 async fn restore_guarded_writes_snapshot_back_and_reports_restored() {

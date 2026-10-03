@@ -1,8 +1,243 @@
 use anyhow::Result;
 use colored::*;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 use super::*;
+
+/// Stable snapshot of the workspace used by one context operation. The
+/// workspace-root handle can be changed when an agent enters or leaves a
+/// worktree, so resolve every path against the root that was active when the
+/// operation began.
+struct ContextWorkspace {
+    path: std::path::PathBuf,
+    explicit: bool,
+}
+
+impl ContextWorkspace {
+    fn capture() -> Self {
+        let root = crate::tools::workspace_root::current();
+        Self {
+            path: root.path(),
+            explicit: root.is_explicit(),
+        }
+    }
+
+    /// Preserve legacy relative labels when the root follows the process
+    /// cwd, but pin relative paths to an explicit base/worktree before any
+    /// async or blocking I/O can lose the task-local root.
+    fn anchor(&self, path: &std::path::Path) -> std::path::PathBuf {
+        if path.is_absolute() || !self.explicit {
+            path.to_path_buf()
+        } else {
+            self.path.join(path)
+        }
+    }
+
+    fn walk_root(&self) -> std::path::PathBuf {
+        if self.explicit {
+            self.path.clone()
+        } else {
+            std::path::PathBuf::from(".")
+        }
+    }
+}
+
+/// Prune directories that are never project source before a repository-wide
+/// walk descends into them. In particular, private coding-agent state may
+/// contain transcripts, caches, credentials, and nested worktree clones.
+fn retain_public_context_entry(entry: &walkdir::DirEntry) -> bool {
+    crate::evolve::graph::retain_repository_entry(entry)
+}
+
+fn context_path_label(path: &std::path::Path) -> String {
+    crate::safety::source_context::quote_untrusted_label(&path.to_string_lossy())
+}
+
+pub(super) fn context_file_header(path: &std::path::Path) -> String {
+    format!(
+        "\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n",
+        context_path_label(path)
+    )
+}
+
+fn context_file_message_name(path: &std::path::Path) -> String {
+    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
+    let short_hash = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("selfware_ctx_{short_hash}")
+}
+
+fn context_file_message(path: &std::path::Path, content: String) -> Message {
+    let mut message = Message::user(content);
+    message.name = Some(context_file_message_name(path));
+    message
+}
+
+pub(super) fn is_context_file_message(message: &Message, path: &std::path::Path) -> bool {
+    let expected_name = context_file_message_name(path);
+    message.role == "user"
+        && (message.name.as_deref() == Some(expected_name.as_str())
+            // Compatibility for context messages created before they carried
+            // an internal identity. A successful refresh migrates them.
+            || (message.name.is_none()
+                && message.content.text().starts_with(&context_file_header(path))))
+}
+
+fn context_file_message_indices(messages: &[Message], path: &std::path::Path) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| is_context_file_message(message, path).then_some(index))
+        .collect()
+}
+
+fn context_file_message_indices_for_paths(
+    messages: &[Message],
+    paths: &[&std::path::Path],
+) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            paths
+                .iter()
+                .any(|path| is_context_file_message(message, path))
+                .then_some(index)
+        })
+        .collect()
+}
+
+async fn collect_context_paths(
+    walk_root: std::path::PathBuf,
+    extensions: Vec<String>,
+) -> Vec<std::path::PathBuf> {
+    crate::tools::workspace_root::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(walk_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(retain_public_context_entry)
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if extensions.iter().any(|expected| expected == extension) {
+                out.push(path);
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn replace_context_file_messages(
+    messages: &mut Vec<Message>,
+    existing_indices: &[usize],
+    replacement: Message,
+) {
+    if let Some((&first, duplicates)) = existing_indices.split_first() {
+        messages[first] = replacement;
+        for &index in duplicates.iter().rev() {
+            messages.remove(index);
+        }
+    } else {
+        messages.push(replacement);
+    }
+}
+
+fn messages_at_indices_tokens(messages: &[Message], indices: &[usize]) -> usize {
+    indices
+        .iter()
+        .map(|&index| {
+            crate::token_count::estimate_messages_tokens(std::slice::from_ref(&messages[index]))
+        })
+        .sum()
+}
+
+impl Agent {
+    fn migrate_context_file_path(&mut self, previous: &str, resolved: &std::path::Path) {
+        let resolved = resolved.to_string_lossy().into_owned();
+        if previous == resolved {
+            return;
+        }
+
+        for tracked in &mut self.file_tracker.context_files {
+            if tracked == previous {
+                *tracked = resolved.clone();
+            }
+        }
+
+        // A checkpoint may contain both the old relative spelling and the
+        // resolved spelling. Keep one tracker entry after migrating it.
+        let mut kept_resolved = false;
+        self.file_tracker.context_files.retain(|tracked| {
+            if tracked != &resolved {
+                return true;
+            }
+            if kept_resolved {
+                false
+            } else {
+                kept_resolved = true;
+                true
+            }
+        });
+    }
+
+    /// Remove every generated context message and tracker entry for one
+    /// canonical file identity. This keeps a successful delete from leaving
+    /// old source text in the model conversation.
+    pub(super) fn remove_context_file(&mut self, path: &str) {
+        let key = self.file_tracker.key(path);
+        let tracked_paths = self
+            .file_tracker
+            .context_files
+            .iter()
+            .filter(|tracked| self.file_tracker.key(tracked) == key)
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        self.messages.retain(|message| {
+            !tracked_paths
+                .iter()
+                .any(|tracked| is_context_file_message(message, tracked))
+        });
+        self.file_tracker.remove_deleted(path);
+    }
+
+    fn remove_resolved_context_file(&mut self, tracked: &str, resolved: &std::path::Path) {
+        let tracked_key = self.file_tracker.key(tracked);
+        let resolved_string = resolved.to_string_lossy();
+        let resolved_key = self.file_tracker.key(resolved_string.as_ref());
+        let mut identities = self
+            .file_tracker
+            .context_files
+            .iter()
+            .filter(|candidate| {
+                let key = self.file_tracker.key(candidate);
+                key == tracked_key || key == resolved_key
+            })
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        identities.push(std::path::PathBuf::from(tracked));
+        identities.push(resolved.to_path_buf());
+        self.messages.retain(|message| {
+            !identities
+                .iter()
+                .any(|identity| is_context_file_message(message, identity))
+        });
+        self.file_tracker.remove_deleted(tracked);
+        if resolved_string.as_ref() != tracked {
+            self.file_tracker.remove_deleted(resolved_string.as_ref());
+        }
+    }
+}
 
 impl Agent {
     /// Refresh any stale files that are in context
@@ -26,36 +261,68 @@ impl Agent {
             return 0;
         }
 
+        let workspace = ContextWorkspace::capture();
         let mut refreshed = 0;
+        let mut refreshed_paths = Vec::new();
         for path_str in &stale_in_context {
-            let file_marker = format!("// FILE: {}", path_str);
-            if let Err(error) = self.validate_context_path(std::path::Path::new(path_str)) {
+            let tracked_path = std::path::Path::new(path_str);
+            let path = workspace.anchor(tracked_path);
+            if let Err(error) = self.validate_context_path(&path) {
                 warn!("Skipping unsafe context file {path_str}: {error}");
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(path_str).await {
-                let content = self.sanitize_context_data(std::path::Path::new(path_str), &content);
-                let file_header = format!(
-                    "\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n",
-                    path_str
-                );
-                let new_content = format!("{}{}", file_header, content);
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    let raw = format!("{}{}", context_file_header(&path), content);
+                    let new_content = self.sanitize_context_data(&path, &raw);
+                    let new_message = context_file_message(&path, new_content);
 
-                // Find and replace the existing message for this file
-                if let Some(msg) = self
-                    .messages
-                    .iter_mut()
-                    .find(|m| m.role == "user" && m.content.contains(&file_marker))
-                {
-                    msg.content = crate::api::types::MessageContent::Text(new_content);
-                    refreshed += 1;
+                    // Find and replace the existing message for this file.
+                    let existing_indices = context_file_message_indices_for_paths(
+                        &self.messages,
+                        &[tracked_path, &path],
+                    );
+                    if !existing_indices.is_empty() {
+                        let budget = self.max_context_tokens;
+                        let current = crate::token_count::estimate_messages_tokens(&self.messages);
+                        let old = messages_at_indices_tokens(&self.messages, &existing_indices);
+                        let replacement = crate::token_count::estimate_messages_tokens(
+                            std::slice::from_ref(&new_message),
+                        );
+                        let projected = current.saturating_sub(old).saturating_add(replacement);
+                        if budget > 0 && projected > budget && projected > current {
+                            warn!(
+                                path = %path.display(),
+                                projected,
+                                budget,
+                                "Skipping stale context refresh that would exceed measured budget"
+                            );
+                            continue;
+                        }
+                        replace_context_file_messages(
+                            &mut self.messages,
+                            &existing_indices,
+                            new_message,
+                        );
+                        self.migrate_context_file_path(path_str, &path);
+                        refreshed += 1;
+                        refreshed_paths
+                            .push((path_str.clone(), path.to_string_lossy().into_owned()));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.remove_resolved_context_file(path_str, &path);
+                }
+                Err(error) => {
+                    warn!(path = %path.display(), %error, "Could not refresh context file")
                 }
             }
         }
 
         // Clear the stale set for refreshed files
-        for path_str in &stale_in_context {
-            self.file_tracker.clear_stale(path_str);
+        for (tracked, resolved) in &refreshed_paths {
+            self.file_tracker.clear_stale(tracked);
+            self.file_tracker.clear_stale(resolved);
         }
 
         refreshed
@@ -84,10 +351,8 @@ impl Agent {
 
     /// Load files matching pattern into context
     pub(super) async fn load_files_to_context(&mut self, pattern: &str) -> Result<usize> {
-        use walkdir::WalkDir;
-
         let mut loaded = 0;
-        let mut total_tokens = 0usize;
+        let mut loaded_tokens = 0usize;
         let extensions: Vec<&str> = if pattern == "." || pattern == "*" {
             vec!["rs", "toml", "md", "ts", "tsx", "js", "jsx", "py", "go"]
         } else {
@@ -97,73 +362,6 @@ impl Agent {
                 .collect()
         };
 
-        // Pre-scan: estimate total tokens from file sizes before loading.
-        // walkdir performs blocking I/O, so run it on the blocking pool.
-        let extensions_owned: Vec<String> = extensions.iter().map(|s| s.to_string()).collect();
-        let (estimated_tokens, file_count) = tokio::task::spawn_blocking(move || {
-            let mut estimated_tokens: usize = 0;
-            let mut file_count: usize = 0;
-            for entry in WalkDir::new(".").into_iter().filter_map(|e| e.ok()) {
-                if entry.file_type().is_file() {
-                    let p = entry.path().display().to_string();
-                    if p.contains("/target/")
-                        || p.contains("/node_modules/")
-                        || p.contains("/.git/")
-                        || p.contains("/.worktrees/")
-                        || p.contains("/__pycache__/")
-                    {
-                        continue;
-                    }
-                    let ext = entry
-                        .path()
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if extensions_owned.iter().any(|e| e == ext) {
-                        if let Ok(meta) = entry.metadata() {
-                            // Rough estimate: ~4 chars per token
-                            estimated_tokens += meta.len() as usize / 4;
-                            file_count += 1;
-                        }
-                    }
-                }
-            }
-            (estimated_tokens, file_count)
-        })
-        .await
-        .unwrap_or((0, 0));
-
-        let budget = self.memory.context_window();
-        if budget > 0 && estimated_tokens > budget {
-            println!(
-                "{} Estimated {} tokens from {} files exceeds context budget of {}. \
-                 Use '/ctx load <specific-dir>' to load a subset.",
-                "❌".bright_red(),
-                estimated_tokens,
-                file_count,
-                budget
-            );
-            return Ok(0);
-        }
-        if let Some(pct) = (estimated_tokens * 100).checked_div(budget) {
-            if pct > 75 {
-                tracing::warn!(
-                    "/ctx load: estimated {} tokens from {} files (~{}% of context budget). \
-                     Consider loading specific subdirectories instead.",
-                    estimated_tokens,
-                    file_count,
-                    pct
-                );
-                println!(
-                    "{} Loading {} files (~{} tokens, ~{}% of budget). Large context may degrade performance.",
-                    "⚠️".bright_yellow(),
-                    file_count,
-                    estimated_tokens,
-                    pct
-                );
-            }
-        }
-
         println!();
         println!(
             "{} Loading files with extensions: {}",
@@ -172,62 +370,72 @@ impl Agent {
         );
         println!();
 
-        // Collect matching paths on the blocking pool, then read them asynchronously.
-        let extensions_owned: Vec<String> = extensions.iter().map(|s| s.to_string()).collect();
-        let paths = tokio::task::spawn_blocking(move || {
-            let mut out = Vec::new();
-            for entry in WalkDir::new(".")
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let path = entry.path().to_path_buf();
-                let path_str = path.display().to_string();
+        // Capture the active root before spawning: Tokio task-locals do not
+        // automatically cross a blocking-task boundary.
+        let workspace = ContextWorkspace::capture();
+        let extensions_owned = extensions.iter().map(|value| value.to_string()).collect();
+        let paths = collect_context_paths(workspace.walk_root(), extensions_owned).await;
 
-                // Skip build artifacts and hidden dirs
-                if path_str.contains("/target/")
-                    || path_str.contains("/node_modules/")
-                    || path_str.contains("/.git/")
-                    || path_str.contains("/.worktrees/")
-                    || path_str.contains("/__pycache__/")
-                {
-                    continue;
-                }
-
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if extensions_owned.iter().any(|e| e == ext) {
-                    out.push(path);
-                }
-            }
-            out
-        })
-        .await
-        .unwrap_or_default();
+        // Count the payload that is already in the conversation, then admit
+        // each file using the shared tokenizer.  File-size fractions are not
+        // a safe projection for code and previously let /ctx load exceed the
+        // configured model window.
+        let budget = self.max_context_tokens;
+        let mut current_tokens = crate::token_count::estimate_messages_tokens(&self.messages);
+        let mut skipped_for_budget = 0usize;
+        let mut skipped_for_limit = 0usize;
 
         for path in paths {
             let path_str = path.display().to_string();
+            let already_tracked = self.file_tracker.context_files.contains(&path_str);
+            if !already_tracked
+                && self.file_tracker.context_files.len() >= MAX_TRACKED_CONTEXT_FILES
+            {
+                skipped_for_limit += 1;
+                tracing::warn!(
+                    path = %path.display(),
+                    limit = MAX_TRACKED_CONTEXT_FILES,
+                    "/ctx load skipped file because the tracked-file limit was reached"
+                );
+                continue;
+            }
             if let Err(error) = self.validate_context_path(&path) {
                 warn!("Skipping unsafe context file {}: {error}", path.display());
                 continue;
             }
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let content = self.sanitize_context_data(&path, &content);
-                let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
-                let full_content = format!("{}{}", file_header, content);
+                let raw = format!("{}{}", context_file_header(&path), content);
+                let full_content = self.sanitize_context_data(&path, &raw);
+                let message = context_file_message(&path, full_content);
                 let file_tokens =
-                    crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
-                total_tokens += file_tokens;
+                    crate::token_count::estimate_messages_tokens(std::slice::from_ref(&message));
+                let existing_indices = context_file_message_indices(&self.messages, &path);
+                let old_tokens = messages_at_indices_tokens(&self.messages, &existing_indices);
+                let projected = current_tokens
+                    .saturating_sub(old_tokens)
+                    .saturating_add(file_tokens);
+                if budget > 0 && projected > budget && projected > current_tokens {
+                    skipped_for_budget += 1;
+                    tracing::warn!(
+                        path = %path.display(),
+                        file_tokens,
+                        projected,
+                        budget,
+                        "/ctx load skipped file that would exceed the measured context budget"
+                    );
+                    continue;
+                }
+                current_tokens = projected;
+                loaded_tokens = loaded_tokens.saturating_add(file_tokens);
 
                 // Add to context files tracking (bounded to prevent memory exhaustion)
-                const MAX_CONTEXT_FILES: usize = 10_000;
-                if !self.file_tracker.context_files.contains(&path_str)
-                    && self.file_tracker.context_files.len() < MAX_CONTEXT_FILES
-                {
+                if !already_tracked {
                     self.file_tracker.context_files.push(path_str.clone());
                 }
 
-                // Add as user message with file content
-                self.messages.push(Message::user(full_content));
+                // Install one tracked message for this path, migrating and
+                // deduplicating messages created by older /ctx loads.
+                replace_context_file_messages(&mut self.messages, &existing_indices, message);
 
                 let k_tokens = file_tokens as f64 / 1000.0;
                 println!(
@@ -242,20 +450,22 @@ impl Agent {
 
         let window = self.memory.context_window();
         let pct = if window > 0 {
-            total_tokens as f64 / window as f64 * 100.0
+            current_tokens as f64 / window as f64 * 100.0
         } else {
             0.0
         };
-        let total_k = total_tokens as f64 / 1000.0;
+        let total_k = loaded_tokens as f64 / 1000.0;
         let window_k = window as f64 / 1000.0;
         println!();
         println!(
-            "  {} Loaded {} files, ~{:.0}k tokens ({:.1}% of {:.0}k context)",
+            "  {} Loaded {} files, {:.0}k measured tokens ({:.1}% of {:.0}k context; {} skipped for budget, {} for file limit)",
             "📊".bright_cyan(),
             loaded,
             total_k,
             pct,
-            window_k
+            window_k,
+            skipped_for_budget,
+            skipped_for_limit
         );
         println!();
         Ok(loaded)
@@ -272,86 +482,107 @@ impl Agent {
             return Ok(0);
         }
 
-        // Remove only messages that contain file content (// FILE: headers)
-        // Keep all conversation messages intact
-        self.messages
-            .retain(|m| !(m.role == "user" && m.content.contains("// FILE: ")));
-
+        let workspace = ContextWorkspace::capture();
         let mut loaded = 0;
+        let budget = self.max_context_tokens;
+        let mut refreshed_paths = Vec::new();
         for path_str in &files {
-            if let Err(error) = self.validate_context_path(std::path::Path::new(path_str)) {
+            let tracked_path = std::path::Path::new(path_str);
+            let path = workspace.anchor(tracked_path);
+            if let Err(error) = self.validate_context_path(&path) {
                 warn!("Skipping unsafe context file {path_str}: {error}");
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(path_str).await {
-                let content = self.sanitize_context_data(std::path::Path::new(path_str), &content);
-                let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
-                self.messages
-                    .push(Message::user(format!("{}{}", file_header, content)));
-                println!("  {} {}", "✓".bright_green(), path_str.bright_white());
-                loaded += 1;
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    let raw = format!("{}{}", context_file_header(&path), content);
+                    let full_content = self.sanitize_context_data(&path, &raw);
+                    let new_message = context_file_message(&path, full_content);
+                    let file_tokens = crate::token_count::estimate_messages_tokens(
+                        std::slice::from_ref(&new_message),
+                    );
+                    let existing_indices = context_file_message_indices_for_paths(
+                        &self.messages,
+                        &[tracked_path, &path],
+                    );
+                    let current = crate::token_count::estimate_messages_tokens(&self.messages);
+                    let old_tokens = messages_at_indices_tokens(&self.messages, &existing_indices);
+                    let projected = current
+                        .saturating_sub(old_tokens)
+                        .saturating_add(file_tokens);
+                    if budget > 0 && projected > budget && projected > current {
+                        warn!(
+                            path = %path.display(),
+                            projected,
+                            budget,
+                            "Skipping context reload that would exceed measured budget"
+                        );
+                        continue;
+                    }
+                    replace_context_file_messages(
+                        &mut self.messages,
+                        &existing_indices,
+                        new_message,
+                    );
+                    self.migrate_context_file_path(path_str, &path);
+                    refreshed_paths.push((path_str.clone(), path.to_string_lossy().into_owned()));
+                    println!(
+                        "  {} {}",
+                        "✓".bright_green(),
+                        path.display().to_string().bright_white()
+                    );
+                    loaded += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.remove_resolved_context_file(path_str, &path);
+                }
+                Err(error) => {
+                    warn!(path = %path.display(), %error, "Could not reload context file")
+                }
             }
         }
 
-        // Clear stale tracking since we just refreshed everything
-        self.file_tracker.stale_files.clear();
+        // Failed, unsafe, or over-budget reads remain stale so a later reload
+        // can retry them without claiming that their old content was refreshed.
+        for (tracked, resolved) in &refreshed_paths {
+            self.file_tracker.clear_stale(tracked);
+            self.file_tracker.clear_stale(resolved);
+        }
 
         Ok(loaded)
     }
 
     /// Copy all source files to clipboard
     pub(super) async fn copy_sources_to_clipboard(&self) -> Result<usize> {
-        use walkdir::WalkDir;
-
-        let mut output = String::new();
-        let extensions = ["rs", "toml"];
-
-        // Directory traversal is blocking I/O; collect matching paths on the blocking pool
-        // and then read their contents asynchronously.
-        let paths = tokio::task::spawn_blocking(move || {
-            let mut out = Vec::new();
-            for entry in WalkDir::new(".")
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let path = entry.path().to_path_buf();
-                let path_str = path.display().to_string();
-
-                if path_str.contains("/target/")
-                    || path_str.contains("/.git/")
-                    || path_str.contains("/.worktrees/")
-                {
-                    continue;
-                }
-
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if extensions.contains(&ext) {
-                    out.push(path);
-                }
-            }
-            out
-        })
-        .await
-        .unwrap_or_default();
-
-        for path in paths {
-            let path_str = path.display().to_string();
-            if let Err(error) = self.validate_context_path(&path) {
-                warn!("Skipping unsafe context file {}: {error}", path.display());
-                continue;
-            }
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let content = self.sanitize_context_data(&path, &content);
-                output.push_str(&format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n{}\n", path_str, content));
-            }
-        }
-
+        let output = self.source_context_for_copy().await;
         let size = output.len();
 
         crate::util::copy_to_clipboard(&output).await?;
 
         Ok(size)
+    }
+
+    /// Build the exact payload used by `/ctx copy`. Kept separate from the
+    /// clipboard side effect so root selection and source filtering can be
+    /// regression-tested without depending on a desktop clipboard service.
+    pub(super) async fn source_context_for_copy(&self) -> String {
+        let workspace = ContextWorkspace::capture();
+        let extensions = vec!["rs".to_string(), "toml".to_string()];
+        let paths = collect_context_paths(workspace.walk_root(), extensions).await;
+        let mut output = String::new();
+
+        for path in paths {
+            if let Err(error) = self.validate_context_path(&path) {
+                warn!("Skipping unsafe context file {}: {error}", path.display());
+                continue;
+            }
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                let raw = format!("{}{}\n", context_file_header(&path), content);
+                output.push_str(&self.sanitize_context_data(&path, &raw));
+            }
+        }
+
+        output
     }
 
     /// Expand @file references in input (e.g., "@src/main.rs" becomes file content)
@@ -368,6 +599,7 @@ impl Agent {
 
         let mut expanded = input.to_string();
         let mut included_files = Vec::new();
+        let workspace = ContextWorkspace::capture();
 
         for caps in FILE_REF_RE.captures_iter(input) {
             let Some(full_match) = caps.get(0).map(|m| m.as_str()) else {
@@ -376,64 +608,73 @@ impl Agent {
             let Some(file_path) = caps.get(1).map(|m| m.as_str()) else {
                 continue;
             };
-            let path = std::path::Path::new(file_path);
+            let path = workspace.anchor(std::path::Path::new(file_path));
 
-            let is_dir = tokio::fs::metadata(path)
+            // Directory references are reads too.  Validate the root before
+            // metadata or traversal so @/etc/ cannot bypass the same policy
+            // enforced for an individual @file.
+            if self.validate_context_path(&path).is_err() {
+                continue;
+            }
+
+            let is_dir = tokio::fs::metadata(&path)
                 .await
                 .map(|m| m.is_dir())
                 .unwrap_or(false);
             if is_dir {
-                // Directory reference: include tree listing + file contents (max depth 3)
-                let file_path_owned = file_path.to_string();
-                let (dir_content, file_count) = tokio::task::spawn_blocking(move || {
-                    let mut dir_content = format!("Directory tree for {}:\n```\n", file_path_owned);
-                    let mut file_count = 0;
-                    for entry in walkdir::WalkDir::new(&file_path_owned)
+                // Directory reference: include a bounded tree listing (max depth 3).
+                let walk_path = path.clone();
+                let entries = crate::tools::workspace_root::spawn_blocking(move || {
+                    let mut entries = Vec::new();
+                    for entry in walkdir::WalkDir::new(walk_path)
                         .max_depth(3)
+                        .follow_links(false)
                         .into_iter()
+                        .filter_entry(retain_public_context_entry)
                         .filter_map(|e| e.ok())
                     {
                         let entry_path = entry.path();
-                        let display = entry_path.display().to_string();
-                        if display.contains("/target/")
-                            || display.contains("\\target\\")
-                            || display.contains("/.git/")
-                            || display.contains("\\.git\\")
-                            || display.contains("/node_modules/")
-                            || display.contains("\\node_modules\\")
-                        {
-                            continue;
-                        }
                         if entry.file_type().is_file() {
-                            dir_content.push_str(&format!("  {}\n", display));
-                            file_count += 1;
+                            entries.push(entry_path.to_path_buf());
+                            if entries.len() >= 1_000 {
+                                break;
+                            }
                         }
                     }
-                    dir_content.push_str("```\n");
-                    (dir_content, file_count)
+                    entries
                 })
                 .await
                 .unwrap_or_default();
+                let mut dir_content =
+                    format!("Directory tree for {}:\n", context_path_label(&path));
+                let mut file_count = 0usize;
+                for entry_path in entries {
+                    if self.validate_context_path(&entry_path).is_err() {
+                        continue;
+                    }
+                    dir_content.push_str("  ");
+                    dir_content.push_str(&context_path_label(&entry_path));
+                    dir_content.push('\n');
+                    file_count += 1;
+                }
+                let dir_content = self.sanitize_context_data(&path, &dir_content);
                 expanded = expanded.replacen(full_match, &dir_content, 1);
                 included_files.push(format!(
                     "{}/ ({} files)",
                     file_path.trim_end_matches('/'),
                     file_count
                 ));
-            } else if self
-                .validate_context_path(std::path::Path::new(file_path))
-                .is_ok()
-            {
-                let Ok(content) = tokio::fs::read_to_string(file_path).await else {
+            } else {
+                let Ok(content) = tokio::fs::read_to_string(&path).await else {
                     continue;
                 };
-                let content = self.sanitize_context_data(std::path::Path::new(file_path), &content);
-                let file_block = format!(
-                    "\n```{} ({})\n{}\n```\n",
-                    file_path,
+                let raw = format!(
+                    "\nFile: {} ({})\n<file_content>\n{}\n</file_content>\n",
+                    context_path_label(&path),
                     Self::format_file_size(content.len()),
                     content.trim()
                 );
+                let file_block = self.sanitize_context_data(&path, &raw);
                 expanded = expanded.replacen(full_match, &file_block, 1);
                 included_files.push(file_path.to_string());
             }

@@ -595,6 +595,12 @@ async fn test_directory_tree_excludes_hidden() {
 async fn test_directory_tree_includes_hidden() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(temp_dir.path().join(".hidden"), "").unwrap();
+    fs::create_dir_all(temp_dir.path().join(".claude/worktrees")).unwrap();
+    fs::write(
+        temp_dir.path().join(".claude/worktrees/private.rs"),
+        "private state",
+    )
+    .unwrap();
 
     let tool = DirectoryTree::with_safety_config(permissive_safety_config());
     let args = serde_json::json!({
@@ -608,6 +614,10 @@ async fn test_directory_tree_includes_hidden() {
     // Should contain .hidden
     let has_hidden = entries.iter().any(|(name, _)| name.contains(".hidden"));
     assert!(has_hidden);
+    assert!(
+        entries.iter().all(|(name, _)| !name.contains(".claude")),
+        "include_hidden must not turn broad discovery into private tool-state traversal"
+    );
 }
 
 #[test]

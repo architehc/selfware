@@ -1,9 +1,5 @@
-//! Integration tests for the hierarchical context system.
-//!
-//! Non-ignored tests run without a live endpoint (pure logic tests on real files).
-//! Ignored tests require a running sglang endpoint:
-//!
-//!   SELFWARE_LIVE_ENDPOINT=http://localhost:8000/v1 cargo test --test integration live_context -- --ignored
+//! Endpoint-free integration tests for the hierarchical context system using
+//! pure logic and files from the real checkout.
 
 use std::path::Path;
 
@@ -212,91 +208,4 @@ fn test_auto_optimize_evicts_stale() {
     let freed = map.auto_optimize(0);
     assert!(freed > 0, "should free stale L3 content");
     assert_ne!(map.level_of(path), Some(ContextMode::Full));
-}
-
-// ─── Live Endpoint Tests ────────────────────────────────────────────────────
-
-fn live_config() -> Option<selfware::config::Config> {
-    let endpoint = std::env::var("SELFWARE_LIVE_ENDPOINT").ok()?;
-    let model = std::env::var("SELFWARE_LIVE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
-
-    Some(selfware::config::Config {
-        endpoint,
-        model,
-        max_tokens: 900_000,
-        agent: selfware::config::AgentConfig {
-            max_iterations: 20,
-            step_timeout_secs: 120,
-            stream_stall_timeout_secs: None,
-            token_budget: 900_000,
-            streaming: true,
-            native_function_calling: false,
-            min_completion_steps: 0,
-            require_verification_before_completion: false,
-            ..Default::default()
-        },
-        safety: selfware::config::SafetyConfig {
-            allowed_paths: vec!["./**".to_string(), "/**".to_string()],
-            ..Default::default()
-        },
-        execution_mode: selfware::config::ExecutionMode::Yolo,
-        ..Default::default()
-    })
-}
-
-#[tokio::test]
-#[ignore = "requires SELFWARE_LIVE_ENDPOINT"]
-async fn test_live_review_with_skeletons() {
-    let config = match live_config() {
-        Some(c) => c,
-        None => return,
-    };
-
-    let mut agent = selfware::agent::Agent::new(config).await.unwrap();
-    let result = agent
-        .run_task("review the code in src/token_count.rs and summarize what it does")
-        .await;
-
-    match result {
-        Ok(()) => println!("PASS: review task completed"),
-        Err(e) => println!("FAIL: {}", e),
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires SELFWARE_LIVE_ENDPOINT"]
-async fn test_live_context_tools() {
-    let config = match live_config() {
-        Some(c) => c,
-        None => return,
-    };
-
-    let mut agent = selfware::agent::Agent::new(config).await.unwrap();
-    let result = agent
-        .run_task("use context_status to check your context window, then report the budget usage")
-        .await;
-
-    match result {
-        Ok(()) => println!("PASS: context tools task completed"),
-        Err(e) => println!("FAIL: {}", e),
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires SELFWARE_LIVE_ENDPOINT"]
-async fn test_live_skeleton_review() {
-    let config = match live_config() {
-        Some(c) => c,
-        None => return,
-    };
-
-    let mut agent = selfware::agent::Agent::new(config).await.unwrap();
-    let result = agent
-        .run_task("read all rust files and give a brief summary of the project structure")
-        .await;
-
-    match result {
-        Ok(()) => println!("PASS: skeleton-based review completed"),
-        Err(e) => println!("FAIL: {}", e),
-    }
 }

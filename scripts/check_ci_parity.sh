@@ -6,12 +6,14 @@
 #   1. Lint job, "Test release and evaluation integrity" step: the python
 #      scripts/tests suite in a bare venv (no numpy/playwright, like the
 #      ubuntu runner) plus the `bash -n` syntax checks.
-#   2. Documentation job: `cargo doc --no-deps --features extras` with
+#   2. Optional-feature lint: `cargo clippy --all-targets --all-features`
+#      compiles every gated target without running live endpoint tests.
+#   3. Documentation job: `cargo doc --no-deps --features extras` with
 #      RUSTDOCFLAGS=-D warnings (catches private/broken intra-doc links).
-#   3. Test (no default features) job: `cargo test --no-default-features`
+#   4. Test (no default features) job: `cargo test --no-default-features`
 #      (catches tests/items that forget their feature cfg), skipping the
 #      red-team corpus gate exactly as that CI job does.
-#   4. Red-team corpus gate job: `cargo test --test redteam_gate_test`
+#   5. Red-team corpus gate job: `cargo test --test redteam_gate_test`
 #      (CI runs it only in its dedicated `redteam-gate` job; here it reuses
 #      the step-3 build).
 #
@@ -31,7 +33,7 @@ REV="${1:-HEAD}"
 SHA="$(cd "${REPO_ROOT}" && git rev-parse --verify "${REV}")"
 
 echo "============================================================"
-echo " CI-parity check (python suite, docs, no-default-features, redteam gate)"
+echo " CI-parity check (python, all-feature lint, docs, no-default, redteam)"
 echo " Revision: ${REV} (${SHA})"
 echo "============================================================"
 
@@ -68,16 +70,20 @@ python3 -m venv "${VENV_DIR}"
     && bash -n benchmarks/harbor/harness-search.sh)
 echo "   python suite OK"
 
-echo "2. cargo doc --no-deps --features extras (RUSTDOCFLAGS=-D warnings)..."
+echo "2. cargo clippy --all-targets --all-features -- -D warnings..."
+(cd "${WORKTREE_DIR}" && cargo clippy --all-targets --all-features -- -D warnings)
+echo "   all-feature clippy OK"
+
+echo "3. cargo doc --no-deps --features extras (RUSTDOCFLAGS=-D warnings)..."
 (cd "${WORKTREE_DIR}" && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features extras)
 echo "   cargo doc OK"
 
-echo "3. cargo test --no-default-features (corpus gate skipped, as in CI) </dev/null..."
+echo "4. cargo test --no-default-features (corpus gate skipped, as in CI) </dev/null..."
 (cd "${WORKTREE_DIR}" \
     && cargo test --no-default-features -- --skip redteam_corpus_respects_gate_expectations </dev/null)
 echo "   cargo test --no-default-features OK"
 
-echo "4. red-team corpus gate (cargo test --test redteam_gate_test) </dev/null..."
+echo "5. red-team corpus gate (cargo test --test redteam_gate_test) </dev/null..."
 (cd "${WORKTREE_DIR}" && cargo test --no-default-features --test redteam_gate_test </dev/null)
 echo "   red-team corpus gate OK"
 

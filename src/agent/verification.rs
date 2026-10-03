@@ -5341,7 +5341,11 @@ pub(crate) fn bound_audit_evidence(files: &[AuditFileEvidence], cap: usize) -> S
     let mut remaining = cap;
     for (i, file) in files.iter().enumerate() {
         let share = remaining / (files.len() - i);
-        let mut section = format!("=== {} ({}) ===\n", file.path, file.label);
+        let mut section = format!(
+            "=== {} ({}) ===\n",
+            crate::safety::source_context::quote_untrusted_label(&file.path),
+            file.label
+        );
         let mut used = tokens(&section);
         let units = split_evidence_units(&file.body);
         for (j, unit) in units.iter().enumerate() {
@@ -5364,7 +5368,7 @@ pub(crate) fn bound_audit_evidence(files: &[AuditFileEvidence], cap: usize) -> S
             if rest > 0 {
                 section.push_str(&format!(
                     "[not shown: {rest} more hunk(s) of {}]\n",
-                    file.path
+                    crate::safety::source_context::quote_untrusted_label(&file.path)
                 ));
             }
             break;

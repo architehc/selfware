@@ -217,10 +217,13 @@ fn hover_response(outcome: &LspQueryOutcome<Option<String>>) -> Value {
     }
 }
 
-/// Validate that an LSP tool's `file` argument is safe to access.
-fn validate_lsp_file(path: &str, safety_config: Option<&SafetyConfig>) -> Result<()> {
+/// Resolve an LSP tool's `file` argument against the active workspace and
+/// validate the exact path every subsequent filesystem/LSP operation uses.
+fn validate_lsp_file(path: &str, safety_config: Option<&SafetyConfig>) -> Result<String> {
+    let path = crate::tools::workspace_root::anchor(path);
     let safety = resolve_safety_config(safety_config);
-    validate_tool_path(path, &safety)
+    validate_tool_path(&path, &safety)?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,17 +259,15 @@ impl Tool for LspGotoDefinitionTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         // Ensure the file is open in the server.
-        let content = tokio::fs::read_to_string(&args.file)
-            .await
-            .unwrap_or_default();
-        client.did_open(&args.file, &content).await?;
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        client.did_open(&file, &content).await?;
 
         let outcome = client
-            .goto_definition(&args.file, args.line, args.column)
+            .goto_definition(&file, args.line, args.column)
             .await?;
 
         Ok(list_response(
@@ -309,16 +310,14 @@ impl Tool for LspFindReferencesTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file)
-            .await
-            .unwrap_or_default();
-        client.did_open(&args.file, &content).await?;
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        client.did_open(&file, &content).await?;
 
         let outcome = client
-            .find_references(&args.file, args.line, args.column)
+            .find_references(&file, args.line, args.column)
             .await?;
 
         Ok(list_response("references", &outcome, None))
@@ -355,15 +354,13 @@ impl Tool for LspDocumentSymbolsTool {
             file: String,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file)
-            .await
-            .unwrap_or_default();
-        client.did_open(&args.file, &content).await?;
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        client.did_open(&file, &content).await?;
 
-        let outcome = client.document_symbols(&args.file).await?;
+        let outcome = client.document_symbols(&file).await?;
 
         Ok(list_response("symbols", &outcome, None))
     }
@@ -401,15 +398,13 @@ impl Tool for LspHoverTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file)
-            .await
-            .unwrap_or_default();
-        client.did_open(&args.file, &content).await?;
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        client.did_open(&file, &content).await?;
 
-        let outcome = client.hover(&args.file, args.line, args.column).await?;
+        let outcome = client.hover(&file, args.line, args.column).await?;
 
         Ok(hover_response(&outcome))
     }
@@ -470,7 +465,7 @@ impl Tool for LspDiagnosticsTool {
             file: String,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         // Diagnostics are push-based: the server only sends them as
@@ -478,10 +473,8 @@ impl Tool for LspDiagnosticsTool {
         // Previously this read the (usually empty) passive store without
         // opening the file, so it reported `status: ok, 0 errors` for files
         // the server had never analyzed — a false "clean" signal.
-        let content = tokio::fs::read_to_string(&args.file)
-            .await
-            .unwrap_or_default();
-        client.did_open(&args.file, &content).await?;
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        client.did_open(&file, &content).await?;
 
         // Wait for the server to publish, polling the store. A background
         // reader task dispatches notifications, so no request needs to be in
@@ -490,15 +483,15 @@ impl Tool for LspDiagnosticsTool {
         const DIAG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
         let deadline = std::time::Instant::now() + DIAG_WAIT_TIMEOUT;
         let diags = loop {
-            let diags = client.diagnostics(&args.file).await?;
+            let diags = client.diagnostics(&file).await?;
             if !diags.is_empty() || std::time::Instant::now() >= deadline {
                 break diags;
             }
             tokio::time::sleep(DIAG_POLL_INTERVAL).await;
         };
-        let _ = client.did_close(&args.file).await;
+        let _ = client.did_close(&file).await;
 
-        Ok(diagnostics_response(&args.file, &diags, DIAG_WAIT_TIMEOUT))
+        Ok(diagnostics_response(&file, &diags, DIAG_WAIT_TIMEOUT))
     }
 }
 
@@ -621,11 +614,11 @@ impl Tool for LspGotoImplementationTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
-        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
+        let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let outcome = client
-            .goto_implementation(&args.file, args.line, args.column)
+            .goto_implementation(&file, args.line, args.column)
             .await?;
 
         Ok(list_response(

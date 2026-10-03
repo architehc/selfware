@@ -199,6 +199,42 @@ async fn test_process_restart_nonexistent() {
 }
 
 #[tokio::test]
+async fn process_restart_preserves_and_refreshes_resource_ownership() {
+    let id = "tracked-manual-restart";
+    ProcessStart
+        .execute(serde_json::json!({
+            "id": id,
+            "command": "sleep",
+            "args": ["60"],
+            "keep": true
+        }))
+        .await
+        .unwrap();
+    let before = managed_entry(id).expect("process_start must register its child");
+
+    let restarted = ProcessRestart
+        .execute(serde_json::json!({ "id": id }))
+        .await
+        .unwrap();
+    let replacement_pid = restarted["pid"].as_u64().unwrap() as u32;
+    let after = managed_entry(id).expect("restart must keep the resource registered");
+
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.owner_task, before.owner_task);
+    assert_eq!(after.owner_agent, before.owner_agent);
+    assert!(after.keep, "restart must preserve the original keep policy");
+    assert!(matches!(
+        after.handle,
+        crate::resources::ResourceHandle::Process { pid, .. } if pid == replacement_pid
+    ));
+
+    ProcessStop
+        .execute(serde_json::json!({ "id": id, "force": true }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_process_start_with_health_check() {
     let tool = ProcessStart;
     let result = tool
@@ -502,4 +538,86 @@ async fn test_process_start_health_check_timeout_returns_error() {
         summary.pid.is_none(),
         "Timed-out process should have been reaped"
     );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn task_teardown_cancels_managed_restart_backoff_before_release() {
+    use crate::resources::{context, ResourceRegistry, ResourceState, SystemDriver};
+
+    let _prune = PRUNE_GUARD.lock().await;
+    let managed_id = format!("teardown-restart-{}", uuid::Uuid::new_v4().simple());
+    let task_id = format!("task-{}", uuid::Uuid::new_v4().simple());
+    let tool = ProcessStart;
+    let _ = context::scope(context::Owner::for_task(task_id.clone()), async {
+        tool.execute(serde_json::json!({
+            "id": managed_id,
+            "command": "false",
+            "auto_restart": true,
+            "max_restart_attempts": 1
+        }))
+        .await
+    })
+    .await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let status = PROCESS_MANAGER
+            .read()
+            .await
+            .get(&managed_id)
+            .await
+            .unwrap()
+            .status;
+        if matches!(
+            status,
+            crate::process_manager::ProcessStatus::Restarting { .. }
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restart backoff not reached"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let registry = ResourceRegistry::global();
+    let entry = crate::resources::managed_process_entry(registry, &managed_id)
+        .expect("start must register before readiness");
+    assert_eq!(entry.owner_task, task_id);
+    let report = crate::resources::teardown::teardown_task(
+        registry,
+        &SystemDriver::default(),
+        &task_id,
+        crate::resources::TeardownPolicy {
+            deadline: std::time::Duration::from_millis(200),
+            force_grace: std::time::Duration::from_secs(1),
+            poll: std::time::Duration::from_millis(20),
+        },
+    )
+    .await;
+    assert_eq!(report.released.len(), 1, "{report:?}");
+    assert_eq!(
+        registry.get(&entry.id).unwrap().state,
+        ResourceState::Released
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    assert_eq!(
+        PROCESS_MANAGER
+            .read()
+            .await
+            .get(&managed_id)
+            .await
+            .unwrap()
+            .status,
+        crate::process_manager::ProcessStatus::Stopped
+    );
+    PROCESS_MANAGER
+        .read()
+        .await
+        .remove(&managed_id)
+        .await
+        .unwrap();
 }

@@ -23,9 +23,9 @@ type CheckFut = Pin<Box<dyn std::future::Future<Output = DoctorCheck> + Send>>;
 /// Maximum time to wait for a single tool check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Project minimum supported Rust version (kept in sync with `Cargo.toml`'s
-/// `rust-version` field).
-pub const MSRV: &str = "1.91";
+/// Project minimum supported Rust version, sourced from `Cargo.toml`'s
+/// `rust-version` field by Cargo.
+pub const MSRV: &str = env!("CARGO_PKG_RUST_VERSION");
 
 // ---------------------------------------------------------------------------
 // Types

@@ -654,6 +654,12 @@ impl PipFreeze {
     }
 }
 
+fn pip_freeze_output_file(args: &Value) -> Option<String> {
+    args.get("output_file")
+        .and_then(Value::as_str)
+        .map(crate::tools::workspace_root::anchor)
+}
+
 #[async_trait]
 impl Tool for PipFreeze {
     fn name(&self) -> &str {
@@ -677,7 +683,13 @@ impl Tool for PipFreeze {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        let output_file = args.get("output_file").and_then(|v| v.as_str());
+        let output_file = pip_freeze_output_file(&args);
+        if let Some(file_path) = output_file.as_deref() {
+            // Validate the exact anchored path that will later be written,
+            // before doing the comparatively expensive child-process work.
+            let safety = resolve_safety_config(self.safety_config.as_ref());
+            validate_tool_path(file_path, &safety)?;
+        }
 
         let python = find_python().await;
 
@@ -698,13 +710,11 @@ impl Tool for PipFreeze {
 
         let packages: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
-        if let Some(file_path) = output_file {
+        if let Some(file_path) = output_file.as_deref() {
             // Arbitrary-write fix (2026-09-21 review): `output_file` was
             // forwarded to fs::write unvalidated, so `pip_freeze` could
             // overwrite any path the process could write. The write target
             // now obeys the same workspace path policy as file_write.
-            let safety = resolve_safety_config(self.safety_config.as_ref());
-            validate_tool_path(file_path, &safety)?;
             tokio::fs::write(file_path, &stdout)
                 .await
                 .context("Failed to write requirements file")?;

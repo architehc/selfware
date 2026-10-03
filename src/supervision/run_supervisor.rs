@@ -142,7 +142,7 @@ struct RunHandle {
     status: Arc<RwLock<RunStatus>>,
     cancel: Arc<AtomicBool>,
     join: JoinHandle<()>,
-    cooperative_abort: bool,
+    cooperative_abort_grace: Option<Duration>,
     /// Human-readable task description for diagnostics/listing.
     #[allow(dead_code)]
     task: String,
@@ -211,7 +211,7 @@ impl RunSupervisor {
             task,
             Arc::new(SupervisedEmitter::new()),
             Arc::new(AtomicBool::new(false)),
-            false,
+            None,
             run,
         )
         .await
@@ -223,7 +223,7 @@ impl RunSupervisor {
         task: String,
         emitter: Arc<SupervisedEmitter>,
         cancel: Arc<AtomicBool>,
-        cooperative_abort: bool,
+        cooperative_abort_grace: Option<Duration>,
         run: F,
     ) -> RunId
     where
@@ -236,7 +236,7 @@ impl RunSupervisor {
         let cancel_clone = Arc::clone(&cancel);
         let event_tx = emitter.tx.clone();
 
-        let join = tokio::spawn(async move {
+        let join = crate::tools::workspace_root::spawn(async move {
             let result = run.await;
             let mut status = status_clone.write().await;
             // If the cancel flag was flipped (abort), treat the outcome as
@@ -271,7 +271,7 @@ impl RunSupervisor {
             status,
             cancel,
             join,
-            cooperative_abort,
+            cooperative_abort_grace,
             task,
             events: event_tx,
         };
@@ -297,36 +297,57 @@ impl RunSupervisor {
         let agent_emitter = emitter.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let agent_cancel = cancel.clone();
-        self.spawn_with_events(task.clone(), emitter, cancel, true, async move {
-            let mut agent = crate::agent::Agent::new(config)
-                .await?
-                .with_event_emitter(agent_emitter.clone())
-                .with_cancel_token(agent_cancel.clone());
-            // Normal cancellation checks get a chance to persist and exit.
-            // If a provider/tool is unresponsive, drop its future and persist
-            // the last resumable state before the supervisor announces abort.
-            let result = tokio::select! {
-                result = agent.run_task(&task) => result,
-                _ = async {
-                    wait_for_cancellation(&agent_cancel).await;
-                    tokio::time::sleep(CANCELLATION_GRACE).await;
-                } => {
-                    // Same typed mapping as the agent loop: a SIGTERM that
-                    // latched the process-wide shutdown is Terminated, not a
-                    // user cancel; a supervisor-only cancel stays Cancelled.
-                    Err(crate::errors::AgentError::for_current_shutdown().into())
+        // A forced cancellation still runs task teardown. Give it the
+        // configured polite deadline plus the teardown engine's force grace
+        // before resorting to JoinHandle::abort.
+        let abort_grace = CANCELLATION_GRACE
+            + Duration::from_secs(config.resources.teardown_deadline_secs)
+            + Duration::from_secs(4);
+        self.spawn_with_events(
+            task.clone(),
+            emitter,
+            cancel,
+            Some(abort_grace),
+            async move {
+                let mut agent = crate::agent::Agent::new(config)
+                    .await?
+                    .with_event_emitter(agent_emitter.clone())
+                    .with_cancel_token(agent_cancel.clone());
+                // Normal cancellation checks get a chance to persist and exit.
+                // If a provider/tool is unresponsive, drop its future and persist
+                // the last resumable state before the supervisor announces abort.
+                let mut forced_cancel = false;
+                let result = tokio::select! {
+                    result = agent.run_task(&task) => result,
+                    _ = async {
+                        wait_for_cancellation(&agent_cancel).await;
+                        tokio::time::sleep(CANCELLATION_GRACE).await;
+                    } => {
+                        forced_cancel = true;
+                        // Same typed mapping as the agent loop: a SIGTERM that
+                        // latched the process-wide shutdown is Terminated, not a
+                        // user cancel; a supervisor-only cancel stays Cancelled.
+                        Err(crate::errors::AgentError::for_current_shutdown().into())
+                    }
+                };
+                let mut checkpoint_error = None;
+                if agent_cancel.load(Ordering::Relaxed) {
+                    if let Err(error) = agent.save_checkpoint(&task) {
+                        agent_emitter.emit(AgentEvent::Error {
+                            message: format!("Cancellation checkpoint save failed: {error}"),
+                        });
+                        checkpoint_error = Some(error);
+                    }
                 }
-            };
-            if agent_cancel.load(Ordering::Relaxed) {
-                if let Err(error) = agent.save_checkpoint(&task) {
-                    agent_emitter.emit(AgentEvent::Error {
-                        message: format!("Cancellation checkpoint save failed: {error}"),
-                    });
+                if forced_cancel {
+                    agent.finish_forced_cancel(&result).await;
+                }
+                if let Some(error) = checkpoint_error {
                     return Err(error);
                 }
-            }
-            result
-        })
+                result
+            },
+        )
         .await
     }
 
@@ -335,7 +356,7 @@ impl RunSupervisor {
     /// Returns `true` if the run existed, `false` otherwise. Aborting an
     /// already-settled run preserves its final status and event.
     pub async fn abort(&self, id: &RunId) -> bool {
-        let (status, abort_handle, events, cooperative) = {
+        let (status, abort_handle, events, cooperative_grace) = {
             let runs = self.runs.read().await;
             let Some(handle) = runs.get(id) else {
                 return false;
@@ -349,11 +370,11 @@ impl RunSupervisor {
                 handle.status.clone(),
                 handle.join.abort_handle(),
                 handle.events.clone(),
-                handle.cooperative_abort,
+                handle.cooperative_abort_grace,
             )
         };
-        if cooperative {
-            let _ = tokio::time::timeout(CANCELLATION_GRACE + Duration::from_secs(1), async {
+        if let Some(grace) = cooperative_grace {
+            let _ = tokio::time::timeout(grace, async {
                 while !status.read().await.is_terminal() {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }

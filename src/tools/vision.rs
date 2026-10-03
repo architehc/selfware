@@ -9,11 +9,13 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::merge_extra_body as merge_request_extra_body;
+use crate::safety::PinnedDnsResolver;
 
-use super::Tool;
+use super::{net_policy, Tool};
 
 const VISION_SYSTEM_PROMPT: &str =
     "You are a precise multimodal assistant. Follow the user request exactly and answer directly.";
@@ -449,9 +451,26 @@ pub(crate) async fn call_vision_endpoint(
     body: &Value,
 ) -> Result<Value> {
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let parsed = reqwest::Url::parse(&url).context("Invalid vision endpoint URL")?;
+    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+    let policy = net_policy::validate_url_target(&parsed, allow_private)
+        .context("Vision endpoint rejected by network policy")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(15))
+        .dns_resolver(Arc::new(PinnedDnsResolver::with_localhost(
+            policy.allow_private,
+            policy.allow_localhost,
+        )))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() > 10 {
+                return attempt.error("Too many redirects");
+            }
+            match net_policy::validate_redirect_target(attempt.url(), &policy) {
+                Ok(_) => attempt.follow(),
+                Err(error) => attempt.error(error),
+            }
+        }))
         .build()
         .context("Failed to build HTTP client")?;
 

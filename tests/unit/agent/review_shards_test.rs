@@ -566,10 +566,11 @@ async fn a_review_is_read_by_shards_and_findings_are_verified() {
 
     // The shard request carried the numbered file content, not the history.
     assert!(
-        bodies[0].contains("=== FILE pkg/a.py (whole file, 2 lines) ==="),
+        bodies[0].contains("=== FILE \\\"pkg/a.py\\\" (whole file, 2 lines) ==="),
         "{}",
         &bodies[0][..bodies[0].len().min(2000)]
     );
+    assert!(bodies[0].contains("<review_file path=\\\"pkg/a.py\\\">"));
     assert!(bodies[0].contains("2\\t    return x / n"));
     assert!(!bodies[0].contains("\"tools\""));
 

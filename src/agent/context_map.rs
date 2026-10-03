@@ -729,7 +729,7 @@ impl ContextMap {
             lines.push(format!(
                 "  {} {} ({}, ~{}tok)",
                 level_marker,
-                entry.path.display(),
+                crate::safety::source_context::quote_untrusted_label(&entry.path.to_string_lossy()),
                 size_str,
                 entry.current_tokens
             ));
@@ -766,7 +766,9 @@ impl ContextMap {
             .entries
             .values()
             .filter(|e| e.level == ContextMode::Full)
-            .map(|e| e.path.display().to_string())
+            .map(|e| {
+                crate::safety::source_context::quote_untrusted_label(&e.path.to_string_lossy())
+            })
             .collect();
 
         let focus = if l3_files.is_empty() {
@@ -904,7 +906,11 @@ impl ContextMap {
         entry.level = ContextMode::Full;
         entry.current_tokens = token_cost;
         entry.costs.l3 = token_cost;
-        entry.full_content = Some(format!("// Source: {}\n{}", source, content));
+        entry.full_content = Some(format!(
+            "// Source: {}\n{}",
+            crate::safety::source_context::quote_untrusted_label(source),
+            content
+        ));
         entry.last_accessed = Instant::now();
         self.total_tokens += token_cost;
 
@@ -1022,12 +1028,28 @@ impl ContextMap {
 
         for entry in self.entries.values() {
             let path_str = entry.path.to_string_lossy().to_lowercase();
+            let file_name = entry
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let file_stem = entry
+                .path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
 
             // Score relevance based on path match + skeleton match.
             let mut relevance = 0.0f32;
             for term in &task_terms {
                 if path_str.contains(term) {
                     relevance += 2.0;
+                }
+                // Naming a file (with or without its extension) is an
+                // explicit request for that context, so it must clear the
+                // full-detail threshold without relying on a loaded skeleton.
+                if *term == file_name || *term == file_stem {
+                    relevance += 1.0;
                 }
             }
             if let Some(ref skeleton) = entry.skeleton {
@@ -1212,7 +1234,7 @@ impl ContextRecommendation {
             for s in &self.promote {
                 out.push_str(&format!(
                     "  ↑ {} ({:?}→{:?}, ~{} tok) — {}\n",
-                    s.path.display(),
+                    crate::safety::source_context::quote_untrusted_label(&s.path.to_string_lossy()),
                     s.current_level,
                     s.suggested_level,
                     s.estimated_tokens,
@@ -1226,7 +1248,7 @@ impl ContextRecommendation {
             for s in &self.evict {
                 out.push_str(&format!(
                     "  ↓ {} ({:?}→{:?}) — {}\n",
-                    s.path.display(),
+                    crate::safety::source_context::quote_untrusted_label(&s.path.to_string_lossy()),
                     s.current_level,
                     s.suggested_level,
                     s.reason

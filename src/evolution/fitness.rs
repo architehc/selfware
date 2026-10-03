@@ -332,18 +332,66 @@ struct SabProcessGroupGuard {
     child: Option<std::process::Child>,
 }
 
+impl SabProcessGroupGuard {
+    /// Observe normal completion without releasing the leader pid, terminate
+    /// any background descendants while that pgid is still pinned, then reap.
+    fn try_finish(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+
+        #[cfg(unix)]
+        let status = {
+            match crate::tools::process_guard::process_has_exited_without_reaping(child.id()) {
+                Ok(false) => return Ok(None),
+                Ok(true) => {}
+                Err(error) => {
+                    // Do not leave a retained pgid armed if another waiter
+                    // already reaped the leader. If it is still running, Drop
+                    // can safely terminate the group.
+                    if !matches!(child.try_wait(), Ok(None)) {
+                        self.child = None;
+                    }
+                    return Err(error);
+                }
+            }
+            signal_sab_group(child.id(), nix::sys::signal::Signal::SIGKILL);
+            child.wait()?
+        };
+        #[cfg(not(unix))]
+        let status = match child.try_wait()? {
+            Some(status) => status,
+            None => return Ok(None),
+        };
+
+        self.child = None;
+        Ok(Some(status))
+    }
+}
+
 impl Drop for SabProcessGroupGuard {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             #[cfg(unix)]
             {
-                let pid = child.id();
-                use nix::sys::signal::{killpg, Signal};
-                use nix::unistd::Pid;
-                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                // The child has not been reaped while held by the guard, so
+                // its pid still pins the process-group identity for both
+                // signals. SIGKILL reaches descendants that ignore SIGTERM.
+                signal_sab_group(child.id(), nix::sys::signal::Signal::SIGTERM);
+                std::thread::sleep(Duration::from_millis(100));
+                signal_sab_group(child.id(), nix::sys::signal::Signal::SIGKILL);
             }
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_sab_group(pgid: u32, signal: nix::sys::signal::Signal) {
+    if let Ok(raw) = i32::try_from(pgid) {
+        if raw > 1 {
+            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(raw), signal);
         }
     }
 }
@@ -466,12 +514,10 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
 
     let deadline = sab_deadline().map(|window| start + window);
     let exit_status = loop {
-        if let Some(ref mut c) = child_guard.child {
-            match c.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) => {}
-                Err(e) => break Err(FitnessError::SabRunFailed(e.to_string())),
-            }
+        match child_guard.try_finish() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(e) => break Err(FitnessError::SabRunFailed(e.to_string())),
         }
         if crate::is_shutdown_requested() {
             return Err(FitnessError::SabRunFailed(
@@ -492,8 +538,6 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         }
         std::thread::sleep(Duration::from_millis(50));
     }?;
-
-    child_guard.child = None;
 
     let wall_clock = start.elapsed();
 

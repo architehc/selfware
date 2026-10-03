@@ -30,6 +30,8 @@ kimi_docs/
 *.md
 !README.md
 !QUICKSTART.md
+# Compiled into the binary by src/boot/chat.rs.
+!src/boot/setup_guide.md
 
 # Test results and outputs
 results/
@@ -49,6 +51,11 @@ batch_tasks/
 *.mp4
 *.mov
 *.avi
+# These two web assets are compiled into the binary with `include_bytes!`.
+# Keep exact exceptions here so the broad media exclusions above cannot make
+# either source-building Dockerfile fail after a clean checkout.
+!src/evolve/web/phi/assets/fox_phi_portrait.jpg
+!src/evolve/web/phi/assets/fox_phi_banner.jpg
 screenshots/
 vlm_fixtures/
 

@@ -840,3 +840,45 @@ fn visible_response_text_strips_parameter_tags_and_malformed_xml() {
     let mixed = "Here is the summary.<tool_call><parameter=name>foo</parameter></tool_call>";
     assert_eq!(visible_response_text(mixed), "Here is the summary.");
 }
+
+#[test]
+fn llm_cache_key_distinguishes_multimodal_content_hidden_by_display() {
+    use crate::api::types::{ContentBlock, ImageUrl, MessageContent};
+
+    let with_image = |url: &str| {
+        let mut message = Message::user("");
+        message.content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".into(),
+            },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl {
+                    url: url.into(),
+                    detail: Some("high".into()),
+                },
+            },
+            ContentBlock::Text {
+                text: "include the background".into(),
+            },
+        ]);
+        message
+    };
+
+    let first = Agent::llm_cache_request_key(
+        "model",
+        &[with_image("data:image/png;base64,AAAA")],
+        &None,
+        ThinkingMode::Enabled,
+    )
+    .unwrap();
+    let second = Agent::llm_cache_request_key(
+        "model",
+        &[with_image("data:image/png;base64,BBBB")],
+        &None,
+        ThinkingMode::Enabled,
+    )
+    .unwrap();
+
+    assert_ne!(first, second);
+    assert!(first.contains("include the background"));
+}

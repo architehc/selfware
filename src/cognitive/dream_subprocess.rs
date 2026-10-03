@@ -525,10 +525,7 @@ async fn prune_and_index_phase(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    // Atomic write
-    let temp_path = memory_path.with_extension(format!("tmp.{}", std::process::id()));
-    tokio::fs::write(&temp_path, output).await?;
-    tokio::fs::rename(&temp_path, &memory_path).await?;
+    crate::session::checkpoint::write_bytes_atomically(&memory_path, output.as_bytes(), 0o600)?;
 
     let stats = store.stats();
     info!(

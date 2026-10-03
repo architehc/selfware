@@ -34,7 +34,8 @@
 //!
 //! Task-locals do not cross `tokio::spawn` / `spawn_blocking`: a tool that
 //! hands work to another task must resolve its paths (or capture
-//! [`current`]) before spawning.
+//! [`current`]) before spawning. Use [`spawn`] / [`spawn_blocking`] when the
+//! spawned work may consult the active root.
 
 use anyhow::{Context, Result};
 use std::future::Future;
@@ -318,6 +319,21 @@ pub async fn scope<F: Future>(root: WorkspaceRoot, fut: F) -> F::Output {
 /// Synchronous counterpart of [`scope`].
 pub fn sync_scope<R>(root: WorkspaceRoot, f: impl FnOnce() -> R) -> R {
     CURRENT.sync_scope(root, f)
+}
+
+/// `tokio::spawn` that carries the [`current`] root into the spawned task.
+///
+/// Tokio task-locals are scoped to one task and are not inherited by child
+/// tasks. Generic background runners and supervisors must use this adapter
+/// when the future can call tools or otherwise resolve workspace-relative
+/// paths.
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let root = current();
+    tokio::spawn(scope(root, future))
 }
 
 /// `tokio::task::spawn_blocking` that carries the [`current`] root into the

@@ -4882,7 +4882,7 @@ mod audit_evidence_tests {
         assert!(evidence.contains("@@ -1,3 +1,4 @@ fn f0()"), "{evidence}");
         assert!(evidence.contains("value_0_5"), "first hunk shown whole");
         assert!(
-            evidence.contains("more hunk(s) of src/big.ts]"),
+            evidence.contains("more hunk(s) of \"src/big.ts\"]"),
             "{evidence}"
         );
     }

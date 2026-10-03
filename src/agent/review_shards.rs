@@ -1059,15 +1059,19 @@ fn render_shard_prompt(
         } else {
             format!("lines {}-{} of {}", s.start, s.end, s.total_lines)
         };
-        out.push_str(&format!("=== FILE {} ({range}) ===\n", s.path));
+        out.push_str(&format!(
+            "=== FILE {} ({range}) ===\n",
+            crate::safety::source_context::quote_untrusted_label(&s.path)
+        ));
         for n in &s.notes {
             out.push_str(&format!("[{n}]\n"));
         }
-        out.push_str(&s.content);
-        if !s.content.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&format!("=== END {} ===\n\n", s.path));
+        out.push_str(&crate::cognitive::memory_system::frame_untrusted_file(
+            "review_file",
+            &s.path,
+            &s.content,
+        ));
+        out.push_str("\n=== END FILE ===\n\n");
     }
     out.push_str(
         "Answer with ONE JSON object and nothing else:\n\

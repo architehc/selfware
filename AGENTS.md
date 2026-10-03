@@ -19,7 +19,7 @@ apply.
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc --no-deps --features extras` with `RUSTDOCFLAGS=-D warnings`, and `cargo test --lib` must be green
 before every commit. A `.git/hooks/pre-commit` gate enforces this locally (also
 mirrored in `.pre-commit-config.yaml` for pre-commit-framework users).
-Before pushing, also run `scripts/check_ci_parity.sh` (python scripts/tests suite without optional deps, `cargo doc` with `-D warnings`, `cargo test --no-default-features`, git defaulting to `master`) — the CI jobs the hook does not cover.
+Before pushing, also run `scripts/check_ci_parity.sh` (python scripts/tests suite without optional deps, all-feature Clippy, `cargo doc` with `-D warnings`, `cargo test --no-default-features`, git defaulting to `master`) — the hermetic CI configurations the hook does not cover. The Docker source-build journey remains a CI job; when a local Docker daemon is available it can be run with `tests/run_docker_validation.sh`.
 
 Failure mode it prevents: main sat red on a fmt check while docs commits kept
 stacking on top (fixed in d9c5874d). Red CI is a stop signal, never background

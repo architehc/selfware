@@ -7,7 +7,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::budget::PlanBudget;
 use super::query::{extract_keywords, find_related_symbols};
@@ -219,7 +219,7 @@ impl EvolutionPlanner {
         // workspace policy, errors surfaced.
         let root = self.codebase_root.clone();
         let safety = self.safety.clone();
-        let files = tokio::task::spawn_blocking(move || {
+        let files = crate::tools::workspace_root::spawn_blocking(move || {
             super::walk::source_files(&root, safety.as_ref(), super::MAX_WALK_DEPTH)
         })
         .await??
@@ -607,9 +607,18 @@ pub struct CallerInfo {
 
 /// Analyze impact of a code change
 pub async fn analyze_impact(
-    target_file: &PathBuf,
+    target_file: &Path,
     symbol: Option<&str>,
-    codebase_root: &PathBuf,
+    codebase_root: &Path,
+) -> Result<ImpactAnalysis> {
+    analyze_impact_with_safety(target_file, symbol, codebase_root, None).await
+}
+
+pub(super) async fn analyze_impact_with_safety(
+    target_file: &Path,
+    symbol: Option<&str>,
+    codebase_root: &Path,
+    safety: Option<&crate::config::SafetyConfig>,
 ) -> Result<ImpactAnalysis> {
     let mut direct_callers = Vec::new();
     let transitive_deps = Vec::new();
@@ -622,40 +631,39 @@ pub async fn analyze_impact(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // Walk codebase to find references. A denied file (`.env`, …) is never
-    // read: "does it contain <symbol>" is an oracle on its content.
-    let safety = crate::tools::file::resolve_safety_config(None);
-    let mut entries = tokio::fs::read_dir(codebase_root).await?;
+    // Use the same bounded, policy-checked, no-symlink walk as every other
+    // introspection tool. `DirEntry::path().is_file()` follows symlinks, so
+    // the old top-level loop could read a symlinked source even though the
+    // other introspection paths refused implicit symlink inputs.
+    let root = codebase_root.to_path_buf();
+    let safety = safety.cloned();
+    let files = crate::tools::workspace_root::spawn_blocking(move || {
+        super::walk::source_files(&root, safety.as_ref(), super::MAX_WALK_DEPTH)
+    })
+    .await??
+    .files;
 
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let path_str = path.to_string_lossy();
-        if crate::safety::yolo::denied_glob_among(&[path_str.as_ref()], &safety.denied_paths)
-            .is_some()
-            || crate::safety::recursive_read::sensitive_component(&path_str, false).is_some()
-        {
+    for path in files {
+        if path == target_file {
             continue;
         }
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            // Check for imports/references to target
+            let file_name = path.to_string_lossy().to_lowercase();
 
-        if path.is_file() && path != *target_file {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                // Check for imports/references to target
-                let file_name = path.to_string_lossy().to_lowercase();
+            // Simple text-based search for references
+            let symbol_matches = symbol.is_some_and(|s: &str| content.contains(s));
+            if content.contains(&target_name) || symbol_matches {
+                let info = CallerInfo {
+                    file: path.to_string_lossy().to_string(),
+                    line: 1, // Would need line-by-line analysis
+                    context: format!("References {}", target_name),
+                };
 
-                // Simple text-based search for references
-                let symbol_matches = symbol.is_some_and(|s: &str| content.contains(s));
-                if content.contains(&target_name) || symbol_matches {
-                    let info = CallerInfo {
-                        file: path.to_string_lossy().to_string(),
-                        line: 1, // Would need line-by-line analysis
-                        context: format!("References {}", target_name),
-                    };
-
-                    if file_name.contains("test") {
-                        tests_affected.push(path.to_string_lossy().to_string());
-                    } else {
-                        direct_callers.push(info);
-                    }
+                if file_name.contains("test") {
+                    tests_affected.push(path.to_string_lossy().to_string());
+                } else {
+                    direct_callers.push(info);
                 }
             }
         }

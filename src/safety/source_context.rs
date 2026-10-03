@@ -35,12 +35,52 @@
 //!   benign content like long base64 blobs).
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::path::{Component, Path};
 use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::Value;
 
 use crate::evolve::context_trust::{analyze_source, is_line_separator, logical_lines, SourceKind};
+
+/// Return whether a directory name belongs to private state maintained by an
+/// AI coding tool. Repository-wide discovery must never descend into these
+/// directories: they can contain transcripts, credentials, caches, and full
+/// worktree clones that are neither project source nor safe model context.
+pub(crate) fn is_private_tool_state_dir_name(name: &OsStr) -> bool {
+    const PRIVATE_DIRS: &[&str] = &[".claude", ".codex", ".agents", ".qwen", ".superpowers"];
+    name.to_str().is_some_and(|name| {
+        PRIVATE_DIRS
+            .iter()
+            .any(|private| name.eq_ignore_ascii_case(private))
+    })
+}
+
+/// Return whether any normal component of `path` is private tool state.
+/// Component matching avoids substring false positives such as
+/// `docs/.claude-example.md`.
+pub(crate) fn path_contains_private_tool_state(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => is_private_tool_state_dir_name(name),
+        _ => false,
+    })
+}
+
+/// Encode an untrusted display label (most commonly a filesystem path) for
+/// inclusion in model-visible context.
+///
+/// JSON quoting makes control characters and quotes explicit.  Backticks and
+/// angle brackets are escaped as unicode as well so a crafted filename cannot
+/// terminate a Markdown fence or manufacture an XML-like control tag around
+/// otherwise trusted context.
+pub(crate) fn quote_untrusted_label(label: &str) -> String {
+    serde_json::to_string(label)
+        .unwrap_or_else(|_| "\"[invalid label]\"".to_string())
+        .replace('`', "\\u0060")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+}
 
 /// Replacement text for a neutralized line.
 pub(crate) const REMOVED_LINE: &str = "[trust-gate: removed injection pattern]";

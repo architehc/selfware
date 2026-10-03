@@ -148,28 +148,18 @@ impl StateBackend for FileBackend {
 
     async fn save(&self, workflow_name: &str, state: &HashMap<String, Value>) -> Result<()> {
         let path = self.state_file_path(workflow_name);
-        let temp_path = path.with_extension("tmp");
 
-        // Write to temp file first for atomicity
         let content = serde_json::to_string_pretty(state)
             .map_err(|e| SelfwareError::Internal(format!("Failed to serialize state: {}", e)))?;
 
-        tokio::fs::write(&temp_path, content).await.map_err(|e| {
-            SelfwareError::Internal(format!(
-                "Failed to write state temp file '{}': {}",
-                temp_path.display(),
-                e
-            ))
-        })?;
-
-        // Atomic rename
-        tokio::fs::rename(&temp_path, &path).await.map_err(|e| {
-            SelfwareError::Internal(format!(
-                "Failed to rename state file to '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        crate::session::checkpoint::write_bytes_atomically(&path, content.as_bytes(), 0o600)
+            .map_err(|e| {
+                SelfwareError::Internal(format!(
+                    "Failed to atomically write state file '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
 
         debug!("Saved state for '{}' to {}", workflow_name, path.display());
         Ok(())

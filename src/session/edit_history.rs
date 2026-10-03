@@ -519,20 +519,12 @@ pub(crate) async fn restore_checkpoint_guarded(
                 continue;
             }
         }
-        // Atomic write: temp file + rename, never a torn write. Uses the
-        // shared replace_atomically so the restore survives Windows' rename
-        // restriction (rename fails when the destination exists — the
-        // remove-then-retry fallback checkpoint.rs established for full
-        // checkpoint writes).
-        let tmp = path.with_extension(format!(
-            "{}.undo-tmp",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
-        ));
-        let written = tokio::fs::write(&tmp, &snapshot.content).await.is_ok()
-            && crate::session::checkpoint::replace_atomically(&tmp, path).is_ok();
-        if !written {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
+        let written = crate::session::checkpoint::write_bytes_atomically(
+            path,
+            snapshot.content.as_bytes(),
+            0o666,
+        )
+        .is_ok();
         outcomes.push((
             path.clone(),
             if written {

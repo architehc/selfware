@@ -24,7 +24,9 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use super::net_policy;
+use super::net_policy::GuardedProxy;
 use super::Tool;
+use crate::safety::checker::validation::contains_outbound_credential_shape;
 
 /// The Playwright bridge script, embedded in the binary at compile time so
 /// PageControl works even when scripts/ is not shipped (cargo install --git /
@@ -78,6 +80,40 @@ const VALID_ACTIONS: &[&str] = &[
     // Lifecycle
     "shutdown",
 ];
+
+fn page_argument_contains_credential(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_outbound_credential_shape(text),
+        Value::Array(values) => values.iter().any(page_argument_contains_credential),
+        Value::Object(values) => values.values().any(page_argument_contains_credential),
+        _ => false,
+    }
+}
+
+/// Enforce the outbound-content policy where the bridge command is built so
+/// direct Tool invocations receive the same protection as agent-dispatched
+/// calls. Output paths remain local; every value below crosses into the
+/// browser and can be submitted to or evaluated inside a remote page.
+fn reject_page_control_credential_shapes(args: &Value) -> Result<()> {
+    for field in [
+        "url",
+        "selector",
+        "text",
+        "value",
+        "values",
+        "key",
+        "name",
+        "expression",
+    ] {
+        if args
+            .get(field)
+            .is_some_and(page_argument_contains_credential)
+        {
+            anyhow::bail!("Refusing page_control operation: credential-shaped value in {field}");
+        }
+    }
+    Ok(())
+}
 
 // ============================================================================
 // Bridge Process Communication
@@ -157,24 +193,36 @@ fn bridge_dead_cause(dead: &BridgeDeadState) -> Option<BridgeTransportError> {
     dead.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
-/// Describe why the bridge's pipes closed: exit status (if Node exited within
-/// a short grace period) and the tail of its stderr. Waits (<=300ms) for both
-/// the exit status and the stderr drain.
+/// Terminate/reap a bridge whose transport failed, then describe its exit
+/// status and the tail of stderr. The final stderr drain is bounded to 300ms.
 async fn describe_bridge_exit(
     child: &Mutex<Child>,
+    process_group: Option<u32>,
+    registry_entry: Option<&str>,
     stderr_tail: &BridgeStderrTail,
     stderr_done: &std::sync::atomic::AtomicBool,
 ) -> String {
-    let mut status = None;
-    for _ in 0..30 {
-        if status.is_none() {
-            if let Ok(mut c) = child.try_lock() {
-                if let Ok(Some(s)) = c.try_wait() {
-                    status = Some(s);
-                }
-            }
+    // The transport is unusable once stdout closes or a read/write fails.
+    // Terminate and reap the whole browser tree immediately, while the direct
+    // child still pins the pgid, instead of leaving cleanup until a later tool
+    // call or object drop.
+    let status = {
+        let mut child = child.lock().await;
+        kill_bridge_group_while_unreaped(&child, process_group);
+        let _ = child.start_kill();
+        child.wait().await.ok()
+    };
+    if status.is_some() {
+        if let Some(id) = registry_entry {
+            crate::resources::ResourceRegistry::global()
+                .release(id, "page-control bridge transport ended");
         }
-        if status.is_some() && stderr_done.load(Ordering::Acquire) {
+    }
+
+    // Give the independently drained stderr stream a short chance to publish
+    // its final diagnostic lines after process teardown.
+    for _ in 0..30 {
+        if stderr_done.load(Ordering::Acquire) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -207,6 +255,8 @@ struct PlaywrightBridge {
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Watches direct-child exit even when a descendant keeps stdout open.
+    exit_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Task that drains the bridge's stderr concurrently, so a >64KB burst of
     /// Chromium logging cannot fill the pipe and stall Node (2026-09-21
     /// review: the pipe was never read — the parent stalled, the child
@@ -215,15 +265,15 @@ struct PlaywrightBridge {
     /// Process-group id of the bridge, captured at spawn. On unix the bridge
     /// is spawned with `process_group(0)`, making it the leader of its own
     /// process group, so the pgid equals the bridge pid and the group covers
-    /// the Chromium children the bridge spawns. Kept separately from the
-    /// [`Child`] handle because `start_kill()` / `kill()` only signal the
-    /// direct Node process (2026-09-21 review: killing Node reparented the
-    /// still-running Chromium to PID 1); the group kill reaches the whole tree.
-    #[cfg(unix)]
+    /// the Chromium children it spawns. It is used only while [`Child::id`]
+    /// still confirms the unreaped leader owns that numeric identity.
     pgid: Option<u32>,
     /// Resource-registry entry: the bridge is session infrastructure (open
     /// pages persist across tasks), recorded as a kept, session-owned browser.
     registry_entry: Option<String>,
+    /// Connection-time SSRF enforcement for browser navigations, redirects,
+    /// subresources, evaluated fetches and WebSocket CONNECT requests.
+    proxy: Option<GuardedProxy>,
 }
 
 impl PlaywrightBridge {
@@ -243,7 +293,10 @@ impl PlaywrightBridge {
     async fn spawn() -> Result<Self> {
         let bridge_script = Self::find_bridge_script()?;
         Self::ensure_bridge_dependencies(&bridge_script)?;
-        Self::spawn_with_script(&bridge_script, &[]).await
+        let allow_private =
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+        let proxy = GuardedProxy::start(allow_private, None).await?;
+        Self::spawn_with_script_and_proxy(&bridge_script, &[], Some(proxy)).await
     }
 
     /// Testable core: spawn the bridge with an explicit script and optional
@@ -254,17 +307,33 @@ impl PlaywrightBridge {
         bridge_script: &std::path::Path,
         extra_args: &[&str],
     ) -> Result<Self> {
+        Self::spawn_with_script_and_proxy(bridge_script, extra_args, None).await
+    }
+
+    async fn spawn_with_script_and_proxy(
+        bridge_script: &std::path::Path,
+        extra_args: &[&str],
+        proxy: Option<GuardedProxy>,
+    ) -> Result<Self> {
         let mut args: Vec<&str> = Vec::with_capacity(extra_args.len() + 1);
         let script = bridge_script.to_string_lossy();
         args.push(&script);
         args.extend_from_slice(extra_args);
-        Self::spawn_program("node", &args).await
+        Self::spawn_program_with_proxy("node", &args, proxy).await
     }
 
     /// Spawn `program args...` as the bridge process. Production always runs
     /// `node <bridge script>`; tests substitute `sh -c ...` stubs to exercise
     /// the transport (exit, broken pipe) without Node or a browser.
     async fn spawn_program(program: &str, args: &[&str]) -> Result<Self> {
+        Self::spawn_program_with_proxy(program, args, None).await
+    }
+
+    async fn spawn_program_with_proxy(
+        program: &str,
+        args: &[&str],
+        proxy: Option<GuardedProxy>,
+    ) -> Result<Self> {
         info!("Spawning playwright-bridge: {} {:?}", program, args);
 
         let mut cmd = Command::new(program);
@@ -312,6 +381,9 @@ impl PlaywrightBridge {
             "SELFWARE_WORKSPACE_ROOT",
             crate::tools::workspace_root::current_path(),
         );
+        if let Some(proxy) = proxy.as_ref() {
+            cmd.env("SELFWARE_BROWSER_PROXY", proxy.url());
+        }
 
         let mut child = cmd
             .spawn()
@@ -319,12 +391,10 @@ impl PlaywrightBridge {
 
         // Capture the process-group id at spawn. The bridge child runs in its
         // own process group (see `process_group(0)` above), so the pgid equals
-        // the child's pid. It must be captured here rather than re-derived
-        // later from the Child handle: `start_kill`/`kill` only signal the
-        // direct Node process, and once Node is reaped `Child::id()` returns
-        // None — the surviving Chromium group members would be unreachable.
-        #[cfg(unix)]
-        let pgid = child.id();
+        // the child's pid. `start_kill`/`kill` signal only Node, so cleanup uses
+        // this pgid to reach Chromium too, but only while the live Child handle
+        // still proves that the unreaped leader owns the same numeric id.
+        let pgid = cfg!(unix).then(|| child.id()).flatten();
         let registry_entry = child.id().map(|pid| {
             use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
             ResourceRegistry::global().register_owned(
@@ -368,6 +438,7 @@ impl PlaywrightBridge {
         let reader_child = Arc::clone(&child);
         let reader_tail = Arc::clone(&stderr_tail);
         let reader_stderr_done = Arc::clone(&stderr_done);
+        let reader_registry_entry = registry_entry.clone();
 
         // Background reader task — reads NDJSON responses from stdout. On EOF
         // or a read error the bridge is marked dead and every pending command
@@ -381,9 +452,14 @@ impl PlaywrightBridge {
                 let line = match lines.next_line().await {
                     Ok(Some(line)) => line,
                     Ok(None) => {
-                        let detail =
-                            describe_bridge_exit(&reader_child, &reader_tail, &reader_stderr_done)
-                                .await;
+                        let detail = describe_bridge_exit(
+                            &reader_child,
+                            pgid,
+                            reader_registry_entry.as_deref(),
+                            &reader_tail,
+                            &reader_stderr_done,
+                        )
+                        .await;
                         warn!("Playwright bridge closed its output{}", detail);
                         mark_bridge_dead(
                             &pending_clone,
@@ -401,6 +477,14 @@ impl PlaywrightBridge {
                             BridgeTransportError::ReadFailed {
                                 message: e.to_string(),
                             },
+                        )
+                        .await;
+                        let _ = describe_bridge_exit(
+                            &reader_child,
+                            pgid,
+                            reader_registry_entry.as_deref(),
+                            &reader_tail,
+                            &reader_stderr_done,
                         )
                         .await;
                         break;
@@ -434,6 +518,33 @@ impl PlaywrightBridge {
             }
 
             debug!("Playwright-bridge stdout reader exited");
+        });
+
+        // A descendant can inherit stdout and keep it open after Node exits,
+        // so EOF alone is not a reliable lifecycle signal. Observe the direct
+        // child independently; WNOWAIT pins its pgid until group teardown.
+        let exit_child = Arc::clone(&child);
+        let exit_pending = Arc::clone(&pending);
+        let exit_dead = Arc::clone(&dead);
+        let exit_tail = Arc::clone(&stderr_tail);
+        let exit_stderr_done = Arc::clone(&stderr_done);
+        let exit_registry_entry = registry_entry.clone();
+        let exit_handle = tokio::spawn(async move {
+            crate::tools::process_guard::wait_for_locked_child_exit(&exit_child).await;
+            let detail = describe_bridge_exit(
+                &exit_child,
+                pgid,
+                exit_registry_entry.as_deref(),
+                &exit_tail,
+                &exit_stderr_done,
+            )
+            .await;
+            mark_bridge_dead(
+                &exit_pending,
+                &exit_dead,
+                BridgeTransportError::Exited { detail },
+            )
+            .await;
         });
 
         // Background stderr drain task. The bridge's stderr pipe was never
@@ -483,10 +594,11 @@ impl PlaywrightBridge {
             next_id: AtomicU64::new(1),
             child,
             reader_handle: Mutex::new(Some(reader_handle)),
+            exit_handle: Mutex::new(Some(exit_handle)),
             stderr_handle: Mutex::new(Some(stderr_handle)),
-            #[cfg(unix)]
             pgid,
             registry_entry,
+            proxy,
         })
     }
 
@@ -565,43 +677,59 @@ impl PlaywrightBridge {
         Ok(response.result.unwrap_or(json!(null)))
     }
 
+    fn allow_local_url(&self, url: &url::Url) {
+        if let Some(proxy) = self.proxy.as_ref() {
+            proxy.allow_local_url(url);
+        }
+    }
+
     /// The recorded fatal cause, if the bridge is dead.
     fn dead_cause(&self) -> Option<BridgeTransportError> {
         bridge_dead_cause(&self.dead)
     }
 
     /// Classify a stdin write failure, mark the bridge dead, and return the
-    /// recorded cause (the reader's `Exited` may win the race — equally fatal,
-    /// and it carries the exit status).
+    /// recorded cause. A broken-pipe cause is recorded before group teardown
+    /// can make the stdout reader observe a synthetic SIGKILL exit.
     async fn write_failed(&self, err: std::io::Error) -> BridgeTransportError {
-        let cause = if err.kind() == std::io::ErrorKind::BrokenPipe {
-            BridgeTransportError::BrokenPipe {
-                detail: describe_bridge_exit(&self.child, &self.stderr_tail, &self.stderr_done)
-                    .await,
+        if err.kind() == std::io::ErrorKind::BrokenPipe {
+            // Record the observed write failure before diagnostics kill the
+            // bridge group. That kill closes stdout and wakes the reader; if
+            // the reader won the race it would overwrite the more precise
+            // BrokenPipe cause with an artificial SIGKILL exit.
+            let provisional = BridgeTransportError::BrokenPipe {
+                detail: String::new(),
+            };
+            mark_bridge_dead(&self.pending, &self.dead, provisional.clone()).await;
+            let detail = describe_bridge_exit(
+                &self.child,
+                self.pgid,
+                self.registry_entry.as_deref(),
+                &self.stderr_tail,
+                &self.stderr_done,
+            )
+            .await;
+            let completed = BridgeTransportError::BrokenPipe { detail };
+            let mut slot = self.dead.lock().unwrap_or_else(|p| p.into_inner());
+            if matches!(slot.as_ref(), Some(BridgeTransportError::BrokenPipe { .. })) {
+                *slot = Some(completed.clone());
             }
-        } else {
-            BridgeTransportError::WriteFailed {
-                message: err.to_string(),
-            }
+            return slot.clone().unwrap_or(completed);
+        }
+
+        let cause = BridgeTransportError::WriteFailed {
+            message: err.to_string(),
         };
         mark_bridge_dead(&self.pending, &self.dead, cause.clone()).await;
+        let _ = describe_bridge_exit(
+            &self.child,
+            self.pgid,
+            self.registry_entry.as_deref(),
+            &self.stderr_tail,
+            &self.stderr_done,
+        )
+        .await;
         self.dead_cause().unwrap_or(cause)
-    }
-
-    /// SIGKILL every member of the bridge's process group.
-    ///
-    /// Uses the pgid captured at spawn rather than the live child pid: it
-    /// reaches the Node process AND the Chromium children it spawned, and it
-    /// still works after the direct Node child has been reaped (`Child::id()`
-    /// returns `None` then, but surviving group members — orphaned Chromium —
-    /// would otherwise be unreachable).
-    fn kill_bridge_group(&self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid {
-            use nix::sys::signal::{killpg, Signal};
-            use nix::unistd::Pid;
-            let _ = killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL);
-        }
     }
 
     /// Shut down the bridge process gracefully.
@@ -617,8 +745,8 @@ impl PlaywrightBridge {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        self.kill_bridge_group();
         let mut child = self.child.lock().await;
+        kill_bridge_group_while_unreaped(&child, self.pgid);
         let _ = child.kill().await;
         if child.wait().await.is_ok() {
             if let Some(id) = &self.registry_entry {
@@ -628,7 +756,11 @@ impl PlaywrightBridge {
             }
         }
 
-        // Cancel reader tasks
+        // Cancel lifecycle/reader tasks
+        let mut handle = self.exit_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
         let mut handle = self.reader_handle.lock().await;
         if let Some(h) = handle.take() {
             h.abort();
@@ -756,11 +888,16 @@ impl Drop for PlaywrightBridge {
         // is killed first so the Chromium children spawn-killed alongside the
         // Node process instead of being orphaned to PID 1 (the 2026-09-21
         // finding that `start_kill()` alone only signals Node).
-        self.kill_bridge_group();
         if let Ok(mut child) = self.child.try_lock() {
+            kill_bridge_group_while_unreaped(&child, self.pgid);
             let _ = child.start_kill();
         }
         if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.exit_handle.try_lock() {
             if let Some(h) = handle.take() {
                 h.abort();
             }
@@ -771,6 +908,27 @@ impl Drop for PlaywrightBridge {
             }
         }
     }
+}
+
+/// SIGKILL every member of a bridge process group only while its direct child
+/// still owns the matching pid. Once the child is reaped, the numeric pgid may
+/// be recycled and must never be signalled from retained state.
+fn kill_bridge_group_while_unreaped(child: &Child, process_group: Option<u32>) {
+    #[cfg(unix)]
+    if let (Some(pid), Some(pgid)) = (child.id(), process_group) {
+        if pid == pgid {
+            if let Ok(raw) = i32::try_from(pgid) {
+                if raw > 1 {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(raw),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (child, process_group);
 }
 
 // ============================================================================
@@ -812,9 +970,12 @@ fn validate_url_with_allow_private(url: &str, allow_private: bool) -> Result<()>
     // bridge doesn't go through our resolver.)
     if !allow_private {
         if let Some(host) = parsed.host_str() {
-            if host.parse::<IpAddr>().is_err() && !net_policy::is_private_network_host(host) {
+            let resolver_host = net_policy::host_for_socket_resolution(host);
+            if resolver_host.parse::<IpAddr>().is_err()
+                && !net_policy::is_private_network_host(host)
+            {
                 let port = parsed.port_or_known_default().unwrap_or(80);
-                if let Ok(addrs) = (host, port).to_socket_addrs() {
+                if let Ok(addrs) = (resolver_host, port).to_socket_addrs() {
                     for addr in addrs {
                         if net_policy::is_private_or_internal_ip(&addr.ip()) {
                             bail!(
@@ -903,12 +1064,49 @@ impl PageController {
     }
 
     /// Send a command to the bridge.
-    async fn send_command(&self, command: Value, timeout_ms: u64) -> Result<Value> {
+    async fn send_command(&self, mut command: Value, timeout_ms: u64) -> Result<Value> {
         self.ensure_bridge().await?;
         let bridge = self.bridge.lock().await;
         let bridge = bridge
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Bridge not initialized"))?;
+
+        // This field is bridge-internal and must never be accepted from a
+        // model-authored tool call. Derive it only from the URL that Rust has
+        // validated. The bridge uses it to scope the localhost exception to
+        // the page that was explicitly navigated there.
+        if let Some(object) = command.as_object_mut() {
+            object.remove("selfware_allowed_local_origin");
+        }
+        let action = command
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if matches!(action.as_deref(), Some("goto" | "new_tab")) {
+            if let Some(object) = command.as_object_mut() {
+                object.insert("selfware_allowed_local_origin".to_string(), Value::Null);
+            }
+            if let Some(raw_url) = command.get("url").and_then(Value::as_str) {
+                let parsed = url::Url::parse(raw_url).context("Invalid URL")?;
+                if matches!(parsed.scheme(), "http" | "https") {
+                    let allow_private =
+                        std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+                    let policy = net_policy::validate_url_target(&parsed, allow_private)?;
+                    let origin = if policy.allow_localhost && !policy.allow_private {
+                        bridge.allow_local_url(&parsed);
+                        Some(parsed.origin().ascii_serialization())
+                    } else {
+                        None
+                    };
+                    if let Some(object) = command.as_object_mut() {
+                        object.insert(
+                            "selfware_allowed_local_origin".to_string(),
+                            origin.map_or(Value::Null, Value::String),
+                        );
+                    }
+                }
+            }
+        }
         bridge.send(command, timeout_ms).await
     }
 
@@ -1078,6 +1276,11 @@ impl Tool for PageControlTool {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_page_control_credential_shapes(&args)?;
+        // The bridge is a persistent process whose cwd does not follow an
+        // agent entering a worktree. Resolve output paths in this task before
+        // validation, parent creation, and forwarding to Node.
+        let args = anchor_page_output_args(args);
         let action = args
             .get("action")
             .and_then(|v| v.as_str())
@@ -1139,6 +1342,10 @@ impl Tool for PageControlTool {
             }
         }
     }
+}
+
+fn anchor_page_output_args(args: Value) -> Value {
+    crate::tools::workspace_root::anchor_json(args, &["path"])
 }
 
 fn validate_page_output_path(output_path: &str, tool_name: &str) -> Result<()> {

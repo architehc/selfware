@@ -547,6 +547,32 @@ pub(crate) fn contains_outbound_credential_shape(text: &str) -> bool {
     OUTBOUND_CREDENTIAL_SHAPE.is_match(text)
 }
 
+/// Refuse credential-shaped strings carried in values that will cross a
+/// network or browser boundary. Arrays and objects are walked so multi-value
+/// browser arguments cannot bypass the scalar check.
+fn check_outbound_credential_value(value: &serde_json::Value, location: &str) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) if contains_outbound_credential_shape(text) => {
+            Err(SelfwareError::Safety(SafetyError::SecretDetected {
+                finding: format!("credential-shaped value in {location}"),
+            }))
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                check_outbound_credential_value(value, location)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                check_outbound_credential_value(value, location)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 impl SafetyChecker {
     /// Create a safety checker with the given configuration
     pub fn new(config: &SafetyConfig) -> Self {
@@ -966,6 +992,15 @@ impl SafetyChecker {
                 if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
                     self.check_browser_url(url)?;
                 }
+                // `user_agent` becomes an outbound request header and
+                // `wait_for` crosses into the remote page's browser process.
+                // Apply the same credential-shape policy as http_request to
+                // every browser-bound string, not only the destination URL.
+                for field in ["wait_for", "user_agent"] {
+                    if let Some(value) = args.get(field) {
+                        check_outbound_credential_value(value, &format!("browser {field}"))?;
+                    }
+                }
             }
             "browser_screenshot" | "browser_pdf" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
@@ -988,7 +1023,8 @@ impl SafetyChecker {
                     self.check_browser_url(url)?;
                 }
                 if let Some(code) = args
-                    .get("code")
+                    .get("script")
+                    .or_else(|| args.get("code"))
                     .or_else(|| args.get("expression"))
                     .and_then(|v| v.as_str())
                 {
@@ -1165,6 +1201,14 @@ impl SafetyChecker {
                 }
                 if let Some(expr) = args.get("expression").and_then(|v| v.as_str()) {
                     self.check_browser_eval(expr)?;
+                }
+                // These values are forwarded to Playwright and can be
+                // submitted to, or evaluated inside, a remote page. Scan all
+                // browser-bound values, including the multi-select array.
+                for field in ["selector", "text", "value", "values", "key", "name"] {
+                    if let Some(value) = args.get(field) {
+                        check_outbound_credential_value(value, &format!("page_control {field}"))?;
+                    }
                 }
             }
             // pty_shell is a shell tool — apply the same command checks as shell_exec.
@@ -3522,6 +3566,10 @@ impl SafetyChecker {
     /// Shared body of the HTTP-request, browser, and vision-endpoint checks
     /// (page-control URLs additionally allow `file://`, so they are separate).
     fn check_endpoint_url(&self, url: &str) -> Result<()> {
+        check_outbound_credential_value(
+            &serde_json::Value::String(url.to_string()),
+            "outbound URL",
+        )?;
         // URLs carrying shell substitution (`$(…)`, backticks, `${…}`) are an
         // exfiltration channel when any layer builds the request through a
         // shell (red-team finding: k8s serviceaccount token smuggled into a
@@ -3601,6 +3649,10 @@ impl SafetyChecker {
 
     /// Check page control URL
     fn check_page_control_url(&self, url: &str) -> Result<()> {
+        check_outbound_credential_value(
+            &serde_json::Value::String(url.to_string()),
+            "page_control URL",
+        )?;
         if url.starts_with("file://") {
             let parsed = url::Url::parse(url)?;
             let path = parsed
@@ -3610,14 +3662,7 @@ impl SafetyChecker {
             return self.check_path(&path_str);
         }
 
-        self.check_url_ssrf_with_options(
-            url,
-            UrlSafetyOptions {
-                allow_file_scheme: false,
-                allow_localhost: true,
-            },
-            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
-        )
+        self.check_endpoint_url(url)
     }
 
     /// Check vision endpoint URL
@@ -3707,7 +3752,8 @@ impl SafetyChecker {
                 return Ok(());
             }
             if let Some(host) = parsed.host_str() {
-                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                let resolver_host = crate::tools::net_policy::host_for_socket_resolution(host);
+                if let Ok(ip) = resolver_host.parse::<std::net::IpAddr>() {
                     if is_private_or_internal(ip) && !allow_private {
                         return Err(SelfwareError::Safety(SafetyError::BlockedPrivateNetwork {
                             ip: ip.to_string(),
@@ -3722,6 +3768,10 @@ impl SafetyChecker {
 
     /// Check browser eval for data exfiltration
     fn check_browser_eval(&self, code: &str) -> Result<()> {
+        check_outbound_credential_value(
+            &serde_json::Value::String(code.to_string()),
+            "browser evaluation",
+        )?;
         let lower = code.to_lowercase();
         if (lower.contains("fetch(") || lower.contains("xmlhttprequest"))
             && (lower.contains("document.cookie") || lower.contains("localstorage"))
@@ -5369,17 +5419,33 @@ pub fn is_private_or_internal(ip: std::net::IpAddr) -> bool {
 #[derive(Clone)]
 pub struct PinnedDnsResolver {
     allow_private: bool,
+    allow_localhost: bool,
 }
 
 impl PinnedDnsResolver {
     pub fn new(allow_private: bool) -> Self {
-        Self { allow_private }
+        Self {
+            allow_private,
+            allow_localhost: false,
+        }
+    }
+
+    /// Permit only syntactically local hostnames to resolve to loopback.
+    /// This remains distinct from broad private-network permission so a
+    /// localhost first hop cannot authorize private DNS answers on redirects.
+    pub fn with_localhost(allow_private: bool, allow_localhost: bool) -> Self {
+        Self {
+            allow_private,
+            allow_localhost,
+        }
     }
 }
 
 impl reqwest::dns::Resolve for PinnedDnsResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let allow_private = self.allow_private;
+        let allow_localhost = self.allow_localhost;
+        let host = name.as_str().to_string();
         Box::pin(async move {
             let addrs: Vec<std::net::SocketAddr> =
                 tokio::net::lookup_host(format!("{}:0", name.as_str()))
@@ -5387,14 +5453,16 @@ impl reqwest::dns::Resolve for PinnedDnsResolver {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
                     .collect();
 
-            if allow_private {
-                let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
-                return Ok(iter);
-            }
-
             let safe_addrs: Vec<std::net::SocketAddr> = addrs
                 .into_iter()
-                .filter(|addr| !is_private_or_internal(addr.ip()))
+                .filter(|addr| {
+                    crate::tools::net_policy::resolved_address_allowed(
+                        &host,
+                        addr.ip(),
+                        allow_private,
+                        allow_localhost,
+                    )
+                })
                 .collect();
 
             if safe_addrs.is_empty() {

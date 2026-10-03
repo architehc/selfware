@@ -272,3 +272,39 @@ fn cargo_telemetry_command_sanitizes_env() {
         "the shared allowlist (PATH) must still reach the child; saw: {envs:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn telemetry_timeout_is_bounded_after_parent_exits_with_inherited_pipes() {
+    let temp = tempfile::tempdir().unwrap();
+    let pidfile = temp.path().join("descendant.pid");
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(format!(
+        "sleep 30 & echo $! > '{}'; printf parent-out; printf parent-err >&2",
+        pidfile.display()
+    ));
+
+    let started = std::time::Instant::now();
+    let error = run_command_with_timeout(cmd, Duration::from_millis(200)).unwrap_err();
+    assert!(format!("{error}").contains("timed out"));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "inherited pipes must not make drain threads join indefinitely"
+    );
+
+    let pid: i32 = std::fs::read_to_string(pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for _ in 0..100 {
+        if matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        ) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("telemetry descendant {pid} survived timeout");
+}

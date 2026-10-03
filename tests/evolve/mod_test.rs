@@ -8,7 +8,15 @@ async fn test_run_self_evolve_starts_server() {
 
 #[tokio::test]
 async fn test_full_server_flow() {
-    let builder = GraphBuilder::new("src");
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src/agent")).unwrap();
+    std::fs::write(
+        project.path().join("src/agent/mod.rs"),
+        "pub struct Agent;\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub mod agent;\n").unwrap();
+    let builder = GraphBuilder::new(project.path().join("src"));
     let graph = builder.scan_src().unwrap();
     let server = EvolveServer::new(graph);
     let json = server.graph_json().await.unwrap();

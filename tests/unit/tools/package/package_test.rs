@@ -371,6 +371,22 @@ async fn test_pip_freeze_output_file_policy() {
 }
 
 #[tokio::test]
+async fn pip_freeze_output_file_follows_the_active_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let resolved = crate::tools::workspace_root::scope(root, async {
+        pip_freeze_output_file(&json!({"output_file": "requirements.lock"}))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        resolved,
+        dir.path().join("requirements.lock").to_string_lossy()
+    );
+}
+
+#[tokio::test]
 async fn test_npm_install_path_policy() {
     let _state = policy_guard();
     let tool = NpmInstall::new();

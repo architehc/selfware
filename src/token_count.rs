@@ -266,6 +266,11 @@ pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usiz
         if let Some(ref reasoning) = msg.reasoning_content {
             total += estimate_tokens(reasoning);
         }
+        // Optional sender names are serialized into the request too. This is
+        // also used to identify generated context-file messages internally.
+        if let Some(ref name) = msg.name {
+            total += estimate_tokens(name);
+        }
         // Image tokens
         total += msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
         // Tool calls if present

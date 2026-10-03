@@ -79,6 +79,97 @@ fn test_localize_issue_empty_query() {
 }
 
 #[test]
+fn test_localize_issue_prunes_private_tool_state_but_keeps_scratchpad() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("scratchpad")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "// repository sentinel\npub fn repository_sentinel() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("scratchpad/kept.rs"),
+        "// scratchpad sentinel\npub fn scratchpad_sentinel() {}\n",
+    )
+    .unwrap();
+    for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        let hidden = repo.join(dir).join("state/private.rs");
+        fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+        fs::write(
+            hidden,
+            "pub fn private_tool_state_sentinel() {}\npub fn private_tool_state_sentinel_again() {}\n",
+        )
+        .unwrap();
+    }
+
+    let candidates = localize_issue_sync(
+        "repository scratchpad private tool state sentinel",
+        repo.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.file.contains("src/lib.rs")),
+        "ordinary repository source was lost: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.file.contains("scratchpad/kept.rs")),
+        "scratchpad is deliberately retained: {candidates:?}"
+    );
+    assert!(candidates.iter().all(|candidate| {
+        ![".claude", ".codex", ".agents", ".qwen", ".superpowers"]
+            .iter()
+            .any(|dir| candidate.file.contains(dir))
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_localize_issue_does_not_follow_source_directory_symlinks() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "// allowed sentinel\npub fn allowed_sentinel() {}\n",
+    )
+    .unwrap();
+
+    let outside = TempDir::new().unwrap();
+    fs::write(
+        outside.path().join("secret.rs"),
+        "pub fn symlink_private_sentinel() {}\npub fn symlink_private_sentinel_again() {}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), repo.join("source-alias")).unwrap();
+
+    let candidates = localize_issue_sync(
+        "allowed symlink private sentinel",
+        repo.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.file.contains("src/lib.rs")),
+        "ordinary repository source was lost: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| !candidate.file.contains("source-alias")),
+        "symlink target became an implicit source input: {candidates:?}"
+    );
+}
+
+#[test]
 fn test_best_function_in_file() {
     let code = "pub fn foo() {}\npub fn bar() {}\npub fn process_data() {}";
     let terms = vec!["process".to_string(), "data".to_string()];

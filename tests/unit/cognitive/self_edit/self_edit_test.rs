@@ -810,6 +810,11 @@ fn test_glob_rs_files() {
     std::fs::write(tmp.join("a.rs"), "").unwrap();
     std::fs::write(tmp.join("b.txt"), "").unwrap(); // not .rs
     std::fs::write(sub.join("c.rs"), "").unwrap();
+    for state_dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        let private = tmp.join(state_dir).join("worktrees");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("private.rs"), "fn private_state() {}\n").unwrap();
+    }
 
     let files = glob_rs_files(&tmp).unwrap();
     assert_eq!(files.len(), 2);

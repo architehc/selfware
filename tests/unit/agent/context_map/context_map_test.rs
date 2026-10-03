@@ -917,3 +917,23 @@ async fn test_focus_on_query_frees_enough_for_full_estimate() {
         after.estimated_tokens
     );
 }
+
+#[tokio::test]
+async fn test_recommend_context_promotes_an_explicit_filename() {
+    let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+    map.register_tree_entry(PathBuf::from("src/agent/recovery.rs"), 100);
+    map.register_tree_entry(PathBuf::from("src/agent/unrelated.rs"), 100);
+
+    let recommendation = map
+        .recommend_context("fix the no-action detection in recovery.rs")
+        .await;
+
+    assert!(recommendation
+        .promote
+        .iter()
+        .any(|suggestion| suggestion.path == Path::new("src/agent/recovery.rs")));
+    assert!(!recommendation
+        .promote
+        .iter()
+        .any(|suggestion| suggestion.path == Path::new("src/agent/unrelated.rs")));
+}

@@ -212,10 +212,11 @@ impl HierarchicalMemory {
         let cfg = config.read().await;
         let working = WorkingMemory::new(cfg.working_capacity, index.clone());
         let short_term = ShortTermMemory::with_config(&cfg, index.clone());
-        let long_term = LongTermMemory::with_config(&cfg, index.clone());
+        let archive = ArchiveMemory::with_index(index.clone());
+        let long_term =
+            LongTermMemory::with_archive(cfg.long_term_capacity, index.clone(), archive.clone());
         drop(cfg);
 
-        let archive = ArchiveMemory::new();
         let episodic = EpisodicMemory::new();
         let semantic = Arc::new(RwLock::new(SemanticMemory::new()));
         let budget = TokenBudget::default();
@@ -274,7 +275,7 @@ impl HierarchicalMemory {
 
     /// Get memory statistics
     pub async fn get_stats(&self) -> MemoryStats {
-        self.stats.read().await.clone()
+        self.stats().await
     }
 
     /// Compress memory if over budget.
@@ -307,9 +308,15 @@ impl HierarchicalMemory {
                 let entry_tokens = crate::token_count::estimate_content_tokens(&entry.content);
                 // Demote to short-term instead of dropping
                 if let Some(mut removed) = self.working.remove(entry.id).await {
+                    let original = removed.clone();
                     removed.tier = MemoryTier::ShortTerm;
                     if let Err(e) = self.short_term.store(removed).await {
                         tracing::warn!(error = %e, entry_id = entry.id, "Failed to demote entry to short-term memory");
+                        self.working.store(original).await.map_err(|rollback| {
+                            anyhow::anyhow!(
+                                "working-memory compression failed: {e}; rollback failed: {rollback}"
+                            )
+                        })?;
                         continue;
                     }
                     let freed = entry_tokens.min(tokens_to_free);
@@ -339,9 +346,15 @@ impl HierarchicalMemory {
             let to_evict = st_count.saturating_sub(st_cap);
             for entry in entries.iter().take(to_evict) {
                 if let Some(mut removed) = self.short_term.remove(entry.id).await {
+                    let original = removed.clone();
                     removed.tier = MemoryTier::LongTerm;
                     if let Err(e) = self.long_term.store(removed).await {
                         tracing::warn!(error = %e, entry_id = entry.id, "Failed to demote entry to long-term memory");
+                        self.short_term.store(original).await.map_err(|rollback| {
+                            anyhow::anyhow!(
+                                "short-term compression failed: {e}; rollback failed: {rollback}"
+                            )
+                        })?;
                         continue;
                     }
                     compressed = true;
@@ -381,17 +394,16 @@ impl HierarchicalMemory {
         let id = self.index.next_id();
         let entry = MemoryEntry::new(id, content, tier);
 
-        {
-            let mut stats = self.stats.write().await;
-            stats.total_inserts += 1;
-        }
-
-        match tier {
+        let result = match tier {
             MemoryTier::Working => self.working.store(entry).await,
             MemoryTier::ShortTerm => self.short_term.store(entry).await,
             MemoryTier::LongTerm => self.long_term.store(entry).await,
             MemoryTier::Archive => self.archive.store(entry).await,
+        };
+        if result.is_ok() {
+            self.stats.write().await.total_inserts += 1;
         }
+        result
     }
 
     /// Retrieve an entry by ID (searches all tiers)
@@ -426,6 +438,9 @@ impl HierarchicalMemory {
         if query.tier.is_none() || query.tier == Some(MemoryTier::LongTerm) {
             results.extend(self.long_term.query(&query).await);
         }
+        if query.tier.is_none() || query.tier == Some(MemoryTier::Archive) {
+            results.extend(self.archive.query(&query).await);
+        }
 
         results.sort_by(|a, b| {
             let tier_order = |t: MemoryTier| match t {
@@ -456,8 +471,14 @@ impl HierarchicalMemory {
 
         if let Some(mut entry) = self.short_term.retrieve(id).await {
             self.short_term.remove(id).await;
+            let original = entry.clone();
             entry.tier = MemoryTier::Working;
-            self.working.store(entry).await?;
+            if let Err(error) = self.working.store(entry).await {
+                self.short_term.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("promotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
             {
                 let mut stats = self.stats.write().await;
                 stats.total_promotions += 1;
@@ -467,8 +488,31 @@ impl HierarchicalMemory {
 
         if let Some(mut entry) = self.long_term.retrieve(id).await {
             self.long_term.remove(id).await;
+            let original = entry.clone();
             entry.tier = MemoryTier::ShortTerm;
-            self.short_term.store(entry).await?;
+            if let Err(error) = self.short_term.store(entry).await {
+                self.long_term.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("promotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
+            {
+                let mut stats = self.stats.write().await;
+                stats.total_promotions += 1;
+            }
+            return Ok(());
+        }
+
+        if let Some(mut entry) = self.archive.retrieve(id).await {
+            self.archive.remove(id).await;
+            let original = entry.clone();
+            entry.tier = MemoryTier::LongTerm;
+            if let Err(error) = self.long_term.store(entry).await {
+                self.archive.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("promotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
             {
                 let mut stats = self.stats.write().await;
                 stats.total_promotions += 1;
@@ -483,8 +527,14 @@ impl HierarchicalMemory {
     pub async fn demote(&self, id: u64) -> anyhow::Result<()> {
         if let Some(mut entry) = self.working.retrieve(id).await {
             self.working.remove(id).await;
+            let original = entry.clone();
             entry.tier = MemoryTier::ShortTerm;
-            self.short_term.store(entry).await?;
+            if let Err(error) = self.short_term.store(entry).await {
+                self.working.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("demotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
             {
                 let mut stats = self.stats.write().await;
                 stats.total_demotions += 1;
@@ -494,8 +544,30 @@ impl HierarchicalMemory {
 
         if let Some(mut entry) = self.short_term.retrieve(id).await {
             self.short_term.remove(id).await;
+            let original = entry.clone();
             entry.tier = MemoryTier::LongTerm;
-            self.long_term.store(entry).await?;
+            if let Err(error) = self.long_term.store(entry).await {
+                self.short_term.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("demotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
+            {
+                let mut stats = self.stats.write().await;
+                stats.total_demotions += 1;
+            }
+            return Ok(());
+        }
+        if let Some(mut entry) = self.long_term.retrieve(id).await {
+            self.long_term.remove(id).await;
+            let original = entry.clone();
+            entry.tier = MemoryTier::Archive;
+            if let Err(error) = self.archive.store(entry).await {
+                self.long_term.store(original).await.map_err(|rollback| {
+                    anyhow::anyhow!("demotion failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(error);
+            }
             {
                 let mut stats = self.stats.write().await;
                 stats.total_demotions += 1;
@@ -512,6 +584,7 @@ impl HierarchicalMemory {
         stats.working_count = self.working.count().await;
         stats.short_term_count = self.short_term.count().await;
         stats.long_term_count = self.long_term.count().await;
+        stats.archive_count = self.archive.count().await;
         stats
     }
 

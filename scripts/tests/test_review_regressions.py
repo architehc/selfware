@@ -3,6 +3,8 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import redteam_triage as triage
 from redteam_verdicts import case_fingerprint, load_matching_verdicts
-from resolve_release import resolve_release
+from resolve_release import cargo_package_version, resolve_release, validate_release_tag
 
 spec = importlib.util.spec_from_file_location("harness_archive", ROOT / "benchmarks/harbor/harness_archive.py")
 archive = importlib.util.module_from_spec(spec)
@@ -91,6 +93,28 @@ class TriageTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_tag_must_match_root_package_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text(
+                '[workspace]\nmembers = ["crate"]\n\n'
+                '[package]\nname = "selfware"\nversion = "1.2.3-rc.1"\n\n'
+                '[dependencies]\nother = { version = "9.9.9" }\n'
+            )
+            self.assertEqual(cargo_package_version(manifest), "1.2.3-rc.1")
+            self.assertEqual(
+                validate_release_tag("v1.2.3-rc.1", manifest), "v1.2.3-rc.1"
+            )
+            with self.assertRaisesRegex(ValueError, "does not match package version"):
+                validate_release_tag("v1.2.4", manifest)
+
+    def test_release_version_parser_fails_closed_without_package_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text('[package]\nname = "selfware"\n')
+            with self.assertRaisesRegex(ValueError, "no \\[package\\]\\.version"):
+                cargo_package_version(manifest)
+
     def test_new_tag_uses_dispatch_but_other_lookup_errors_fail(self):
         sha = "a" * 40
         for status in (403, 404, 500):
@@ -146,6 +170,20 @@ class ArchiveTests(unittest.TestCase):
             binary.write_bytes(b"different-executable")
             with self.assertRaises(ValueError):
                 archive.record_candidate(root, "c2", "", config, job, "suite/a", binary, sha)
+
+
+class PlaywrightBridgePolicyTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for bridge policy tests")
+    def test_browser_navigation_policy(self):
+        subprocess.run(
+            [
+                shutil.which("node"),
+                "--test",
+                str(ROOT / "scripts/tests/playwright_bridge_policy.test.js"),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
 
 
 if __name__ == "__main__":

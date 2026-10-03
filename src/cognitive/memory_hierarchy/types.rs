@@ -492,6 +492,8 @@ pub struct MemoryStats {
     pub working_count: usize,
     pub short_term_count: usize,
     pub long_term_count: usize,
+    #[serde(default)]
+    pub archive_count: usize,
     pub total_inserts: u64,
     pub total_queries: u64,
     pub total_promotions: u64,
@@ -579,11 +581,17 @@ impl MemoryIndex {
     pub async fn index_entry(&self, entry: &MemoryEntry) {
         {
             let mut by_tier = self.by_tier.write().await;
+            for ids in by_tier.values_mut() {
+                ids.retain(|&id| id != entry.id);
+            }
             by_tier.entry(entry.tier).or_default().push(entry.id);
         }
 
         {
             let mut by_tag = self.by_tag.write().await;
+            for ids in by_tag.values_mut() {
+                ids.retain(|&id| id != entry.id);
+            }
             for tag in &entry.tags {
                 by_tag.entry(tag.clone()).or_default().push(entry.id);
             }
@@ -603,17 +611,15 @@ impl MemoryIndex {
     pub async fn remove_entry(&self, entry: &MemoryEntry) {
         {
             let mut by_tier = self.by_tier.write().await;
-            if let Some(ids) = by_tier.get_mut(&entry.tier) {
+            for ids in by_tier.values_mut() {
                 ids.retain(|&id| id != entry.id);
             }
         }
 
         {
             let mut by_tag = self.by_tag.write().await;
-            for tag in &entry.tags {
-                if let Some(ids) = by_tag.get_mut(tag) {
-                    ids.retain(|&id| id != entry.id);
-                }
+            for ids in by_tag.values_mut() {
+                ids.retain(|&id| id != entry.id);
             }
         }
     }

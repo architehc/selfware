@@ -467,7 +467,7 @@ async fn agent_terminal_event_is_settled_once_with_original_message() {
                 "agent terminal".into(),
                 emitter,
                 Arc::new(AtomicBool::new(false)),
-                false,
+                None,
                 async move {
                     ready.await?;
                     agent.emit_terminal_event_once(terminal);
@@ -577,4 +577,37 @@ async fn start_abort_persists_checkpoint_before_terminal_event() {
     }
     assert_eq!(terminal_count, 1);
     server.stop().await;
+}
+
+#[tokio::test]
+async fn forced_cancel_continuation_drains_current_task_resources() {
+    use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceState};
+
+    let config = crate::test_support::mock_agent_config("http://127.0.0.1:1/v1");
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    let task_id = format!("forced-cancel-{}", uuid::Uuid::new_v4());
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        task_id.clone(),
+        "forced cancellation cleanup".into(),
+    ));
+
+    // Requested resources need no host driver: teardown deterministically
+    // transitions them to Released. This proves the hard-cancel continuation
+    // executes after the run_task future itself has been dropped.
+    let mut requested = NewResource::new(
+        ResourceKind::Port,
+        ResourceHandle::Port { port: 65_000 },
+        "pending startup",
+    );
+    requested.state = ResourceState::Requested;
+    let registry = crate::resources::ResourceRegistry::global();
+    let resource_id = registry.register_owned(requested, task_id, None);
+
+    let result: anyhow::Result<()> = Err(anyhow::anyhow!("forced cancellation"));
+    agent.finish_forced_cancel(&result).await;
+
+    assert_eq!(
+        registry.get(&resource_id).unwrap().state,
+        ResourceState::Released
+    );
 }

@@ -319,7 +319,69 @@ fn test_code_chunker_fixed_size() {
 
     assert!(!chunks.is_empty());
     for chunk in &chunks {
-        assert!(chunk.len() <= 100);
+        assert!(crate::token_count::estimate_content_tokens(&chunk.content) <= 100);
+    }
+}
+
+#[test]
+fn test_code_chunker_bounds_a_single_oversized_line() {
+    let chunker = CodeChunker {
+        max_chunk_size: 32,
+        min_chunk_size: 1,
+        overlap: 4,
+    };
+    let content = "identifier_".repeat(500);
+
+    let chunks = chunker.chunk_fixed_size(&content, Path::new("minified.js"), "js");
+
+    assert!(chunks.len() > 1);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>(),
+        content
+    );
+    assert!(chunks
+        .iter()
+        .all(|chunk| { crate::token_count::estimate_content_tokens(&chunk.content) <= 32 }));
+    let ids: std::collections::HashSet<&str> =
+        chunks.iter().map(|chunk| chunk.id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        chunks.len(),
+        "pieces from one oversized line must have distinct stable IDs"
+    );
+    assert!(chunks
+        .windows(2)
+        .all(|pair| pair[0].metadata.byte_offset < pair[1].metadata.byte_offset));
+}
+
+#[test]
+fn test_code_chunker_refreshes_ids_after_rebasing_split_rust_chunks() {
+    let chunker = CodeChunker {
+        max_chunk_size: 24,
+        min_chunk_size: 1,
+        overlap: 2,
+    };
+    let content = format!(
+        "// heading\n\npub fn huge() {{\n    let value = \"{}\";\n}}\n",
+        "repeated_token_".repeat(200)
+    );
+
+    let chunks = chunker.chunk(&content, Path::new("src/lib.rs"));
+    assert!(chunks.len() > 1);
+    let ids: std::collections::HashSet<&str> =
+        chunks.iter().map(|chunk| chunk.id.as_str()).collect();
+    assert_eq!(ids.len(), chunks.len());
+    let function_chunks: Vec<&CodeChunk> = chunks
+        .iter()
+        .filter(|chunk| chunk.metadata.chunk_type == ChunkType::Function)
+        .collect();
+    assert!(function_chunks.len() > 1);
+    for chunk in function_chunks {
+        assert_eq!(chunk.id, CodeChunk::stable_id(&chunk.metadata));
+        assert!(chunk.metadata.start_line >= 3);
     }
 }
 
@@ -346,6 +408,30 @@ async fn test_vector_store_delete_collection() {
     assert!(store.get_collection("test").is_none());
 }
 
+#[test]
+fn test_vector_store_delete_then_save_publishes_deletion_and_prunes_previous_generation() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let mut store = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    store.collection("deleted", CollectionScope::Project);
+    store.save().unwrap();
+    let previous_generation = current_generation_path(&storage_path);
+    assert!(previous_generation.is_dir());
+
+    assert!(store.delete_collection("deleted").is_some());
+    store.save().unwrap();
+    assert!(
+        !previous_generation.exists(),
+        "the previously committed generation should be pruned only after replacement"
+    );
+
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    loaded.load().unwrap();
+    assert!(loaded.get_collection("deleted").is_none());
+    assert!(loaded.list_collections().is_empty());
+}
+
 #[tokio::test]
 async fn test_vector_store_index_file() {
     let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
@@ -364,6 +450,30 @@ async fn test_vector_store_index_file() {
     assert!(!collection.is_empty());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn vector_store_refuses_symlinked_source_file() {
+    use std::os::unix::fs::symlink;
+
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let mut store = VectorStore::new(provider);
+    store.collection("project", CollectionScope::Project);
+
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let target = outside.path().join("private.rs");
+    std::fs::write(&target, "pub fn private_material() {}").unwrap();
+    let linked = root.path().join("visible.rs");
+    symlink(&target, &linked).unwrap();
+
+    let error = store.index_file("project", &linked).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("indexed source file"),
+        "unexpected error: {error:#}"
+    );
+    assert!(store.get_collection("project").unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn reindex_file_replaces_chunks_not_accumulates() {
     let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
@@ -376,6 +486,13 @@ async fn reindex_file_replaces_chunks_not_accumulates() {
     std::fs::write(&file_path, "pub fn a() {}\npub fn b() {}\npub fn c() {}").unwrap();
     store.index_file("project", &file_path).await.unwrap();
     let first = store.get_collection("project").unwrap().len();
+    let first_ids = store
+        .get_collection("project")
+        .unwrap()
+        .chunks()
+        .iter()
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
     assert!(first >= 1);
 
     // Re-index the SAME file with SHRUNK content: stale chunks must be
@@ -383,6 +500,29 @@ async fn reindex_file_replaces_chunks_not_accumulates() {
     std::fs::write(&file_path, "pub fn a() {}").unwrap();
     store.index_file("project", &file_path).await.unwrap();
     let second = store.get_collection("project").unwrap().len();
+    let live_index = store.indices.get("project").unwrap();
+    assert_eq!(
+        live_index.len(),
+        second,
+        "collection replacement must remove the same stale IDs from HNSW"
+    );
+    for old_id in &first_ids {
+        if store
+            .get_collection("project")
+            .unwrap()
+            .get_chunk(old_id)
+            .is_none()
+        {
+            assert!(
+                !live_index
+                    .chunk_ids
+                    .iter()
+                    .enumerate()
+                    .any(|(index, id)| id == old_id && !live_index.deleted.contains(&index)),
+                "removed collection chunk {old_id} must not remain live in HNSW"
+            );
+        }
+    }
     assert!(
         second <= first,
         "re-index of a smaller file must not leave stale chunks (first={first}, second={second})"
@@ -524,6 +664,260 @@ async fn test_vector_store_persistence_chunk_id_resolves() {
             known_chunk_id
         );
     }
+}
+
+fn current_generation_path(storage_path: &Path) -> PathBuf {
+    let manifest: VectorStoreManifest = serde_json::from_slice(
+        &std::fs::read(storage_path.join(VECTOR_STORE_MANIFEST_FILE)).unwrap(),
+    )
+    .unwrap();
+    VectorStore::generation_path(storage_path, &manifest.generation).unwrap()
+}
+
+#[tokio::test]
+async fn test_vector_store_load_rejects_id_mismatch_without_partial_state() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let file_path = dir.path().join("persist_test.rs");
+    std::fs::write(&file_path, "pub fn persisted_fn() { let x = 42; }").unwrap();
+
+    let mut source = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    source.collection("project", CollectionScope::Project);
+    source.index_file("project", &file_path).await.unwrap();
+    source.save().unwrap();
+
+    let index_path = current_generation_path(&storage_path).join(VECTOR_STORE_INDICES_FILE);
+    let bytes = std::fs::read(&index_path).unwrap();
+    let (mut persisted, consumed): (PersistedIndices, usize) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+    assert_eq!(consumed, bytes.len());
+    persisted.indices.get_mut("project").unwrap().chunk_ids[0] = "wrong-id".to_string();
+    std::fs::write(
+        &index_path,
+        bincode::serde::encode_to_vec(&persisted, bincode::config::standard()).unwrap(),
+    )
+    .unwrap();
+
+    let mut target = VectorStore::new(provider).with_storage(&storage_path);
+    target.collection("sentinel", CollectionScope::Session);
+    let error = target.load().unwrap_err();
+    assert!(
+        error.to_string().contains("do not exactly match"),
+        "unexpected error: {error:#}"
+    );
+    assert!(target.get_collection("sentinel").is_some());
+    assert!(target.get_collection("project").is_none());
+}
+
+#[tokio::test]
+async fn test_vector_store_load_requires_full_index_parse_before_replacing_state() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let file_path = dir.path().join("persist_test.rs");
+    std::fs::write(&file_path, "pub fn persisted_fn() {}").unwrap();
+
+    let mut source = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    source.collection("project", CollectionScope::Project);
+    source.index_file("project", &file_path).await.unwrap();
+    source.save().unwrap();
+
+    let index_path = current_generation_path(&storage_path).join(VECTOR_STORE_INDICES_FILE);
+    let mut bytes = std::fs::read(&index_path).unwrap();
+    bytes.extend_from_slice(b"trailing-corruption");
+    std::fs::write(index_path, bytes).unwrap();
+
+    let mut target = VectorStore::new(provider).with_storage(&storage_path);
+    target.collection("sentinel", CollectionScope::Session);
+    let error = target.load().unwrap_err();
+    assert!(error.to_string().contains("trailing data"));
+    assert!(target.get_collection("sentinel").is_some());
+    assert!(target.get_collection("project").is_none());
+}
+
+#[tokio::test]
+async fn test_vector_store_load_rejects_chunk_content_hash_mismatch() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let file_path = dir.path().join("persist_test.rs");
+    std::fs::write(&file_path, "pub fn persisted_fn() {}").unwrap();
+
+    let mut source = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    source.collection("project", CollectionScope::Project);
+    source.index_file("project", &file_path).await.unwrap();
+    source.save().unwrap();
+
+    let collection_path =
+        current_generation_path(&storage_path).join(VECTOR_STORE_COLLECTIONS_FILE);
+    let mut persisted: PersistedCollections =
+        serde_json::from_slice(&std::fs::read(&collection_path).unwrap()).unwrap();
+    persisted.collections.get_mut("project").unwrap().chunks[0].content =
+        "stale or tampered model context".to_string();
+    std::fs::write(&collection_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let mut target = VectorStore::new(provider).with_storage(&storage_path);
+    target.collection("sentinel", CollectionScope::Session);
+    let error = target.load().unwrap_err();
+    assert!(error.to_string().contains("content hash"), "{error:#}");
+    assert!(target.get_collection("sentinel").is_some());
+    assert!(target.get_collection("project").is_none());
+}
+
+#[test]
+fn test_vector_store_ignores_unpublished_generation() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+
+    let mut source = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    source.collection("committed", CollectionScope::Project);
+    source.save().unwrap();
+
+    let orphan =
+        VectorStore::generation_path(&storage_path, "00000000000000000000000000000000").unwrap();
+    std::fs::create_dir(&orphan).unwrap();
+    std::fs::write(orphan.join(VECTOR_STORE_COLLECTIONS_FILE), b"partial").unwrap();
+
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    loaded.load().unwrap();
+    assert!(loaded.get_collection("committed").is_some());
+    assert_eq!(loaded.list_collections().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_vector_store_pruning_never_follows_or_removes_generation_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let protected = dir.path().join("protected");
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::write(protected.join("marker"), b"keep").unwrap();
+
+    let mut store = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    store.collection("first", CollectionScope::Project);
+    store.save().unwrap();
+    let previous_generation = current_generation_path(&storage_path);
+    std::fs::remove_dir_all(&previous_generation).unwrap();
+    symlink(&protected, &previous_generation).unwrap();
+
+    store.collection("second", CollectionScope::Session);
+    store.save().unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(&previous_generation)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "generation cleanup must leave a masquerading symlink untouched"
+    );
+    assert_eq!(std::fs::read(protected.join("marker")).unwrap(), b"keep");
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    loaded.load().unwrap();
+    assert!(loaded.get_collection("second").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_vector_store_load_refuses_symlinked_active_generation() {
+    use std::os::unix::fs::symlink;
+
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let external_generation = dir.path().join("external-generation");
+
+    let mut store = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    store.collection("project", CollectionScope::Project);
+    store.save().unwrap();
+    let active_generation = current_generation_path(&storage_path);
+    std::fs::rename(&active_generation, &external_generation).unwrap();
+    symlink(&external_generation, &active_generation).unwrap();
+
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    let error = loaded.load().unwrap_err();
+    assert!(error.to_string().contains("real directory"), "{error:#}");
+    assert!(loaded.list_collections().is_empty());
+}
+
+#[test]
+fn test_vector_store_concurrent_saves_publish_complete_unique_generations() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    let mut first = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    first.collection("first", CollectionScope::Project);
+    let mut second = VectorStore::new(provider.clone()).with_storage(&storage_path);
+    second.collection("second", CollectionScope::Session);
+
+    std::thread::scope(|scope| {
+        let first_save = scope.spawn(|| first.save());
+        let second_save = scope.spawn(|| second.save());
+        first_save.join().unwrap().unwrap();
+        second_save.join().unwrap().unwrap();
+    });
+
+    let entries: Vec<String> = std::fs::read_dir(&storage_path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let generation_count = entries
+        .iter()
+        .filter(|name| name.starts_with(VECTOR_STORE_GENERATION_PREFIX))
+        .count();
+    assert!((1..=2).contains(&generation_count));
+    assert!(!entries.iter().any(|name| name.ends_with(".tmp")));
+    assert!(current_generation_path(&storage_path).is_dir());
+
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    loaded.load().unwrap();
+    let names = loaded.list_collections();
+    assert!(names == ["first"] || names == ["second"]);
+}
+
+#[test]
+fn test_vector_store_loads_complete_legacy_collection_index_pair() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::new(3)));
+    let dir = tempdir().unwrap();
+    let storage_path = dir.path().join("vector_store");
+    std::fs::create_dir(&storage_path).unwrap();
+
+    let content = "legacy chunk".to_string();
+    let metadata = ChunkMetadata::new(
+        PathBuf::from("legacy.rs"),
+        1,
+        1,
+        ChunkType::CodeBlock,
+        "rust",
+        &content,
+    );
+    let chunk = CodeChunk::new(content, metadata);
+    let chunk_id = chunk.id.clone();
+    let mut collection = VectorCollection::new("legacy", CollectionScope::Project);
+    collection.add_chunk(chunk).unwrap();
+    std::fs::write(
+        storage_path.join("legacy.json"),
+        serde_json::to_vec_pretty(&collection).unwrap(),
+    )
+    .unwrap();
+    let embeddings = vec![vec![1.0f32, 0.0, 0.0]];
+    let chunk_ids = vec![chunk_id.clone()];
+    std::fs::write(
+        storage_path.join("legacy.idx"),
+        bincode::serde::encode_to_vec((&embeddings, &chunk_ids), bincode::config::standard())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut loaded = VectorStore::new(provider).with_storage(&storage_path);
+    loaded.load().unwrap();
+    let collection = loaded.get_collection("legacy").unwrap();
+    assert!(collection.get_chunk(&chunk_id).is_some());
+    assert_eq!(loaded.indices.get("legacy").unwrap().dimension(), 3);
 }
 
 #[tokio::test]
@@ -1245,6 +1639,62 @@ async fn test_vector_store_search_filter_does_not_starve() {
 }
 
 // ─── HttpEmbeddingProvider auth ─────────────────────────────────────────────
+
+#[test]
+fn http_embedding_parser_reorders_indexed_batch() {
+    let json = serde_json::json!({
+        "data": [
+            {"index": 1, "embedding": [3.0, 4.0]},
+            {"index": 0, "embedding": [1.0, 2.0]}
+        ]
+    });
+    let parsed = HttpEmbeddingProvider::parse_embeddings(&json, 2, 2).unwrap();
+    assert_eq!(parsed, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+}
+
+#[test]
+fn http_embedding_parser_rejects_bad_cardinality_dimension_and_values() {
+    let short = serde_json::json!({"data": [{"embedding": [1.0, 2.0]}]});
+    assert!(HttpEmbeddingProvider::parse_embeddings(&short, 2, 2).is_err());
+
+    let wrong_dimension = serde_json::json!({"data": [{"embedding": [1.0]}]});
+    assert!(HttpEmbeddingProvider::parse_embeddings(&wrong_dimension, 1, 2).is_err());
+
+    let non_numeric = serde_json::json!({"data": [{"embedding": [1.0, "bad"]}]});
+    assert!(HttpEmbeddingProvider::parse_embeddings(&non_numeric, 1, 2).is_err());
+}
+
+#[test]
+fn http_embedding_provider_learns_dimension_once() {
+    let provider = HttpEmbeddingProvider::new("http://127.0.0.1:1/v1", "test-model", 0);
+    assert_eq!(provider.dimension(), 0);
+    provider.accept_dimension(3).unwrap();
+    assert_eq!(provider.dimension(), 3);
+    provider.accept_dimension(3).unwrap();
+    assert!(provider.accept_dimension(4).is_err());
+}
+
+#[test]
+fn malformed_batch_does_not_pin_dynamic_provider_dimension() {
+    let provider = Arc::new(EmbeddingBackend::Http(HttpEmbeddingProvider::new(
+        "http://127.0.0.1:1/v1",
+        "test-model",
+        0,
+    )));
+    let store = VectorStore::new(provider.clone());
+
+    let mixed = vec![vec![1.0, 2.0], vec![3.0, 4.0, 5.0]];
+    assert!(store.validate_embedding_batch(&mixed, 2).is_err());
+    assert_eq!(provider.dimension(), 0);
+
+    let non_finite = vec![vec![1.0, f32::NAN]];
+    assert!(store.validate_embedding_batch(&non_finite, 1).is_err());
+    assert_eq!(provider.dimension(), 0);
+
+    let valid = vec![vec![1.0, 2.0, 3.0]];
+    assert_eq!(store.validate_embedding_batch(&valid, 1).unwrap(), 3);
+    assert_eq!(provider.dimension(), 3);
+}
 
 /// Fake /embeddings endpoint that requires `Bearer secret-key` and returns a
 /// fixed 3-dim vector. Returns the base URL (server runs on a spawned task).

@@ -431,13 +431,14 @@ impl CodeIntrospect {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        let target_path = PathBuf::from(&args.target);
+        let target = crate::tools::workspace_root::anchor(&args.target);
+        let target_path = PathBuf::from(&target);
 
         // The tool WALKS and READS every source file under `target` — the
         // root must obey the same workspace path policy as file_read
         // (2026-09-21 review sweep).
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        validate_tool_path(&args.target, &safety)?;
+        validate_tool_path(&target, &safety)?;
 
         let format = args.format.as_deref().unwrap_or("tree");
         let renderer = OutputRenderer::new(format);
@@ -539,7 +540,7 @@ impl CodeIntrospect {
     ) -> Result<walk::SourceWalk> {
         let target = target.to_path_buf();
         let safety = safety.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::tools::workspace_root::spawn_blocking(move || {
             walk::source_files(&target, Some(&safety), MAX_WALK_DEPTH)
         })
         .await?
@@ -769,7 +770,8 @@ impl Tool for CodeQuery {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        let scope = args.scope.unwrap_or_else(|| ".".to_string());
+        let scope =
+            crate::tools::workspace_root::anchor(&args.scope.unwrap_or_else(|| ".".to_string()));
         let scope_path = PathBuf::from(&scope);
 
         // code_query WALKS and READS every source file under `scope` — the
@@ -826,7 +828,7 @@ impl CodeQuery {
     async fn collect_files(dir: &Path, safety: &SafetyConfig) -> Result<Vec<PathBuf>> {
         let dir = dir.to_path_buf();
         let safety = safety.clone();
-        let walked = tokio::task::spawn_blocking(move || {
+        let walked = crate::tools::workspace_root::spawn_blocking(move || {
             walk::source_files(&dir, Some(&safety), MAX_WALK_DEPTH)
         })
         .await??;
@@ -932,14 +934,15 @@ impl Tool for CodePlan {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        let root = PathBuf::from(&args.codebase_root);
+        let codebase_root = crate::tools::workspace_root::anchor(&args.codebase_root);
+        let root = PathBuf::from(&codebase_root);
 
         // code_plan WALKS and READS the codebase under `codebase_root` — the
         // root must obey the same workspace path policy as file_read
         // (2026-09-21 review: `codebase_root` was forwarded to the planner
         // unvalidated).
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        validate_tool_path(&args.codebase_root, &safety)?;
+        validate_tool_path(&codebase_root, &safety)?;
 
         let planner = EvolutionPlanner::new(
             args.goal.clone(),
@@ -1019,7 +1022,7 @@ impl Tool for CodeDiffPlan {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        use planner::analyze_impact;
+        use planner::analyze_impact_with_safety;
 
         #[derive(Deserialize)]
         #[allow(dead_code)]
@@ -1037,18 +1040,26 @@ impl Tool for CodeDiffPlan {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        let target = PathBuf::from(&args.target_file);
-        let root = PathBuf::from(&args.codebase_root);
+        let target_file = crate::tools::workspace_root::anchor(&args.target_file);
+        let codebase_root = crate::tools::workspace_root::anchor(&args.codebase_root);
+        let target = PathBuf::from(&target_file);
+        let root = PathBuf::from(&codebase_root);
 
         // code_diff_plan READS the target file and walks the codebase under
         // `codebase_root` for impact analysis — both must obey the same
         // workspace path policy as file_read (2026-09-21 review sweep; the
         // checker's introspection arm already covers these keys).
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        validate_tool_path(&args.target_file, &safety)?;
-        validate_tool_path(&args.codebase_root, &safety)?;
+        validate_tool_path(&target_file, &safety)?;
+        validate_tool_path(&codebase_root, &safety)?;
 
-        let analysis = analyze_impact(&target, args.affected_symbol.as_deref(), &root).await?;
+        let analysis = analyze_impact_with_safety(
+            &target,
+            args.affected_symbol.as_deref(),
+            &root,
+            Some(&safety),
+        )
+        .await?;
 
         Ok(serde_json::to_value(analysis)?)
     }

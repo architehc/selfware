@@ -290,18 +290,16 @@ cargo build --release
 ```
 
 > The default feature set already includes the TUI, resilience, execution
-> modes, log analysis, tokens, self-improvement, and consolidation modules —
-> you don't need `--all-features`. That flag is not covered by CI and
-> additionally enables the security-sensitive `hot-reload` module plus
-> test-only features (`system-tests`, `integration`) that require a live LLM
-> endpoint. To opt into the full optional set, use `--features extras` (this
-> is what CI tests and release builds use; note it does include `hot-reload`).
+> modes, log analysis, self-improvement, and consolidation modules. CI tests
+> the endpoint-free `extras` set and compiles/lints every feature; running the
+> `integration` or `system-tests` suites still requires their external
+> services. Release builds use `--features extras,vendored-openssl`.
 
 **Option D: Docker**
 
 ```bash
-docker build -t selfware .
-docker run --rm -it -v $(pwd):/workspace selfware chat
+docker build --build-arg SELFWARE_GIT_SHA="$(git rev-parse --short=12 HEAD)" -t selfware .
+docker run --rm -it -v "$(pwd):/workspace" -w /workspace selfware chat
 ```
 
 ### 2. Find the Right Model for Your Hardware
@@ -1564,7 +1562,7 @@ docs/               User documentation (8 guides)
 ### Run Tests
 
 ```bash
-# All tests (7,000+ tests; same feature set CI uses)
+# Endpoint-free suite (the feature set exercised by CI)
 cargo test --features extras
 
 # Quick unit tests only
@@ -1577,24 +1575,28 @@ cargo test --features self-improvement --test evolution_integration_test
 # With resilience features
 cargo test --features resilience
 
-# Integration tests with real LLM
-cargo test --features integration
+# Endpoint-dependent integration tests with a real LLM
+SELFWARE_ENDPOINT=http://localhost:8000/v1 \
+  cargo test --features integration --test integration
 ```
 
 ### Test Coverage
 
-| Metric | Value |
-|--------|-------|
-| **Total Tests** | 7,291 |
-| **Line Coverage** | ~75% |
-| **Test Targets** | lib + external + integration + doc + property |
+```bash
+cargo llvm-cov --features extras --html
+```
+
+CI publishes the measured report and currently enforces a 60% line-coverage
+floor. The endpoint-free integration target is included in that report;
+endpoint-dependent tests are run separately against a configured service.
 
 ### Code Quality
 
 ```bash
-cargo clippy --all-targets --features extras -- -D warnings
 cargo fmt -- --check
-cargo llvm-cov --lib --features extras --summary-only
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+scripts/check_ci_parity.sh
 ```
 
 ---

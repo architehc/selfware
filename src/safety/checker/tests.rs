@@ -662,6 +662,113 @@ fn test_browser_eval_safe_code() {
 }
 
 #[test]
+fn browser_tools_refuse_credential_shaped_urls() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, arguments) in [
+        (
+            "browser_fetch",
+            r#"{"url":"https://example.com/?token=ghp_abcdef1234567890"}"#,
+        ),
+        (
+            "browser_links",
+            r#"{"url":"https://example.com/?token=ghp_abcdef1234567890"}"#,
+        ),
+        (
+            "browser_screenshot",
+            r#"{"url":"https://example.com/?token=ghp_abcdef1234567890"}"#,
+        ),
+        (
+            "browser_pdf",
+            r#"{"url":"https://example.com/?token=ghp_abcdef1234567890"}"#,
+        ),
+        (
+            "browser_eval",
+            r#"{"url":"https://example.com/?token=ghp_abcdef1234567890","script":"document.title"}"#,
+        ),
+        (
+            "page_control",
+            r#"{"action":"goto","url":"https://example.com/?token=ghp_abcdef1234567890"}"#,
+        ),
+    ] {
+        let result = checker.check_tool_call(&create_test_call(tool, arguments));
+        assert!(
+            result.is_err(),
+            "{tool} must refuse a credential-shaped URL"
+        );
+    }
+}
+
+#[test]
+fn browser_tools_refuse_credentials_in_browser_bound_parameters() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, arguments, field) in [
+        (
+            "browser_fetch",
+            r#"{"url":"https://example.com","user_agent":"ghp_abcdef1234567890"}"#,
+            "user_agent",
+        ),
+        (
+            "browser_fetch",
+            r##"{"url":"https://example.com","wait_for":"#ghp_abcdef1234567890"}"##,
+            "wait_for",
+        ),
+        (
+            "browser_eval",
+            r#"{"url":"https://example.com","script":"fetch('/collect?key=sk-ant-abcdef1234567890')"}"#,
+            "script",
+        ),
+        (
+            "page_control",
+            r#"{"action":"evaluate","expression":"fetch('/collect?key=sk-ant-abcdef1234567890')"}"#,
+            "expression",
+        ),
+        (
+            "page_control",
+            r##"{"action":"fill","selector":"#token","text":"ghp_abcdef1234567890"}"##,
+            "text",
+        ),
+        (
+            "page_control",
+            r##"{"action":"select","selector":"#scope","values":["safe","ghp_abcdef1234567890"]}"##,
+            "values",
+        ),
+    ] {
+        let result = checker.check_tool_call(&create_test_call(tool, arguments));
+        assert!(
+            result.is_err(),
+            "{tool} must refuse a credential-shaped {field} value"
+        );
+    }
+}
+
+#[test]
+fn browser_credential_policy_keeps_benign_short_sk_text_allowed() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, arguments) in [
+        (
+            "browser_eval",
+            r#"{"url":"https://example.com/releases/sk-2024","script":"'sk-alpine release notes'"}"#,
+        ),
+        (
+            "page_control",
+            r##"{"action":"fill","selector":"#release","text":"sk-2024"}"##,
+        ),
+    ] {
+        let result = checker.check_tool_call(&create_test_call(tool, arguments));
+        assert!(
+            result.is_ok(),
+            "benign {tool} arguments must pass: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn test_screen_capture_checks_output_path() {
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);
@@ -2286,6 +2393,36 @@ fn test_http_request_blocks_link_local() {
     let call = create_test_call("http_request", r#"{"url": "http://169.254.0.1/"}"#);
     let result = checker.check_tool_call(&call);
     assert!(result.is_err(), "link-local address should be blocked");
+}
+
+#[test]
+fn browser_and_http_checks_classify_bracketed_ipv6_literals() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, url) in [
+        ("http_request", "http://[fd00::1]/private"),
+        ("browser_fetch", "http://[fd00::1]/private"),
+        (
+            "browser_fetch",
+            "http://[::ffff:a9fe:a9fe]/latest/meta-data/",
+        ),
+        ("page_control", "http://[fe80::1]/private"),
+    ] {
+        let arguments = if tool == "page_control" {
+            serde_json::json!({"action": "goto", "url": url})
+        } else {
+            serde_json::json!({"url": url})
+        };
+        let result = checker.check_tool_call(&create_test_call(tool, &arguments.to_string()));
+        assert!(result.is_err(), "{tool} must refuse private IPv6 {url}");
+    }
+
+    for tool in ["http_request", "browser_fetch"] {
+        let arguments = serde_json::json!({"url": "https://[2606:4700:4700::1111]/"});
+        let result = checker.check_tool_call(&create_test_call(tool, &arguments.to_string()));
+        assert!(result.is_ok(), "{tool} must allow public IPv6: {result:?}");
+    }
 }
 
 #[test]

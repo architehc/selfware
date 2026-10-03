@@ -68,7 +68,10 @@ impl FileSkeleton {
     /// `evolve::summary::compile_summary` (used by `evolve::map::expand`) is the
     /// accurate tree-sitter-based renderer. Different cost/accuracy points.
     pub fn render(&self) -> String {
-        let mut out = format!("// {}\n", self.path.display());
+        let mut out = format!(
+            "// {}\n",
+            crate::safety::source_context::quote_untrusted_label(&self.path.to_string_lossy())
+        );
         for item in &self.items {
             match item {
                 SkeletonItem::Function {

@@ -1,5 +1,12 @@
 use super::*;
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[tokio::test]
 async fn test_tool_cache_basic() {
     let cache = ToolCache::new();
@@ -61,6 +68,7 @@ fn test_llm_cache_entry_cost() {
         prompt: "test".into(),
         embedding: vec![0.1, 0.2, 0.3],
         response: "response".into(),
+        reasoning: None,
         model: "test".into(),
         input_tokens: 1000,
         output_tokens: 500,
@@ -89,10 +97,11 @@ async fn test_llm_cache_lookup_and_store() {
         prompt: "test prompt".into(),
         embedding: vec![1.0, 0.0, 0.0],
         response: "test response".into(),
+        reasoning: None,
         model: "test".into(),
         input_tokens: 10,
         output_tokens: 5,
-        created_at: 0,
+        created_at: now_secs(),
         hit_count: 0,
         context_hash: 0,
         file_paths: vec![],
@@ -104,7 +113,9 @@ async fn test_llm_cache_lookup_and_store() {
         .lookup("test prompt", &[1.0, 0.0, 0.0], 0, "test")
         .await;
     assert!(result.is_some());
-    assert_eq!(result.unwrap().response, "test response");
+    let result = result.unwrap();
+    assert_eq!(result.response, "test response");
+    assert_eq!(result.hit_count, 1);
 }
 
 #[tokio::test]
@@ -143,10 +154,11 @@ async fn test_llm_cache_different_model_no_hit() {
         prompt: "same prompt".into(),
         embedding: vec![1.0, 0.0, 0.0],
         response: "alpha response".into(),
+        reasoning: None,
         model: "alpha".into(),
         input_tokens: 10,
         output_tokens: 5,
-        created_at: 0,
+        created_at: now_secs(),
         hit_count: 0,
         context_hash: 42,
         file_paths: vec![],
@@ -178,10 +190,11 @@ async fn test_llm_cache_different_context_hash_no_hit() {
         prompt: "prompt".into(),
         embedding: vec![1.0, 0.0, 0.0],
         response: "response".into(),
+        reasoning: None,
         model: "m".into(),
         input_tokens: 10,
         output_tokens: 5,
-        created_at: 0,
+        created_at: now_secs(),
         hit_count: 0,
         context_hash: 100,
         file_paths: vec![],
@@ -194,6 +207,82 @@ async fn test_llm_cache_different_context_hash_no_hit() {
         result.is_none(),
         "cache should NOT hit for a different context_hash"
     );
+}
+
+#[tokio::test]
+async fn llm_cache_expires_entries_and_removes_their_embeddings() {
+    let cache = LlmCache::new(LlmCacheConfig {
+        ttl_secs: 1,
+        ..Default::default()
+    });
+    cache
+        .store(LlmCacheEntry {
+            id: "expired".into(),
+            prompt: "prompt".into(),
+            embedding: vec![1.0, 0.0],
+            response: "stale".into(),
+            reasoning: None,
+            model: "m".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            created_at: now_secs().saturating_sub(2),
+            hit_count: 0,
+            context_hash: 7,
+            file_paths: vec![],
+        })
+        .await;
+
+    assert!(cache.lookup("prompt", &[1.0, 0.0], 7, "m").await.is_none());
+    assert_eq!(cache.stats().await.entries, 0);
+}
+
+#[tokio::test]
+async fn llm_cache_honors_small_and_zero_capacities() {
+    let cache = LlmCache::new(LlmCacheConfig {
+        max_entries: 2,
+        ..Default::default()
+    });
+    for n in 0..3_u64 {
+        cache
+            .store(LlmCacheEntry {
+                id: format!("id-{n}"),
+                prompt: format!("prompt-{n}"),
+                embedding: vec![1.0, n as f32],
+                response: String::new(),
+                reasoning: None,
+                model: "m".into(),
+                input_tokens: 0,
+                output_tokens: 0,
+                created_at: now_secs() + n,
+                hit_count: 0,
+                context_hash: n,
+                file_paths: vec![],
+            })
+            .await;
+    }
+    assert_eq!(cache.stats().await.entries, 2);
+
+    let disabled = LlmCache::new(LlmCacheConfig {
+        max_entries: 0,
+        ..Default::default()
+    });
+    disabled
+        .store(LlmCacheEntry {
+            id: "ignored".into(),
+            prompt: String::new(),
+            embedding: vec![],
+            response: String::new(),
+            reasoning: None,
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: now_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        })
+        .await;
+    assert_eq!(disabled.stats().await.entries, 0);
 }
 
 #[test]
@@ -271,6 +360,116 @@ async fn invalidate_path_also_drops_tree_scoped_entries() {
         .await;
     cache.invalidate_path("/abs/project/src/deep/file.rs").await;
     assert!(cache.get("grep_search", &grep).await.is_none());
+}
+
+#[tokio::test]
+async fn tool_cache_is_namespaced_by_active_workspace_root() {
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::write(first.path().join("same.txt"), "first").unwrap();
+    std::fs::write(second.path().join("same.txt"), "second").unwrap();
+    let first_root = WorkspaceRoot::fixed(first.path());
+    let second_root = WorkspaceRoot::fixed(second.path());
+    let cache = ToolCache::new();
+    let args = serde_json::json!({"path": "same.txt"});
+
+    workspace_root::scope(first_root.clone(), async {
+        cache
+            .set("file_read", &args, serde_json::json!("from first"))
+            .await;
+        assert_eq!(
+            cache.get("file_read", &args).await,
+            Some(serde_json::json!("from first"))
+        );
+    })
+    .await;
+
+    workspace_root::scope(second_root, async {
+        assert!(
+            cache.get("file_read", &args).await.is_none(),
+            "the same relative arguments in another worktree must miss"
+        );
+        cache
+            .set("file_read", &args, serde_json::json!("from second"))
+            .await;
+    })
+    .await;
+
+    workspace_root::scope(first_root, async {
+        assert_eq!(
+            cache.get("file_read", &args).await,
+            Some(serde_json::json!("from first")),
+            "switching back may reuse only that workspace's own entry"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn invalidation_only_drops_entries_for_the_active_workspace() {
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let first_root = WorkspaceRoot::fixed(first.path());
+    let second_root = WorkspaceRoot::fixed(second.path());
+    let cache = ToolCache::new();
+    let tree = serde_json::json!({"path": "."});
+
+    workspace_root::scope(first_root.clone(), async {
+        cache
+            .set("directory_tree", &tree, serde_json::json!(["first.rs"]))
+            .await;
+    })
+    .await;
+    workspace_root::scope(second_root.clone(), async {
+        cache
+            .set("directory_tree", &tree, serde_json::json!(["second.rs"]))
+            .await;
+        cache.invalidate_path("src/edited.rs").await;
+        assert!(cache.get("directory_tree", &tree).await.is_none());
+    })
+    .await;
+
+    workspace_root::scope(first_root, async {
+        assert_eq!(
+            cache.get("directory_tree", &tree).await,
+            Some(serde_json::json!(["first.rs"])),
+            "an edit in another worktree must not evict this root's listing"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn relative_path_mtime_is_checked_inside_the_active_workspace() {
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+
+    let workspace = tempfile::tempdir().unwrap();
+    let file = workspace.path().join("only-in-workspace.txt");
+    std::fs::write(&file, "present").unwrap();
+    let root = WorkspaceRoot::fixed(workspace.path());
+    let cache = ToolCache::new();
+    let args = serde_json::json!({"path": "only-in-workspace.txt"});
+
+    workspace_root::scope(root.clone(), async {
+        cache
+            .set("file_read", &args, serde_json::json!("present"))
+            .await;
+        assert!(cache.get("file_read", &args).await.is_some());
+    })
+    .await;
+
+    std::fs::remove_file(file).unwrap();
+    workspace_root::scope(root, async {
+        assert!(
+            cache.get("file_read", &args).await.is_none(),
+            "relative-path staleness must be checked under the workspace, not process cwd"
+        );
+    })
+    .await;
 }
 
 #[test]

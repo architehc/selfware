@@ -100,11 +100,14 @@ pub(crate) async fn run_cancellable_subprocess(
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
 
-    let child = cmd.spawn().map_err(SubprocessError::Io)?;
+    let mut child = cmd.spawn().map_err(SubprocessError::Io)?;
     let child_pid = child.id();
     let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
-    let wait_fut = tokio::time::timeout(timeout, child.wait_with_output());
+    let wait_fut = tokio::time::timeout(
+        timeout,
+        crate::tools::process_guard::wait_with_output_without_reaping(&mut child),
+    );
     tokio::pin!(wait_fut);
 
     let wait_res = loop {
@@ -120,10 +123,11 @@ pub(crate) async fn run_cancellable_subprocess(
     };
 
     match wait_res {
-        Ok(output_res) => {
+        Ok(Ok(output)) => {
             pg_guard.disarm();
-            output_res.map_err(SubprocessError::Io)
+            Ok(output)
         }
+        Ok(Err(error)) => Err(SubprocessError::Io(error)),
         Err(_) => {
             pg_guard.kill();
             Err(SubprocessError::Timeout)

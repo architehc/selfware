@@ -125,13 +125,16 @@ Execute a shell command. Runs with configurable timeout (max 1 hour). Requires c
 
 ### `pty_shell`
 
-Interactive shell sessions that persist across invocations. Use for commands that need a persistent environment (e.g., virtualenvs, nvm).
+Interactive shell session handles that persist across invocations. A standalone `cd <path>` updates the session's validated working directory. Every other command runs in an isolated child shell, so environment variables, aliases, functions, shell options, and traps do not carry into later calls.
 
 **Parameters:**
-- `action` (string, required) -- `"create"`, `"send"`, `"read"`, `"close"`, or `"list"`
-- `session_id` (string) -- session identifier
+- `action` (string, required) -- `"start"`, `"send"`, `"read"`, `"resize"`, `"status"`, or `"close"`
+- `session_id` (string) -- session identifier (required except for `"start"`)
 - `command` (string) -- command to send
+- `shell` (string) -- shell to use when starting a session
 - `timeout_secs` (number) -- timeout
+- `cols` (number) -- terminal width for `"resize"`
+- `rows` (number) -- terminal height for `"resize"`
 
 ---
 

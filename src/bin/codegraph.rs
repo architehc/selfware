@@ -31,9 +31,34 @@ fn main() {
 
     // Collect all .rs files
     let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&src_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            !matches!(
+                entry.file_name().to_str(),
+                Some(
+                    ".claude"
+                        | ".codex"
+                        | ".agents"
+                        | ".qwen"
+                        | ".superpowers"
+                        | ".git"
+                        | "target"
+                        | "node_modules"
+                )
+            )
+        })
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path().to_path_buf();
-        if path.extension().is_some_and(|ext| ext == "rs") {
+        if entry.file_type().is_file()
+            && !entry.path_is_symlink()
+            && path.extension().is_some_and(|ext| ext == "rs")
+        {
             files.push(path);
         }
     }

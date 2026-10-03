@@ -191,3 +191,13 @@ fn probe_endpoint_tcp_detects_listener_and_dead_port() {
         std::time::Duration::from_millis(50)
     ));
 }
+
+#[test]
+fn probe_endpoint_tcp_accepts_bracketed_ipv6_literal() {
+    let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert!(super::probe_endpoint_tcp(
+        &format!("http://[::1]:{port}/v1"),
+        std::time::Duration::from_millis(500)
+    ));
+}

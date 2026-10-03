@@ -331,7 +331,9 @@ impl Agent {
 
         // Inject context map awareness: L1 tree in the request tail, boundary before recent.
         if self.context_map.file_count() > 0 {
-            turn_hints.push(self.context_map.render_tree());
+            let tree = self.context_map.render_tree();
+            turn_hints
+                .push(self.sanitize_context_data(std::path::Path::new("<context-map>"), &tree));
         }
 
         // RAG: inject relevant code chunks from scanned index
@@ -370,6 +372,10 @@ impl Agent {
                         } else {
                             ctx.context
                         };
+                        let context_str = self.sanitize_context_data(
+                            std::path::Path::new("<rag-retrieval>"),
+                            &context_str,
+                        );
                         let rag_hint = format!(
                             "## Relevant Code Context (RAG)\n\
                              The following code chunks were retrieved from the indexed codebase \
@@ -403,7 +409,10 @@ impl Agent {
         // This exploits the recency effect — model sees boundary and knows
         // everything above is reference, everything below is active task.
         if self.context_map.file_count() > 0 && request_messages.len() > 8 {
-            let boundary = self.context_map.render_boundary();
+            let boundary = self.sanitize_context_data(
+                std::path::Path::new("<context-boundary>"),
+                &self.context_map.render_boundary(),
+            );
             // Insert 6 messages from the end (before the recent window) — but
             // NEVER split an assistant(tool_calls) / role=tool result pair:
             // OpenAI-compatible endpoints (OpenAI/vLLM/SGLang) reject with

@@ -200,7 +200,9 @@ pub(crate) fn localize_issue_sync(
     let mut total_doc_len: usize = 0;
 
     for entry in WalkDir::new(repo_path)
+        .follow_links(false)
         .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {

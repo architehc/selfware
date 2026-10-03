@@ -79,12 +79,15 @@ impl StructureAnalyzer {
     pub fn outline(&self) -> Result<Vec<FileStructure>> {
         let mut out = Vec::new();
         for entry in WalkDir::new(&self.root)
+            .follow_links(false)
             .into_iter()
-            .filter_entry(super::graph::retain_outside_python_environments)
+            .filter_entry(super::graph::retain_repository_entry)
             .filter_map(|e| e.ok())
         {
             let p = entry.path();
-            if p.extension().is_some_and(|e| e == "rs")
+            if entry.file_type().is_file()
+                && !entry.path_is_symlink()
+                && p.extension().is_some_and(|e| e == "rs")
                 && !p.to_string_lossy().ends_with("_test.rs")
             {
                 if let Ok(text) = std::fs::read_to_string(p) {

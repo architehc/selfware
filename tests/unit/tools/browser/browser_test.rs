@@ -88,6 +88,25 @@ fn test_resolve_and_pin_target_allows_public_ip() {
 }
 
 #[test]
+fn test_resolve_and_pin_target_allows_public_ipv6_literal() {
+    let pinned = resolve_and_pin_target("https://[2606:4700:4700::1111]/").unwrap();
+    assert_eq!(pinned.host, "[2606:4700:4700::1111]");
+    assert_eq!(
+        pinned.ip,
+        "2606:4700:4700::1111".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert!(pinned.host_is_ip);
+}
+
+#[test]
+fn test_resolve_and_pin_target_allows_ipv6_loopback_literal() {
+    let pinned = resolve_and_pin_target("http://[::1]/").unwrap();
+    assert_eq!(pinned.host, "[::1]");
+    assert_eq!(pinned.ip, "::1".parse::<std::net::IpAddr>().unwrap());
+    assert!(pinned.host_is_ip);
+}
+
+#[test]
 fn test_extract_text_entities() {
     let html = "<p>Hello &amp; World &lt;test&gt;</p>";
     let text = extract_text_from_html(html);
@@ -111,6 +130,32 @@ async fn test_browser_fetch_no_url() {
     let result = tool.execute(json!({})).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("url is required"));
+}
+
+#[tokio::test]
+async fn direct_browser_tools_refuse_credential_shaped_payloads_before_network_io() {
+    let secret_url = "https://example.com/?token=ghp_abcdef1234567890";
+
+    for result in [
+        BrowserFetch.execute(json!({"url": secret_url})).await,
+        BrowserFetch
+            .execute(json!({"url": "https://example.com", "user_agent":
+                "ghp_abcdef1234567890"}))
+            .await,
+        BrowserLinks.execute(json!({"url": secret_url})).await,
+        BrowserScreenshot.execute(json!({"url": secret_url})).await,
+        BrowserPdf.execute(json!({"url": secret_url})).await,
+        BrowserEval
+            .execute(json!({"url": "https://example.com", "script":
+                "fetch('/collect?key=sk-ant-abcdef1234567890')"}))
+            .await,
+    ] {
+        let error = result.expect_err("credential-shaped browser payload must be refused");
+        assert!(
+            error.to_string().contains("credential-shaped"),
+            "unexpected refusal: {error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -557,6 +602,7 @@ fn test_trusted_localhost() {
 #[test]
 fn test_trusted_127001() {
     assert!(is_trusted_local_browser_host("127.0.0.1"));
+    assert!(is_trusted_local_browser_host("127.0.0.2"));
 }
 
 #[test]

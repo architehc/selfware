@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::Graph;
+use super::{Graph, NodeLayer};
 
 /// Minimum Jaccard similarity over normalized line sets for two nodes to
 /// be reported as near-duplicates.
@@ -43,16 +43,40 @@ impl DeduplicationAnalyzer {
     }
 
     pub fn find_duplicates(&self, graph: &Graph) -> Result<Vec<DuplicatePair>> {
+        self.find_duplicates_in(graph, &crate::tools::workspace_root::current_path())
+    }
+
+    /// Find duplicate file nodes, resolving repository-relative graph paths
+    /// against `project_root`.
+    ///
+    /// Symbol nodes deliberately mirror their parent file's path. Treating
+    /// them as independent files both manufactures file↔symbol duplicates and
+    /// turns the near-duplicate pass into an O(symbols²) comparison over the
+    /// same file content.
+    pub fn find_duplicates_in(
+        &self,
+        graph: &Graph,
+        project_root: &Path,
+    ) -> Result<Vec<DuplicatePair>> {
         let mut hashes: HashMap<String, String> = HashMap::new();
         let mut duplicates = Vec::new();
         // (node id, normalized line set) for near-duplicate comparison.
         let mut line_sets: Vec<(String, HashSet<String>)> = Vec::new();
 
         for node in &graph.nodes {
+            if node.layer == NodeLayer::Symbol {
+                continue;
+            }
             let Some(ref path) = node.path else {
                 continue;
             };
-            let Some(content) = read_content(Path::new(path)) else {
+            let path = Path::new(path);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                project_root.join(path)
+            };
+            let Some(content) = read_content(&path) else {
                 continue;
             };
 
@@ -97,16 +121,25 @@ impl Default for DeduplicationAnalyzer {
 /// would hash identically for any two such nodes, producing false
 /// duplicates).
 fn read_content(path: &Path) -> Option<String> {
-    if path.is_file() {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    if metadata.is_file() {
         let content = std::fs::read_to_string(path).ok()?;
         return (!content.is_empty()).then_some(content);
     }
-    if path.is_dir() {
+    if metadata.is_dir() {
         let mut files: Vec<_> = walkdir::WalkDir::new(path)
+            .follow_links(false)
             .into_iter()
-            .filter_entry(super::graph::retain_outside_python_environments)
+            .filter_entry(super::graph::retain_repository_entry)
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+            .filter(|e| {
+                e.file_type().is_file()
+                    && !e.path_is_symlink()
+                    && e.path().extension().is_some_and(|x| x == "rs")
+            })
             .map(|e| e.path().to_path_buf())
             .collect();
         files.sort();

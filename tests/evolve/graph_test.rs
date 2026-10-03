@@ -6,6 +6,23 @@ fn write_rust(path: &std::path::Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+fn small_agent_graph_fixture() -> tempfile::TempDir {
+    let project = tempfile::tempdir().unwrap();
+    write_rust(
+        &project.path().join("src/agent/mod.rs"),
+        "use crate::config::Config;\npub struct Agent { pub config: Config }\n",
+    );
+    write_rust(
+        &project.path().join("src/config.rs"),
+        "pub struct Config;\n",
+    );
+    write_rust(
+        &project.path().join("src/lib.rs"),
+        "pub mod agent;\npub mod config;\n",
+    );
+    project
+}
+
 #[test]
 fn test_graph_prunes_nonstandard_python_environments_and_keeps_project_sources() {
     let project = tempfile::tempdir().unwrap();
@@ -59,6 +76,61 @@ fn test_graph_prunes_nonstandard_python_environments_and_keeps_project_sources()
     assert!(!outline
         .iter()
         .any(|file| file.path.contains("python-tools")));
+}
+
+#[test]
+fn test_graph_prunes_gitignored_trees_but_keeps_an_explicit_ignored_root() {
+    let project = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    write_rust(
+        &project.path().join("src/lib.rs"),
+        "pub fn visible_source() {}\n",
+    );
+    std::fs::write(project.path().join(".gitignore"), "ignored/\n").unwrap();
+    write_rust(
+        &project.path().join("ignored/src/private.rs"),
+        "pub fn explicitly_selectable_source() {}\n",
+    );
+
+    let repository_graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    assert!(repository_graph
+        .nodes
+        .iter()
+        .any(|node| node.path.as_deref() == Some("src/lib.rs")));
+    assert!(repository_graph
+        .nodes
+        .iter()
+        .all(|node| { node.path.as_deref() != Some("ignored/src/private.rs") }));
+
+    let explicit_graph = GraphBuilder::new(project.path().join("ignored/src"))
+        .scan_src()
+        .unwrap();
+    assert!(explicit_graph
+        .nodes
+        .iter()
+        .any(|node| node.path.as_deref() == Some("src/private.rs")));
+}
+
+#[test]
+fn test_graph_dedup_resolves_relative_node_paths_against_the_scanned_root() {
+    let project = tempfile::tempdir().unwrap();
+    let duplicate = "fn duplicate_body() { let value = 42; }\n";
+    write_rust(&project.path().join("src/a.rs"), duplicate);
+    write_rust(&project.path().join("src/b.rs"), duplicate);
+
+    let graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    assert!(graph.edges.iter().any(|edge| {
+        edge.edge_type == EdgeType::DuplicateOf && edge.from == "crate::a" && edge.to == "crate::b"
+    }));
 }
 
 #[test]
@@ -162,7 +234,8 @@ fn test_non_rust_implementation_sources_are_code_nodes_with_test_partition() {
 
 #[test]
 fn test_graph_builder_scans_agent_component() {
-    let builder = GraphBuilder::new("src");
+    let project = small_agent_graph_fixture();
+    let builder = GraphBuilder::new(project.path().join("src"));
     let graph = builder.scan_src().unwrap();
     let agent = graph.nodes.iter().find(|n| n.id == "crate::agent").unwrap();
     assert!(agent.tokens > 0);
@@ -171,7 +244,8 @@ fn test_graph_builder_scans_agent_component() {
 
 #[test]
 fn test_depends_on_edges_never_dangle() {
-    let builder = GraphBuilder::new("src");
+    let project = small_agent_graph_fixture();
+    let builder = GraphBuilder::new(project.path().join("src"));
     let graph = builder.scan_src().unwrap();
     let ids: std::collections::HashSet<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
     // File modules must be normalized to bare names (no `.rs` suffix).
@@ -358,6 +432,18 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
         ("vendor/copied.rs", "pub fn copied() {}\n"),
         ("build/bundle.js", "export const built = 1;\n"),
         (".selfware/private.json", "{}\n"),
+        (
+            ".claude/worktrees/agent/src/private.rs",
+            "pub fn claude_private() {}\n",
+        ),
+        (".codex/session/private.rs", "pub fn codex_private() {}\n"),
+        (".agents/state/private.rs", "pub fn agents_private() {}\n"),
+        (".qwen/tmp/private.rs", "pub fn qwen_private() {}\n"),
+        (
+            ".superpowers/sdd/private.rs",
+            "pub fn superpowers_private() {}\n",
+        ),
+        ("scratchpad/kept.rs", "pub fn scratchpad_source() {}\n"),
         ("selfware.toml", "api_key = \"do-not-index\"\n"),
         ("credentials.json", "{}\n"),
         ("codegraph.json", "{}\n"),
@@ -407,6 +493,10 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
         .iter()
         .any(|node| node.id == "tool::rustfmt.toml"));
     assert!(graph.nodes.iter().any(|node| node.id == "tool::Makefile"));
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|node| node.path.as_deref() == Some("scratchpad/kept.rs")));
 
     let paths = graph
         .nodes
@@ -414,11 +504,16 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
         .filter_map(|node| node.path.as_deref())
         .collect::<Vec<_>>();
     for excluded in [
-        "/target/",
-        "/node_modules/",
-        "/vendor/",
-        "/build/",
-        "/.selfware/",
+        "target/",
+        "node_modules/",
+        "vendor/",
+        "build/",
+        ".selfware/",
+        ".claude/",
+        ".codex/",
+        ".agents/",
+        ".qwen/",
+        ".superpowers/",
         "selfware.toml",
         "credentials.json",
         "codegraph.json",
@@ -451,4 +546,85 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
         edge.edge_type == EdgeType::Contains && edge.from == "crate" && edge.to == "crate::library"
     }));
     assert!(selfware::evolve::validate_graph(&graph).valid);
+}
+
+#[test]
+fn test_shared_evolve_walkers_prune_private_tool_state_and_symlinks() {
+    let project = tempfile::tempdir().unwrap();
+    write_rust(
+        &project.path().join("src/lib.rs"),
+        "pub struct RealProjectType;\npub fn real_project_function() {}\n",
+    );
+    write_rust(
+        &project.path().join("scratchpad/kept.rs"),
+        "pub struct ScratchpadProjectType;\npub fn scratchpad_project_function() {}\n",
+    );
+    for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        write_rust(
+            &project.path().join(dir).join("private.rs"),
+            &format!(
+                "pub struct Private{}Type;\npub fn private_{}_function() {{}}\n",
+                dir.trim_start_matches('.').replace('-', "_"),
+                dir.trim_start_matches('.').replace('-', "_")
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        write_rust(
+            &outside.path().join("symlinked.rs"),
+            "pub struct SymlinkedPrivateType;\npub fn symlinked_private_function() {}\n",
+        );
+        std::os::unix::fs::symlink(outside.path(), project.path().join("source-alias")).unwrap();
+
+        let index = selfware::evolve::ConceptIndex::build(project.path()).unwrap();
+        assert!(index.xray("RealProjectType").is_some());
+        assert!(index.xray("ScratchpadProjectType").is_some());
+        assert!(index.xray("SymlinkedPrivateType").is_none());
+        for hidden in [
+            "PrivateclaudeType",
+            "PrivatecodexType",
+            "PrivateagentsType",
+            "PrivateqwenType",
+            "PrivatesuperpowersType",
+        ] {
+            assert!(
+                index.xray(hidden).is_none(),
+                "indexed private type {hidden}"
+            );
+        }
+
+        let outline = selfware::evolve::StructureAnalyzer::new(project.path())
+            .outline()
+            .unwrap();
+        assert!(outline.iter().any(|file| file.path == "src/lib.rs"));
+        assert!(outline.iter().any(|file| file.path == "scratchpad/kept.rs"));
+        assert!(outline.iter().all(|file| {
+            !file.path.contains("source-alias")
+                && ![".claude", ".codex", ".agents", ".qwen", ".superpowers"]
+                    .iter()
+                    .any(|dir| file.path.contains(dir))
+        }));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let index = selfware::evolve::ConceptIndex::build(project.path()).unwrap();
+        assert!(index.xray("RealProjectType").is_some());
+        assert!(index.xray("ScratchpadProjectType").is_some());
+        for hidden in [
+            "PrivateclaudeType",
+            "PrivatecodexType",
+            "PrivateagentsType",
+            "PrivateqwenType",
+            "PrivatesuperpowersType",
+        ] {
+            assert!(
+                index.xray(hidden).is_none(),
+                "indexed private type {hidden}"
+            );
+        }
+    }
 }

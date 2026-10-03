@@ -173,13 +173,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy --all-targets --features extras -- -D warnings
+      - name: Run clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
 
-        # The extras pass above does not cover the system-tests/redis/etc.
-        # feature set — lint it separately so those targets can't rot unseen.
-      - name: Run clippy (system-tests features)
-        run: cargo clippy --all-targets --features system-tests -- -D warnings
+        # Compile every gated target without running endpoint-dependent tests.
+        # This covers system-tests, integration, redis, context-select and
+        # tool-verify, which are intentionally absent from `extras`.
+      - name: Run clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test-no-default-features:
     name: Test (no default features)
@@ -208,6 +209,19 @@ jobs:
       # Red-team corpus gate: see the `redteam-gate` job.
       - name: Test (no default features)
         run: cargo test --no-default-features -- --skip redteam_corpus_respects_gate_expectations
+
+  docker-validation:
+    name: Docker source-build validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Builds from the same filtered context users receive, then exercises the
+      # installed binary, project scaffolds and real config-loading path.
+      - name: Build and run validation image
+        run: tests/run_docker_validation.sh
 
   # NOTE: a Linux-based aarch64-apple-darwin cross-check is not viable:
   # ring's build script compiles C even under `cargo check`, which needs an

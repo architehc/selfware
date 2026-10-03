@@ -134,12 +134,16 @@ impl ConceptIndex {
         let mut files: Vec<FileEntry> = Vec::new();
 
         for entry in WalkDir::new(root.as_ref())
+            .follow_links(false)
             .into_iter()
-            .filter_entry(super::graph::retain_outside_python_environments)
+            .filter_entry(super::graph::retain_repository_entry)
             .filter_map(|e| e.ok())
         {
             let p = entry.path();
-            if p.extension().is_some_and(|e| e == "rs") {
+            if entry.file_type().is_file()
+                && !entry.path_is_symlink()
+                && p.extension().is_some_and(|e| e == "rs")
+            {
                 let text = match std::fs::read_to_string(p) {
                     Ok(t) => t,
                     Err(_) => continue,

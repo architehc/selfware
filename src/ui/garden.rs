@@ -416,9 +416,11 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
     let sep = std::path::MAIN_SEPARATOR_STR;
 
     for entry in WalkDir::new(path)
+        .follow_links(false)
         .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
     {
         let path_str = entry.path().display().to_string();
 
@@ -588,9 +590,11 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
 
     for entry in WalkDir::new(dir)
         .max_depth(8) // Limit depth to avoid scanning too deep
+        .follow_links(false)
         .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
     {
         let path = entry.path();
         let path_str = path.strip_prefix(dir).unwrap_or(path).display().to_string();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::analysis::vector_store::MockEmbeddingProvider;
+use crate::analysis::vector_store::{HttpEmbeddingProvider, MockEmbeddingProvider};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -147,6 +147,51 @@ async fn test_record_episode() {
     let id = memory.record(episode).await.unwrap();
 
     assert!(memory.get(&id).is_some());
+}
+
+#[tokio::test]
+async fn test_record_adopts_first_dynamic_embedding_dimension() {
+    use axum::{routing::post, Json, Router};
+
+    async fn embedding() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}]
+        }))
+    }
+
+    let app = Router::new().route("/embeddings", post(embedding));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let provider = Arc::new(EmbeddingBackend::Http(HttpEmbeddingProvider::new(
+        format!("http://{address}"),
+        "dynamic-test",
+        0,
+    )));
+    let mut memory = EpisodicMemory::new(provider.clone());
+    assert_eq!(memory.index.dimension(), 0);
+
+    let id = memory
+        .record(Episode::new(
+            EpisodeType::Conversation,
+            "dimension discovery",
+            "session",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.dimension(), 3);
+    assert_eq!(memory.index.dimension(), 3);
+    assert!(memory.get(&id).is_some());
+    assert_eq!(
+        memory
+            .retrieve("dimension discovery", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

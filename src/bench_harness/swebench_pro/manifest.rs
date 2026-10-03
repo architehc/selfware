@@ -92,11 +92,8 @@ impl SweepManifest {
 /// otherwise misread as corrupt and turned into a spurious "synthetic failure".
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_vec_pretty(value)?;
-    let temp_path = path.with_extension("json.tmp");
-    std::fs::write(&temp_path, json)
-        .with_context(|| format!("writing temp file {}", temp_path.display()))?;
-    std::fs::rename(&temp_path, path)
-        .with_context(|| format!("renaming {} into place", path.display()))?;
+    crate::session::checkpoint::write_bytes_atomically(path, &json, 0o666)
+        .with_context(|| format!("atomically writing {}", path.display()))?;
     Ok(())
 }
 

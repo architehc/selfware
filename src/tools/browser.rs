@@ -16,7 +16,20 @@ use tokio::process::Command;
 
 use super::Tool;
 use crate::config::is_local_endpoint;
+use crate::safety::checker::validation::contains_outbound_credential_shape;
 use crate::safety::process_env::SanitizedEnvExt;
+use crate::tools::net_policy::{host_for_socket_resolution, GuardedProxy};
+
+fn reject_browser_bound_credential_shapes(args: &Value, fields: &[&str]) -> Result<()> {
+    for field in fields {
+        if let Some(text) = args.get(*field).and_then(Value::as_str) {
+            if contains_outbound_credential_shape(text) {
+                anyhow::bail!("Refusing browser operation: credential-shaped value in {field}");
+            }
+        }
+    }
+    Ok(())
+}
 
 // ============================================================================
 // Tracked browser processes
@@ -37,7 +50,7 @@ async fn run_browser_process(cmd: &mut Command) -> std::io::Result<std::process:
     #[cfg(unix)]
     cmd.process_group(0);
     let program = cmd.as_std().get_program().to_string_lossy().into_owned();
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     let pid = child.id();
     let mut group_guard = crate::tools::process_guard::ProcessGroupGuard::new(pid);
     let registry = ResourceRegistry::global();
@@ -53,8 +66,10 @@ async fn run_browser_process(cmd: &mut Command) -> std::io::Result<std::process:
             format!("headless browser ({program})"),
         ))
     });
-    let output = child.wait_with_output().await;
-    group_guard.disarm();
+    let output = crate::tools::process_guard::wait_with_output_without_reaping(&mut child).await;
+    if output.is_ok() {
+        group_guard.disarm();
+    }
     if let (Ok(_), Some(id)) = (&output, &entry) {
         // Reaped: the browser process is confirmed gone.
         registry.release(id, "browser process reaped");
@@ -188,7 +203,7 @@ async fn playwright_runtime_available() -> bool {
         .unwrap_or(false)
 }
 
-fn playwright_launch_prelude(extra_args: &str) -> String {
+fn playwright_launch_prelude(extra_args: &str, proxy_url: &str) -> String {
     format!(
         r#"
 const fs = require('fs');
@@ -199,14 +214,34 @@ try {{
     pw = require('playwright-core');
 }}
 const executablePath = process.env.SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-const launchOptions = {{ headless: true, args: {} }};
+const launchOptions = {{
+    headless: true,
+    args: {},
+    proxy: {{ server: '{}' }},
+}};
 if (executablePath && fs.existsSync(executablePath)) {{
     launchOptions.executablePath = executablePath;
 }}
 const browser = await pw.chromium.launch(launchOptions);
 "#,
-        extra_args
+        extra_args,
+        escape_js_string(proxy_url)
     )
+}
+
+fn configure_chromium_proxy(cmd: &mut Command, proxy: &GuardedProxy) {
+    cmd.arg(format!("--proxy-server={}", proxy.url()))
+        // Chromium bypasses loopback proxies by default; disable that implicit
+        // exception so localhost subresources reach the guarded proxy too.
+        .arg("--proxy-bypass-list=<-loopback>")
+        // QUIC uses UDP and would bypass an HTTP CONNECT proxy.
+        .arg("--disable-quic");
+}
+
+async fn guarded_proxy_for_target(target: &PinnedTarget) -> Result<GuardedProxy> {
+    let parsed = url::Url::parse(&target.url).context("Invalid browser target URL")?;
+    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+    GuardedProxy::start(allow_private, Some(&parsed)).await
 }
 
 fn should_stage_chrome_output_for_home(output_path: &Path, home_dir: Option<&Path>) -> bool {
@@ -368,6 +403,11 @@ impl Tool for BrowserFetch {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Enforce the outbound-content policy at request construction as
+        // well as in SafetyChecker so direct Tool invocations cannot bypass
+        // it. The user agent is an HTTP header; wait_for is forwarded into
+        // the remote page's browser process.
+        reject_browser_bound_credential_shapes(&args, &["url", "user_agent", "wait_for"])?;
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
@@ -379,6 +419,7 @@ impl Tool for BrowserFetch {
             .unwrap_or(30);
         let user_agent = args.get("user_agent").and_then(|v| v.as_str());
         let pinned_target = resolve_and_pin_target(url)?;
+        let proxy = guarded_proxy_for_target(&pinned_target).await?;
 
         let browser = detect_browser().await?;
 
@@ -390,13 +431,16 @@ impl Tool for BrowserFetch {
                     timeout_secs,
                     user_agent,
                     &args,
+                    &proxy,
                 )
                 .await
             }
             BrowserType::Playwright => {
-                fetch_with_playwright(&pinned_target, timeout_secs, user_agent, &args).await
+                fetch_with_playwright(&pinned_target, timeout_secs, user_agent, &args, &proxy).await
             }
-            BrowserType::Curl => fetch_with_curl(&pinned_target, timeout_secs, user_agent).await,
+            BrowserType::Curl => {
+                fetch_with_curl(&pinned_target, timeout_secs, user_agent, &proxy).await
+            }
         }
     }
 }
@@ -407,6 +451,7 @@ async fn fetch_with_chrome(
     timeout_secs: u64,
     user_agent: Option<&str>,
     args: &Value,
+    proxy: &GuardedProxy,
 ) -> Result<Value> {
     let _wait_for = args.get("wait_for").and_then(|v| v.as_str());
 
@@ -428,6 +473,7 @@ async fn fetch_with_chrome(
     if no_sandbox {
         cmd.arg("--no-sandbox");
     }
+    configure_chromium_proxy(&mut cmd, proxy);
 
     if let Some(ua) = user_agent {
         cmd.arg(format!("--user-agent={}", ua));
@@ -499,6 +545,7 @@ async fn fetch_with_playwright(
     timeout_secs: u64,
     user_agent: Option<&str>,
     _args: &Value,
+    proxy: &GuardedProxy,
 ) -> Result<Value> {
     let safe_url = escape_js_string(&target.url);
     let ua_option = user_agent
@@ -512,7 +559,7 @@ async fn fetch_with_playwright(
             escape_js_string(&target.resolver_rule)
         )
     };
-    let launch_prelude = playwright_launch_prelude(&launch_args);
+    let launch_prelude = playwright_launch_prelude(&launch_args, &proxy.url());
     let script = format!(
         r#"
 (async () => {{
@@ -570,10 +617,13 @@ async fn fetch_with_curl(
     target: &PinnedTarget,
     timeout_secs: u64,
     user_agent: Option<&str>,
+    proxy: &GuardedProxy,
 ) -> Result<Value> {
     let mut cmd = Command::new("curl");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
     crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
+    let timeout_arg = timeout_secs.to_string();
+    let proxy_url = proxy.url();
     cmd.args([
         "-s",
         "-L",
@@ -582,7 +632,11 @@ async fn fetch_with_curl(
         "--proto",
         "=https,http",
         "--max-time",
-        &timeout_secs.to_string(),
+        &timeout_arg,
+        "--proxy",
+        &proxy_url,
+        "--noproxy",
+        "",
     ]);
     if !target.host_is_ip {
         cmd.args([
@@ -671,11 +725,13 @@ impl Tool for BrowserScreenshot {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_browser_bound_credential_shapes(&args, &["url"])?;
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
         let pinned_target = resolve_and_pin_target(url)?;
+        let proxy = guarded_proxy_for_target(&pinned_target).await?;
 
         // A relative output path resolves against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
@@ -715,6 +771,7 @@ impl Tool for BrowserScreenshot {
                 if no_sandbox {
                     cmd.arg("--no-sandbox");
                 }
+                configure_chromium_proxy(&mut cmd, &proxy);
                 if !pinned_target.host_is_ip {
                     cmd.arg(format!(
                         "--host-resolver-rules={}",
@@ -767,7 +824,7 @@ impl Tool for BrowserScreenshot {
                         escape_js_string(&pinned_target.resolver_rule)
                     )
                 };
-                let launch_prelude = playwright_launch_prelude(&launch_args);
+                let launch_prelude = playwright_launch_prelude(&launch_args, &proxy.url());
                 let script = format!(
                     r#"
 (async () => {{
@@ -870,11 +927,13 @@ impl Tool for BrowserPdf {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_browser_bound_credential_shapes(&args, &["url"])?;
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
         let pinned_target = resolve_and_pin_target(url)?;
+        let proxy = guarded_proxy_for_target(&pinned_target).await?;
 
         // A relative output path resolves against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
@@ -911,6 +970,7 @@ impl Tool for BrowserPdf {
                 if no_sandbox {
                     cmd.arg("--no-sandbox");
                 }
+                configure_chromium_proxy(&mut cmd, &proxy);
                 if !pinned_target.host_is_ip {
                     cmd.arg(format!(
                         "--host-resolver-rules={}",
@@ -957,7 +1017,7 @@ impl Tool for BrowserPdf {
                         escape_js_string(&pinned_target.resolver_rule)
                     )
                 };
-                let launch_prelude = playwright_launch_prelude(&launch_args);
+                let launch_prelude = playwright_launch_prelude(&launch_args, &proxy.url());
                 let script = format!(
                     r#"
 (async () => {{
@@ -1058,11 +1118,13 @@ impl Tool for BrowserEval {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_browser_bound_credential_shapes(&args, &["url", "script"])?;
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
         let pinned_target = resolve_and_pin_target(url)?;
+        let proxy = guarded_proxy_for_target(&pinned_target).await?;
 
         let script = args
             .get("script")
@@ -1092,7 +1154,7 @@ impl Tool for BrowserEval {
                         escape_js_string(&pinned_target.resolver_rule)
                     )
                 };
-                let launch_prelude = playwright_launch_prelude(&launch_args);
+                let launch_prelude = playwright_launch_prelude(&launch_args, &proxy.url());
 
                 let node_script = format!(
                     r#"
@@ -1252,15 +1314,16 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL host is required"))?
         .to_string();
+    let resolver_host = host_for_socket_resolution(&host);
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let host_is_ip = host.parse::<IpAddr>().is_ok();
+    let host_is_ip = resolver_host.parse::<IpAddr>().is_ok();
     let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
     let allow_localhost = is_local_endpoint(url) || is_trusted_local_browser_host(&host);
 
-    let ip = if let Ok(ip) = host.parse::<IpAddr>() {
+    let ip = if let Ok(ip) = resolver_host.parse::<IpAddr>() {
         ip
     } else {
-        let addrs: Vec<_> = (host.as_str(), port)
+        let addrs: Vec<_> = (resolver_host, port)
             .to_socket_addrs()
             .with_context(|| format!("Failed to resolve host {}", host))?
             .collect();
@@ -1307,9 +1370,7 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
 }
 
 fn is_trusted_local_browser_host(host: &str) -> bool {
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
-    matches!(bare_host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
-        || bare_host.ends_with(".localhost")
+    crate::tools::net_policy::is_trusted_local_network_host(host)
 }
 
 fn is_private_network_ip(ip: &IpAddr) -> bool {

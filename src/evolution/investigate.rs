@@ -488,25 +488,17 @@ pub fn scan_patch_for_opaque_structures(
                         if !is_valid {
                             if let Some(parent) = snapshot_file.parent() {
                                 let _ = std::fs::create_dir_all(parent);
-                                let nonce = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_nanos())
-                                    .unwrap_or(0);
-                                let tmp_path = parent.join(format!(
-                                    ".tmp_snap_{}_{}_{}",
-                                    std::process::id(),
-                                    citation_idx,
-                                    nonce
-                                ));
-                                if std::fs::write(&tmp_path, &expected_bytes).is_ok() {
-                                    if std::fs::rename(&tmp_path, &snapshot_file).is_ok() {
-                                        // Verify the replaced file content matches git show expected bytes
-                                        is_valid = std::fs::read(&snapshot_file)
-                                            .map(|b| b == expected_bytes)
-                                            .unwrap_or(false);
-                                    } else {
-                                        let _ = std::fs::remove_file(&tmp_path);
-                                    }
+                                if crate::session::checkpoint::write_bytes_atomically(
+                                    &snapshot_file,
+                                    &expected_bytes,
+                                    0o600,
+                                )
+                                .is_ok()
+                                {
+                                    // Verify the replaced file content matches git show expected bytes
+                                    is_valid = std::fs::read(&snapshot_file)
+                                        .map(|b| b == expected_bytes)
+                                        .unwrap_or(false);
                                 }
                             }
                         }
@@ -1401,38 +1393,40 @@ pub fn find_affected_callers(
     }
 
     let mut callers = Vec::new();
-    let mut stack = vec![src_dir];
-
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    for entry in walkdir::WalkDir::new(src_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
+    {
+        let Ok(entry) = entry else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let rel = path
-                    .strip_prefix(repo_root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if files_touched.iter().any(|t| t == &rel) {
-                    continue;
+        if !entry.file_type().is_file()
+            || entry.path_is_symlink()
+            || entry.path().extension().is_none_or(|e| e != "rs")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(repo_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if files_touched.iter().any(|t| t == &rel) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for sym in symbols {
+                let pat1 = format!("{sym}(");
+                let pat2 = format!("{sym}::");
+                if content.contains(&pat1) || content.contains(&pat2) {
+                    callers.push(format!("{rel} (ref: {sym})"));
+                    break;
                 }
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    for sym in symbols {
-                        let pat1 = format!("{sym}(");
-                        let pat2 = format!("{sym}::");
-                        if content.contains(&pat1) || content.contains(&pat2) {
-                            callers.push(format!("{rel} (ref: {sym})"));
-                            break;
-                        }
-                    }
-                }
-                if callers.len() >= 12 {
-                    return callers;
-                }
+            }
+            if callers.len() >= 12 {
+                return callers;
             }
         }
     }

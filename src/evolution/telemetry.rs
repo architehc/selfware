@@ -153,66 +153,189 @@ fn run_command_with_timeout(
     mut cmd: std::process::Command,
     timeout: Duration,
 ) -> Result<std::process::Output, TelemetryError> {
-    use std::io::Read;
     use std::process::Stdio;
-    use wait_timeout::ChildExt;
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     let mut child = cmd
         .spawn()
         .map_err(|e| TelemetryError::ToolFailed("spawn".into(), e.to_string()))?;
 
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = Read::read_to_end(&mut std::io::BufReader::new(stdout_pipe), &mut buf);
-        buf
-    });
-
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = Read::read_to_end(&mut std::io::BufReader::new(stderr_pipe), &mut buf);
-        buf
-    });
-
-    let started = std::time::Instant::now();
-    let poll_interval = Duration::from_millis(200);
-
-    loop {
-        match child.wait_timeout(poll_interval) {
-            Ok(Some(status)) => {
-                let stdout = stdout_handle.join().unwrap_or_default();
-                let stderr = stderr_handle.join().unwrap_or_default();
-                return Ok(std::process::Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
-            Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-                    return Err(TelemetryError::ToolFailed(
-                        "timeout".into(),
-                        format!("command timed out after {}s", timeout.as_secs()),
-                    ));
+    fn pipe_reader<R: std::io::Read + Send + 'static>(
+        pipe: R,
+    ) -> (
+        std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(pipe);
+            let mut chunk = [0_u8; 8192];
+            loop {
+                match std::io::Read::read(&mut reader, &mut chunk) {
+                    Ok(0) | Err(_) => {
+                        let _ = tx.send(None);
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx.send(Some(chunk[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return Err(TelemetryError::ToolFailed("wait".into(), e.to_string()));
+        });
+        (rx, handle)
+    }
+
+    fn drain_available(
+        rx: &std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+        output: &mut Vec<u8>,
+        done: &mut bool,
+    ) {
+        while !*done {
+            match rx.try_recv() {
+                Ok(Some(chunk)) => output.extend_from_slice(&chunk),
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => *done = true,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
             }
         }
     }
+
+    let (stdout_rx, stdout_handle) = pipe_reader(child.stdout.take().expect("stdout piped"));
+    let (stderr_rx, stderr_handle) = pipe_reader(child.stderr.take().expect("stderr piped"));
+
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    let poll_interval = Duration::from_millis(25);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut child_exited = false;
+    #[cfg(unix)]
+    let status_before_reap: Option<std::process::ExitStatus> = None;
+    #[cfg(not(unix))]
+    let mut status_before_reap = None;
+
+    loop {
+        drain_available(&stdout_rx, &mut stdout, &mut stdout_done);
+        drain_available(&stderr_rx, &mut stderr, &mut stderr_done);
+
+        if !child_exited {
+            #[cfg(unix)]
+            match crate::tools::process_guard::process_has_exited_without_reaping(child.id()) {
+                Ok(exited) => child_exited = exited,
+                Err(error) => {
+                    // Only signal the numeric process group while `try_wait`
+                    // confirms the leader is still our unreaped child.
+                    match child.try_wait() {
+                        Ok(None) => {
+                            kill_telemetry_group(&mut child);
+                            let _ = child.wait();
+                        }
+                        Ok(Some(_)) | Err(_) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                    return Err(TelemetryError::ToolFailed("wait".into(), error.to_string()));
+                }
+            }
+            #[cfg(not(unix))]
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    status_before_reap = Some(status);
+                    child_exited = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TelemetryError::ToolFailed("wait".into(), error.to_string()));
+                }
+            }
+        }
+
+        if child_exited && stdout_done && stderr_done {
+            // Stop descendants that detached both output streams while the
+            // zombie leader still pins the pgid, then release that identity.
+            force_kill_telemetry_group_while_unreaped(&child);
+            let status = match status_before_reap {
+                Some(status) => status,
+                None => child
+                    .wait()
+                    .map_err(|e| TelemetryError::ToolFailed("wait".into(), e.to_string()))?,
+            };
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if std::time::Instant::now() >= deadline {
+            // The Unix leader remains unreaped even when it exited before a
+            // descendant closed an inherited pipe, so this group signal cannot
+            // hit a recycled pgid.
+            kill_telemetry_group(&mut child);
+            if status_before_reap.is_none() {
+                let _ = child.wait();
+            }
+
+            // Do not join unboundedly: a setsid descendant may have escaped
+            // the process group while retaining either pipe.
+            let drain_deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while (!stdout_done || !stderr_done) && std::time::Instant::now() < drain_deadline {
+                drain_available(&stdout_rx, &mut stdout, &mut stdout_done);
+                drain_available(&stderr_rx, &mut stderr, &mut stderr_done);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if stdout_done {
+                let _ = stdout_handle.join();
+            }
+            if stderr_done {
+                let _ = stderr_handle.join();
+            }
+            return Err(TelemetryError::ToolFailed(
+                "timeout".into(),
+                format!("command timed out after {}s", timeout.as_secs()),
+            ));
+        }
+
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(poll_interval),
+        );
+    }
+}
+
+fn kill_telemetry_group(child: &mut std::process::Child) {
+    force_kill_telemetry_group_while_unreaped(child);
+    let _ = child.kill();
+}
+
+fn force_kill_telemetry_group_while_unreaped(child: &std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(raw) = i32::try_from(child.id()) {
+        if raw > 1 {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 /// Build the cargo invocation for telemetry capture with a SANITIZED

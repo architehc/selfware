@@ -17,9 +17,11 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -125,6 +127,10 @@ pub struct ChunkMetadata {
     pub start_line: usize,
     /// End line (1-indexed)
     pub end_line: usize,
+    /// Byte offset within `start_line` for pieces split from one oversized
+    /// line. Older persisted chunks predate this field and start at offset 0.
+    #[serde(default)]
+    pub byte_offset: usize,
     /// Chunk type
     pub chunk_type: ChunkType,
     /// Symbol name if applicable (function name, struct name, etc.)
@@ -167,6 +173,7 @@ impl ChunkMetadata {
             file_path: file_path.into(),
             start_line,
             end_line,
+            byte_offset: 0,
             chunk_type,
             symbol_name: None,
             language: language.into(),
@@ -204,14 +211,24 @@ pub struct CodeChunk {
 }
 
 impl CodeChunk {
-    /// Create a new code chunk
-    pub fn new(content: String, metadata: ChunkMetadata) -> Self {
-        let id = format!(
-            "{}:{}:{}",
+    fn stable_id(metadata: &ChunkMetadata) -> String {
+        format!(
+            "{}:{}:{}:{}:{}",
             metadata.file_path.display(),
             metadata.start_line,
-            &metadata.content_hash[..8]
-        );
+            metadata.end_line,
+            metadata.byte_offset,
+            metadata.content_hash
+        )
+    }
+
+    fn refresh_id(&mut self) {
+        self.id = Self::stable_id(&self.metadata);
+    }
+
+    /// Create a new code chunk
+    pub fn new(content: String, metadata: ChunkMetadata) -> Self {
+        let id = Self::stable_id(&metadata);
 
         Self {
             id,
@@ -485,14 +502,23 @@ impl VectorCollection {
         }
     }
 
-    /// Rebuild the `id_index` from the `chunks` vector.
+    fn chunk_ids_for_file(&self, path: &Path) -> Vec<String> {
+        self.file_index.get(path).cloned().unwrap_or_default()
+    }
+
+    /// Rebuild the derived ID and file indexes from the `chunks` vector.
     ///
     /// Must be called after deserialization because `id_index` is
     /// `#[serde(skip)]` — it is derivable from `chunks` but not persisted.
     pub fn rebuild_id_index(&mut self) {
         self.id_index.clear();
+        self.file_index.clear();
         for (i, chunk) in self.chunks.iter().enumerate() {
             self.id_index.insert(chunk.id.clone(), i);
+            self.file_index
+                .entry(chunk.metadata.file_path.to_path_buf())
+                .or_default()
+                .push(chunk.id.clone());
         }
     }
 
@@ -546,12 +572,26 @@ pub trait EmbeddingProvider: Send + Sync {
 /// Mock embedding provider for testing
 pub struct MockEmbeddingProvider {
     dimension: usize,
+    #[cfg(test)]
+    fail_on_substring: Option<String>,
 }
 
 impl MockEmbeddingProvider {
     /// Create new mock provider
     pub fn new(dimension: usize) -> Self {
-        Self { dimension }
+        Self {
+            dimension,
+            #[cfg(test)]
+            fail_on_substring: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failing_on(dimension: usize, marker: impl Into<String>) -> Self {
+        Self {
+            dimension,
+            fail_on_substring: Some(marker.into()),
+        }
     }
 }
 
@@ -564,6 +604,15 @@ impl Default for MockEmbeddingProvider {
 #[async_trait::async_trait]
 impl EmbeddingProvider for MockEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        #[cfg(test)]
+        if self
+            .fail_on_substring
+            .as_deref()
+            .is_some_and(|marker| text.contains(marker))
+        {
+            anyhow::bail!("mock embedding failure for configured marker");
+        }
+
         // Generate deterministic embedding based on text hash
         let mut hasher = Sha256::new();
         hasher.update(text.as_bytes());
@@ -764,6 +813,11 @@ impl VectorIndex {
     /// Whether the index contains zero live entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Embedding width accepted by this index.
+    pub fn dimension(&self) -> usize {
+        self.dimension
     }
 
     /// Add an embedding to the index.
@@ -1072,19 +1126,21 @@ impl VectorIndex {
 }
 
 /// Code chunker for splitting code into meaningful pieces
+#[derive(Clone)]
 pub struct CodeChunker {
-    /// Maximum chunk size in characters
+    /// Maximum chunk size in measured tokens.
     pub max_chunk_size: usize,
-    /// Minimum chunk size
+    /// Minimum chunk size in characters (a filtering threshold, not a
+    /// context-size projection).
     pub min_chunk_size: usize,
-    /// Overlap between chunks
+    /// Maximum measured-token overlap between adjacent fallback chunks.
     pub overlap: usize,
 }
 
 impl Default for CodeChunker {
     fn default() -> Self {
         Self {
-            max_chunk_size: 2000,
+            max_chunk_size: 500,
             min_chunk_size: 100,
             overlap: 50,
         }
@@ -1093,11 +1149,55 @@ impl Default for CodeChunker {
 
 impl CodeChunker {
     /// Create new chunker
-    pub fn new(max_chunk_size: usize) -> Self {
+    pub fn new(max_chunk_tokens: usize) -> Self {
         Self {
-            max_chunk_size,
+            max_chunk_size: max_chunk_tokens,
             ..Default::default()
         }
+    }
+
+    /// Split one line that is itself larger than the measured token budget.
+    /// Line-based chunking alone cannot bound minified/generated sources, and
+    /// recursively feeding the same line back into `chunk_fixed_size` would
+    /// never make it smaller.
+    fn split_oversized_line(&self, line: &str) -> Vec<(usize, String)> {
+        let max_tokens = self.max_chunk_size.max(1);
+        let mut boundaries: Vec<usize> = line.char_indices().map(|(index, _)| index).collect();
+        boundaries.push(line.len());
+
+        let mut pieces = Vec::new();
+        let mut start = 0usize;
+        while start + 1 < boundaries.len() {
+            let start_byte = boundaries[start];
+            let mut low = start + 1;
+            let mut high = boundaries.len() - 1;
+            let mut best = start + 1;
+
+            // Token counts are effectively monotonic for prefixes. Search for
+            // the largest measured prefix that fits, then verify the result
+            // below so a tokenizer edge case can never emit an oversized
+            // piece when a smaller character boundary is available.
+            while low <= high {
+                let mid = low + (high - low) / 2;
+                let candidate = &line[start_byte..boundaries[mid]];
+                if crate::token_count::estimate_content_tokens(candidate) <= max_tokens {
+                    best = mid;
+                    low = mid + 1;
+                } else {
+                    high = mid.saturating_sub(1);
+                }
+            }
+            while best > start + 1
+                && crate::token_count::estimate_content_tokens(&line[start_byte..boundaries[best]])
+                    > max_tokens
+            {
+                best -= 1;
+            }
+
+            pieces.push((start_byte, line[start_byte..boundaries[best]].to_string()));
+            start = best;
+        }
+        pieces
     }
 
     /// Chunk Rust code by functions, structs, etc.
@@ -1276,15 +1376,23 @@ impl CodeChunker {
         let shared_path: Arc<Path> = Arc::from(file_path);
         let shared_lang: Arc<str> = Arc::from(language);
 
+        let max_tokens = self.max_chunk_size.max(1);
         let mut start = 0;
         while start < lines.len() {
             let mut end = start;
-            let mut size = 0;
 
-            // Accumulate lines until max size
-            while end < lines.len() && size + lines[end].len() < self.max_chunk_size {
-                size += lines[end].len() + 1; // +1 for newline
+            // Accumulate lines using the shared tokenizer. A single line may
+            // exceed the budget, but must still make forward progress.
+            while end < lines.len() {
+                let candidate = lines[start..=end].join("\n");
+                let tokens = crate::token_count::estimate_content_tokens(&candidate);
+                if end > start && tokens > max_tokens {
+                    break;
+                }
                 end += 1;
+                if tokens >= max_tokens {
+                    break;
+                }
             }
 
             // Ensure minimum size
@@ -1293,6 +1401,24 @@ impl CodeChunker {
             }
 
             let chunk_content: String = lines[start..end].join("\n");
+            if end == start + 1
+                && crate::token_count::estimate_content_tokens(&chunk_content) > max_tokens
+            {
+                for (byte_offset, piece) in self.split_oversized_line(&chunk_content) {
+                    let mut metadata = ChunkMetadata::new(
+                        shared_path.clone(),
+                        start + 1,
+                        end,
+                        ChunkType::CodeBlock,
+                        shared_lang.clone(),
+                        &piece,
+                    );
+                    metadata.byte_offset = byte_offset;
+                    chunks.push(CodeChunk::new(piece, metadata));
+                }
+                start = end;
+                continue;
+            }
             let metadata = ChunkMetadata::new(
                 shared_path.clone(),
                 start + 1,
@@ -1303,11 +1429,20 @@ impl CodeChunker {
             );
             chunks.push(CodeChunk::new(chunk_content, metadata));
 
-            // Move start with overlap
+            // Move start with a measured overlap, always advancing at least
+            // one line so a large overlap cannot loop forever.
             if end >= lines.len() {
                 break;
             }
-            start = end.saturating_sub(self.overlap / 50);
+            let mut overlap_start = end;
+            while overlap_start > start + 1 {
+                let candidate = lines[overlap_start - 1..end].join("\n");
+                if crate::token_count::estimate_content_tokens(&candidate) > self.overlap {
+                    break;
+                }
+                overlap_start -= 1;
+            }
+            start = overlap_start.max(start + 1);
         }
 
         chunks
@@ -1317,10 +1452,40 @@ impl CodeChunker {
     pub fn chunk(&self, content: &str, file_path: &Path) -> Vec<CodeChunk> {
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        match ext {
+        let chunks = match ext {
             "rs" => self.chunk_rust(content, file_path),
             _ => self.chunk_fixed_size(content, file_path, ext),
+        };
+
+        let mut bounded = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            if crate::token_count::estimate_content_tokens(&chunk.content)
+                <= self.max_chunk_size.max(1)
+            {
+                bounded.push(chunk);
+                continue;
+            }
+
+            let base_line = chunk.metadata.start_line.saturating_sub(1);
+            let chunk_type = chunk.metadata.chunk_type;
+            let symbol_name = chunk.metadata.symbol_name.clone();
+            let mut pieces = self.chunk_fixed_size(
+                &chunk.content,
+                chunk.metadata.file_path.as_ref(),
+                chunk.metadata.language.as_ref(),
+            );
+            for (piece_index, piece) in pieces.iter_mut().enumerate() {
+                piece.metadata.start_line += base_line;
+                piece.metadata.end_line += base_line;
+                piece.metadata.chunk_type = chunk_type;
+                if piece_index == 0 {
+                    piece.metadata.symbol_name.clone_from(&symbol_name);
+                }
+                piece.refresh_id();
+            }
+            bounded.extend(pieces);
         }
+        bounded
     }
 }
 
@@ -1328,7 +1493,10 @@ impl CodeChunker {
 pub struct HttpEmbeddingProvider {
     endpoint: String,
     model: String,
-    dimension: usize,
+    /// Zero means the endpoint's first successful response will establish the
+    /// dimension.  Keeping this atomic makes concurrent first requests agree
+    /// on one observed value instead of racing different index shapes.
+    dimension: AtomicUsize,
     api_key: Option<String>,
     client: reqwest::Client,
 }
@@ -1340,12 +1508,18 @@ impl HttpEmbeddingProvider {
     /// `model` is the embedding model name (e.g. `text-embedding-nomic-embed-text-v1.5`).
     /// `dimension` is the expected embedding vector size (e.g. 768 for nomic-embed).
     pub fn new(endpoint: impl Into<String>, model: impl Into<String>, dimension: usize) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("static embedding HTTP client configuration must be valid");
         Self {
             endpoint: endpoint.into(),
             model: model.into(),
-            dimension,
+            dimension: AtomicUsize::new(dimension),
             api_key: None,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -1363,6 +1537,142 @@ impl HttpEmbeddingProvider {
         // via a userinfo URL) before attaching the bearer token.
         crate::config::api_key::authorize_request(req, &self.endpoint, self.api_key.as_deref())
     }
+
+    fn accept_dimension(&self, observed: usize) -> Result<()> {
+        if observed == 0 {
+            anyhow::bail!("Embedding endpoint returned an empty vector");
+        }
+        match self
+            .dimension
+            .compare_exchange(0, observed, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => Ok(()),
+            Err(expected) if expected == observed => Ok(()),
+            Err(expected) => anyhow::bail!(
+                "Embedding dimension mismatch: expected {}, got {}",
+                expected,
+                observed
+            ),
+        }
+    }
+
+    async fn bounded_body(
+        mut response: reqwest::Response,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        const MAX_EMBEDDING_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_EMBEDDING_RESPONSE_BYTES as u64)
+        {
+            anyhow::bail!(
+                "Embedding response exceeds {} byte limit",
+                MAX_EMBEDDING_RESPONSE_BYTES
+            );
+        }
+
+        let status = response.status();
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Failed to read embedding response")?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_EMBEDDING_RESPONSE_BYTES {
+                anyhow::bail!(
+                    "Embedding response exceeds {} byte limit",
+                    MAX_EMBEDDING_RESPONSE_BYTES
+                );
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(body).context("Embedding response was not valid UTF-8")?;
+        Ok((status, text))
+    }
+
+    fn parse_embeddings(
+        json: &serde_json::Value,
+        expected_count: usize,
+        expected_dimension: usize,
+    ) -> Result<Vec<Vec<f32>>> {
+        let data = json["data"]
+            .as_array()
+            .context("Missing data array in embedding response")?;
+        if data.len() != expected_count {
+            anyhow::bail!(
+                "Embedding response count mismatch: expected {}, got {}",
+                expected_count,
+                data.len()
+            );
+        }
+
+        let indexed = data.iter().any(|item| item.get("index").is_some());
+        let mut ordered: Vec<Option<Vec<f32>>> = vec![None; expected_count];
+        let mut observed_dimension = None;
+        for (position, item) in data.iter().enumerate() {
+            let response_index = if indexed {
+                item.get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .context("Every batch embedding item must have an integer index")?
+                    as usize
+            } else {
+                position
+            };
+            if response_index >= expected_count {
+                anyhow::bail!(
+                    "Embedding response index {} is out of range for {} inputs",
+                    response_index,
+                    expected_count
+                );
+            }
+            if ordered[response_index].is_some() {
+                anyhow::bail!("Duplicate embedding response index {}", response_index);
+            }
+
+            let values = item["embedding"]
+                .as_array()
+                .context("Missing embedding in response item")?;
+            let embedding = values
+                .iter()
+                .enumerate()
+                .map(|(component, value)| {
+                    let value = value.as_f64().with_context(|| {
+                        format!("Embedding component {} is not numeric", component)
+                    })? as f32;
+                    if !value.is_finite() {
+                        anyhow::bail!("Embedding component {} is not finite", component);
+                    }
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if expected_dimension > 0 && embedding.len() != expected_dimension {
+                anyhow::bail!(
+                    "Embedding dimension mismatch: expected {}, got {}",
+                    expected_dimension,
+                    embedding.len()
+                );
+            }
+            if let Some(observed) = observed_dimension {
+                if embedding.len() != observed {
+                    anyhow::bail!(
+                        "Embedding batch contains mixed dimensions: {} and {}",
+                        observed,
+                        embedding.len()
+                    );
+                }
+            } else {
+                observed_dimension = Some(embedding.len());
+            }
+            ordered[response_index] = Some(embedding);
+        }
+
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.ok_or_else(|| anyhow!("Missing embedding response index {}", index))
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -1377,33 +1687,25 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .send()
             .await
             .context("HTTP embedding request failed")?;
-        let status = resp.status();
-        let body_text = resp
-            .text()
-            .await
-            .context("Failed to read embedding response")?;
+        let (status, body_text) = Self::bounded_body(resp).await?;
         if !status.is_success() {
             anyhow::bail!("Embedding endpoint returned {}: {}", status, body_text);
         }
         let json: serde_json::Value =
             serde_json::from_str(&body_text).context("Failed to parse embedding response")?;
-        let embedding = json["data"][0]["embedding"]
-            .as_array()
-            .context("Missing embedding array in response")?
-            .iter()
-            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-            .collect::<Vec<f32>>();
-        if embedding.len() != self.dimension {
-            anyhow::bail!(
-                "Embedding dimension mismatch: expected {}, got {}",
-                self.dimension,
-                embedding.len()
-            );
-        }
+        let mut embeddings =
+            Self::parse_embeddings(&json, 1, self.dimension.load(Ordering::Acquire))?;
+        let embedding = embeddings
+            .pop()
+            .ok_or_else(|| anyhow!("Embedding response did not contain a vector"))?;
+        self.accept_dimension(embedding.len())?;
         Ok(embedding)
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         let body = serde_json::json!({
             "model": self.model,
             "input": texts,
@@ -1413,34 +1715,24 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .send()
             .await
             .context("HTTP batch embedding request failed")?;
-        let status = resp.status();
-        let body_text = resp
-            .text()
-            .await
-            .context("Failed to read batch embedding response")?;
+        let (status, body_text) = Self::bounded_body(resp).await?;
         if !status.is_success() {
             anyhow::bail!("Embedding endpoint returned {}: {}", status, body_text);
         }
         let json: serde_json::Value =
             serde_json::from_str(&body_text).context("Failed to parse batch embedding response")?;
-        let data = json["data"]
-            .as_array()
-            .context("Missing data array in batch embedding response")?;
-        let mut results = Vec::with_capacity(data.len());
-        for item in data {
-            let embedding = item["embedding"]
-                .as_array()
-                .context("Missing embedding in batch item")?
-                .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                .collect::<Vec<f32>>();
-            results.push(embedding);
-        }
+        let results =
+            Self::parse_embeddings(&json, texts.len(), self.dimension.load(Ordering::Acquire))?;
+        let observed = results
+            .first()
+            .map(Vec::len)
+            .ok_or_else(|| anyhow!("Embedding response did not contain vectors"))?;
+        self.accept_dimension(observed)?;
         Ok(results)
     }
 
     fn dimension(&self) -> usize {
-        self.dimension
+        self.dimension.load(Ordering::Acquire)
     }
 }
 
@@ -1484,6 +1776,49 @@ impl EmbeddingBackend {
             Self::Http(p) => p.dimension(),
         }
     }
+
+    fn accept_dimension(&self, observed: usize) -> Result<()> {
+        match self {
+            Self::Http(provider) => provider.accept_dimension(observed),
+            _ if self.dimension() == observed => Ok(()),
+            _ => anyhow::bail!(
+                "Embedding dimension mismatch: expected {}, got {}",
+                self.dimension(),
+                observed
+            ),
+        }
+    }
+}
+
+const VECTOR_STORE_FORMAT_VERSION: u32 = 1;
+const VECTOR_STORE_MANIFEST_FILE: &str = ".vector-store-manifest.json";
+const VECTOR_STORE_COLLECTIONS_FILE: &str = "collections.json";
+const VECTOR_STORE_INDICES_FILE: &str = "indices.bin";
+const VECTOR_STORE_GENERATION_PREFIX: &str = ".vector-store-generation-";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VectorStoreManifest {
+    version: u32,
+    generation: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedCollections {
+    version: u32,
+    collections: HashMap<String, VectorCollection>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedVectorIndex {
+    dimension: usize,
+    embeddings: Vec<Vec<f32>>,
+    chunk_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedIndices {
+    version: u32,
+    indices: HashMap<String, PersistedVectorIndex>,
 }
 
 /// Main vector store
@@ -1518,6 +1853,12 @@ impl VectorStore {
         self
     }
 
+    /// Configure the chunker used for subsequent file indexing.
+    pub fn with_chunker(mut self, chunker: CodeChunker) -> Self {
+        self.chunker = chunker;
+        self
+    }
+
     /// Create or get collection
     pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {
         if !self.collections.contains_key(name) {
@@ -1541,52 +1882,202 @@ impl VectorStore {
         self.collections.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Delete collection, including its on-disk files.
+    /// Delete a collection from the live store.
+    ///
+    /// Persistence is snapshot-based: callers that configured storage must
+    /// call [`Self::save`] to durably publish the deletion. Keeping deletion
+    /// and persistence explicit also lets a full-index rebuild replace the
+    /// in-memory collection without briefly publishing an empty snapshot.
     pub fn delete_collection(&mut self, name: &str) -> Option<VectorCollection> {
         self.indices.remove(name);
-        let removed = self.collections.remove(name);
+        self.collections.remove(name)
+    }
 
-        // Clean up persisted files for this collection
-        if let Some(ref storage_path) = self.storage_path {
-            let json_path = storage_path.join(format!("{}.json", name));
-            let idx_path = storage_path.join(format!("{}.idx", name));
-            if json_path.exists() {
-                let _ = std::fs::remove_file(&json_path);
-            }
-            if idx_path.exists() {
-                let _ = std::fs::remove_file(&idx_path);
-            }
+    /// Create an empty, non-persistent store with the same embedding provider
+    /// and chunking policy for staging a rebuild.
+    ///
+    /// Keeping staging outside the live maps means cancellation simply drops
+    /// the partial store; it cannot leak a temporary collection into a later
+    /// persistence snapshot.
+    pub(crate) fn staging_store(&self) -> Self {
+        Self {
+            collections: HashMap::new(),
+            indices: HashMap::new(),
+            provider: Arc::clone(&self.provider),
+            storage_path: None,
+            chunker: self.chunker.clone(),
+        }
+    }
+
+    /// Atomically publish a fully built collection from a staging store.
+    ///
+    /// Both halves of the staged collection are checked before either live map
+    /// is changed. Callers can therefore keep the last-good live collection
+    /// searchable until every file and embedding has succeeded.
+    pub(crate) fn publish_staged_collection(
+        &mut self,
+        mut staged: Self,
+        collection_name: &str,
+    ) -> Result<()> {
+        if !staged.collections.contains_key(collection_name) {
+            anyhow::bail!("Staging collection not found: {collection_name}");
+        }
+        if !staged.indices.contains_key(collection_name) {
+            anyhow::bail!("Index for staging collection not found: {collection_name}");
         }
 
-        removed
+        // No fallible work remains after these removals. The caller holds
+        // `&mut self`, so no observer can see the two map insertions separately.
+        let collection = staged
+            .collections
+            .remove(collection_name)
+            .expect("staging collection existence checked above");
+        let index = staged
+            .indices
+            .remove(collection_name)
+            .expect("staging index existence checked above");
+        self.collections
+            .insert(collection_name.to_string(), collection);
+        self.indices.insert(collection_name.to_string(), index);
+        Ok(())
+    }
+
+    fn validate_embedding_values(
+        embeddings: &[Vec<f32>],
+        expected_count: usize,
+    ) -> Result<Option<usize>> {
+        if embeddings.len() != expected_count {
+            anyhow::bail!(
+                "Embedding response count mismatch: expected {}, got {}",
+                expected_count,
+                embeddings.len()
+            );
+        }
+        let Some(first) = embeddings.first() else {
+            return Ok(None);
+        };
+        let dimension = first.len();
+        if dimension == 0 {
+            anyhow::bail!("Embedding batch contains an empty vector");
+        }
+        for (index, embedding) in embeddings.iter().enumerate() {
+            if embedding.len() != dimension {
+                anyhow::bail!(
+                    "Embedding batch item {} has dimension {}, expected {}",
+                    index,
+                    embedding.len(),
+                    dimension
+                );
+            }
+            if embedding.iter().any(|value| !value.is_finite()) {
+                anyhow::bail!("Embedding batch item {} contains a non-finite value", index);
+            }
+        }
+        Ok(Some(dimension))
+    }
+
+    fn validate_embedding_batch(
+        &self,
+        embeddings: &[Vec<f32>],
+        expected_count: usize,
+    ) -> Result<usize> {
+        let observed = Self::validate_embedding_values(embeddings, expected_count)?;
+        if let Some(dimension) = observed {
+            // Dynamic providers learn their width only after every vector in
+            // the response has passed cardinality, shape, and finite-value
+            // validation. A malformed response must not pin future requests.
+            self.provider.accept_dimension(dimension)?;
+            Ok(dimension)
+        } else {
+            Ok(self.provider.dimension())
+        }
+    }
+
+    /// Remove a file from both the persisted collection and its HNSW index.
+    pub fn remove_file(&mut self, collection_name: &str, file_path: &Path) -> Result<usize> {
+        let chunk_ids = self
+            .collections
+            .get(collection_name)
+            .with_context(|| format!("collection '{}' not found", collection_name))?
+            .chunk_ids_for_file(file_path);
+        let index = self
+            .indices
+            .get_mut(collection_name)
+            .with_context(|| format!("index for collection '{}' not found", collection_name))?;
+        for chunk_id in &chunk_ids {
+            index.remove(chunk_id);
+        }
+        self.collections
+            .get_mut(collection_name)
+            .expect("collection existence checked above")
+            .remove_file(file_path);
+        Ok(chunk_ids.len())
     }
 
     /// Index a file into a collection
     pub async fn index_file(&mut self, collection_name: &str, file_path: &Path) -> Result<usize> {
-        let content = std::fs::read_to_string(file_path)?;
+        let content = String::from_utf8(Self::read_regular_file(file_path, "indexed source file")?)
+            .with_context(|| {
+                format!("Indexed source file is not UTF-8: {}", file_path.display())
+            })?;
         let chunks = self.chunker.chunk(&content, file_path);
         let chunk_count = chunks.len();
 
         // Generate embeddings
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = self.provider.embed_batch(&texts).await?;
+        let embedding_dimension = self.validate_embedding_batch(&embeddings, chunk_count)?;
 
         // Get or create collection
         if !self.collections.contains_key(collection_name) {
             self.collection(collection_name, CollectionScope::Project);
         }
 
-        let collection = self.collections.get_mut(collection_name).with_context(|| {
-            format!("collection '{}' not found after creation", collection_name)
-        })?;
+        let old_ids = self
+            .collections
+            .get(collection_name)
+            .with_context(|| format!("collection '{}' not found after creation", collection_name))?
+            .chunk_ids_for_file(file_path);
+        let collection_len = self
+            .collections
+            .get(collection_name)
+            .map(VectorCollection::len)
+            .unwrap_or_default();
+        let projected_len = collection_len
+            .saturating_sub(old_ids.len())
+            .saturating_add(chunk_count);
+        if projected_len > MAX_CHUNKS {
+            anyhow::bail!(
+                "Collection {} would exceed its {} chunk limit",
+                collection_name,
+                MAX_CHUNKS
+            );
+        }
+
         let index = self
             .indices
             .get_mut(collection_name)
             .with_context(|| format!("index for collection '{}' not found", collection_name))?;
+        if index.is_empty() && index.dimension == 0 && embedding_dimension > 0 {
+            *index = VectorIndex::new(embedding_dimension);
+        }
+        if embedding_dimension > 0 && index.dimension != embedding_dimension {
+            anyhow::bail!(
+                "Index dimension mismatch: expected {}, got {}",
+                index.dimension,
+                embedding_dimension
+            );
+        }
 
-        // Clear any previously-indexed chunks for this file before re-adding, so
-        // re-indexing a changed file replaces its chunks instead of accumulating
-        // stale ones (which would grow the collection unbounded toward MAX_CHUNKS).
+        // All fallible generation and validation is complete. Replace the old
+        // file in both stores only now, preserving the last good version if an
+        // embedding request failed or returned a malformed batch.
+        for chunk_id in &old_ids {
+            index.remove(chunk_id);
+        }
+        let collection = self.collections.get_mut(collection_name).with_context(|| {
+            format!("collection '{}' not found after creation", collection_name)
+        })?;
         collection.remove_file(file_path);
 
         // Add chunks with embeddings
@@ -1619,8 +2110,9 @@ impl VectorStore {
         let ids: Vec<String> = collection.chunks().iter().map(|c| c.id.clone()).collect();
 
         let embeddings = self.provider.embed_batch(&texts).await?;
+        let dimension = self.validate_embedding_batch(&embeddings, ids.len())?;
 
-        let mut new_index = VectorIndex::new(self.provider.dimension());
+        let mut new_index = VectorIndex::new(dimension);
         for (id, embedding) in ids.into_iter().zip(embeddings) {
             new_index.add(id, embedding)?;
         }
@@ -1807,110 +2299,574 @@ impl VectorStore {
         Ok(results)
     }
 
-    /// Save store to disk.
+    fn validate_generation_id(generation: &str) -> Result<()> {
+        if generation.len() != 32 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!("Invalid vector-store generation identifier");
+        }
+        Ok(())
+    }
+
+    fn generation_path(storage_path: &Path, generation: &str) -> Result<PathBuf> {
+        Self::validate_generation_id(generation)?;
+        Ok(storage_path.join(format!("{}{}", VECTOR_STORE_GENERATION_PREFIX, generation)))
+    }
+
+    fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
+            .with_context(|| format!("Failed to create vector-store file {:?}", path))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn sync_directory(path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(path)?.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
+    }
+
+    fn validate_collection_index(
+        name: &str,
+        collection: &VectorCollection,
+        index: &PersistedVectorIndex,
+    ) -> Result<()> {
+        if collection.name != name {
+            anyhow::bail!(
+                "Collection key '{}' does not match persisted name '{}'",
+                name,
+                collection.name
+            );
+        }
+
+        let collection_ids: HashSet<&str> = collection
+            .chunks
+            .iter()
+            .map(|chunk| chunk.id.as_str())
+            .collect();
+        if collection_ids.len() != collection.chunks.len() {
+            anyhow::bail!("Collection '{}' contains duplicate chunk IDs", name);
+        }
+        for chunk in &collection.chunks {
+            let mut hasher = Sha256::new();
+            hasher.update(chunk.content.as_bytes());
+            let observed_hash = hex::encode(hasher.finalize());
+            if chunk.metadata.content_hash != observed_hash {
+                anyhow::bail!(
+                    "Collection '{}' contains a chunk whose content hash does not match its content",
+                    name
+                );
+            }
+            if chunk.id != CodeChunk::stable_id(&chunk.metadata) {
+                anyhow::bail!(
+                    "Collection '{}' contains a chunk whose ID does not match its metadata",
+                    name
+                );
+            }
+            if chunk.metadata.start_line == 0 || chunk.metadata.end_line < chunk.metadata.start_line
+            {
+                anyhow::bail!("Collection '{}' contains an invalid chunk line range", name);
+            }
+        }
+        let index_ids: HashSet<&str> = index.chunk_ids.iter().map(String::as_str).collect();
+        if index_ids.len() != index.chunk_ids.len() {
+            anyhow::bail!("Vector index '{}' contains duplicate chunk IDs", name);
+        }
+        if collection_ids != index_ids {
+            anyhow::bail!(
+                "Collection '{}' chunk IDs do not exactly match its vector index",
+                name
+            );
+        }
+
+        let observed = Self::validate_embedding_values(&index.embeddings, index.chunk_ids.len())?;
+        match observed {
+            Some(observed) if index.dimension != observed => anyhow::bail!(
+                "Vector index '{}' declares dimension {}, but contains dimension {}",
+                name,
+                index.dimension,
+                observed
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn stage_snapshot(
+        &self,
+        mut collections: HashMap<String, VectorCollection>,
+        persisted_indices: HashMap<String, PersistedVectorIndex>,
+    ) -> Result<(
+        HashMap<String, VectorCollection>,
+        HashMap<String, VectorIndex>,
+    )> {
+        let collection_names: HashSet<&str> = collections.keys().map(String::as_str).collect();
+        let index_names: HashSet<&str> = persisted_indices.keys().map(String::as_str).collect();
+        if collection_names != index_names {
+            anyhow::bail!("Persisted collection and vector-index name sets do not match");
+        }
+
+        let mut learned_dimension = None;
+        for (name, collection) in &collections {
+            let persisted_index = persisted_indices
+                .get(name)
+                .ok_or_else(|| anyhow!("Missing vector index for collection '{}'", name))?;
+            Self::validate_collection_index(name, collection, persisted_index)?;
+            if persisted_index.dimension > 0 {
+                if let Some(previous) = learned_dimension {
+                    if previous != persisted_index.dimension {
+                        anyhow::bail!(
+                            "Persisted vector indexes use mixed dimensions: {} and {}",
+                            previous,
+                            persisted_index.dimension
+                        );
+                    }
+                } else {
+                    learned_dimension = Some(persisted_index.dimension);
+                }
+            }
+        }
+
+        if let Some(dimension) = learned_dimension {
+            let configured = self.provider.dimension();
+            if configured != 0 && configured != dimension {
+                anyhow::bail!(
+                    "Embedding dimension mismatch: expected {}, got {}",
+                    configured,
+                    dimension
+                );
+            }
+        }
+
+        // Build every HNSW index before changing either the provider or the
+        // live maps. A corrupt later collection therefore cannot leave a
+        // partially loaded store.
+        let mut indices = HashMap::with_capacity(persisted_indices.len());
+        for (name, persisted) in persisted_indices {
+            let mut index = VectorIndex::new(persisted.dimension);
+            for (chunk_id, embedding) in persisted.chunk_ids.into_iter().zip(persisted.embeddings) {
+                index.add(chunk_id, embedding)?;
+            }
+            indices.insert(name, index);
+        }
+        for collection in collections.values_mut() {
+            collection.rebuild_id_index();
+        }
+
+        // This is the only fallible state mutation, and it happens after the
+        // full snapshot has parsed, validated, and built successfully.
+        if let Some(dimension) = learned_dimension {
+            self.provider.accept_dimension(dimension)?;
+        }
+        Ok((collections, indices))
+    }
+
+    fn load_generation(
+        &self,
+        storage_path: &Path,
+        manifest: VectorStoreManifest,
+    ) -> Result<(
+        HashMap<String, VectorCollection>,
+        HashMap<String, VectorIndex>,
+    )> {
+        if manifest.version != VECTOR_STORE_FORMAT_VERSION {
+            anyhow::bail!(
+                "Unsupported vector-store manifest version {}",
+                manifest.version
+            );
+        }
+        let generation_path = Self::generation_path(storage_path, &manifest.generation)?;
+        let generation_metadata = std::fs::symlink_metadata(&generation_path)
+            .context("Failed to inspect vector-store generation")?;
+        if !generation_metadata.file_type().is_dir() {
+            anyhow::bail!("Vector-store generation is not a real directory");
+        }
+        let collection_bytes = Self::read_regular_file(
+            &generation_path.join(VECTOR_STORE_COLLECTIONS_FILE),
+            "vector-store collection generation",
+        )?;
+        let persisted_collections: PersistedCollections = serde_json::from_slice(&collection_bytes)
+            .context("Failed to parse vector-store collection generation")?;
+        if persisted_collections.version != VECTOR_STORE_FORMAT_VERSION {
+            anyhow::bail!(
+                "Unsupported vector-store collection version {}",
+                persisted_collections.version
+            );
+        }
+
+        let index_bytes = Self::read_regular_file(
+            &generation_path.join(VECTOR_STORE_INDICES_FILE),
+            "vector-store index generation",
+        )?;
+        let (persisted_indices, consumed): (PersistedIndices, usize) =
+            bincode::serde::decode_from_slice(&index_bytes, bincode::config::standard())
+                .context("Failed to parse vector-store index generation")?;
+        if consumed != index_bytes.len() {
+            anyhow::bail!("Vector-store index generation contains trailing data");
+        }
+        if persisted_indices.version != VECTOR_STORE_FORMAT_VERSION {
+            anyhow::bail!(
+                "Unsupported vector-store index version {}",
+                persisted_indices.version
+            );
+        }
+        self.stage_snapshot(persisted_collections.collections, persisted_indices.indices)
+    }
+
+    fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let metadata = std::fs::symlink_metadata(path)
+                .with_context(|| format!("Failed to inspect {label}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!("Refusing {label} that is a symlink or non-regular file");
+            }
+        }
+
+        // Validate the opened handle rather than checking the path and then
+        // opening it. On Unix O_NOFOLLOW also closes the final-component swap
+        // window in which a repository file could become an external symlink
+        // between enumeration and ingestion.
+        let mut file = options
+            .open(path)
+            .with_context(|| format!("Failed to open {label}"))?;
+        if !file
+            .metadata()
+            .with_context(|| format!("Failed to inspect opened {label}"))?
+            .is_file()
+        {
+            anyhow::bail!("Refusing {label} that is a symlink or non-regular file");
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("Failed to read {label}"))?;
+        Ok(bytes)
+    }
+
+    /// Return whether the persisted chunks for `file_path` are exactly the
+    /// chunks produced from the file's current bytes and the current chunker.
+    /// Persisted RAG content is model-visible, so path eligibility alone is
+    /// insufficient: a stale cache must not replay text that has since been
+    /// removed from an otherwise allowed source file.
+    pub(crate) fn file_chunks_match_current(
+        &self,
+        collection_name: &str,
+        file_path: &Path,
+    ) -> Result<bool> {
+        let collection = self
+            .collections
+            .get(collection_name)
+            .with_context(|| format!("Collection not found: {collection_name}"))?;
+        let persisted_ids = collection.chunk_ids_for_file(file_path);
+        let content = String::from_utf8(Self::read_regular_file(
+            file_path,
+            "current indexed source file",
+        )?)
+        .with_context(|| format!("Indexed source file is not UTF-8: {}", file_path.display()))?;
+        let current_chunks = self.chunker.chunk(&content, file_path);
+        if persisted_ids.len() != current_chunks.len() {
+            return Ok(false);
+        }
+        let current_ids: HashSet<&str> = current_chunks
+            .iter()
+            .map(|chunk| chunk.id.as_str())
+            .collect();
+        Ok(persisted_ids
+            .iter()
+            .all(|chunk_id| current_ids.contains(chunk_id.as_str())))
+    }
+
+    fn load_legacy(
+        &self,
+        storage_path: &Path,
+    ) -> Result<
+        Option<(
+            HashMap<String, VectorCollection>,
+            HashMap<String, VectorIndex>,
+        )>,
+    > {
+        let mut collections = HashMap::new();
+        let mut indices = HashMap::new();
+        for entry in std::fs::read_dir(storage_path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+                || path.file_name().and_then(|name| name.to_str())
+                    == Some(VECTOR_STORE_MANIFEST_FILE)
+            {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| anyhow!("Invalid legacy collection file name"))?
+                .to_string();
+            let json =
+                String::from_utf8(Self::read_regular_file(&path, "legacy vector collection")?)
+                    .context("Legacy vector collection is not valid UTF-8")?;
+            let collection: VectorCollection = serde_json::from_str(&json)
+                .with_context(|| format!("Failed to parse legacy collection '{}'", name))?;
+
+            let index_path = storage_path.join(format!("{}.idx", name));
+            let data = Self::read_regular_file(&index_path, "legacy vector index")
+                .with_context(|| format!("Missing legacy vector index for '{}'", name))?;
+            let ((embeddings, chunk_ids), consumed): ((Vec<Vec<f32>>, Vec<String>), usize) =
+                bincode::serde::decode_from_slice(&data, bincode::config::standard())
+                    .with_context(|| format!("Failed to parse legacy vector index '{}'", name))?;
+            if consumed != data.len() {
+                anyhow::bail!("Legacy vector index '{}' contains trailing data", name);
+            }
+            let dimension = Self::validate_embedding_values(&embeddings, chunk_ids.len())?
+                .unwrap_or(self.provider.dimension());
+            collections.insert(name.clone(), collection);
+            indices.insert(
+                name,
+                PersistedVectorIndex {
+                    dimension,
+                    embeddings,
+                    chunk_ids,
+                },
+            );
+        }
+
+        if collections.is_empty() {
+            return Ok(None);
+        }
+        self.stage_snapshot(collections, indices).map(Some)
+    }
+
+    fn write_generation(
+        &self,
+        temporary_generation: &Path,
+        final_generation: &Path,
+        persisted_indices: HashMap<String, PersistedVectorIndex>,
+    ) -> Result<()> {
+        let collections = PersistedCollections {
+            version: VECTOR_STORE_FORMAT_VERSION,
+            collections: self.collections.clone(),
+        };
+        let collection_bytes = serde_json::to_vec_pretty(&collections)?;
+        Self::write_new_file(
+            &temporary_generation.join(VECTOR_STORE_COLLECTIONS_FILE),
+            &collection_bytes,
+        )?;
+
+        let indices = PersistedIndices {
+            version: VECTOR_STORE_FORMAT_VERSION,
+            indices: persisted_indices,
+        };
+        let index_bytes = bincode::serde::encode_to_vec(&indices, bincode::config::standard())?;
+        Self::write_new_file(
+            &temporary_generation.join(VECTOR_STORE_INDICES_FILE),
+            &index_bytes,
+        )?;
+        Self::sync_directory(temporary_generation)?;
+        std::fs::rename(temporary_generation, final_generation)
+            .context("Failed to publish vector-store generation")?;
+        let storage_path = final_generation
+            .parent()
+            .ok_or_else(|| anyhow!("Vector-store generation has no parent directory"))?;
+        Self::sync_directory(storage_path)?;
+        Ok(())
+    }
+
+    /// Remove only the generation that was authoritative before the current
+    /// save. Sweeping every unreferenced directory could delete a concurrent
+    /// writer's fully written generation before it publishes its manifest.
+    fn prune_previous_generation(storage_path: &Path, previous: &str, current: &str) {
+        if previous == current {
+            return;
+        }
+        let previous_path = match Self::generation_path(storage_path, previous) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!("Skipping invalid previous vector-store generation: {error}");
+                return;
+            }
+        };
+        let metadata = match std::fs::symlink_metadata(&previous_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                warn!(
+                    "Failed to inspect previous vector-store generation {:?}: {}",
+                    previous_path, error
+                );
+                return;
+            }
+        };
+
+        // Never follow or unlink a symlink (or any unexpected non-directory)
+        // merely because its name resembles one of our generations.
+        if !metadata.file_type().is_dir() {
+            warn!(
+                "Skipping non-directory previous vector-store generation {:?}",
+                previous_path
+            );
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&previous_path) {
+            warn!(
+                "Failed to prune previous vector-store generation {:?}: {}",
+                previous_path, error
+            );
+            return;
+        }
+        if let Err(error) = Self::sync_directory(storage_path) {
+            warn!(
+                "Failed to sync vector-store directory after pruning {:?}: {}",
+                previous_path, error
+            );
+        }
+    }
+
+    /// Save the complete store as one immutable generation.
     ///
-    /// Uses atomic writes (temp file + rename) for each file to prevent
-    /// corruption if the process crashes mid-write. Both the `.json` and
-    /// `.idx` files for a collection are written atomically.
+    /// The generation's JSON and index files are fully written and synced
+    /// before one small manifest is atomically replaced. A crash can leave an
+    /// unreferenced generation, but it cannot publish only one half of the
+    /// collection/index pair.
     pub fn save(&self) -> Result<()> {
         let storage_path = self
             .storage_path
             .as_ref()
             .ok_or_else(|| anyhow!("Storage path not set"))?;
-
         std::fs::create_dir_all(storage_path)?;
 
-        let pid = std::process::id();
+        let manifest_path = storage_path.join(VECTOR_STORE_MANIFEST_FILE);
+        let _lock = crate::session::checkpoint::FileLock::acquire(&manifest_path)?;
+        let previous_generation = match std::fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let bytes = Self::read_regular_file(&manifest_path, "vector-store manifest")?;
+                let manifest: VectorStoreManifest = serde_json::from_slice(&bytes)
+                    .context("Failed to parse existing vector-store manifest")?;
+                (manifest.version == VECTOR_STORE_FORMAT_VERSION).then_some(manifest.generation)
+            }
+            Ok(_) => anyhow::bail!("Vector-store manifest is not a regular file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("Failed to inspect vector-store manifest"),
+        };
 
-        // Save each collection with atomic writes
+        let mut persisted_indices = HashMap::with_capacity(self.indices.len());
+        for (name, index) in &self.indices {
+            let (embeddings, chunk_ids) = index.live_data_owned();
+            persisted_indices.insert(
+                name.clone(),
+                PersistedVectorIndex {
+                    dimension: index.dimension,
+                    embeddings,
+                    chunk_ids,
+                },
+            );
+        }
         for (name, collection) in &self.collections {
-            let collection_path = storage_path.join(format!("{}.json", name));
-            let json = serde_json::to_string_pretty(collection)?;
-
-            // Atomic write for collection JSON
-            let tmp_json = collection_path.with_extension(format!("json.tmp.{}", pid));
-            std::fs::write(&tmp_json, &json)?;
-            if let Err(e) = std::fs::rename(&tmp_json, &collection_path) {
-                let _ = std::fs::remove_file(&tmp_json);
-                return Err(e).context("Failed to atomically save collection");
-            }
-
-            // Atomic write for embeddings index
-            if let Some(index) = self.indices.get(name) {
-                let index_path = storage_path.join(format!("{}.idx", name));
-                let (embs, cids) = index.live_data_owned();
-                let data =
-                    bincode::serde::encode_to_vec((&embs, &cids), bincode::config::standard())?;
-
-                let tmp_idx = index_path.with_extension(format!("idx.tmp.{}", pid));
-                std::fs::write(&tmp_idx, &data)?;
-                if let Err(e) = std::fs::rename(&tmp_idx, &index_path) {
-                    let _ = std::fs::remove_file(&tmp_idx);
-                    return Err(e).context("Failed to atomically save index");
-                }
-            }
+            let index = persisted_indices
+                .get(name)
+                .ok_or_else(|| anyhow!("Missing vector index for collection '{}'", name))?;
+            Self::validate_collection_index(name, collection, index)?;
+        }
+        let collection_names: HashSet<&str> = self.collections.keys().map(String::as_str).collect();
+        let index_names: HashSet<&str> = persisted_indices.keys().map(String::as_str).collect();
+        if collection_names != index_names {
+            anyhow::bail!("Live collection and vector-index name sets do not match");
         }
 
+        let generation = uuid::Uuid::new_v4().simple().to_string();
+        let final_generation = Self::generation_path(storage_path, &generation)?;
+        let temporary_generation = storage_path.join(format!(
+            ".vector-store-generation-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&temporary_generation)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &temporary_generation,
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+        }
+
+        let write_generation =
+            self.write_generation(&temporary_generation, &final_generation, persisted_indices);
+        if let Err(error) = write_generation {
+            let _ = std::fs::remove_dir_all(&temporary_generation);
+            return Err(error);
+        }
+
+        let manifest = VectorStoreManifest {
+            version: VECTOR_STORE_FORMAT_VERSION,
+            generation,
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+        let temporary_manifest = storage_path.join(format!(
+            ".vector-store-manifest-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        Self::write_new_file(&temporary_manifest, &manifest_bytes)?;
+        crate::session::checkpoint::replace_atomically(&temporary_manifest, &manifest_path)
+            .context("Failed to publish vector-store manifest")?;
+        Self::sync_directory(storage_path)?;
+        if let Some(previous) = previous_generation {
+            Self::prune_previous_generation(storage_path, &previous, &manifest.generation);
+        }
         Ok(())
     }
 
-    /// Load store from disk
+    /// Load a fully validated store snapshot from disk.
     pub fn load(&mut self) -> Result<()> {
         let storage_path = self
             .storage_path
             .as_ref()
             .ok_or_else(|| anyhow!("Storage path not set"))?
             .clone();
-
         if !storage_path.exists() {
-            return Ok(()); // Nothing to load
+            return Ok(());
         }
 
-        // Find all collection files
-        for entry in std::fs::read_dir(&storage_path)? {
-            let entry = entry?;
-            let path = entry.path();
+        let manifest_path = storage_path.join(VECTOR_STORE_MANIFEST_FILE);
+        let _lock = crate::session::checkpoint::FileLock::acquire(&manifest_path)?;
+        let staged = if manifest_path.exists() {
+            let manifest_bytes = Self::read_regular_file(&manifest_path, "vector-store manifest")?;
+            let manifest: VectorStoreManifest = serde_json::from_slice(&manifest_bytes)
+                .context("Failed to parse vector-store manifest")?;
+            Some(self.load_generation(&storage_path, manifest)?)
+        } else {
+            self.load_legacy(&storage_path)?
+        };
 
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| anyhow!("Invalid collection file name"))?;
-
-                // Load collection — rebuild the skipped id_index from chunks
-                let json = std::fs::read_to_string(&path)?;
-                let mut collection: VectorCollection = serde_json::from_str(&json)?;
-                collection.rebuild_id_index();
-                self.collections.insert(name.to_string(), collection);
-
-                // Load index
-                let index_path = storage_path.join(format!("{}.idx", name));
-                if index_path.exists() {
-                    let data = std::fs::read(&index_path)?;
-                    let ((embeddings, chunk_ids), _): ((Vec<Vec<f32>>, Vec<String>), usize) =
-                        bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
-
-                    // Validate parallel array invariant: embeddings and chunk_ids
-                    // must have the same length, otherwise the index is corrupt.
-                    if embeddings.len() != chunk_ids.len() {
-                        tracing::warn!(
-                            "Corrupt vector index for '{}': {} embeddings vs {} chunk_ids — skipping",
-                            name,
-                            embeddings.len(),
-                            chunk_ids.len()
-                        );
-                        continue;
-                    }
-
-                    let mut index = VectorIndex::new(self.provider.dimension());
-                    for (chunk_id, embedding) in chunk_ids.into_iter().zip(embeddings) {
-                        index.add(chunk_id, embedding)?;
-                    }
-                    self.indices.insert(name.to_string(), index);
-                }
-            }
+        if let Some((collections, indices)) = staged {
+            self.collections = collections;
+            self.indices = indices;
         }
-
         Ok(())
     }
 

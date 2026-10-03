@@ -300,19 +300,24 @@ const STDERR_TAIL_LINE_MAX_CHARS: usize = 200;
 
 type StderrTail = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
 
-/// Describe why the server's stdout closed: exit status (if the process has
-/// exited within a short grace period) and the tail of its stderr.
-async fn describe_exit(child: &Mutex<Child>, stderr_tail: &StderrTail) -> String {
-    let mut status = None;
-    // stdout EOF usually precedes reaping by a hair; poll briefly (<=200ms).
-    for _ in 0..20 {
-        if let Ok(mut c) = child.try_lock() {
-            if let Ok(Some(s)) = c.try_wait() {
-                status = Some(s);
-                break;
-            }
+/// Terminate/reap a server whose transport failed, release its registry entry,
+/// then describe the exit status and stderr tail.
+async fn describe_exit(
+    child: &Mutex<Child>,
+    process_group: Option<u32>,
+    resource_id: Option<&str>,
+    stderr_tail: &StderrTail,
+) -> String {
+    let status = {
+        let mut child = child.lock().await;
+        kill_group_while_unreaped(&child, process_group);
+        let _ = child.start_kill();
+        child.wait().await.ok()
+    };
+    if status.is_some() {
+        if let Some(id) = resource_id {
+            crate::resources::ResourceRegistry::global().release(id, "MCP server transport ended");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let mut detail = String::new();
     if let Some(s) = status {
@@ -351,6 +356,8 @@ pub struct StdioTransport {
     /// First fatal cause once the connection died (EOF, read/write failure);
     /// later requests fail fast with it instead of waiting for a timeout.
     dead: DeadState,
+    /// Recent stderr lines retained for transport-failure diagnostics.
+    stderr_tail: StderrTail,
     /// Server name used in error messages.
     server_name: String,
     /// How long a request waits for its response.
@@ -359,6 +366,8 @@ pub struct StdioTransport {
     child: Arc<Mutex<Child>>,
     /// Background reader task handle.
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Watches direct-child exit even when a descendant keeps stdout open.
+    exit_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Framing used for *outgoing* requests/notifications. Incoming messages
     /// are always auto-detected, so a server may reply in either framing.
     framing: Framing,
@@ -461,6 +470,7 @@ impl StdioTransport {
         let child = Arc::new(Mutex::new(child));
         let child_reader = Arc::clone(&child);
         let reader_server_name = server_name.to_string();
+        let reader_resource_id = resource_id.clone();
 
         // Spawn background task to read JSON-RPC responses from stdout.
         // The framing of each incoming message is auto-detected (see
@@ -499,7 +509,13 @@ impl StdioTransport {
                         // EOF: the server exited or closed its stdout. Fail
                         // every pending request now instead of letting each
                         // one wait out its timeout.
-                        let detail = describe_exit(&child_reader, &stderr_tail_reader).await;
+                        let detail = describe_exit(
+                            &child_reader,
+                            pgid,
+                            reader_resource_id.as_deref(),
+                            &stderr_tail_reader,
+                        )
+                        .await;
                         warn!(
                             "MCP server '{}' closed its output{}",
                             reader_server_name, detail
@@ -529,6 +545,13 @@ impl StdioTransport {
                             },
                         )
                         .await;
+                        let _ = describe_exit(
+                            &child_reader,
+                            pgid,
+                            reader_resource_id.as_deref(),
+                            &stderr_tail_reader,
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -537,10 +560,34 @@ impl StdioTransport {
             debug!("MCP stdout reader exited");
         });
 
+        // An npx/node descendant can inherit stdout after the direct server
+        // exits, so observe the group leader independently of pipe EOF.
+        let exit_child = Arc::clone(&child);
+        let exit_pending = Arc::clone(&pending);
+        let exit_dead = Arc::clone(&dead);
+        let exit_tail = Arc::clone(&stderr_tail);
+        let exit_resource_id = resource_id.clone();
+        let exit_server_name = server_name.to_string();
+        let exit_handle = tokio::spawn(async move {
+            crate::tools::process_guard::wait_for_locked_child_exit(&exit_child).await;
+            let detail =
+                describe_exit(&exit_child, pgid, exit_resource_id.as_deref(), &exit_tail).await;
+            mark_dead(
+                &exit_pending,
+                &exit_dead,
+                McpTransportError::ServerExited {
+                    server: exit_server_name,
+                    detail,
+                },
+            )
+            .await;
+        });
+
         // Spawn a background task to drain child stderr so it can't fill
         // the OS pipe buffer and deadlock the server.  Lines are forwarded
         // to tracing so they are visible for debugging but don't interfere
         // with the JSON-RPC protocol on stdout.
+        let stderr_tail_task = Arc::clone(&stderr_tail);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
@@ -552,7 +599,8 @@ impl StdioTransport {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
                             debug!("MCP server stderr: {}", trimmed);
-                            let mut tail = stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
+                            let mut tail =
+                                stderr_tail_task.lock().unwrap_or_else(|p| p.into_inner());
                             if tail.len() == STDERR_TAIL_LINES {
                                 tail.pop_front();
                             }
@@ -574,11 +622,13 @@ impl StdioTransport {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             dead,
+            stderr_tail,
             server_name: server_name.to_string(),
             request_timeout: std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             next_id: AtomicU64::new(1),
             child,
             reader_handle: Mutex::new(Some(reader_handle)),
+            exit_handle: Mutex::new(Some(exit_handle)),
             framing: Framing::default(),
             resource_id,
             pgid,
@@ -620,6 +670,13 @@ impl StdioTransport {
                 let cause = McpTransportError::from_write_error(&self.server_name, &e);
                 warn!("{}", cause);
                 mark_dead(&self.pending, &self.dead, cause.clone()).await;
+                let _ = describe_exit(
+                    &self.child,
+                    self.pgid,
+                    self.resource_id.as_deref(),
+                    &self.stderr_tail,
+                )
+                .await;
                 Err(cause)
             }
         }
@@ -731,17 +788,19 @@ impl Transport for StdioTransport {
         let mut child = self.child.lock().await;
         // The group first, while the leader is still unreaped (its pid, and so
         // the pgid, cannot have been reused yet).
-        if matches!(child.try_wait(), Ok(None)) {
-            kill_group(self.pgid);
-        }
-        let _ = child.kill().await;
+        kill_group_while_unreaped(&child, self.pgid);
+        let _ = child.start_kill();
         // Released only once the child is confirmed reaped; otherwise the
         // entry stays for the session drain / reaper to confirm.
-        if let (Some(id), Ok(Some(_))) = (&self.resource_id, child.try_wait()) {
+        if let (Some(id), Ok(_)) = (&self.resource_id, child.wait().await) {
             crate::resources::ResourceRegistry::global().release(id, "MCP server shut down");
         }
 
-        // Cancel reader task
+        // Cancel lifecycle/reader tasks
+        let mut handle = self.exit_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
         let mut handle = self.reader_handle.lock().await;
         if let Some(h) = handle.take() {
             h.abort();
@@ -759,15 +818,18 @@ impl Drop for StdioTransport {
         // synchronous — no await, so use try_lock + Child::start_kill (SIGKILL).
         if let Ok(mut child) = self.child.try_lock() {
             // Group first, only while the leader is unreaped (pgid not reusable).
-            if matches!(child.try_wait(), Ok(None)) {
-                kill_group(self.pgid);
-            }
+            kill_group_while_unreaped(&child, self.pgid);
             let _ = child.start_kill();
         }
         // The registry entry is not released here: the kill cannot be
         // confirmed synchronously. The session drain probes the pid (gone or
         // a zombie reads as gone) and releases it then.
         if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.exit_handle.try_lock() {
             if let Some(h) = handle.take() {
                 h.abort();
             }
@@ -790,6 +852,12 @@ fn kill_group(pgid: Option<u32>) {
     }
     #[cfg(not(unix))]
     let _ = pgid;
+}
+
+fn kill_group_while_unreaped(child: &Child, process_group: Option<u32>) {
+    if child.id().is_some_and(|pid| Some(pid) == process_group) {
+        kill_group(process_group);
+    }
 }
 
 #[cfg(test)]

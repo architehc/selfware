@@ -547,13 +547,8 @@ impl Agent {
         tools: &Option<Vec<crate::api::types::ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<Option<LlmCacheEntry>> {
-        // Generate cache key from model, messages, tools, and thinking mode.
-        // Including the model name prevents cross-model semantic matches.
         let prompt = Self::messages_to_prompt(messages);
-        let key = format!(
-            "{}:{}:{:?}:{:?}",
-            self.config.model, prompt, tools, thinking
-        );
+        let key = Self::llm_cache_request_key(&self.config.model, messages, tools, thinking)?;
 
         // Compute a real context hash from the full key so that entries with
         // different model / prompt / tools / thinking never collide.
@@ -586,6 +581,23 @@ impl Agent {
             .join("\n")
     }
 
+    /// Serialize every request field that can affect the completion. Display
+    /// formatting intentionally collapses multimodal messages to their first
+    /// text block, so it is unsuitable as a cache identity.
+    fn llm_cache_request_key(
+        model: &str,
+        messages: &[Message],
+        tools: &Option<Vec<crate::api::types::ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<String> {
+        Ok(serde_json::to_string(&serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "thinking": format!("{thinking:?}"),
+        }))?)
+    }
+
     /// Cache a response after streaming completes
     ///
     /// This function stores the LLM response in the cache for future reuse,
@@ -616,10 +628,13 @@ impl Agent {
         }
 
         let prompt = Self::messages_to_prompt(messages);
-        let key = format!(
-            "{}:{}:{:?}:{:?}",
-            self.config.model, prompt, tools, thinking
-        );
+        let key = match Self::llm_cache_request_key(&self.config.model, messages, tools, thinking) {
+            Ok(key) => key,
+            Err(error) => {
+                debug!("Failed to serialize LLM cache key: {error}");
+                return;
+            }
+        };
 
         // Compute a real context hash from the full key (includes model).
         let context_hash = {
@@ -637,23 +652,29 @@ impl Agent {
             }
         };
 
-        // Build response text from content and reasoning
-        let mut response = content.to_string();
-        if let Some(reason) = reasoning {
-            if !reason.is_empty() {
-                response.push_str("\n\nReasoning: ");
-                response.push_str(reason);
-            }
-        }
-
         let entry = LlmCacheEntry {
             id: Uuid::new_v4().to_string(),
             prompt: prompt.clone(),
             embedding,
-            response,
+            response: content.to_string(),
+            reasoning: reasoning.clone(),
             model: self.config.model.clone(),
-            input_tokens: 0,                     // Would need to track this
-            output_tokens: content.len() as u32, // Approximation
+            input_tokens: u32::try_from(
+                crate::token_count::estimate_messages_tokens(messages)
+                    + tools
+                        .as_deref()
+                        .map(crate::token_count::estimate_tool_definitions_tokens)
+                        .unwrap_or(0),
+            )
+            .unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(
+                crate::token_count::estimate_content_tokens(content)
+                    + reasoning
+                        .as_deref()
+                        .map(crate::token_count::estimate_content_tokens)
+                        .unwrap_or(0),
+            )
+            .unwrap_or(u32::MAX),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -755,8 +776,7 @@ impl Agent {
         if let Some(cached) = self.check_llm_cache(&messages, &tools, thinking).await? {
             debug!("LLM cache hit: returning cached response");
             self.emit_unstreamed_text(&cached.response);
-            // For cached responses, return just the content
-            return Ok((cached.response, None, None));
+            return Ok((cached.response, cached.reasoning, None));
         }
 
         // Clone messages and tools for caching after streaming (they will be moved below)

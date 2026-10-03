@@ -319,7 +319,7 @@ impl GraphBuilder {
 
         let mut graph = Graph { nodes, edges };
         let dedup = DeduplicationAnalyzer::new();
-        match dedup.find_duplicates(&graph) {
+        match dedup.find_duplicates_in(&graph, project_root) {
             Ok(duplicates) => {
                 for pair in duplicates {
                     graph.edges.push(Edge {
@@ -363,16 +363,17 @@ pub(crate) fn repository_source_inventory(
         anyhow::bail!("repository root must be a real directory");
     }
 
+    let visibility = GitVisibleRepository::for_root(project_root);
     let mut paths = Vec::new();
     let walker = walkdir::WalkDir::new(project_root)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
-            retain_outside_python_environments(entry)
-                && (entry.depth() == 0
-                    || !entry.file_type().is_dir()
-                    || !is_excluded_repository_directory(entry.file_name()))
+            retain_repository_entry(entry)
+                && visibility
+                    .as_ref()
+                    .is_none_or(|visible| visible.retains(entry, project_root))
         });
     for entry in walker {
         let entry = entry?;
@@ -433,16 +434,17 @@ pub(crate) fn repository_file_walk(project_root: &Path) -> Result<Vec<PathBuf>> 
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         anyhow::bail!("repository root must be a real directory");
     }
+    let visibility = GitVisibleRepository::for_root(project_root);
     let mut paths = Vec::new();
     let walker = walkdir::WalkDir::new(project_root)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
-            retain_outside_python_environments(entry)
-                && (entry.depth() == 0
-                    || !entry.file_type().is_dir()
-                    || !is_excluded_repository_directory(entry.file_name()))
+            retain_repository_entry(entry)
+                && visibility
+                    .as_ref()
+                    .is_none_or(|visible| visible.retains(entry, project_root))
         });
     for entry in walker {
         let Ok(entry) = entry else {
@@ -544,15 +546,74 @@ pub(crate) fn repository_relative_path_supported(path: &Path) -> bool {
     is_graph_source(path)
 }
 
-/// Prune nested Python environments by their interpreter marker, regardless
-/// of their directory name. The explicit scan root remains user-selected
-/// input even if it contains this marker. This is discovery pruning, not a
-/// restriction on explicitly requested document reads.
-pub(crate) fn retain_outside_python_environments(entry: &walkdir::DirEntry) -> bool {
-    entry.depth() == 0 || !entry.file_type().is_dir() || !entry.path().join("pyvenv.cfg").is_file()
+/// Prune generated, dependency, private tool-state, and Python-environment
+/// directories before descent. The explicit scan root remains user-selected
+/// input even when its own name or marker would normally be pruned. This is
+/// discovery pruning, not a restriction on explicitly requested reads.
+pub(crate) fn retain_repository_entry(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() == 0
+        || !entry.file_type().is_dir()
+        || (!is_excluded_repository_directory(entry.file_name())
+            && !entry.path().join("pyvenv.cfg").is_file())
+}
+
+/// Files and ancestor directories that Git considers visible (tracked or
+/// untracked-and-not-ignored). Keeping the ancestor set lets WalkDir reject an
+/// ignored tree before descent instead of walking it and filtering its files
+/// afterward. Outside a Git work tree callers fall back to the normal
+/// repository exclusion policy.
+struct GitVisibleRepository {
+    files: HashSet<String>,
+    directories: HashSet<String>,
+}
+
+impl GitVisibleRepository {
+    fn for_root(root: &Path) -> Option<Self> {
+        let files = crate::analysis::repo_inventory::git_visible_files(root)?;
+        // `git ls-files` is empty when `root` itself is an explicitly selected
+        // ignored subtree. Preserve the established explicit-root behavior in
+        // that case instead of hiding every child.
+        if files.is_empty() {
+            return None;
+        }
+        let mut directories = HashSet::new();
+        for file in &files {
+            let mut ancestor = String::new();
+            let components = file.split('/').collect::<Vec<_>>();
+            for component in components.iter().take(components.len().saturating_sub(1)) {
+                if component.is_empty() {
+                    continue;
+                }
+                if !ancestor.is_empty() {
+                    ancestor.push('/');
+                }
+                ancestor.push_str(component);
+                directories.insert(ancestor.clone());
+            }
+        }
+        Some(Self { files, directories })
+    }
+
+    fn retains(&self, entry: &walkdir::DirEntry, root: &Path) -> bool {
+        if entry.depth() == 0 {
+            return true;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            return false;
+        };
+        let relative = path_string(relative);
+        if entry.file_type().is_dir() {
+            self.directories.contains(&relative)
+        } else {
+            self.files.contains(&relative)
+        }
+    }
 }
 
 pub(crate) fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
+    if crate::safety::source_context::is_private_tool_state_dir_name(name) {
+        return true;
+    }
     let name = name.to_str().unwrap_or_default();
     // Cargo-style build output under any name (`target`, `sw_auto_target`,
     // `.fingerprint`): measured 2026-08-29, the evolve graph's single largest
@@ -1270,6 +1331,20 @@ mod tests {
                 "{dir} must be excluded"
             );
         }
+    }
+
+    #[test]
+    fn excludes_private_ai_tool_state_directories() {
+        for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+            assert!(
+                is_excluded_repository_directory(OsStr::new(dir)),
+                "{dir} must be excluded"
+            );
+        }
+        assert!(
+            is_excluded_repository_directory(OsStr::new(".CLAUDE")),
+            "case-insensitive filesystems must not bypass private-state pruning"
+        );
     }
 
     #[test]

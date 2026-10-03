@@ -137,17 +137,27 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
 /// Collect the contents of all `.rs` files under `path`.
 fn read_rs_files(path: &Path) -> Result<Vec<String>> {
     let mut contents = Vec::new();
-    if path.is_file() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() => metadata,
+        Ok(_) => return Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(contents),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() {
         if path.extension().is_some_and(|e| e == "rs") {
             contents.push(std::fs::read_to_string(path)?);
         }
-    } else if path.is_dir() {
+    } else if metadata.is_dir() {
         for entry in walkdir::WalkDir::new(path)
+            .follow_links(false)
             .into_iter()
-            .filter_entry(super::graph::retain_outside_python_environments)
+            .filter_entry(super::graph::retain_repository_entry)
         {
             let entry = entry?;
-            if entry.path().extension().is_some_and(|e| e == "rs") {
+            if entry.file_type().is_file()
+                && !entry.path_is_symlink()
+                && entry.path().extension().is_some_and(|e| e == "rs")
+            {
                 contents.push(std::fs::read_to_string(entry.path())?);
             }
         }

@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_NAME="selfware-validation"
 DOCKERFILE="tests/Dockerfile.validation"
+SELFWARE_GIT_SHA="${SELFWARE_GIT_SHA:-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')}"
 
 echo "=== Selfware Docker Validation ==="
 echo "  Repo root:  $REPO_ROOT"
@@ -33,6 +34,7 @@ echo "--- Building validation image ---"
 docker build \
     -f "$REPO_ROOT/$DOCKERFILE" \
     -t "$IMAGE_NAME" \
+    --build-arg "SELFWARE_GIT_SHA=$SELFWARE_GIT_SHA" \
     "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}" \
     "$REPO_ROOT"
 
@@ -41,4 +43,6 @@ echo "--- Running validation suite ---"
 echo ""
 
 # Run and propagate exit code
-docker run --rm "$IMAGE_NAME"
+docker run --rm \
+    -e "SELFWARE_EXPECTED_GIT_SHA=$SELFWARE_GIT_SHA" \
+    "$IMAGE_NAME"

@@ -12,6 +12,22 @@ fn test_language_from_path() {
     assert_eq!(Language::from_path("Makefile"), None);
 }
 
+#[tokio::test]
+async fn dominant_language_ignores_private_tool_state() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("visible.rs"), "fn visible() {}\n").unwrap();
+    let private = root.path().join(".claude/worktrees");
+    std::fs::create_dir_all(&private).unwrap();
+    for index in 0..4 {
+        std::fs::write(private.join(format!("private_{index}.py")), "pass\n").unwrap();
+    }
+
+    assert_eq!(
+        detect_dominant_language(root.path()).await,
+        Some(Language::Rust)
+    );
+}
+
 #[test]
 fn test_language_id() {
     assert_eq!(Language::Rust.id(), "rust");
@@ -712,9 +728,11 @@ async fn spawned_server_is_a_session_owned_resource_released_on_kill() {
     assert!(matches!(
         entry.handle,
         ResourceHandle::Process {
+            pid,
+            pgid: Some(pgid),
             start_time: Some(_),
             ..
-        }
+        } if pid == pgid
     ));
     assert!(!entry.state.is_released());
     conn.kill_now().await;
@@ -723,4 +741,53 @@ async fn spawned_server_is_a_session_owned_resource_released_on_kill() {
         .expect("entry")
         .state
         .is_released());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn kill_now_stops_language_server_descendants() {
+    use crate::resources::driver::{probe_pid, process_start_time};
+    use crate::resources::Probe;
+
+    let dir = tempfile::tempdir().unwrap();
+    let child_pid_file = dir.path().join("worker.pid");
+    let script = format!("sleep 30 & echo $! > '{}' ; wait", child_pid_file.display());
+    let conn = LspServerConnection::spawn(
+        "sh",
+        &["-c".to_string(), script],
+        dir.path(),
+        Language::Rust,
+    )
+    .await
+    .expect("spawn server tree");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let worker_pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&child_pid_file) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "worker pid not written"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let worker_start = process_start_time(worker_pid);
+    assert!(worker_start.is_some());
+
+    conn.kill_now().await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if matches!(probe_pid(worker_pid, worker_start), Probe::Gone) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "LSP worker {worker_pid} survived process-group shutdown"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

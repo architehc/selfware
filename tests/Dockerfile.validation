@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — compile selfware from local source
 # ---------------------------------------------------------------------------
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 # Build dependencies (mirrors production Dockerfile)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy manifests first for dependency caching
-COPY Cargo.toml Cargo.lock ./
+# Copy manifests and the package build script first for dependency caching
+COPY Cargo.toml Cargo.lock build.rs ./
 
 # Create dummy source tree so cargo can resolve and cache deps
 RUN mkdir -p src/bin && \
@@ -46,9 +46,17 @@ RUN cargo build --release 2>/dev/null || true && rm -rf src benches tests
 
 # Copy real source
 COPY src ./src
+# Compile-time includes used by page_controller and project templates.
+COPY scripts ./scripts
 COPY tests ./tests
 COPY benches ./benches
 COPY examples ./examples
+COPY templates ./templates
+COPY selfware-qa-schema.yaml ./selfware-qa-schema.yaml
+
+# Keep dependency caching independent of the source revision. build.rs emitted
+# `rerun-if-env-changed`, so Cargo reruns it when this argument is provided.
+ARG SELFWARE_GIT_SHA=unknown
 
 RUN touch src/main.rs src/lib.rs
 
@@ -61,13 +69,21 @@ RUN strip /app/target/release/selfware
 # ---------------------------------------------------------------------------
 # Stage 2: Validation runtime
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim
+# `selfware doctor` treats rustc and cargo as required core tools. Keep the
+# validation runtime on the same pinned toolchain as the builder so the user
+# journey exercises an environment that satisfies the project's Rust version.
+FROM rust:1.95-bookworm
 
 # Runtime deps + language toolchains for template / QA validation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     libgcc-s1 \
+    libdbus-1-3 \
+    libxcb1 \
+    libxcb-randr0 \
+    libxcb-shm0 \
+    libxcb-composite0 \
     curl \
     git \
     python3 \

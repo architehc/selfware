@@ -503,16 +503,18 @@ fn test_load_and_save_ledger_reject_symlinks() {
         let err = distiller.save_ledger(&ledger).unwrap_err();
         assert!(err.to_string().contains("Ledger destination is a symlink"));
 
-        // Test tmp_path symlink rejection
+        // A symlink at the legacy predictable temp name is no longer opened:
+        // the shared writer reserves a fresh UUID name with create_new.
+        fs::write(&real_file, b"OUTSIDE_SENTINEL").unwrap();
         let direct_ledger = tmp.path().join("direct_ledger.json");
         let tmp_path = direct_ledger.with_extension("tmp");
         std::os::unix::fs::symlink(&real_file, &tmp_path).unwrap();
 
         let distiller_tmp = SkillDistiller::new(tmp.path().join("skills"), direct_ledger);
-        let err = distiller_tmp.save_ledger(&ledger).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Ledger temporary destination is a symlink"));
+        distiller_tmp.save_ledger(&ledger).unwrap();
+        assert_eq!(fs::read(&real_file).unwrap(), b"OUTSIDE_SENTINEL");
+        assert_eq!(distiller_tmp.load_ledger().unwrap(), ledger);
+        assert!(tmp_path.is_symlink());
     }
 }
 

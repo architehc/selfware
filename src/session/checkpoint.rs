@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use crate::api::types::Message;
@@ -51,17 +51,25 @@ impl CheckpointEnvelope {
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("selfware")
                     .join("checkpoint_hmac_key");
+                let key_lock = path
+                    .parent()
+                    .and_then(|parent| ensure_private_checkpoint_dir(parent).ok())
+                    .and_then(|_| FileLock::acquire(&path).ok());
 
-                // Try to load existing key
-                if let Ok(key) = std::fs::read(&path) {
-                    if key.len() == 32 {
-                        return key;
+                // Try to load an existing regular file without following a
+                // pre-seeded symlink at the key path.
+                if let Ok(mut file) = open_regular_checkpoint_file(&path, "checkpoint HMAC key") {
+                    let mut key = Vec::new();
+                    if file.read_to_end(&mut key).is_ok() {
+                        if key.len() == 32 {
+                            return key;
+                        }
+                        tracing::warn!(
+                            "Existing HMAC key at {:?} has invalid length (expected 32, got {}). Generating new key.",
+                            path,
+                            key.len()
+                        );
                     }
-                    tracing::warn!(
-                        "Existing HMAC key at {:?} has invalid length (expected 32, got {}). Generating new key.",
-                        path,
-                        key.len()
-                    );
                 }
 
                 // Generate new key
@@ -69,7 +77,12 @@ impl CheckpointEnvelope {
                 rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
 
                 // Attempt to persist the key with best-effort error handling
-                if let Err(e) = Self::persist_hmac_key(&path, &key) {
+                if key_lock.is_none() {
+                    tracing::warn!(
+                        "Failed to acquire the checkpoint HMAC key lock at {:?}; using an ephemeral key for this session.",
+                        path
+                    );
+                } else if let Err(e) = Self::persist_hmac_key(&path, &key) {
                     tracing::warn!(
                         "Failed to persist HMAC key to {:?}: {}. Key will be ephemeral for this session.",
                         path,
@@ -86,49 +99,11 @@ impl CheckpointEnvelope {
     fn persist_hmac_key(path: &PathBuf, key: &[u8]) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create HMAC key directory {:?}. Check permissions and disk space.",
-                    parent
-                )
-            })?;
+            ensure_private_checkpoint_dir(parent)
+                .with_context(|| format!("Failed to secure HMAC key directory {:?}", parent))?;
         }
-
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .with_context(|| {
-                    format!(
-                        "Failed to create HMAC key file {:?} with secure permissions (0o600). Check file permissions.",
-                        path
-                    )
-                })?;
-            file.write_all(key).with_context(|| {
-                format!(
-                    "Failed to write HMAC key to {:?}. Check disk space and permissions.",
-                    path
-                )
-            })?;
-            file.sync_all()
-                .with_context(|| format!("Failed to sync HMAC key file {:?} to disk", path))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, key).with_context(|| {
-                format!(
-                    "Failed to write HMAC key to {:?}. Check disk space and permissions.",
-                    path
-                )
-            })?;
-        }
-
+        write_bytes_atomically(path, key, 0o600)
+            .with_context(|| format!("Failed to atomically persist HMAC key to {:?}", path))?;
         Ok(())
     }
 
@@ -1148,9 +1123,9 @@ impl TaskCheckpoint {
             // Record which workspace owns this task, canonicalized so a
             // symlinked path (e.g. /tmp → /private/tmp on macOS) compares
             // equal at selection time. None only when the cwd is unavailable.
-            project_root: std::env::current_dir()
+            project_root: crate::tools::workspace_root::current_path()
+                .canonicalize()
                 .ok()
-                .and_then(|cwd| cwd.canonicalize().ok())
                 .map(|cwd| cwd.to_string_lossy().into_owned()),
             task_start_head: None,
             task_start_tree: None,
@@ -1349,15 +1324,10 @@ fn sanitize_task_id(task_id: &str) -> Result<String> {
 /// write cycle; two concurrent writers for the same task serialize even when
 /// one is mid-cycle.
 ///
-/// Implementation notes:
-/// * Unix: `flock(LOCK_EX)` on the sibling, opened O_CLOEXEC so a spawned
-///   subprocess never inherits (and never pins) a task lock. `flock` locks
-///   are released by the kernel when the descriptor closes, so a crashed
-///   process cannot leave a stale lock behind. Release is explicit
-///   (`LOCK_UN` on Drop) as in `crate::phi::activity`.
-/// * Other platforms: advisory file locking is unavailable without an extra
-///   dependency, so the guard is a documented no-op. Atomic replace
-///   ([`replace_atomically`]) still prevents torn writes there.
+/// Implementation notes: the standard library's cross-platform exclusive
+/// file lock is held on the sibling descriptor. The descriptor is closed on
+/// release, so a crashed process cannot leave a stale lock behind. On Unix
+/// the lock file is also opened O_CLOEXEC and O_NOFOLLOW with mode 0o600.
 ///
 /// Reentrancy: `flock` locks are per open-file-description, so a second
 /// flock from the SAME thread on a fresh descriptor would block forever
@@ -1368,11 +1338,9 @@ fn sanitize_task_id(task_id: &str) -> Result<String> {
 pub(crate) struct FileLock {
     /// Path of the `<target>.lock` sibling file.
     lock_path: PathBuf,
-    /// Whether this guard actually holds the OS lock (vs. a reentrant no-op
-    /// or a non-Unix stub).
+    /// Whether this guard actually holds the OS lock (vs. a reentrant no-op).
     held: bool,
     /// The open descriptor pinning the lock; closed on release.
-    #[cfg(unix)]
     _file: Option<std::fs::File>,
 }
 
@@ -1385,7 +1353,6 @@ thread_local! {
 }
 
 /// Sibling lock path for `target` (e.g. `task.json` → `task.json.lock`).
-#[cfg(unix)]
 fn lock_sibling_path(target: &std::path::Path) -> PathBuf {
     let mut os = target.as_os_str().to_os_string();
     os.push(".lock");
@@ -1396,24 +1363,19 @@ impl FileLock {
     /// Acquire the exclusive advisory lock for `target`, blocking until any
     /// other writer releases it. Must be held across the whole
     /// read→modify→atomic-write cycle.
-    #[cfg(unix)]
     pub(crate) fn acquire(target: &std::path::Path) -> Result<Self> {
-        Self::acquire_with(target, libc::LOCK_EX)
+        Self::acquire_with(target, false)
     }
 
     /// Acquire the exclusive advisory lock without blocking; errors
     /// immediately (EWOULDBLOCK) when another writer holds it. Test-only
     /// seam for proving mutual exclusion (no non-test caller yet).
-    #[cfg(unix)]
     #[allow(dead_code)] // test seam — used by checkpoint/chat_store tests only
     pub(crate) fn try_acquire(target: &std::path::Path) -> Result<Self> {
-        Self::acquire_with(target, libc::LOCK_EX | libc::LOCK_NB)
+        Self::acquire_with(target, true)
     }
 
-    #[cfg(unix)]
-    fn acquire_with(target: &std::path::Path, flags: i32) -> Result<Self> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
+    fn acquire_with(target: &std::path::Path, nonblocking: bool) -> Result<Self> {
         let lock_path = lock_sibling_path(target);
 
         // Reentrancy: this thread already holds the lock (nested no-op).
@@ -1425,18 +1387,50 @@ impl FileLock {
             });
         }
 
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .custom_flags(libc::O_CLOEXEC)
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let file = options
             .open(&lock_path)
             .with_context(|| format!("Failed to open advisory lock file {:?}", lock_path))?;
+        if !file.metadata()?.file_type().is_file() {
+            bail!(
+                "refusing advisory lock path that is a symlink or non-regular file: {:?}",
+                lock_path
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to secure advisory lock file {:?}", lock_path))?;
+        }
 
-        if unsafe { libc::flock(file.as_raw_fd(), flags) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("Failed to acquire advisory lock {:?}", lock_path));
+        if nonblocking {
+            file.try_lock()
+                .map_err(|error| match error {
+                    fs::TryLockError::Error(error) => error,
+                    fs::TryLockError::WouldBlock => {
+                        std::io::Error::from(std::io::ErrorKind::WouldBlock)
+                    }
+                })
+                .with_context(|| format!("Failed to acquire advisory lock {:?}", lock_path))?;
+        } else {
+            file.lock()
+                .with_context(|| format!("Failed to acquire advisory lock {:?}", lock_path))?;
         }
 
         HELD_LOCKS.with(|held| held.borrow_mut().insert(lock_path.clone()));
@@ -1444,17 +1438,6 @@ impl FileLock {
             lock_path,
             held: true,
             _file: Some(file),
-        })
-    }
-
-    /// Non-Unix stub: no advisory locking without an extra dependency. The
-    /// atomic-replace fallback ([`replace_atomically`]) still keeps writes
-    /// consistent.
-    #[cfg(not(unix))]
-    pub(crate) fn acquire(_target: &std::path::Path) -> Result<Self> {
-        Ok(Self {
-            lock_path: PathBuf::new(),
-            held: false,
         })
     }
 }
@@ -1465,79 +1448,291 @@ impl Drop for FileLock {
             return;
         }
         HELD_LOCKS.with(|held| held.borrow_mut().remove(&self.lock_path));
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if let Some(file) = &self._file {
-                unsafe {
-                    libc::flock(file.as_raw_fd(), libc::LOCK_UN);
-                }
+        if let Some(file) = &self._file {
+            if let Err(error) = file.unlock() {
+                tracing::warn!(
+                    "Failed to release advisory lock {:?}: {}",
+                    self.lock_path,
+                    error
+                );
             }
         }
     }
 }
 
-/// Replace `dst` with `src` (both on the same filesystem) with the
-/// remove-destination-then-retry fallback for platforms where `rename`
-/// refuses to overwrite an existing destination (Windows semantics).
-/// On Unix this is a straight atomic rename. On any platform, a double
-/// failure cleans up `src` before returning the error.
+/// Replace `dst` with `src` (both on the same filesystem), preserving the
+/// previous regular-file destination on every supported platform.
+/// Non-regular destinations, including symlinks and directories, are
+/// rejected. Unix uses one atomic rename; Windows uses `ReplaceFileW` (or
+/// `MoveFileExW` for first publication) so the destination never disappears
+/// in a preserve/install crash window.
 ///
 /// This is the shared form of the fallback convention established in
 /// [`CheckpointManager::save_full_checkpoint`]; chat saves and undo
-/// restores use it so they survive the same Windows rename restriction.
+/// restores use it so they survive Windows' rename restriction.
 pub(crate) fn replace_atomically(
     src: &std::path::Path,
     dst: &std::path::Path,
 ) -> std::io::Result<()> {
-    replace_atomically_with(src, dst, |s, d| std::fs::rename(s, d))
+    #[cfg(windows)]
+    {
+        return replace_atomically_windows(src, dst);
+    }
+    #[cfg(not(windows))]
+    replace_atomically_direct_with(src, dst, |s, d| std::fs::rename(s, d))
 }
 
-/// [`replace_atomically`] with an injectable rename operation (test seam:
-/// a fake Windows-style rename can exercise the remove-then-retry sequence
-/// on any platform).
-fn replace_atomically_with<F>(
+/// Validate both paths and attempt exactly one atomic rename. Unix production
+/// code uses this path: a failed rename must leave the old destination in
+/// place instead of moving it aside for a second attempt.
+fn replace_atomically_direct_with<F>(
     src: &std::path::Path,
     dst: &std::path::Path,
-    rename: F,
+    mut rename: F,
 ) -> std::io::Result<()>
 where
-    F: Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 {
+    regular_file_source(src)?;
+    if let Err(error) = regular_file_destination(dst) {
+        let _ = fs::remove_file(src);
+        return Err(error);
+    }
+    let result = rename(src, dst);
+    if result.is_err() {
+        let _ = fs::remove_file(src);
+    }
+    result
+}
+
+/// Reserve a unique sibling temporary file for an atomic write.
+///
+/// The file is opened with `create_new`, so a pre-seeded symlink at a
+/// predictable `.tmp` path cannot redirect the caller's write. The returned
+/// path stays on the destination filesystem and can be passed to
+/// [`replace_atomically`] after the file is written and synced.
+pub(crate) fn create_atomic_temp_file(
+    destination: &std::path::Path,
+    unix_mode: u32,
+) -> std::io::Result<(PathBuf, fs::File)> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+
+    for _ in 0..16 {
+        let path = parent.join(format!(".{name}.tmp.{}", uuid::Uuid::new_v4().simple()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(unix_mode)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "failed to reserve a unique atomic temp file beside {:?}",
+            destination
+        ),
+    ))
+}
+
+/// Write `bytes` to a securely reserved sibling and publish them atomically.
+pub(crate) fn write_bytes_atomically(
+    destination: &std::path::Path,
+    bytes: &[u8],
+    unix_mode: u32,
+) -> std::io::Result<()> {
+    let (temporary, mut file) = create_atomic_temp_file(destination, unix_mode)?;
+    let write_result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_atomically(&temporary, destination)?;
+        #[cfg(unix)]
+        if let Some(parent) = destination.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+/// Use the native atomic replacement primitives on Windows. The generic
+/// rename-to-backup fallback has an unavoidable crash window where `dst` is
+/// absent; `ReplaceFileW` publishes the complete replacement in one kernel
+/// operation and `MoveFileExW` handles first publication durably.
+#[cfg(windows)]
+fn replace_atomically_windows(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH,
+    };
+
+    regular_file_source(src)?;
+    let destination_exists = regular_file_destination(dst)?;
+    let src_wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+    let dst_wide: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
+    let status = unsafe {
+        if destination_exists {
+            ReplaceFileW(
+                dst_wide.as_ptr(),
+                src_wide.as_ptr(),
+                std::ptr::null(),
+                // The replacement file is synced before publication.
+                // Microsoft documents REPLACEFILE_WRITE_THROUGH as
+                // unsupported, so do not pass it here.
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } else {
+            MoveFileExW(src_wide.as_ptr(), dst_wide.as_ptr(), MOVEFILE_WRITE_THROUGH)
+        }
+    };
+    if status == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// [`replace_atomically`] with an injectable rename operation (test seam for
+/// Windows-style destination conflicts and restore failures on any platform).
+#[cfg(test)]
+pub(crate) fn replace_atomically_with<F>(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    mut rename: F,
+) -> std::io::Result<()>
+where
+    F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    // A symlink source may have already caused damage in a legacy caller that
+    // opened it unsafely, but it must never be published under the trusted
+    // destination name as if it were a completed temp file.
+    regular_file_source(src)?;
+    match regular_file_destination(dst) {
+        Ok(_) => {}
+        Err(error) => {
+            let _ = fs::remove_file(src);
+            return Err(error);
+        }
+    }
+
     match rename(src, dst) {
         Ok(()) => Ok(()),
         Err(first_err) => {
-            // On Windows, rename fails when the destination already exists:
-            // remove the destination and retry before giving up.
-            if dst.exists() {
-                if let Err(remove_err) = fs::remove_file(dst) {
+            match regular_file_destination(dst) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = fs::remove_file(src);
+                    return Err(first_err);
+                }
+                Err(destination_err) => {
                     let _ = fs::remove_file(src);
                     return Err(std::io::Error::new(
-                        remove_err.kind(),
+                        destination_err.kind(),
                         format!(
-                            "failed to remove existing destination {:?} for atomic replace (original rename error: {first_err})",
+                            "refusing fallback replacement of {:?}: {destination_err} (initial rename: {first_err})",
                             dst
                         ),
                     ));
                 }
-                match rename(src, dst) {
-                    Ok(()) => Ok(()),
-                    Err(retry_err) => {
+            }
+
+            let backup = dst.with_extension(format!(
+                "replace-backup.{}.{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            if let Err(backup_err) = rename(dst, &backup) {
+                let _ = fs::remove_file(src);
+                return Err(std::io::Error::new(
+                    backup_err.kind(),
+                    format!(
+                        "failed to preserve existing destination {:?}: {backup_err} (initial rename: {first_err})",
+                        dst
+                    ),
+                ));
+            }
+
+            match rename(src, dst) {
+                Ok(()) => {
+                    let _ = fs::remove_file(backup);
+                    Ok(())
+                }
+                Err(retry_err) => match rename(&backup, dst) {
+                    Ok(()) => {
                         let _ = fs::remove_file(src);
                         Err(std::io::Error::new(
                             retry_err.kind(),
+                            format!("failed to install replacement {:?}: {retry_err}", dst),
+                        ))
+                    }
+                    Err(restore_err) => {
+                        let _ = fs::remove_file(src);
+                        Err(std::io::Error::new(
+                            restore_err.kind(),
                             format!(
-                                "failed to rename {:?} from {:?} after removing the destination",
-                                dst, src
+                                "failed to install replacement {:?} ({retry_err}) or restore backup {:?} ({restore_err})",
+                                dst, backup
                             ),
                         ))
                     }
-                }
-            } else {
-                let _ = fs::remove_file(src);
-                Err(first_err)
+                },
             }
         }
+    }
+}
+
+fn regular_file_source(src: &std::path::Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(src) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to publish non-regular source {:?}", src),
+        )),
+        Err(error) => Err(std::io::Error::new(
+            error.kind(),
+            format!("failed to inspect replacement source {:?}: {error}", src),
+        )),
+    }
+}
+
+/// Return whether `dst` exists as a regular file. The atomic-replace fallback
+/// must never move a directory, symlink, or other special file out of the way.
+fn regular_file_destination(dst: &std::path::Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(dst) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to replace non-regular destination {:?}", dst),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to inspect replacement destination {:?}: {error}",
+                dst
+            ),
+        )),
     }
 }
 
@@ -1567,25 +1762,127 @@ fn parse_delta_line(line: &str, path: &std::path::Path, line_no: usize) -> Resul
     }
 }
 
+fn ensure_delta_log_identity(path: &std::path::Path, requested_task_id: &str) -> Result<()> {
+    let content = read_regular_checkpoint_file(path, "checkpoint delta log")?;
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let delta = parse_delta_line(line, path, index + 1)?;
+        if delta.task_id != requested_task_id {
+            bail!(
+                "checkpoint delta path {:?} holds task '{}', not requested task '{}'",
+                path,
+                delta.task_id,
+                requested_task_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Failed to inspect {label} {:?}", path))?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "refusing {label} that is a symlink or non-regular file: {:?}",
+            path
+        );
+    }
+    Ok(())
+}
+
+/// Open a persisted checkpoint artifact without following a final symlink,
+/// then validate the opened handle rather than trusting a prior path lookup.
+fn open_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("Failed to securely open {label} {:?}", path))?;
+    if !file.metadata()?.file_type().is_file() {
+        bail!(
+            "refusing {label} that is a symlink or non-regular file: {:?}",
+            path
+        );
+    }
+    Ok(file)
+}
+
+fn read_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<String> {
+    let mut file = open_regular_checkpoint_file(path, label)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("Failed to read {label} {:?}", path))?;
+    Ok(content)
+}
+
+fn ensure_checkpoint_identity(
+    checkpoint: &TaskCheckpoint,
+    requested_task_id: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    if checkpoint.task_id != requested_task_id {
+        bail!(
+            "checkpoint path {:?} holds task '{}', not requested task '{}'",
+            path,
+            checkpoint.task_id,
+            requested_task_id
+        );
+    }
+    Ok(())
+}
+
+fn ensure_private_checkpoint_dir(path: &std::path::Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => bail!(
+            "refusing checkpoint directory that is a symlink or non-directory: {:?}",
+            path
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)
+                .with_context(|| format!("Failed to create checkpoints directory: {:?}", path))?;
+        }
+        Err(error) => return Err(error).context("Failed to inspect checkpoints directory"),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("Failed to securely open checkpoint directory {:?}", path))?;
+        if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+            bail!(
+                "refusing checkpoint directory not owned by the current user: {:?}",
+                path
+            );
+        }
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to secure checkpoint directory {:?}", path))?;
+    }
+    Ok(())
+}
+
 impl CheckpointManager {
     /// Create a new checkpoint manager
     pub fn new(checkpoints_dir: PathBuf) -> Result<Self> {
-        // Create directory if it doesn't exist
-        if !checkpoints_dir.exists() {
-            fs::create_dir_all(&checkpoints_dir).with_context(|| {
-                format!(
-                    "Failed to create checkpoints directory: {:?}",
-                    checkpoints_dir
-                )
-            })?;
-        }
-        // Checkpoints may contain conversation data and tool output — keep the
-        // directory owner-only on Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&checkpoints_dir, fs::Permissions::from_mode(0o700));
-        }
+        ensure_private_checkpoint_dir(&checkpoints_dir)?;
         Ok(Self::with_dir(checkpoints_dir))
     }
 
@@ -1601,9 +1898,13 @@ impl CheckpointManager {
     /// The current on-disk stamp of a task's base file + delta log, or `None`
     /// when the base file cannot be stat'ed.
     fn disk_stamp(&self, task_id: &str) -> Option<DiskStamp> {
-        let base = fs::metadata(self.checkpoint_path(task_id).ok()?).ok()?;
-        let delta = match fs::metadata(self.checkpoint_delta_path(task_id).ok()?) {
-            Ok(meta) => Some((meta.len(), meta.modified().ok())),
+        let base = fs::symlink_metadata(self.checkpoint_path(task_id).ok()?).ok()?;
+        if !base.file_type().is_file() {
+            return None;
+        }
+        let delta = match fs::symlink_metadata(self.checkpoint_delta_path(task_id).ok()?) {
+            Ok(meta) if meta.file_type().is_file() => Some((meta.len(), meta.modified().ok())),
+            Ok(_) => return None,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return None,
         };
@@ -1766,6 +2067,7 @@ impl CheckpointManager {
         // Prefer a compact delta write when possible to reduce SSD wear.
         if full_path.exists() {
             if let Ok(mut base) = self.try_load_from_path(&full_path) {
+                ensure_checkpoint_identity(&base, &checkpoint.task_id, &full_path)?;
                 if let Err(e) = self.apply_deltas(&checkpoint.task_id, &mut base) {
                     tracing::warn!(
                         "Failed to hydrate checkpoint with deltas before save ({}). Falling back to full save.",
@@ -1872,7 +2174,25 @@ impl CheckpointManager {
     /// status/step. Used at task finalization — a delta save would leave the
     /// base frozen at in_progress/step 1 for anything that reads the base file.
     pub fn save_final(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
-        let _lock = FileLock::acquire(&self.checkpoint_path(&checkpoint.task_id)?)?;
+        let path = self.checkpoint_path(&checkpoint.task_id)?;
+        let _lock = FileLock::acquire(&path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let existing = self.try_load_from_path(&path).with_context(|| {
+                    format!(
+                        "refusing to overwrite unreadable existing checkpoint {:?}",
+                        path
+                    )
+                })?;
+                ensure_checkpoint_identity(&existing, &checkpoint.task_id, &path)?;
+            }
+            Ok(_) => bail!(
+                "refusing checkpoint that is a symlink or non-regular file: {:?}",
+                path
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Failed to inspect existing checkpoint"),
+        }
         self.save_full_checkpoint(checkpoint)?;
         self.clear_delta_log(&checkpoint.task_id)?;
         self.remember_persisted(checkpoint);
@@ -1906,11 +2226,46 @@ impl CheckpointManager {
         let line = serde_json::to_string(&envelope)
             .context("Failed to serialize checkpoint delta envelope")?;
 
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => bail!(
+                "refusing checkpoint delta log that is a symlink or non-regular file: {:?}",
+                path
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Failed to inspect checkpoint delta log"),
+        }
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let mut file = options
             .open(&path)
             .with_context(|| format!("Failed to open checkpoint delta log {:?}", path))?;
+        if !file.metadata()?.file_type().is_file() {
+            bail!(
+                "refusing checkpoint delta log that is a symlink or non-regular file: {:?}",
+                path
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to secure checkpoint delta log {:?}", path))?;
+        }
         file.write_all(line.as_bytes())
             .with_context(|| format!("Failed to write checkpoint delta log {:?}", path))?;
         file.write_all(b"\n")
@@ -1926,14 +2281,15 @@ impl CheckpointManager {
             return Ok(false);
         }
 
-        let metadata = fs::metadata(&path)
+        ensure_regular_checkpoint_file(&path, "checkpoint delta log")?;
+
+        let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("Failed to stat checkpoint delta log {:?}", path))?;
         if metadata.len() > MAX_DELTA_FILE_BYTES {
             return Ok(true);
         }
 
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read checkpoint delta log {:?}", path))?;
+        let content = read_regular_checkpoint_file(&path, "checkpoint delta log")?;
         let line_count = content
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -1944,6 +2300,7 @@ impl CheckpointManager {
     fn clear_delta_log(&self, task_id: &str) -> Result<()> {
         let delta_path = self.checkpoint_delta_path(task_id)?;
         if delta_path.exists() {
+            ensure_regular_checkpoint_file(&delta_path, "checkpoint delta log")?;
             fs::remove_file(&delta_path).with_context(|| {
                 format!("Failed to delete checkpoint delta log {:?}", delta_path)
             })?;
@@ -2117,44 +2474,69 @@ impl CheckpointManager {
         let json =
             serde_json::to_string_pretty(&envelope).context("Failed to format checkpoint JSON")?;
 
-        // Atomic write: write to a temp file in the same directory, then rename.
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp_path = path.with_extension(format!(
-            "json.tmp.{}.{}.{}",
-            checkpoint.task_id,
-            std::process::id(),
-            suffix
-        ));
-        {
-            let mut open_opts = fs::OpenOptions::new();
-            open_opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                open_opts.mode(0o600);
+        // Atomic write: reserve a unique sibling with create_new, write and
+        // sync it, then publish it with one replacement operation.
+        let (tmp_path, mut tmp_file) = create_atomic_temp_file(&path, 0o600)
+            .with_context(|| format!("Failed to create checkpoint temp file beside {:?}", path))?;
+        tmp_file
+            .write_all(json.as_bytes())
+            .with_context(|| format!("Failed to write checkpoint temp file {:?}", tmp_path))?;
+        tmp_file
+            .sync_all()
+            .with_context(|| format!("Failed to fsync checkpoint temp file {:?}", tmp_path))?;
+        drop(tmp_file);
+        // Snapshot the old primary to the backup without moving the primary
+        // out of place. Moving it first creates a crash window where the
+        // checkpoint name is absent, especially on Windows. Both backup and
+        // primary are instead published with an atomic replacement.
+        match regular_file_destination(&path) {
+            Ok(false) => {}
+            Ok(true) => {
+                let backup_path = path.with_extension("json.bak");
+                if let Err(error) = regular_file_destination(&backup_path) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Refusing to replace non-regular checkpoint backup {:?}",
+                            backup_path
+                        )
+                    });
+                }
+                let (backup_tmp, mut backup_file) = create_atomic_temp_file(&backup_path, 0o600)
+                    .with_context(|| {
+                        format!(
+                            "Failed to create checkpoint backup temp beside {:?}",
+                            backup_path
+                        )
+                    })?;
+                let backup_result = (|| -> Result<()> {
+                    let mut primary = open_regular_checkpoint_file(&path, "checkpoint")?;
+                    std::io::copy(&mut primary, &mut backup_file)?;
+                    backup_file.sync_all()?;
+                    drop(backup_file);
+                    replace_atomically(&backup_tmp, &backup_path)?;
+                    Ok(())
+                })();
+                if let Err(error) = backup_result {
+                    let _ = fs::remove_file(&backup_tmp);
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(error).with_context(|| {
+                        format!("Failed to refresh checkpoint backup {:?}", backup_path)
+                    });
+                }
             }
-            let mut tmp_file = open_opts
-                .open(&tmp_path)
-                .with_context(|| format!("Failed to create checkpoint temp file {:?}", tmp_path))?;
-            tmp_file
-                .write_all(json.as_bytes())
-                .with_context(|| format!("Failed to write checkpoint temp file {:?}", tmp_path))?;
-            tmp_file
-                .sync_all()
-                .with_context(|| format!("Failed to fsync checkpoint temp file {:?}", tmp_path))?;
-        }
-        // Keep a backup of the previous checkpoint so it can be recovered
-        if path.exists() {
-            let backup_path = path.with_extension("json.bak");
-            if let Err(e) = fs::rename(&path, &backup_path) {
-                tracing::warn!("Failed to create checkpoint backup: {}", e);
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(error).with_context(|| {
+                    format!(
+                        "Refusing to replace non-regular checkpoint destination {:?}",
+                        path
+                    )
+                });
             }
         }
 
-        // Atomic replace (tmp → path), with the remove-destination-then-retry
+        // Atomic replace (tmp → path), with a preserve/install/restore
         // fallback for Windows, where rename fails when the destination
         // exists. The caller holds the task's advisory lock across this
         // whole cycle.
@@ -2225,7 +2607,10 @@ impl CheckpointManager {
         // discard every valid delta (crash-cascade bug — a power loss tearing
         // the final delta line cascaded into the PRIMARY being rolled back).
         let mut checkpoint = match self.try_load_from_path(&path) {
-            Ok(checkpoint) => checkpoint,
+            Ok(checkpoint) => {
+                ensure_checkpoint_identity(&checkpoint, task_id, &path)?;
+                checkpoint
+            }
             Err(primary_err) => {
                 tracing::warn!(
                     "Primary checkpoint load failed for {:?}: {}. Attempting recovery.",
@@ -2272,8 +2657,9 @@ impl CheckpointManager {
             return Ok(());
         }
 
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read checkpoint delta log {:?}", path))?;
+        ensure_regular_checkpoint_file(&path, "checkpoint delta log")?;
+
+        let content = read_regular_checkpoint_file(&path, "checkpoint delta log")?;
 
         // Torn-write signature: an interrupted append never emitted the
         // terminating newline, so the file body ends mid-record.
@@ -2333,15 +2719,32 @@ impl CheckpointManager {
         }
 
         if let Some(truncate_to) = torn_tail_len {
-            let file = fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .with_context(|| {
-                    format!(
-                        "Failed to open checkpoint delta log {:?} to repair its torn tail",
-                        path
-                    )
-                })?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(
+                    windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+                );
+            }
+            let file = options.open(&path).with_context(|| {
+                format!(
+                    "Failed to open checkpoint delta log {:?} to repair its torn tail",
+                    path
+                )
+            })?;
+            if !file.metadata()?.file_type().is_file() {
+                bail!(
+                    "refusing checkpoint delta log that is a symlink or non-regular file: {:?}",
+                    path
+                );
+            }
             file.set_len(truncate_to as u64).with_context(|| {
                 format!(
                     "Failed to truncate torn tail of checkpoint delta log {:?}",
@@ -2363,8 +2766,7 @@ impl CheckpointManager {
 
     /// Attempt to load and verify a checkpoint from a specific path.
     fn try_load_from_path(&self, path: &std::path::Path) -> Result<TaskCheckpoint> {
-        let json = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read checkpoint from {:?}", path))?;
+        let json = read_regular_checkpoint_file(path, "checkpoint")?;
 
         // Try to parse as an envelope first (new format with integrity check)
         if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(&json) {
@@ -2408,6 +2810,7 @@ impl CheckpointManager {
 
         // Step 0: never prefer an older backup over a healthier primary.
         if let Ok(checkpoint) = self.try_load_from_path(&primary_path) {
+            ensure_checkpoint_identity(&checkpoint, task_id, &primary_path)?;
             tracing::warn!(
                 "Primary checkpoint {:?} is readable despite the earlier failure; keeping it over any backup.",
                 primary_path
@@ -2421,6 +2824,7 @@ impl CheckpointManager {
         if backup_path.exists() {
             match self.try_load_from_path(&backup_path) {
                 Ok(checkpoint) => {
+                    ensure_checkpoint_identity(&checkpoint, task_id, &backup_path)?;
                     tracing::info!(
                         "Recovered checkpoint for task '{}' from backup {:?}",
                         task_id,
@@ -2625,18 +3029,37 @@ impl CheckpointManager {
         // task's advisory lock so a concurrent writer observes either all
         // or nothing.
         let _lock = FileLock::acquire(&path)?;
-        if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        let delta_path = self.checkpoint_delta_path(task_id)?;
+        let primary_exists = fs::symlink_metadata(&path).is_ok();
+        let backup_exists = fs::symlink_metadata(&backup_path).is_ok();
+        let delta_exists = fs::symlink_metadata(&delta_path).is_ok();
+
+        // Validate the whole set before removing any member. A colliding
+        // sanitized task ID or a corrupt/symlinked sibling must not make a
+        // delete partially remove another task's recoverable state.
+        if primary_exists {
+            let checkpoint = self.try_load_from_path(&path)?;
+            ensure_checkpoint_identity(&checkpoint, task_id, &path)?;
+        }
+        if backup_exists {
+            let checkpoint = self.try_load_from_path(&backup_path)?;
+            ensure_checkpoint_identity(&checkpoint, task_id, &backup_path)?;
+        }
+        if delta_exists {
+            ensure_delta_log_identity(&delta_path, task_id)?;
+        }
+
+        if primary_exists {
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to delete checkpoint: {:?}", path))?;
         }
-        let backup_path = path.with_extension("json.bak");
-        if backup_path.exists() {
+        if backup_exists {
             fs::remove_file(&backup_path).with_context(|| {
                 format!("Failed to delete checkpoint backup: {:?}", backup_path)
             })?;
         }
-        let delta_path = self.checkpoint_delta_path(task_id)?;
-        if delta_path.exists() {
+        if delta_exists {
             fs::remove_file(&delta_path).with_context(|| {
                 format!("Failed to delete checkpoint delta log: {:?}", delta_path)
             })?;

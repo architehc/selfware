@@ -72,7 +72,7 @@
       "loop_stage": "foundation",
       "pattern": "version-floor-check",
       "intent": "Ensure the installed Rust toolchain meets the minimum supported version.",
-      "how_it_shapes_the_loop": "check_msrv compares the toolchain against MSRV ('1.91'); a too-old toolchain yields a Missing/Warning DoctorCheck that flags a build risk before the loop compiles anything.",
+      "how_it_shapes_the_loop": "check_msrv compares the toolchain against MSRV ('1.95'); a too-old toolchain yields a Missing/Warning DoctorCheck that flags a build risk before the loop compiles anything.",
       "loop_objects_touched": ["DoctorCheck", "MSRV", "CheckStatus"],
       "wiring": {
         "inputs_from": ["rustc --version"],
@@ -81,9 +81,9 @@
       "touch_interaction": {
         "gesture": "double-tap",
         "canvas_action": "Double-tapping the Rust chip shows detected version vs required MSRV side by side.",
-        "visual": "A version dial reads green if >= 1.91, amber if below with the gap highlighted."
+        "visual": "A version dial reads green if >= 1.95, amber if below with the gap highlighted."
       },
-      "mini_scenario": "Detected rustc 1.89 vs MSRV 1.91 raises a Warning, warning the loop that compilation may fail.",
+      "mini_scenario": "Detected rustc 1.94 vs MSRV 1.95 raises a Warning, warning the loop that compilation may fail.",
       "pitfall": "MSRV is kept in sync with Cargo.toml's rust-version; a drifted constant misreports the true floor."
     },
     {

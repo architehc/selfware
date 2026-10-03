@@ -1912,6 +1912,36 @@ async fn test_review_reads_file() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+async fn review_relative_path_follows_the_agents_workspace_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("review.rs"),
+        "pub fn only_in_scoped_workspace() {}",
+    )
+    .unwrap();
+    let server = MockLlmServer::builder()
+        .with_response("Review.")
+        .with_response("Done.")
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.tools.workspace_root().enter(dir.path()).unwrap();
+
+    agent.review("review.rs").await.unwrap();
+
+    assert!(agent
+        .messages
+        .iter()
+        .any(|message| message.content.text().contains("only_in_scoped_workspace")));
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
 async fn test_review_nonexistent_file() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = mock_agent_config(format!("{}/v1", server.url()), false);

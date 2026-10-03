@@ -23,6 +23,45 @@ fn test_copy_dir_recursive_excludes_target() {
 }
 
 #[test]
+fn repository_copy_prunes_private_tool_state() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("visible.rs"), "fn visible() {}\n").unwrap();
+    for state_dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        let private = src.path().join(state_dir).join("worktrees");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("private.rs"), "fn private_state() {}\n").unwrap();
+    }
+
+    copy_dir_recursive(src.path(), dst.path(), Some("target")).unwrap();
+
+    assert!(dst.path().join("visible.rs").is_file());
+    for state_dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+        assert!(!dst.path().join(state_dir).exists(), "copied {state_dir}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_copy_does_not_follow_symlinks() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.rs"), "private\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), src.path().join("linked_dir")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.rs"),
+        src.path().join("linked_file.rs"),
+    )
+    .unwrap();
+
+    copy_dir_recursive(src.path(), dst.path(), Some("target")).unwrap();
+
+    assert!(!dst.path().join("linked_dir").exists());
+    assert!(!dst.path().join("linked_file.rs").exists());
+}
+
+#[test]
 fn test_parse_test_counts() {
     let output = "test result: ok. 5198 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out";
     let (passed, total) = parse_test_counts(output);

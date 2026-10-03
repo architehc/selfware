@@ -39,20 +39,28 @@ impl ShortTermMemory {
     }
 
     /// Store an entry
-    pub async fn store(&self, mut entry: MemoryEntry) -> anyhow::Result<u64> {
-        entry.tier = MemoryTier::ShortTerm;
+    pub async fn store(&self, entry: MemoryEntry) -> anyhow::Result<u64> {
+        self.store_in_tier(entry, MemoryTier::ShortTerm).await
+    }
+
+    async fn store_in_tier(&self, mut entry: MemoryEntry, tier: MemoryTier) -> anyhow::Result<u64> {
+        anyhow::ensure!(self.capacity > 0, "memory tier capacity is zero");
+        entry.tier = tier;
 
         let mut entries = self.entries.write().await;
 
-        if entries.len() >= self.capacity && !entries.is_empty() {
+        if entries.len() >= self.capacity && !entries.contains_key(&entry.id) {
             self.evict_oldest(&mut entries).await?;
         }
 
         let id = entry.id;
-        entries.insert(id, entry.clone());
-        drop(entries);
+        let replaced = entries.insert(id, entry.clone());
 
+        if let Some(previous) = replaced {
+            self.index.remove_entry(&previous).await;
+        }
         self.index.index_entry(&entry).await;
+        drop(entries);
 
         Ok(id)
     }
@@ -113,7 +121,12 @@ impl ShortTermMemory {
     /// Remove an entry
     pub async fn remove(&self, id: u64) -> Option<MemoryEntry> {
         let mut entries = self.entries.write().await;
-        entries.remove(&id)
+        let removed = entries.remove(&id);
+        if let Some(entry) = &removed {
+            self.index.remove_entry(entry).await;
+        }
+        drop(entries);
+        removed
     }
 
     /// Get count of entries
@@ -124,7 +137,12 @@ impl ShortTermMemory {
     /// Clear all entries
     pub async fn clear(&self) {
         let mut entries = self.entries.write().await;
+        let removed: Vec<_> = entries.values().cloned().collect();
         entries.clear();
+        for entry in &removed {
+            self.index.remove_entry(entry).await;
+        }
+        drop(entries);
     }
 
     /// Get all entries
@@ -172,7 +190,7 @@ impl WorkingMemory {
 
     pub async fn store(&self, mut entry: MemoryEntry) -> anyhow::Result<u64> {
         entry.tier = MemoryTier::Working;
-        self.inner.store(entry).await
+        self.inner.store_in_tier(entry, MemoryTier::Working).await
     }
 
     pub async fn retrieve(&self, id: u64) -> Option<MemoryEntry> {

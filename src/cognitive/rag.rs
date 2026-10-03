@@ -11,7 +11,7 @@
 //! - Incremental updates on file changes
 //! - Multi-language support
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,6 +24,58 @@ use crate::analysis::vector_store::{
     VectorStore,
 };
 use crate::token_count::estimate_content_tokens;
+
+/// Enumerate the regular files that the RAG index is allowed to ingest.
+///
+/// Full builds and incremental scans must share one traversal policy. In
+/// particular, repository-local AI/tool state is private implementation data,
+/// and symlinks must not make a repository scan escape its selected root.
+fn indexable_files(watcher: &FileWatcher) -> Vec<PathBuf> {
+    WalkDir::new(&watcher.root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !entry.file_type().is_symlink() && !watcher.is_excluded(entry.path()))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file() && watcher.is_included(entry.path()))
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+fn is_excluded_path(path: &Path, config: &RagConfig) -> bool {
+    let path_str = path.to_string_lossy();
+    for pattern in &config.exclude_patterns {
+        if pattern.ends_with('/') {
+            // Directory pattern: match a whole path component, not a
+            // substring ("target/" must not exclude target_info.rs).
+            let dir = std::ffi::OsStr::new(pattern.trim_end_matches('/'));
+            if path
+                .components()
+                .any(|component| component.as_os_str() == dir)
+            {
+                return true;
+            }
+        } else if pattern.starts_with('*') {
+            // Extension pattern
+            let ext = pattern.trim_start_matches("*.");
+            if path.extension().is_some_and(|candidate| candidate == ext) {
+                return true;
+            }
+        } else if path_str.contains(pattern) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_included_path(path: &Path, config: &RagConfig) -> bool {
+    path.extension().is_some_and(|extension| {
+        let extension = extension.to_string_lossy();
+        config
+            .include_extensions
+            .iter()
+            .any(|included| included == extension.as_ref())
+    })
+}
 
 /// RAG configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,7 +267,7 @@ pub struct ContextSource {
 /// File watcher for incremental updates
 pub struct FileWatcher {
     /// Files and their last known modification time
-    tracked_files: HashMap<PathBuf, u64>,
+    tracked_files: HashMap<PathBuf, u128>,
     /// Root directory
     root: PathBuf,
     /// Config for filtering
@@ -232,47 +284,25 @@ impl FileWatcher {
         }
     }
 
-    /// Scan for changes
-    pub fn scan_changes(&mut self) -> Vec<FileChange> {
+    /// Discover changes without advancing the watcher snapshot. Callers that
+    /// perform fallible work can acknowledge each change only after it has
+    /// been applied successfully.
+    fn pending_changes(&self) -> Vec<FileChange> {
         let mut changes = Vec::new();
         let mut current_files: HashSet<PathBuf> = HashSet::new();
 
-        for entry in WalkDir::new(&self.root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-
-            // Skip directories and excluded patterns
-            if path.is_dir() || self.is_excluded(path) {
-                continue;
-            }
-
-            // Check extension
-            if !self.is_included(path) {
-                continue;
-            }
-
-            current_files.insert(path.to_path_buf());
+        for path in indexable_files(self) {
+            current_files.insert(path.clone());
 
             // Get modification time
-            let modified = path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let modified = file_modified_nanos(&path).unwrap_or(0);
 
-            if let Some(&prev_modified) = self.tracked_files.get(path) {
-                if modified > prev_modified {
-                    changes.push(FileChange::Modified(path.to_path_buf()));
-                    self.tracked_files.insert(path.to_path_buf(), modified);
+            if let Some(&prev_modified) = self.tracked_files.get(&path) {
+                if modified != prev_modified {
+                    changes.push(FileChange::Modified(path));
                 }
             } else {
-                changes.push(FileChange::Added(path.to_path_buf()));
-                self.tracked_files.insert(path.to_path_buf(), modified);
+                changes.push(FileChange::Added(path));
             }
         }
 
@@ -284,52 +314,70 @@ impl FileWatcher {
             .cloned()
             .collect();
 
-        for path in deleted {
-            self.tracked_files.remove(&path);
-            changes.push(FileChange::Deleted(path));
-        }
+        changes.extend(deleted.into_iter().map(FileChange::Deleted));
 
+        changes
+    }
+
+    fn acknowledge_observed(&mut self, change: &FileChange, modified: Option<u128>) {
+        match change {
+            FileChange::Added(path) | FileChange::Modified(path) => {
+                if let Some(modified) = modified {
+                    self.tracked_files.insert(path.clone(), modified);
+                }
+            }
+            FileChange::Deleted(path) => {
+                self.tracked_files.remove(path);
+            }
+        }
+    }
+
+    /// Scan for changes and advance the watcher snapshot immediately.
+    /// Retained for callers that only need change detection; indexing uses
+    /// `pending_changes` plus per-change acknowledgement.
+    pub fn scan_changes(&mut self) -> Vec<FileChange> {
+        let changes = self.pending_changes();
+        for change in &changes {
+            let observed = match change {
+                FileChange::Added(path) | FileChange::Modified(path) => file_modified_nanos(path),
+                FileChange::Deleted(_) => None,
+            };
+            self.acknowledge_observed(change, observed);
+        }
         changes
     }
 
     /// Check if path is excluded
     fn is_excluded(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-        for pattern in &self.config.exclude_patterns {
-            if pattern.ends_with('/') {
-                // Directory pattern: match a whole path component, not a
-                // substring ("target/" must not exclude target_info.rs).
-                let dir = pattern.trim_end_matches('/');
-                if path_str.split('/').any(|component| component == dir) {
-                    return true;
-                }
-            } else if pattern.starts_with('*') {
-                // Extension pattern
-                let ext = pattern.trim_start_matches("*.");
-                if path.extension().is_some_and(|e| e == ext) {
-                    return true;
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
+        // The selected scan root is explicit user input. Only private state
+        // nested below it is pruned; otherwise a checkout intentionally kept
+        // under (for example) ~/.claude/worktrees would appear empty.
+        let relative = path.strip_prefix(&self.root).unwrap_or(path);
+        if crate::safety::source_context::path_contains_private_tool_state(relative) {
+            return true;
         }
-        false
+        is_excluded_path(path, &self.config)
     }
 
     /// Check if path should be included
     fn is_included(&self, path: &Path) -> bool {
-        if let Some(ext) = path.extension() {
-            let ext_str = ext.to_string_lossy().to_string();
-            self.config.include_extensions.contains(&ext_str)
-        } else {
-            false
-        }
+        is_included_path(path, &self.config)
     }
 
     /// Get tracked file count
     pub fn tracked_count(&self) -> usize {
         self.tracked_files.len()
     }
+}
+
+fn file_modified_nanos(path: &Path) -> Option<u128> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
 }
 
 /// File change type
@@ -346,10 +394,6 @@ pub struct RagEngine {
     store: VectorStore,
     /// Configuration
     config: RagConfig,
-    /// Root directory
-    root: PathBuf,
-    /// Code chunker
-    _chunker: CodeChunker,
     /// File watcher for incremental updates
     watcher: FileWatcher,
     /// Statistics
@@ -378,10 +422,9 @@ impl RagEngine {
         let watcher = FileWatcher::new(&root, config.clone());
 
         Self {
-            store: VectorStore::new(provider),
+            store: VectorStore::new(provider)
+                .with_chunker(CodeChunker::new(config.max_chunk_tokens)),
             config: config.clone(),
-            root,
-            _chunker: CodeChunker::new(config.max_chunk_tokens * 4), // ~4 chars per token
             watcher,
             stats: RagStats::default(),
             indexed_files: HashMap::new(),
@@ -399,44 +442,139 @@ impl RagEngine {
     pub async fn build_index(&mut self) -> Result<RagStats> {
         let start = Instant::now();
 
-        // Clear existing collection
-        self.store.delete_collection(&self.collection_name);
-        self.store
-            .collection(&self.collection_name, CollectionScope::Project);
-        self.indexed_files.clear();
+        // Build in a separate non-persistent store. The live collection,
+        // watcher snapshot, indexed-file metadata, and reported stats stay
+        // untouched until every candidate has succeeded; cancellation drops
+        // the partial staging store without leaving cache state behind.
+        let mut staged_store = self.store.staging_store();
+        staged_store.collection(&self.collection_name, CollectionScope::Project);
 
         // Scan and index files
         let mut files_by_lang: HashMap<String, usize> = HashMap::new();
         let mut total_chunks = 0;
         let mut total_tokens = 0;
+        let mut indexed_files = HashMap::new();
+        let mut tracked_files = HashMap::new();
 
-        for entry in WalkDir::new(&self.root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
+        for path in indexable_files(&self.watcher) {
+            // Record the version we are about to read. If the file changes
+            // during embedding, acknowledging this older stamp guarantees the
+            // next incremental scan retries it instead of suppressing the
+            // concurrent update.
+            let Some(observed_modified) = file_modified_nanos(&path) else {
+                anyhow::bail!(
+                    "RAG full index rebuild failed while inspecting {}; previous index retained",
+                    path.display()
+                );
+            };
+            let chunk_count = staged_store
+                .index_file(&self.collection_name, &path)
+                .await
+                .with_context(|| format!("Failed to index {}", path.display()))
+                .context("RAG full index rebuild failed; previous index retained")?;
 
-            if path.is_dir() || self.watcher.is_excluded(path) || !self.watcher.is_included(path) {
-                continue;
+            // Full-build statistics describe the staged index that will be
+            // published. A failed read or a concurrent source change aborts
+            // the build instead of returning partial success.
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {} for RAG statistics", path.display()))
+                .context("RAG full index rebuild failed; previous index retained")?;
+            let metadata = path
+                .metadata()
+                .with_context(|| format!("Failed to inspect indexed file {}", path.display()))
+                .context("RAG full index rebuild failed; previous index retained")?;
+            let Some(indexed_modified) = file_modified_nanos(&path) else {
+                anyhow::bail!(
+                    "RAG full index rebuild failed while rechecking {}; previous index retained",
+                    path.display()
+                );
+            };
+            if indexed_modified != observed_modified {
+                anyhow::bail!(
+                    "RAG full index rebuild observed {} change while it was being indexed; previous index retained",
+                    path.display()
+                );
             }
 
-            match self.index_file(path).await {
-                Ok(chunk_count) => {
+            let lang = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            *files_by_lang.entry(lang.clone()).or_insert(0) += 1;
+            total_chunks += chunk_count;
+            total_tokens += estimate_content_tokens(&content);
+
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            indexed_files.insert(
+                path.clone(),
+                IndexedFile {
+                    path: path.clone(),
+                    modified_at: modified,
+                    chunk_count,
+                    size: metadata.len(),
+                    language: lang,
+                },
+            );
+            tracked_files.insert(path, observed_modified);
+        }
+
+        let build_time = start.elapsed().as_millis() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let stats = RagStats {
+            total_files: indexed_files.len(),
+            total_chunks,
+            total_tokens,
+            last_full_index: Some(now),
+            last_update: Some(now),
+            build_time_ms: build_time,
+            files_by_language: files_by_lang,
+        };
+
+        self.store
+            .publish_staged_collection(staged_store, &self.collection_name)
+            .context(
+                "RAG full index rebuild could not publish staged index; previous index retained",
+            )?;
+        self.indexed_files = indexed_files;
+        self.watcher.tracked_files = tracked_files;
+        self.stats = stats;
+
+        Ok(self.stats.clone())
+    }
+
+    /// Update index incrementally
+    pub async fn update_index(&mut self) -> Result<Vec<FileChange>> {
+        self.store
+            .collection(&self.collection_name, CollectionScope::Project);
+        let changes = self.watcher.pending_changes();
+
+        for change in &changes {
+            let observed_modified = match change {
+                FileChange::Added(path) | FileChange::Modified(path) => file_modified_nanos(path),
+                FileChange::Deleted(_) => None,
+            };
+            match change {
+                FileChange::Added(path) | FileChange::Modified(path) => {
+                    // VectorStore stages and validates the complete replacement
+                    // before removing the prior file, so a transient provider
+                    // failure leaves the last good searchable version intact.
+                    let chunk_count = self.index_file(path).await.with_context(|| {
+                        format!("Failed to update RAG index for {}", path.display())
+                    })?;
                     let lang = path
                         .extension()
                         .map(|e| e.to_string_lossy().to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    *files_by_lang.entry(lang.clone()).or_insert(0) += 1;
-                    total_chunks += chunk_count;
-
-                    // Token estimate via shared tokenizer utility
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        total_tokens += estimate_content_tokens(&content);
-                    }
-
-                    // Track indexed file
                     let modified = path
                         .metadata()
                         .ok()
@@ -448,9 +586,9 @@ impl RagEngine {
                     let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
 
                     self.indexed_files.insert(
-                        path.to_path_buf(),
+                        path.clone(),
                         IndexedFile {
-                            path: path.to_path_buf(),
+                            path: path.clone(),
                             modified_at: modified,
                             chunk_count,
                             size,
@@ -458,78 +596,16 @@ impl RagEngine {
                         },
                     );
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to index {}: {}", path.display(), e);
-                }
-            }
-        }
-
-        let build_time = start.elapsed().as_millis() as u64;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        self.stats = RagStats {
-            total_files: self.indexed_files.len(),
-            total_chunks,
-            total_tokens,
-            last_full_index: Some(now),
-            last_update: Some(now),
-            build_time_ms: build_time,
-            files_by_language: files_by_lang,
-        };
-
-        Ok(self.stats.clone())
-    }
-
-    /// Update index incrementally
-    pub async fn update_index(&mut self) -> Result<Vec<FileChange>> {
-        let changes = self.watcher.scan_changes();
-
-        for change in &changes {
-            match change {
-                FileChange::Added(path) | FileChange::Modified(path) => {
-                    // Re-index file
-                    self.store
-                        .collection(&self.collection_name, CollectionScope::Project)
-                        .remove_file(path);
-
-                    if let Ok(chunk_count) = self.index_file(path).await {
-                        let lang = path
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-
-                        let modified = path
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-
-                        let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
-
-                        self.indexed_files.insert(
-                            path.clone(),
-                            IndexedFile {
-                                path: path.clone(),
-                                modified_at: modified,
-                                chunk_count,
-                                size,
-                                language: lang,
-                            },
-                        );
-                    }
-                }
                 FileChange::Deleted(path) => {
                     self.store
-                        .collection(&self.collection_name, CollectionScope::Project)
-                        .remove_file(path);
+                        .remove_file(&self.collection_name, path)
+                        .with_context(|| {
+                            format!("Failed to remove {} from RAG index", path.display())
+                        })?;
                     self.indexed_files.remove(path);
                 }
             }
+            self.watcher.acknowledge_observed(change, observed_modified);
         }
 
         if !changes.is_empty() {
@@ -540,6 +616,25 @@ impl RagEngine {
                     .as_secs(),
             );
             self.stats.total_files = self.indexed_files.len();
+            self.stats.total_chunks = self
+                .indexed_files
+                .values()
+                .map(|file| file.chunk_count)
+                .sum();
+            self.stats.total_tokens = self
+                .indexed_files
+                .keys()
+                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .map(|content| estimate_content_tokens(&content))
+                .sum();
+            self.stats.files_by_language.clear();
+            for file in self.indexed_files.values() {
+                *self
+                    .stats
+                    .files_by_language
+                    .entry(file.language.clone())
+                    .or_insert(0) += 1;
+            }
         }
 
         Ok(changes)
@@ -696,7 +791,9 @@ impl RagEngine {
             if self.config.include_metadata {
                 formatted.push_str(&format!(
                     "// File: {} (lines {}-{})\n",
-                    meta.file_path.display(),
+                    crate::safety::source_context::quote_untrusted_label(
+                        &meta.file_path.to_string_lossy()
+                    ),
                     meta.start_line,
                     meta.end_line
                 ));
@@ -753,7 +850,71 @@ impl RagEngine {
 
     /// Load index from disk
     pub fn load(&mut self) -> Result<()> {
-        self.store.load()
+        self.store.load()?;
+
+        // Persisted collections predate the traversal hardening above.  Do
+        // not let chunks for files which the current scan would refuse reach
+        // search: that includes deleted/excluded files, nested private tool
+        // state, symlinks, and paths outside the explicitly selected root.
+        // Comparing against the walk result also preserves the important
+        // root semantic: a root named `.claude` is allowed, while a nested
+        // `.codex` below it is not.
+        let allowed_paths: HashSet<PathBuf> = indexable_files(&self.watcher).into_iter().collect();
+        let disallowed_paths: HashSet<PathBuf> = self
+            .store
+            .get_collection(&self.collection_name)
+            .into_iter()
+            .flat_map(|collection| collection.chunks())
+            .filter_map(|chunk| {
+                let path = chunk.metadata.file_path.as_ref();
+                (!allowed_paths.contains(path)
+                    || !self
+                        .store
+                        .file_chunks_match_current(&self.collection_name, path)
+                        .unwrap_or(false))
+                .then(|| path.to_path_buf())
+            })
+            .collect();
+
+        let mut removal_failed = false;
+        for path in &disallowed_paths {
+            if self.store.remove_file(&self.collection_name, path).is_err() {
+                removal_failed = true;
+                break;
+            }
+        }
+        let still_contains_disallowed = self
+            .store
+            .get_collection(&self.collection_name)
+            .is_some_and(|collection| {
+                collection
+                    .chunks()
+                    .iter()
+                    .any(|chunk| !allowed_paths.contains(chunk.metadata.file_path.as_ref()))
+            });
+        if removal_failed || still_contains_disallowed {
+            // A malformed or incomplete persisted index may make selective
+            // removal impossible.  In that case discard the cache rather
+            // than risk serving a private chunk.
+            self.store.delete_collection(&self.collection_name);
+            self.store
+                .collection(&self.collection_name, CollectionScope::Project);
+        } else if !disallowed_paths.is_empty() {
+            tracing::warn!(
+                collection = %self.collection_name,
+                removed_files = disallowed_paths.len(),
+                "Removed stale or disallowed files from persisted RAG cache"
+            );
+        }
+
+        // Loading cache data is not proof that any current file is indexed.
+        // Leave the watcher empty so the next update replaces every allowed
+        // file from disk and cannot mistake persisted content for a current
+        // snapshot.
+        self.watcher.tracked_files.clear();
+        self.indexed_files.clear();
+        self.stats = RagStats::default();
+        Ok(())
     }
 
     /// Search with specific filters

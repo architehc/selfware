@@ -1214,6 +1214,39 @@ async fn test_process_manager_restart_nonexistent() {
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn failed_manual_restart_does_not_leave_a_permanent_restart_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let manager = ProcessManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("restart-target.sh");
+    std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = ProcessConfig {
+        id: "failed-manual-restart".into(),
+        command: executable.display().to_string(),
+        args: Vec::new(),
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+
+    manager.start(config).await.unwrap();
+    std::fs::remove_file(&executable).unwrap();
+    assert!(manager.restart("failed-manual-restart").await.is_err());
+    assert!(matches!(
+        manager.get("failed-manual-restart").await.unwrap().status,
+        ProcessStatus::Crashed { .. }
+    ));
+    manager.remove("failed-manual-restart").await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg(unix)]
 async fn test_process_manager_remove_running() {
@@ -2108,4 +2141,255 @@ async fn test_auto_restart_then_stop_kills_the_restarted_process() {
         "restarted pid {} must stay dead after the entry is removed",
         restarted_pid
     );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn concurrent_same_id_start_spawns_only_one_child() {
+    let manager = ProcessManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let starts = dir.path().join("starts");
+    let script = format!("echo started >> '{}'; exec sleep 30", starts.display());
+    let config = ProcessConfig {
+        id: "concurrent-start".into(),
+        command: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+
+    let (first, second) = tokio::join!(manager.start(config.clone()), manager.start(config));
+    assert!(first.is_ok(), "first start failed: {first:?}");
+    assert!(second.is_ok(), "second start failed: {second:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let launches = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(launches.lines().count(), 1, "{launches:?}");
+
+    manager.stop("concurrent-start", true).await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn stop_during_restart_backoff_prevents_resurrection() {
+    let manager = ProcessManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let starts = dir.path().join("starts");
+    let script = format!("echo started >> '{}'; exit 1", starts.display());
+    let config = ProcessConfig {
+        id: "cancel-restart".into(),
+        command: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: true,
+        max_restart_attempts: 1,
+    };
+
+    let _ = manager.start(config).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if matches!(
+            manager.get("cancel-restart").await.unwrap().status,
+            ProcessStatus::Restarting { .. }
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restart did not enter backoff"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Reconciliation runs during agent construction. It must leave a
+    // monitor-owned restart backoff intact even when called repeatedly.
+    manager.reconcile(true).await;
+    manager.reconcile(true).await;
+    assert!(matches!(
+        manager.get("cancel-restart").await.unwrap().status,
+        ProcessStatus::Restarting { .. }
+    ));
+
+    assert!(manager.remove("cancel-restart").await.is_err());
+    manager.stop("cancel-restart", true).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+    assert_eq!(
+        manager.get("cancel-restart").await.unwrap().status,
+        ProcessStatus::Stopped
+    );
+    let launches = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(launches.lines().count(), 1, "process restarted after stop");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn reconcile_does_not_steal_an_exit_from_auto_restart_monitor() {
+    let manager = std::sync::Arc::new(ProcessManager::new());
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("first-launch");
+    let script = format!(
+        "if [ -f '{}' ]; then exec sleep 30; else touch '{}'; exit 1; fi",
+        marker.display(),
+        marker.display()
+    );
+    let config = ProcessConfig {
+        id: "reconcile-restart-owner".into(),
+        command: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: true,
+        max_restart_attempts: 1,
+    };
+
+    let starter = manager.clone();
+    let start = tokio::spawn(async move { starter.start(config).await });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        manager.reconcile(true).await;
+        if manager
+            .get("reconcile-restart-owner")
+            .await
+            .is_ok_and(|summary| {
+                summary.restart_count == 1 && matches!(summary.status, ProcessStatus::Running)
+            })
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reconcile stole the child exit before the monitor could restart it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let _ = start.await;
+    manager.stop("reconcile-restart-owner", true).await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn graceful_stop_kills_term_ignoring_descendants() {
+    let manager = ProcessManager::new();
+    let dir = tempfile::tempdir().unwrap();
+    let worker_file = dir.path().join("worker.pid");
+    let script = format!(
+        "(trap '' TERM; exec sleep 300) & echo $! > '{}'; wait",
+        worker_file.display()
+    );
+    let config = ProcessConfig {
+        id: "tree-stop".into(),
+        command: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+    manager.start(config).await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let worker = loop {
+        if let Ok(text) = std::fs::read_to_string(&worker_file) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker pid not written"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert!(pid_is_alive(worker));
+
+    manager.stop("tree-stop", false).await.unwrap();
+    assert!(
+        wait_until_pid_dead(worker, std::time::Duration::from_secs(5)).await,
+        "TERM-ignoring descendant survived a successful stop"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn graceful_stop_does_not_lock_the_process_map_during_exit_wait() {
+    let manager = std::sync::Arc::new(ProcessManager::new());
+    let dir = tempfile::tempdir().unwrap();
+    let term_marker = dir.path().join("term-received");
+    let mut env = HashMap::new();
+    env.insert("STOP_MARKER".to_string(), term_marker.display().to_string());
+    let config = ProcessConfig {
+        id: "slow-graceful-stop".into(),
+        command: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "trap 'touch \"$STOP_MARKER\"' TERM; while :; do sleep 30; done".into(),
+        ],
+        cwd: None,
+        env,
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+    manager.start(config).await.unwrap();
+
+    let probe_config = ProcessConfig {
+        id: "map-lock-probe".into(),
+        command: "true".into(),
+        args: Vec::new(),
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+    manager
+        .processes
+        .write()
+        .await
+        .insert("map-lock-probe".into(), ManagedProcess::new(probe_config));
+
+    let stopping_manager = manager.clone();
+    let stopper =
+        tokio::spawn(async move { stopping_manager.stop("slow-graceful-stop", false).await });
+
+    let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !term_marker.exists() {
+        assert!(
+            std::time::Instant::now() < marker_deadline,
+            "graceful stop did not deliver SIGTERM"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !stopper.is_finished(),
+        "TERM-ignoring process should still be in the graceful wait"
+    );
+
+    let removed = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        manager.remove("map-lock-probe"),
+    )
+    .await
+    .expect("an unrelated process-map write was blocked by graceful stop");
+    assert!(removed.is_ok(), "probe removal failed: {removed:?}");
+
+    let stopped = stopper.await.expect("stop task panicked").unwrap();
+    assert_eq!(stopped.status, ProcessStatus::Stopped);
 }

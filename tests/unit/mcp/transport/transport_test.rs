@@ -585,3 +585,60 @@ async fn session_drain_stops_a_registered_mcp_server() {
     assert!(!pid_alive(pid));
     drop(transport);
 }
+
+/// EOF diagnostics used to reap the direct server before group teardown. A
+/// background descendant then survived, while later cleanup could no longer
+/// signal the retained pgid safely. EOF must kill the group before reaping.
+#[cfg(unix)]
+#[tokio::test]
+async fn server_exit_reaps_background_descendant_before_recording_status() {
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("descendant.pid");
+    let script = format!("sleep 30 & echo $! > '{}'; exit 0", pidfile.display());
+    let transport = StdioTransport::spawn_named(
+        "descendant-exit-test",
+        "sh",
+        &["-c".to_string(), script],
+        &HashMap::new(),
+    )
+    .await
+    .expect("spawn server stub");
+    let resource_id = transport
+        .resource_id
+        .clone()
+        .expect("server registered as a resource");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let descendant = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "server stub did not record descendant pid"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+
+    while pid_alive(descendant) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !pid_alive(descendant),
+        "EOF cleanup must terminate background descendant {descendant}"
+    );
+    assert!(
+        crate::resources::ResourceRegistry::global()
+            .get(&resource_id)
+            .expect("MCP resource remains inspectable")
+            .state
+            .is_released(),
+        "EOF cleanup must release the reaped MCP resource immediately"
+    );
+    drop(transport);
+}

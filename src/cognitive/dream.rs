@@ -136,9 +136,7 @@ impl DreamState {
         std::fs::create_dir_all(base_dir)?;
 
         let json = serde_json::to_string_pretty(self)?;
-        let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&temp_path, json)?;
-        std::fs::rename(&temp_path, &path)?;
+        crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o600)?;
 
         Ok(())
     }

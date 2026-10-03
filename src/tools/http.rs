@@ -128,8 +128,9 @@ impl Tool for HttpRequest {
 
         let builder = Client::builder()
             .timeout(Duration::from_secs(args.timeout_secs))
-            .dns_resolver(Arc::new(PinnedDnsResolver::new(
-                policy.allow_private || policy.allow_localhost,
+            .dns_resolver(Arc::new(PinnedDnsResolver::with_localhost(
+                policy.allow_private,
+                policy.allow_localhost,
             )));
 
         if let Some(host) = url.host_str() {
@@ -150,17 +151,14 @@ impl Tool for HttpRequest {
                     if attempt.previous().len() > 10 {
                         return attempt.error("Too many redirects");
                     }
-                    // Check redirect targets for known-private hostnames (e.g. "localhost").
-                    // DNS-level protection for redirects is handled by PinnedDnsResolver,
-                    // which will reject any resolution to a private IP.
-                    if let Some(host) = attempt.url().host_str().map(|h| h.to_owned()) {
-                        if !policy.allow_private
-                            && !net_policy::is_trusted_local_network_host(&host)
-                            && net_policy::is_private_network_host(&host)
-                        {
-                            return attempt
-                                .error("Blocked redirect to private/internal network address");
-                        }
+                    // Re-evaluate every hop. Localhost is accepted only when
+                    // the request itself started at an explicit local target;
+                    // otherwise a public endpoint could redirect into a local
+                    // service. The resolver independently applies the same
+                    // split to DNS answers at connection time.
+                    match net_policy::validate_redirect_target(attempt.url(), &policy) {
+                        Ok(_) => {}
+                        Err(error) => return attempt.error(error),
                     }
                     attempt.follow()
                 })

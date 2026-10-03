@@ -1606,6 +1606,7 @@ impl Agent {
         );
 
         for (module, files) in &modules {
+            let module_label = crate::safety::source_context::quote_untrusted_label(module);
             let file_count = files.len();
             let l3_count = files
                 .iter()
@@ -1618,7 +1619,7 @@ impl Agent {
 
             summary.push_str(&format!(
                 "## {} ({} files, {} full, {} skeleton)\n",
-                module, file_count, l3_count, l2_count,
+                module_label, file_count, l3_count, l2_count,
             ));
 
             // List key items from skeletons.
@@ -1642,7 +1643,9 @@ impl Agent {
                         if fn_count > 0 || struct_count > 0 {
                             summary.push_str(&format!(
                                 "  - {} ({} fn, {} struct, ~{} tok)\n",
-                                path.display(),
+                                crate::safety::source_context::quote_untrusted_label(
+                                    &path.to_string_lossy()
+                                ),
                                 fn_count,
                                 struct_count,
                                 skel.token_count,
@@ -1650,7 +1653,12 @@ impl Agent {
                         }
                     }
                 } else if *level == ContextMode::Full {
-                    summary.push_str(&format!("  - {} [FULL]\n", path.display()));
+                    summary.push_str(&format!(
+                        "  - {} [FULL]\n",
+                        crate::safety::source_context::quote_untrusted_label(
+                            &path.to_string_lossy()
+                        )
+                    ));
                 }
             }
             summary.push('\n');

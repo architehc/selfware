@@ -462,8 +462,11 @@ impl Agent {
                 let file_tokens = self
                     .messages
                     .iter()
-                    .find(|m| {
-                        m.role == "user" && m.content.contains(&format!("// FILE: {}", path_str))
+                    .find(|message| {
+                        super::context_files::is_context_file_message(
+                            message,
+                            std::path::Path::new(path_str),
+                        )
                     })
                     .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
                     .unwrap_or(0);

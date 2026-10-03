@@ -371,6 +371,18 @@ impl<'g> GraphOverlay<'g> {
     }
 }
 
+fn is_regular_file_without_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn is_directory_without_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 /// Build a lightweight code map for a directory, optionally focused on a module path.
 ///
 /// Directory structure comes from a listing-only walk (no file reads); token
@@ -382,12 +394,12 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
     let scan_dir = if let Some(focus_path) = focus {
         // Resolve focus as a subpath under root/src
         let candidate = root.join("src").join(focus_path.replace("::", "/"));
-        if candidate.is_dir() {
+        if is_directory_without_symlink(&candidate) {
             candidate
         } else {
             // Try as a file
             let rs_file = candidate.with_extension("rs");
-            if rs_file.is_file() {
+            if is_regular_file_without_symlink(&rs_file) {
                 // Single file focus — add it and return
                 let index = crate::evolve::graph_cache::shared_graph_index(root).ok();
                 let overlay = index.as_ref().map(|index| GraphOverlay::load(index, root));
@@ -429,7 +441,7 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
         root.join("src")
     };
 
-    if !scan_dir.exists() {
+    if !is_directory_without_symlink(&scan_dir) {
         return nodes;
     }
 
@@ -461,7 +473,21 @@ fn collect_rs_files(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // Directory symlinks must not alias a private state tree into the
+        // code map, and file symlinks must not make the live fallback read a
+        // target outside the selected source tree.
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if crate::evolve::graph::is_excluded_repository_directory(&entry.file_name())
+                || path.join("pyvenv.cfg").is_file()
+            {
+                continue;
+            }
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
@@ -479,7 +505,7 @@ fn collect_rs_files(
                 },
             );
             collect_rs_files(&path, root, max_depth, current_depth + 1, overlay, nodes);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+        } else if file_type.is_file() && path.extension().is_some_and(|e| e == "rs") {
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
@@ -833,6 +859,66 @@ impl Tool for ContextActionTool {
             "fusion_multiplier": fusion.multiplier(),
             "token_source": token_source,
         }))
+    }
+}
+
+#[cfg(test)]
+mod private_state_walk_tests {
+    use super::*;
+
+    fn write(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(path, content).expect("write fixture");
+    }
+
+    #[test]
+    fn broad_map_prunes_private_state_but_explicit_focus_remains_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write(&temp.path().join("src/visible.rs"), "pub fn visible() {}\n");
+        for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+            write(
+                &temp.path().join("src").join(dir).join("private.rs"),
+                "pub fn private_state() {}\n",
+            );
+        }
+
+        let broad = build_code_map(temp.path(), None, 4);
+        assert!(broad.contains_key("src/visible.rs"));
+        assert!(
+            broad.keys().all(|path| {
+                !crate::safety::source_context::path_contains_private_tool_state(Path::new(path))
+            }),
+            "{broad:?}"
+        );
+
+        let explicit = build_code_map(temp.path(), Some(".claude"), 2);
+        assert!(
+            explicit.contains_key("src/.claude/private.rs"),
+            "{explicit:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn map_does_not_follow_discovered_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        write(
+            &outside.path().join("outside.rs"),
+            "pub fn symlink_only() {}\n",
+        );
+        symlink(outside.path(), root.path().join("src/linked_dir")).expect("dir symlink");
+        symlink(
+            outside.path().join("outside.rs"),
+            root.path().join("src/linked_file.rs"),
+        )
+        .expect("file symlink");
+
+        let map = build_code_map(root.path(), None, 4);
+        assert!(map.is_empty(), "{map:?}");
     }
 }
 

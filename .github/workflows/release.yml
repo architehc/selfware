@@ -46,6 +46,21 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: python3 scripts/resolve_release.py
 
+      # Preserve the checker from the workflow revision. A manual dispatch may
+      # resolve an older tag whose checkout predates this validation command.
+      - name: Stage release version checker
+        run: cp scripts/resolve_release.py "$RUNNER_TEMP/resolve_release.py"
+
+      - name: Checkout resolved release revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+
+      - name: Require tag to match Cargo package version
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: python3 "$RUNNER_TEMP/resolve_release.py" --validate-version "$RELEASE_TAG" Cargo.toml
+
   build:
     name: Build ${{ matrix.target }}
     needs: resolve
@@ -187,18 +202,32 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.7 --locked
 
-      - name: Generate CycloneDX SBOM
+      - name: Generate target-aligned CycloneDX SBOMs
         run: |
-          cargo cyclonedx --format json
-          mv selfware.cdx.json selfware-sbom.json
+          set -euo pipefail
+          mkdir -p sbom
+          while read -r target artifact; do
+            rm -f selfware.cdx.json
+            cargo cyclonedx --format json \
+              --features extras,vendored-openssl \
+              --target "$target"
+            test -f selfware.cdx.json
+            mv selfware.cdx.json "sbom/${artifact}.sbom.cdx.json"
+          done <<'TARGETS'
+          x86_64-unknown-linux-gnu selfware-linux-x86_64
+          aarch64-unknown-linux-gnu selfware-linux-aarch64
+          aarch64-apple-darwin selfware-macos-aarch64
+          x86_64-apple-darwin selfware-macos-x86_64
+          x86_64-pc-windows-msvc selfware-windows-x86_64
+          TARGETS
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: selfware-sbom.json
+          path: sbom/*.sbom.cdx.json
 
   release:
     name: Create Release
@@ -242,11 +271,15 @@ jobs:
             artifacts/selfware-macos-aarch64/selfware-macos-aarch64.zip
             artifacts/selfware-macos-x86_64/selfware-macos-x86_64.zip
             artifacts/selfware-windows-x86_64/selfware-windows-x86_64.zip
-            artifacts/sbom/selfware-sbom.json
+            artifacts/sbom/selfware-linux-x86_64.sbom.cdx.json
+            artifacts/sbom/selfware-linux-aarch64.sbom.cdx.json
+            artifacts/sbom/selfware-macos-aarch64.sbom.cdx.json
+            artifacts/sbom/selfware-macos-x86_64.sbom.cdx.json
+            artifacts/sbom/selfware-windows-x86_64.sbom.cdx.json
 
   verify-release:
-    name: Verify release assets are downloadable
-    needs: [release, resolve]
+    name: Verify signed release assets are downloadable
+    needs: [sign-release, resolve]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -257,20 +290,34 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-      # Regression guard: v0.3.0 shipped with zero assets and the README's
-      # prebuilt-binary URLs 404'd. Fail the workflow if any expected asset
-      # is missing from the release we just created.
+      # Regression guard: fail if any shipped archive, target-aligned SBOM or
+      # keyless-signing evidence is missing from the release.
       - name: Download every expected asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          set -e
-          for asset in selfware-linux-x86_64.tar.gz selfware-linux-aarch64.tar.gz selfware-macos-aarch64.zip selfware-macos-x86_64.zip selfware-windows-x86_64.zip selfware-sbom.json; do
-            echo "checking $asset"
-            gh release download "$RELEASE_TAG" \
-              --repo "${{ github.repository }}" \
-              -p "$asset" --dir /tmp/verify-assets --clobber
+          set -euo pipefail
+          assets=(
+            selfware-linux-x86_64.tar.gz
+            selfware-linux-aarch64.tar.gz
+            selfware-macos-aarch64.zip
+            selfware-macos-x86_64.zip
+            selfware-windows-x86_64.zip
+            selfware-linux-x86_64.sbom.cdx.json
+            selfware-linux-aarch64.sbom.cdx.json
+            selfware-macos-aarch64.sbom.cdx.json
+            selfware-macos-x86_64.sbom.cdx.json
+            selfware-windows-x86_64.sbom.cdx.json
+          )
+          for asset in "${assets[@]}"; do
+            for suffix in "" .sig .cert; do
+              expected="${asset}${suffix}"
+              echo "checking $expected"
+              gh release download "$RELEASE_TAG" \
+                --repo "${{ github.repository }}" \
+                -p "$expected" --dir /tmp/verify-assets --clobber
+            done
           done
           ls -la /tmp/verify-assets
 
@@ -297,11 +344,17 @@ jobs:
 
       - name: Sign release artifacts
         run: |
-          for file in artifacts/selfware-*/*; do
-            if [ -f "$file" ]; then
-              echo "Signing $file..."
-              cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.cert"
-            fi
+          set -euo pipefail
+          mapfile -d '' files < <(
+            find artifacts -type f ! -name '*.sig' ! -name '*.cert' -print0
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release artifacts were downloaded" >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            echo "Signing $file..."
+            cosign sign-blob --yes "$file" --output-signature "${file}.sig" --output-certificate "${file}.cert"
           done
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -314,3 +367,5 @@ jobs:
           files: |
             artifacts/selfware-*/*.sig
             artifacts/selfware-*/*.cert
+            artifacts/sbom/*.sig
+            artifacts/sbom/*.cert

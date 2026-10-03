@@ -1,13 +1,14 @@
 # Selfware development Makefile (Rust-only; QA reports via scripts/)
 
-.PHONY: help qa test coverage bench format lint security report report-md clean
+.PHONY: help qa test test-live coverage bench format lint security report report-md clean
 
 help:
 	@echo "Selfware - Available Commands"
 	@echo ""
 	@echo "  make qa          Run full Rust QA (check, fmt, clippy, test)"
 	@echo "  make test        Run the test suite"
-	@echo "  make coverage    Generate coverage reports (cargo-tarpaulin)"
+	@echo "  make test-live   Run endpoint-dependent integration tests"
+	@echo "  make coverage    Generate an HTML coverage report (cargo-llvm-cov)"
 	@echo "  make bench       Run benchmarks"
 	@echo "  make format      Format all code"
 	@echo "  make lint        Run clippy"
@@ -17,16 +18,20 @@ help:
 	@echo "  make clean       Clean generated files"
 
 qa:
-	cargo check --all-features
+	cargo check --all-targets --all-features
 	cargo fmt --all -- --check
-	cargo clippy --all-features -- -D warnings
-	cargo test --all-features
+	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
+	cargo test --features extras
 
 test:
-	cargo test --all-features
+	cargo test --features extras
+
+test-live:
+	cargo test --features integration --test integration
 
 coverage:
-	cargo tarpaulin --out Html --out Xml
+	cargo llvm-cov --features extras --html
 
 bench:
 	cargo bench
@@ -35,7 +40,8 @@ format:
 	cargo fmt --all
 
 lint:
-	cargo clippy --all-features -- -D warnings
+	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
 security:
 	cargo audit

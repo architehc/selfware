@@ -17,11 +17,15 @@
 const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns').promises;
+const net = require('net');
+const { fileURLToPath } = require('url');
 
 let browser = null;
 let context = null;
 let pages = [];
 let currentTabIndex = 0;
+const allowedLocalOrigins = new WeakMap();
 
 const MAX_PAGES = 5;
 const DEFAULT_TIMEOUT = 30000;
@@ -50,13 +54,25 @@ async function ensureBrowser() {
   const executablePath =
     process.env.SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
     process.env.SELFWARE_CHROME_EXECUTABLE_PATH;
-  const launchOptions = { headless: true };
+  const launchOptions = {
+    headless: true,
+    args: ['--disable-quic', '--proxy-bypass-list=<-loopback>'],
+  };
+  if (process.env.SELFWARE_BROWSER_PROXY) {
+    launchOptions.proxy = { server: process.env.SELFWARE_BROWSER_PROXY };
+  }
   if (executablePath && fs.existsSync(executablePath)) {
     launchOptions.executablePath = executablePath;
   }
   browser = await pw.chromium.launch(launchOptions);
-  context = await browser.newContext();
+  // Service workers can hide requests from route interception. Blocking them
+  // keeps every browser-initiated HTTP request inside the policy hook below;
+  // the Rust connection proxy independently checks the resolved destination.
+  context = await browser.newContext({ serviceWorkers: 'block' });
+  await context.route('**/*', enforceRequestPolicy);
+  await installContextWebSocketPolicy(context);
   const page = await context.newPage();
+  await installWebSocketPolicy(page);
   pages = [page];
   currentTabIndex = 0;
 }
@@ -69,9 +85,14 @@ function isWorkspaceFileUrl(url) {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'file:') return false;
-    const targetPath = path.resolve(decodeURIComponent(parsed.pathname));
-    const root = path.resolve(workspaceRoot());
-    return targetPath === root || targetPath.startsWith(root + path.sep);
+    // Resolve both paths through the filesystem. A lexical prefix check lets
+    // `workspace/link -> /etc` escape the workspace, and hand-decoding URL
+    // pathnames mishandles Windows drive/UNC forms.
+    const targetPath = fs.realpathSync(fileURLToPath(parsed));
+    const root = fs.realpathSync(workspaceRoot());
+    const relative = path.relative(root, targetPath);
+    return relative === '' ||
+      (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   } catch (_) {
     return false;
   }
@@ -103,22 +124,209 @@ function validateUrl(url) {
     }
     return;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'data:') {
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Unsupported URL scheme: ${parsed.protocol}`);
   }
   // Block common private IPs unless SELFWARE_ALLOW_PRIVATE_NETWORK=1
   if (process.env.SELFWARE_ALLOW_PRIVATE_NETWORK !== '1') {
-    const host = parsed.hostname;
-    if (
-        (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') ||
-        host.startsWith('10.') || host.startsWith('192.168.') ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-        host.startsWith('169.254.')) {
-      if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
-        return;
-      }
+    const host = normalizeHost(parsed.hostname);
+    if (isTrustedLocalHost(host)) return;
+    if (net.isIP(host) && isPrivateAddress(host)) {
       throw new Error(`Blocked request to private/internal address: ${host}`);
     }
+  }
+}
+
+function normalizeHost(host) {
+  return host.replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '').toLowerCase();
+}
+
+function isTrustedLocalHost(host) {
+  host = normalizeHost(host);
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (net.isIPv4(host)) {
+    return host.split('.')[0] === '127' || host === '0.0.0.0';
+  }
+  return net.isIPv6(host) && (host === '::1' || host === '::');
+}
+
+function mappedIpv4Address(address) {
+  address = normalizeHost(address);
+  if (!net.isIPv6(address)) return null;
+
+  // WHATWG URL parsing canonicalizes dotted IPv4-mapped literals such as
+  // `::ffff:169.254.169.254` to `::ffff:a9fe:a9fe`. Canonicalize every IPv6
+  // input the same way, then reconstruct the embedded IPv4 bytes. Merely
+  // stripping `::ffff:` leaves two hexadecimal hextets that net.isIPv4()
+  // does not recognize.
+  let canonical;
+  try {
+    canonical = normalizeHost(new URL(`http://[${address}]/`).hostname);
+  } catch (_) {
+    return null;
+  }
+  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
+  if (!match) return null;
+
+  const high = Number.parseInt(match[1], 16);
+  const low = Number.parseInt(match[2], 16);
+  return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+}
+
+function isPrivateAddress(address) {
+  address = normalizeHost(address);
+  address = mappedIpv4Address(address) || address;
+  if (net.isIPv4(address)) {
+    const octets = address.split('.').map(Number);
+    return octets[0] === 0 || octets[0] === 10 || octets[0] === 127 ||
+      (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+      (octets[0] === 169 && octets[1] === 254) ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 192 && octets[1] === 168) || octets[0] >= 224;
+  }
+  if (net.isIPv6(address)) {
+    return address === '::' || address === '::1' ||
+      address.startsWith('fc') || address.startsWith('fd') ||
+      /^fe[89ab]/.test(address) || address.startsWith('ff');
+  }
+  return false;
+}
+
+function isLoopbackOrUnspecified(address) {
+  address = normalizeHost(address);
+  address = mappedIpv4Address(address) || address;
+  return address === '::' || address === '::1' || address === '0.0.0.0' ||
+    (net.isIPv4(address) && address.startsWith('127.'));
+}
+
+function sameLocalAuthority(parsed, allowedOrigin) {
+  if (!allowedOrigin || !isTrustedLocalHost(parsed.hostname)) return false;
+  try {
+    const allowed = new URL(allowedOrigin);
+    const port = parsed.port || (parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? '443' : '80');
+    const allowedPort = allowed.port || (allowed.protocol === 'https:' ? '443' : '80');
+    return normalizeHost(parsed.hostname) === normalizeHost(allowed.hostname) && port === allowedPort;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function enforceRequestPolicy(route) {
+  const request = route.request();
+  let parsed;
+  try {
+    parsed = new URL(request.url());
+  } catch (_) {
+    await route.abort('blockedbyclient');
+    return;
+  }
+
+  let page = null;
+  try {
+    page = request.frame().page();
+  } catch (_) {
+    // Worker requests have no page-scoped localhost authorization.
+  }
+  let allowedOrigin = page ? allowedLocalOrigins.get(page) : null;
+  // Once the main frame leaves the explicitly authorized local authority,
+  // revoke that exception before the new document can issue subrequests.
+  if (page && allowedOrigin && request.isNavigationRequest() &&
+      request.frame() === page.mainFrame() && !sameLocalAuthority(parsed, allowedOrigin)) {
+    allowedLocalOrigins.delete(page);
+    allowedOrigin = null;
+  }
+
+  // The Rust side validates model-authored goto/new_tab calls, but links,
+  // redirects, history traversal, reloads, frames, popups, and page.evaluate
+  // can all initiate a later navigation without another tool-level URL check.
+  // Apply the workspace boundary to every file request at the browser choke
+  // point. All other non-network schemes are unsupported and fail closed.
+  if (parsed.protocol === 'file:') {
+    if (!isWorkspaceFileUrl(parsed.href)) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+    return;
+  }
+  if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) {
+    await route.abort('blockedbyclient');
+    return;
+  }
+
+  if (process.env.SELFWARE_ALLOW_PRIVATE_NETWORK === '1') {
+    await route.continue();
+    return;
+  }
+  if (!await networkTargetAllowed(parsed, allowedOrigin)) {
+    await route.abort('blockedbyclient');
+    return;
+  }
+  await route.continue();
+}
+
+async function networkTargetAllowed(parsed, allowedOrigin) {
+  if (process.env.SELFWARE_ALLOW_PRIVATE_NETWORK === '1') return true;
+  const explicitLocal = sameLocalAuthority(parsed, allowedOrigin);
+  let addresses;
+  if (net.isIP(normalizeHost(parsed.hostname))) {
+    addresses = [{ address: normalizeHost(parsed.hostname) }];
+  } else {
+    try {
+      addresses = await dns.lookup(normalizeHost(parsed.hostname), { all: true, verbatim: true });
+    } catch (_) {
+      return false;
+    }
+  }
+  return addresses.length > 0 && !addresses.some(({ address }) =>
+    isPrivateAddress(address) && !(explicitLocal && isLoopbackOrUnspecified(address)));
+}
+
+async function routeWebSocketWithPolicy(webSocket, allowedOrigin) {
+  let parsed;
+  try {
+    parsed = new URL(webSocket.url());
+  } catch (_) {
+    await webSocket.close({ code: 1008, reason: 'Invalid WebSocket URL' });
+    return;
+  }
+  if (!await networkTargetAllowed(parsed, allowedOrigin)) {
+    await webSocket.close({ code: 1008, reason: 'Blocked by network policy' });
+    return;
+  }
+  webSocket.connectToServer();
+}
+
+async function installContextWebSocketPolicy(browserContext) {
+  // This fallback is registered before any page exists, so popups and any
+  // other untracked pages cannot reuse a local proxy authority. Tracked pages
+  // install a more specific page route below; Playwright gives page routes
+  // precedence over context routes.
+  if (typeof browserContext.routeWebSocket !== 'function') {
+    throw new Error('page_control requires Playwright with routeWebSocket support');
+  }
+  await browserContext.routeWebSocket('**/*', webSocket =>
+    routeWebSocketWithPolicy(webSocket, null));
+}
+
+async function installWebSocketPolicy(page) {
+  // A per-page WebSocket route prevents a public tab from reusing a local
+  // authority that another tab authorized in the shared connection proxy.
+  // Fail closed on old Playwright rather than losing that isolation boundary.
+  if (typeof page.routeWebSocket !== 'function') {
+    throw new Error('page_control requires Playwright with page.routeWebSocket support');
+  }
+  await page.routeWebSocket('**/*', webSocket => {
+    const allowedOrigin = allowedLocalOrigins.get(page) || null;
+    return routeWebSocketWithPolicy(webSocket, allowedOrigin);
+  });
+}
+
+function applyLocalAuthorization(page, cmd) {
+  if (typeof cmd.selfware_allowed_local_origin === 'string') {
+    allowedLocalOrigins.set(page, cmd.selfware_allowed_local_origin);
+  } else {
+    allowedLocalOrigins.delete(page);
   }
 }
 
@@ -130,6 +338,7 @@ const handlers = {
     validateUrl(cmd.url);
     await enforceNavRateLimit();
     const page = currentPage();
+    applyLocalAuthorization(page, cmd);
     const timeout = cmd.timeout_ms || DEFAULT_TIMEOUT;
     const response = await page.goto(cmd.url, {
       timeout,
@@ -362,10 +571,12 @@ const handlers = {
       throw new Error(`Maximum ${MAX_PAGES} tabs reached`);
     }
     const page = await context.newPage();
+    await installWebSocketPolicy(page);
     pages.push(page);
     currentTabIndex = pages.length - 1;
     if (cmd.url) {
       validateUrl(cmd.url);
+      applyLocalAuthorization(page, cmd);
       await enforceNavRateLimit();
       await page.goto(cmd.url, { timeout: cmd.timeout_ms || DEFAULT_TIMEOUT });
     }
@@ -413,60 +624,73 @@ const handlers = {
 
 // ---- Main loop ----
 
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
+function startBridgeProtocol() {
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
-rl.on('line', async (line) => {
-  let cmd;
-  try {
-    cmd = JSON.parse(line);
-  } catch (e) {
-    respond(null, false, null, `Invalid JSON: ${e.message}`);
-    return;
-  }
-
-  const id = cmd.id ?? null;
-  const action = cmd.action;
-
-  if (!action) {
-    respond(id, false, null, 'Missing "action" field');
-    return;
-  }
-
-  const handler = handlers[action];
-  if (!handler) {
-    respond(id, false, null, `Unknown action: ${action}`);
-    return;
-  }
-
-  try {
-    // Lazy-init browser on first real action (not shutdown)
-    if (action !== 'shutdown') {
-      await ensureBrowser();
+  rl.on('line', async (line) => {
+    let cmd;
+    try {
+      cmd = JSON.parse(line);
+    } catch (e) {
+      respond(null, false, null, `Invalid JSON: ${e.message}`);
+      return;
     }
-    const result = await handler(cmd);
-    respond(id, true, result, null);
-  } catch (e) {
-    respond(id, false, null, e.message || String(e));
-  }
 
-  // Exit after shutdown
-  if (action === 'shutdown') {
+    const id = cmd.id ?? null;
+    const action = cmd.action;
+
+    if (!action) {
+      respond(id, false, null, 'Missing "action" field');
+      return;
+    }
+
+    const handler = handlers[action];
+    if (!handler) {
+      respond(id, false, null, `Unknown action: ${action}`);
+      return;
+    }
+
+    try {
+      // Lazy-init browser on first real action (not shutdown)
+      if (action !== 'shutdown') {
+        await ensureBrowser();
+      }
+      const result = await handler(cmd);
+      respond(id, true, result, null);
+    } catch (e) {
+      respond(id, false, null, e.message || String(e));
+    }
+
+    // Exit after shutdown
+    if (action === 'shutdown') {
+      process.exit(0);
+    }
+  });
+
+  rl.on('close', async () => {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
     process.exit(0);
-  }
-});
+  });
 
-rl.on('close', async () => {
-  if (browser) {
-    await browser.close().catch(() => {});
-  }
-  process.exit(0);
-});
+  // Handle unexpected errors only in the bridge process. Importing the pure
+  // policy helpers in a test must not replace the test runner's handlers.
+  process.on('uncaughtException', (err) => {
+    respond(null, false, null, `Uncaught exception: ${err.message}`);
+  });
 
-// Handle unexpected errors
-process.on('uncaughtException', (err) => {
-  respond(null, false, null, `Uncaught exception: ${err.message}`);
-});
+  process.on('unhandledRejection', (err) => {
+    respond(null, false, null, `Unhandled rejection: ${err}`);
+  });
+}
 
-process.on('unhandledRejection', (err) => {
-  respond(null, false, null, `Unhandled rejection: ${err}`);
-});
+if (require.main === module) {
+  startBridgeProtocol();
+}
+
+module.exports = {
+  enforceRequestPolicy,
+  isWorkspaceFileUrl,
+  validateUrl,
+};

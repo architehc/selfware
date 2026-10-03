@@ -175,13 +175,13 @@ async fn run_stage_with_code(
         bytes
     });
 
-    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
-    let mut exit_code = None;
-    let (passed, wait_timed_out) = match wait_result {
-        Ok(Ok(status)) => {
-            exit_code = status.code();
-            (status.success(), false)
-        }
+    let wait_result = tokio::time::timeout(
+        timeout,
+        crate::tools::process_guard::wait_for_exit_without_reaping(&mut child),
+    )
+    .await;
+    let (status_before_drain, wait_timed_out) = match wait_result {
+        Ok(Ok(status)) => (status, false),
         Ok(Err(e)) => {
             return (
                 QaStageResult {
@@ -205,9 +205,11 @@ async fn run_stage_with_code(
                 use nix::unistd::Pid;
                 let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            (false, true)
+            // Keep the killed leader unreaped through the drain phase below,
+            // where its pgid may be signalled again. Reaping here would allow
+            // that numeric pgid to be recycled first.
+            let _ = child.start_kill();
+            (None, true)
         }
     };
 
@@ -256,6 +258,33 @@ async fn run_stage_with_code(
             drain_timed_out,
         )
     };
+    // Keep the Unix group leader unreaped until every possible group signal
+    // above is complete. This pins its pid so a drain-timeout cleanup cannot
+    // target a newly recycled, unrelated process group.
+    let status = match status_before_drain {
+        Some(status) => Some(status),
+        None => match child.wait().await {
+            Ok(status) => Some(status),
+            Err(error) => {
+                return (
+                    QaStageResult {
+                        stage,
+                        passed: false,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output: format!("Failed to reap {} {:?}: {}", program, args, error),
+                        error_count: 1,
+                        warning_count: 0,
+                        not_run: None,
+                    },
+                    None,
+                )
+            }
+        },
+    };
+    let passed = status
+        .as_ref()
+        .is_some_and(std::process::ExitStatus::success);
+    let exit_code = status.and_then(|status| status.code());
     pg_guard.disarm();
     let timed_out = wait_timed_out || drain_timed_out;
     let duration_ms = start.elapsed().as_millis() as u64;

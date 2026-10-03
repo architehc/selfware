@@ -13,8 +13,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use wait_timeout::ChildExt;
-
 /// Whether an environment variable is safe to forward to a spawned agent.
 ///
 /// The agent needs its toolchain (PATH/HOME/CARGO_HOME/…) and its model
@@ -105,42 +103,165 @@ pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<Pro
     let mut child = cmd.spawn().context("spawning subprocess")?;
 
     // Drain stdout on a helper thread so a chatty child can't deadlock on a
-    // full pipe while we poll for exit.
+    // full pipe while we poll for exit. Send chunks back as they arrive: a
+    // background descendant can inherit the pipe after the leader exits, and
+    // a plain thread `join` would otherwise wait past the wall-clock timeout.
     let stdout = child.stdout.take().expect("stdout piped above");
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
     let stdout_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf);
-        buf
-    });
-
-    let deadline = started + timeout;
-    let poll_interval = Duration::from_millis(500);
-    loop {
-        match child.wait_timeout(poll_interval)? {
-            Some(status) => {
-                let stdout = stdout_handle.join().unwrap_or_default();
-                return Ok(ProcOutcome {
-                    stdout,
-                    exit_code: status.code().unwrap_or(-1),
-                    timed_out: false,
-                    wall_secs: started.elapsed().as_secs_f64(),
-                });
-            }
-            None => {
-                if Instant::now() >= deadline {
-                    kill_group(&mut child);
-                    let _ = child.wait();
-                    let stdout = stdout_handle.join().unwrap_or_default();
-                    return Ok(ProcOutcome {
-                        stdout,
-                        exit_code: -1,
-                        timed_out: true,
-                        wall_secs: started.elapsed().as_secs_f64(),
-                    });
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => {
+                    let _ = stdout_tx.send(None);
+                    break;
+                }
+                Ok(n) => {
+                    if stdout_tx.send(Some(chunk[..n].to_vec())).is_err() {
+                        break;
+                    }
                 }
             }
         }
+    });
+
+    let deadline = started + timeout;
+    let poll_interval = Duration::from_millis(50);
+    let mut stdout_bytes = Vec::new();
+    let mut stdout_done = false;
+    #[cfg(unix)]
+    let status_before_reap: Option<std::process::ExitStatus> = None;
+    #[cfg(not(unix))]
+    let mut status_before_reap = None;
+    let mut child_exited = false;
+    loop {
+        while !stdout_done {
+            match stdout_rx.try_recv() {
+                Ok(Some(chunk)) => stdout_bytes.extend_from_slice(&chunk),
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    stdout_done = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            }
+        }
+
+        if !child_exited {
+            #[cfg(unix)]
+            {
+                child_exited = match crate::tools::process_guard::process_has_exited_without_reaping(
+                    child.id(),
+                ) {
+                    Ok(exited) => exited,
+                    Err(error) => {
+                        // If the leader is still ours, its id safely pins the
+                        // process group for cleanup. If it was already reaped
+                        // elsewhere, never signal the retained numeric pgid.
+                        match child.try_wait() {
+                            Ok(None) => {
+                                kill_group(&mut child);
+                                let _ = child.wait();
+                            }
+                            Ok(Some(_)) | Err(_) => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
+                        }
+                        return Err(error).context("observing subprocess exit");
+                    }
+                };
+            }
+            #[cfg(not(unix))]
+            if let Some(status) = child.try_wait()? {
+                status_before_reap = Some(status);
+                child_exited = true;
+            }
+        }
+
+        if child_exited && stdout_done {
+            // On Unix the leader is still an unreaped zombie here, so no
+            // stored pgid survives this final wait. Any descendant that closed
+            // stdout is also stopped before the group identity is released.
+            force_kill_group_while_unreaped(&child);
+            let status = match status_before_reap {
+                Some(status) => status,
+                None => child.wait()?,
+            };
+            let _ = stdout_handle.join();
+            return Ok(ProcOutcome {
+                stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                exit_code: status.code().unwrap_or(-1),
+                timed_out: false,
+                wall_secs: started.elapsed().as_secs_f64(),
+            });
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            // Unix has deliberately not reaped the leader, so its pid still
+            // pins the pgid through both signals below.
+            kill_group(&mut child);
+            if status_before_reap.is_none() {
+                let _ = child.wait();
+            }
+
+            // Group termination normally closes stdout immediately. Bound the
+            // final drain too: a setsid descendant can escape the group while
+            // retaining the pipe and must not hang the benchmark harness.
+            let drain_deadline = Instant::now() + Duration::from_secs(1);
+            while !stdout_done && Instant::now() < drain_deadline {
+                let remaining = drain_deadline.saturating_duration_since(Instant::now());
+                match stdout_rx.recv_timeout(remaining.min(poll_interval)) {
+                    Ok(Some(chunk)) => stdout_bytes.extend_from_slice(&chunk),
+                    Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        stdout_done = true;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            if stdout_done {
+                let _ = stdout_handle.join();
+            }
+            return Ok(ProcOutcome {
+                stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                exit_code: -1,
+                timed_out: true,
+                wall_secs: started.elapsed().as_secs_f64(),
+            });
+        }
+
+        if !stdout_done {
+            let wait = deadline.saturating_duration_since(now).min(poll_interval);
+            match stdout_rx.recv_timeout(wait) {
+                Ok(Some(chunk)) => stdout_bytes.extend_from_slice(&chunk),
+                Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    stdout_done = true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        } else {
+            std::thread::sleep(deadline.saturating_duration_since(now).min(poll_interval));
+        }
     }
+}
+
+/// Kill the group only while its leader is known to be unreaped. This is used
+/// on normal completion to stop descendants that detached their stdio before
+/// the leader exited.
+fn force_kill_group_while_unreaped(child: &std::process::Child) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+        if let Ok(pid) = i32::try_from(child.id()) {
+            if pid > 1 {
+                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 /// Kill the child's whole process group (Unix) or just the child (elsewhere).

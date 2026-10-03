@@ -148,6 +148,26 @@ fn test_anchor_json_rewrites_relative_paths_only_when_explicit() {
     assert_eq!(out, args);
 }
 
+#[tokio::test]
+async fn test_spawn_adapters_carry_the_callers_root() {
+    let (_dir, base, wt) = base_with_worktree();
+    let root = WorkspaceRoot::fixed(&base);
+    root.enter(&wt).unwrap();
+
+    let (async_root, blocking_root) = scope(root, async {
+        let async_task = spawn(async { current_path() });
+        let blocking_task = spawn_blocking(current_path);
+        (
+            async_task.await.expect("async task"),
+            blocking_task.await.expect("blocking task"),
+        )
+    })
+    .await;
+
+    assert_eq!(async_root, wt);
+    assert_eq!(blocking_root, wt);
+}
+
 /// Requirement (2) + (4): after enter, a relative path validates and resolves
 /// against the worktree root, shell/cargo subprocesses run there; exit
 /// restores the base root. Driven through the registry — the same scoped

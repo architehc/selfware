@@ -3,6 +3,19 @@ use crate::config::Config;
 use crate::testing::mock_api::MockLlmServer;
 
 #[test]
+fn workspace_fingerprint_ignores_private_tool_state() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("visible.rs"), "fn visible() {}\n").unwrap();
+    let before = workspace_fingerprint(root.path()).unwrap();
+
+    let private = root.path().join(".claude/worktrees");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(private.join("private.rs"), "fn private_state() {}\n").unwrap();
+
+    assert_eq!(before, workspace_fingerprint(root.path()).unwrap());
+}
+
+#[test]
 fn confirm_response_requires_explicit_yolo_word() {
     use super::{parse_confirm_response, ConfirmDecision};
     assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);
@@ -5751,8 +5764,9 @@ async fn all_context_loaders_enforce_paths_and_sanitize_cached_source() {
                 &serde_json::json!({"pattern":"escape.rs"}),
             )
             .await;
+        assert_eq!(result["matched_files"], 0);
         assert_eq!(result["loaded"], 0);
-        assert_eq!(result["skipped"], 1);
+        assert_eq!(result["skipped"], 0);
         assert!(agent
             .context_map
             .full_content(Path::new("escape.rs"))
@@ -8061,6 +8075,29 @@ async fn tracked_state_of_one_checkout_never_matches_the_other_after_a_switch() 
     expected.sort();
     assert_eq!(paths, expected);
     assert!(agent.file_tracker.is_stale("a.rs"));
+}
+
+#[tokio::test]
+async fn file_read_metadata_follows_the_agents_workspace_root() {
+    let (_dir, _base, worktree) = two_checkouts();
+    let mut agent = reread_agent().await;
+    agent.tools.workspace_root().enter(&worktree).unwrap();
+    agent.sync_path_key_root();
+    let args = serde_json::json!({"path": "a.rs"});
+    let result = serde_json::json!({"content": "WORKTREE FILE", "total_lines": 1}).to_string();
+
+    agent
+        .track_task_state_after_tool("file_read", &args, &result, true)
+        .await;
+
+    assert!(
+        agent
+            .file_tracker
+            .read_state_of("a.rs")
+            .and_then(|state| state.last_modified)
+            .is_some(),
+        "file-read metadata must come from the agent's active checkout"
+    );
 }
 
 #[tokio::test]

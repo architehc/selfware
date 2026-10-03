@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -17,6 +18,10 @@ struct CacheEntry {
     created_at: Instant,
     ttl: Duration,
     file_mtime: Option<std::time::SystemTime>,
+    /// Workspace whose files produced this value. One agent can enter and
+    /// leave worktrees without changing the process cwd, so raw relative tool
+    /// arguments alone are not a safe cache identity.
+    workspace_root: PathBuf,
 }
 
 impl CacheEntry {
@@ -51,33 +56,45 @@ impl ToolCache {
         }
     }
 
-    /// Generate a cache key from tool name and arguments
+    /// Generate a cache key from tool name, the active workspace, and
+    /// arguments. Keeping the tool name first preserves the cheap tool-class
+    /// checks used by invalidation.
     pub fn cache_key(tool_name: &str, args: &Value) -> String {
+        Self::cache_key_at_root(
+            tool_name,
+            args,
+            &crate::tools::workspace_root::current_path(),
+        )
+    }
+
+    fn cache_key_at_root(tool_name: &str, args: &Value, root: &Path) -> String {
         let args_str = serde_json::to_string(args).unwrap_or_default();
-        format!("{}:{}", tool_name, args_str)
+        let root = serde_json::to_string(&root.to_string_lossy()).unwrap_or_default();
+        format!("{tool_name}:{root}:{args_str}")
     }
 
     /// Get a cached result if available and not expired
     pub async fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
-        let key = Self::cache_key(tool_name, args);
-        let entries = self.entries.read().await;
+        let workspace_root = crate::tools::workspace_root::current_path();
+        let key = Self::cache_key_at_root(tool_name, args, &workspace_root);
+        // Do not hold the map lock across filesystem I/O.
+        let entry = self.entries.read().await.get(&key).cloned()?;
 
-        if let Some(entry) = entries.get(&key) {
-            if !entry.is_expired() {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    let current_mtime = tokio::fs::metadata(path)
-                        .await
-                        .ok()
-                        .and_then(|m| m.modified().ok());
+        if entry.is_expired() || entry.workspace_root != workspace_root {
+            return None;
+        }
+        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+            let path = resolve_cache_path(&workspace_root, path);
+            let current_mtime = tokio::fs::metadata(path)
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok());
 
-                    if entry.is_file_stale(current_mtime) {
-                        return None;
-                    }
-                }
-                return Some(entry.value.clone());
+            if entry.is_file_stale(current_mtime) {
+                return None;
             }
         }
-        None
+        Some(entry.value)
     }
 
     /// Store a result in the cache
@@ -88,10 +105,11 @@ impl ToolCache {
 
     /// Store a result with a custom TTL
     pub async fn set_with_ttl(&self, tool_name: &str, args: &Value, value: Value, ttl: Duration) {
-        let key = Self::cache_key(tool_name, args);
+        let workspace_root = crate::tools::workspace_root::current_path();
+        let key = Self::cache_key_at_root(tool_name, args, &workspace_root);
 
         let file_mtime = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            tokio::fs::metadata(path)
+            tokio::fs::metadata(resolve_cache_path(&workspace_root, path))
                 .await
                 .ok()
                 .and_then(|m| m.modified().ok())
@@ -104,6 +122,7 @@ impl ToolCache {
             created_at: Instant::now(),
             ttl,
             file_mtime,
+            workspace_root,
         };
 
         let mut entries = self.entries.write().await;
@@ -140,8 +159,12 @@ impl ToolCache {
     /// an in-place edit does not change.
     #[allow(dead_code)]
     pub async fn invalidate_path(&self, path: &str) {
+        let workspace_root = crate::tools::workspace_root::current_path();
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| !key.contains(path) && !is_tree_scoped_key(key));
+        entries.retain(|key, entry| {
+            entry.workspace_root != workspace_root
+                || (!key.contains(path) && !is_tree_scoped_key(key))
+        });
     }
 
     /// Invalidate entries related to a specific file path as well as the
@@ -149,19 +172,25 @@ impl ToolCache {
     /// [`Self::invalidate_path`] for why a single path cannot be matched
     /// against a recursive search's key).
     pub async fn invalidate_git_and_path(&self, path: &str) {
+        let workspace_root = crate::tools::workspace_root::current_path();
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| {
-            !key.contains(path)
-                && !key.starts_with("git_status")
-                && !key.starts_with("git_diff")
-                && !is_tree_scoped_key(key)
+        entries.retain(|key, entry| {
+            entry.workspace_root != workspace_root
+                || (!key.contains(path)
+                    && !key.starts_with("git_status")
+                    && !key.starts_with("git_diff")
+                    && !is_tree_scoped_key(key))
         });
     }
 
     /// Invalidate git status and git diff cache entries
     pub async fn invalidate_git(&self) {
+        let workspace_root = crate::tools::workspace_root::current_path();
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| !key.starts_with("git_status") && !key.starts_with("git_diff"));
+        entries.retain(|key, entry| {
+            entry.workspace_root != workspace_root
+                || (!key.starts_with("git_status") && !key.starts_with("git_diff"))
+        });
     }
 
     /// Clear all entries
@@ -178,6 +207,15 @@ impl ToolCache {
             max_entries: self.max_entries,
             default_ttl_secs: self.default_ttl.as_secs(),
         }
+    }
+}
+
+fn resolve_cache_path(workspace_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
     }
 }
 
@@ -296,6 +334,10 @@ pub struct LlmCacheEntry {
     pub prompt: String,
     pub embedding: Vec<f32>,
     pub response: String,
+    /// Hidden model reasoning is kept separate from user-visible content so a
+    /// cache hit has the same response shape as the original request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub model: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -353,7 +395,7 @@ impl LlmCache {
     /// Look up a cached response by prompt similarity
     pub async fn lookup(
         &self,
-        _prompt: &str,
+        prompt: &str,
         embedding: &[f32],
         context_hash: u64,
         model: &str,
@@ -362,38 +404,64 @@ impl LlmCache {
             return None;
         }
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         // Normalize the query embedding
         let normalized_query = Self::l2_normalize(embedding);
 
-        let entries = self.entries.read().await;
-        let embeddings = self.embeddings.read().await;
+        // Lookup also performs expiry and updates hit counters, so both maps
+        // are write-locked in the same order used by store.
+        let mut entries = self.entries.write().await;
+        let mut embeddings = self.embeddings.write().await;
+
+        let expired: Vec<String> = entries
+            .iter()
+            .filter(|(_, entry)| now.saturating_sub(entry.created_at) >= self.config.ttl_secs)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            entries.remove(&id);
+            embeddings.remove(&id);
+        }
 
         let mut best_match: Option<(String, f32)> = None;
 
-        for (id, stored_embedding) in embeddings.iter() {
-            if stored_embedding.len() != normalized_query.len() {
+        for (id, entry) in entries.iter() {
+            // The context hash is produced from the complete serialized
+            // request. Semantic similarity may rank equivalent entries, but
+            // it must never broaden the causal request boundary.
+            if entry.context_hash != context_hash || entry.model != model {
                 continue;
             }
-            let similarity = Self::cosine_similarity(&normalized_query, stored_embedding);
 
-            if similarity >= self.config.similarity_threshold {
-                if let Some(entry) = entries.get(id) {
-                    // Require both the same context_hash AND the same model
-                    // before accepting a hit. This prevents semantic matches
-                    // across different causal contexts or different models.
-                    if entry.context_hash == context_hash
-                        && entry.model == model
-                        && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
-                    {
-                        best_match = Some((id.clone(), similarity));
-                    }
+            let similarity = if self.config.semantic_matching {
+                let Some(stored_embedding) = embeddings.get(id) else {
+                    continue;
+                };
+                if stored_embedding.len() != normalized_query.len() {
+                    continue;
                 }
+                Self::cosine_similarity(&normalized_query, stored_embedding)
+            } else if entry.prompt == prompt {
+                1.0
+            } else {
+                continue;
+            };
+
+            if similarity >= self.config.similarity_threshold
+                && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
+            {
+                best_match = Some((id.clone(), similarity));
             }
         }
 
         if let Some((id, _)) = best_match {
-            if let Some(entry) = entries.get(&id).cloned() {
-                return Some(entry);
+            if let Some(entry) = entries.get_mut(&id) {
+                entry.hit_count = entry.hit_count.saturating_add(1);
+                return Some(entry.clone());
             }
         }
 
@@ -402,7 +470,7 @@ impl LlmCache {
 
     /// Store a response in the cache
     pub async fn store(&self, entry: LlmCacheEntry) {
-        if !self.config.enabled {
+        if !self.config.enabled || self.config.max_entries == 0 {
             return;
         }
 
@@ -433,7 +501,9 @@ impl LlmCache {
             .collect();
         items.sort_by_key(|a| a.1);
 
-        let to_remove = self.config.max_entries / 10;
+        // Always free at least one slot. The previous integer division made
+        // limits below ten grow without bound.
+        let to_remove = (self.config.max_entries / 10).max(1);
         let ids_to_remove: Vec<_> = items
             .iter()
             .take(to_remove)

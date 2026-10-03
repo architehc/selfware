@@ -6,6 +6,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -270,12 +271,23 @@ impl AgentSnapshot {
                         .parent()
                         .ok_or_else(|| std::io::Error::other("snapshot path has no parent"))?;
                     std::fs::create_dir_all(parent)?;
-                    let temporary =
-                        parent.join(format!(".selfware-restore-{}", uuid::Uuid::new_v4()));
-                    let result = std::fs::copy(slot, &temporary)
-                        .and_then(|_| std::fs::rename(&temporary, &path));
+                    let (bytes, permissions) = Self::read_file(slot)?.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "snapshot preimage disappeared",
+                        )
+                    })?;
+                    let (temporary, mut file) =
+                        crate::session::checkpoint::create_atomic_temp_file(&path, 0o600)?;
+                    let result = (|| {
+                        file.write_all(&bytes)?;
+                        file.set_permissions(permissions)?;
+                        file.sync_all()?;
+                        drop(file);
+                        crate::session::checkpoint::replace_atomically(&temporary, &path)
+                    })();
                     if result.is_err() {
-                        let _ = std::fs::remove_file(temporary);
+                        let _ = std::fs::remove_file(&temporary);
                     }
                     result?;
                     Ok(restored)

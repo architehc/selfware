@@ -512,6 +512,14 @@ impl EpisodicMemory {
 
         let id = episode.id.clone();
 
+        // HTTP providers may discover their dimension from the first
+        // successful response. Episodic memory is constructed before that
+        // request, so replace its still-empty zero-width index with the
+        // learned shape before inserting the first episode.
+        if self.index.is_empty() && self.index.dimension() == 0 && !embedding.is_empty() {
+            self.index = VectorIndex::new(embedding.len());
+        }
+
         // Add to index
         self.index.add(id.clone(), embedding)?;
 
@@ -870,17 +878,7 @@ impl EpisodicMemory {
         }
 
         fn atomic_write(path: &std::path::Path, json: &str) -> Result<()> {
-            // Unique per write so concurrent saves in one process never collide.
-            static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
-            std::fs::write(&tmp_path, json)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-            }
-            std::fs::rename(&tmp_path, path)?;
+            crate::session::checkpoint::write_bytes_atomically(path, json.as_bytes(), 0o600)?;
             Ok(())
         }
 

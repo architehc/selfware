@@ -742,13 +742,17 @@ fn glob_rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if !dir.is_dir() {
         return Ok(results);
     }
-    for entry in std::fs::read_dir(dir)? {
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(crate::evolve::graph::retain_repository_entry)
+    {
         let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            results.extend(glob_rs_files(&path)?);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            results.push(path);
+        if entry.file_type().is_file()
+            && !entry.path_is_symlink()
+            && entry.path().extension().is_some_and(|ext| ext == "rs")
+        {
+            results.push(entry.into_path());
         }
     }
     Ok(results)

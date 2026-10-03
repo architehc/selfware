@@ -46,6 +46,38 @@ pub enum Operation {
     assert!(md.contains("`Calculator`"));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_generate_collection_map_does_not_follow_source_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let outside = tempdir().unwrap();
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("lib.rs"), "pub fn local_symbol() {}\n").unwrap();
+    fs::write(
+        outside.path().join("private.rs"),
+        "pub fn private_symlink_symbol() {}\n",
+    )
+    .unwrap();
+    symlink(outside.path(), src.join("linked_source")).unwrap();
+    symlink(
+        outside.path().join("private.rs"),
+        src.join("linked_file.rs"),
+    )
+    .unwrap();
+
+    let map = TheseusScaffold::generate_collection_map(tmp.path()).unwrap();
+    let names: Vec<_> = map
+        .symbols
+        .iter()
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    assert!(names.contains(&"local_symbol"));
+    assert!(!names.contains(&"private_symlink_symbol"));
+}
+
 #[test]
 fn test_generate_event_log_fallback_on_non_git() {
     let tmp = tempdir().unwrap();
@@ -83,6 +115,46 @@ fn test_scaffold_shadow_worktree_injects_artifacts() {
     let root_guide = fs::read_to_string(shadow.join(".theseus.md")).unwrap();
     assert!(root_guide.contains("# Theseus Environment Guide"));
     assert!(root_guide.contains("Architecture Summary"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scaffold_rejects_symlinked_selfware_parent() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let shadow = tmp.path().join("shadow");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(base.join("src")).unwrap();
+    fs::create_dir_all(&shadow).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(base.join("src/lib.rs"), "pub fn safe() {}\n").unwrap();
+    symlink(&outside, shadow.join(".selfware")).unwrap();
+
+    let error = TheseusScaffold::scaffold_shadow_worktree(&shadow, &base).unwrap_err();
+    assert!(error.to_string().contains("symlink"));
+    assert!(!outside.join("theseus").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scaffold_rejects_symlinked_shadow_root() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let shadow = tmp.path().join("shadow");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(base.join("src")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(base.join("src/lib.rs"), "pub fn safe() {}\n").unwrap();
+    symlink(&outside, &shadow).unwrap();
+
+    let error = TheseusScaffold::scaffold_shadow_worktree(&shadow, &base).unwrap_err();
+    assert!(error.to_string().contains("symlink"));
+    assert!(!outside.join(".selfware").exists());
+    assert!(!outside.join(".theseus.md").exists());
 }
 
 #[test]

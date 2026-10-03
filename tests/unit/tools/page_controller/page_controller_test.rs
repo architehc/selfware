@@ -52,6 +52,53 @@ fn test_page_control_schema_action_enum() {
 }
 
 #[test]
+fn direct_page_control_rejects_credentials_in_browser_bound_values() {
+    for (field, args) in [
+        (
+            "url",
+            json!({"action": "goto", "url":
+                "https://example.com/?token=ghp_abcdef1234567890"}),
+        ),
+        (
+            "expression",
+            json!({"action": "evaluate", "expression":
+                "fetch('/collect?key=sk-ant-abcdef1234567890')"}),
+        ),
+        (
+            "text",
+            json!({"action": "fill", "selector": "#token", "text":
+                "ghp_abcdef1234567890"}),
+        ),
+        (
+            "selector",
+            json!({"action": "click", "selector": "#ghp_abcdef1234567890"}),
+        ),
+        (
+            "values",
+            json!({"action": "select", "selector": "#scope", "values":
+                ["safe", "ghp_abcdef1234567890"]}),
+        ),
+    ] {
+        let error = reject_page_control_credential_shapes(&args)
+            .expect_err("credential-shaped page argument must be refused");
+        assert!(
+            error.to_string().contains(field),
+            "refusal should identify {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn direct_page_control_allows_benign_short_sk_text() {
+    let args = json!({
+        "action": "fill",
+        "selector": "#release",
+        "text": "sk-2024 release notes"
+    });
+    assert!(reject_page_control_credential_shapes(&args).is_ok());
+}
+
+#[test]
 fn test_page_control_rejects_unsafe_output_path() {
     crate::tools::file::reset_safety_config_for_tests();
     let err = validate_page_output_path("/etc/selfware-page.png", "page_control")
@@ -141,6 +188,7 @@ fn test_validate_url_blocks_private_ip() {
 fn test_validate_url_allows_localhost() {
     let result = validate_url("http://localhost/test");
     assert!(result.is_ok());
+    assert!(validate_url("http://127.0.0.2/test").is_ok());
 }
 
 #[test]
@@ -158,6 +206,12 @@ fn test_validate_url_allows_public() {
 #[test]
 fn test_validate_url_allows_public_ip() {
     let result = validate_url("https://1.1.1.1/");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_validate_url_allows_public_ipv6_literal() {
+    let result = validate_url("https://[2606:4700:4700::1111]/");
     assert!(result.is_ok());
 }
 
@@ -298,6 +352,23 @@ fn test_bridge_response_error() {
 fn embedded_bridge_is_present() {
     assert!(!EMBEDDED_BRIDGE_JS.is_empty());
     assert!(EMBEDDED_BRIDGE_JS.contains("playwright"));
+}
+
+#[test]
+fn embedded_bridge_intercepts_all_network_requests() {
+    assert!(EMBEDDED_BRIDGE_JS.contains("context.route('**/*', enforceRequestPolicy)"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("serviceWorkers: 'block'"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("fs.realpathSync(fileURLToPath(parsed))"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("if (parsed.protocol === 'file:')"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("!isWorkspaceFileUrl(parsed.href)"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("dns.lookup"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("SELFWARE_BROWSER_PROXY"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("allowedLocalOrigins"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("page.routeWebSocket"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("browserContext.routeWebSocket"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("routeWebSocketWithPolicy(webSocket, null)"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("webSocket.connectToServer"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("host.split('.')[0] === '127'"));
 }
 
 #[test]
@@ -479,7 +550,6 @@ async fn bridge_that_exits_immediately_fails_fast_with_cause() {
     )
     .await
     .expect("spawn sh stub");
-
     let start = std::time::Instant::now();
     let err = bridge
         .send(json!({"action": "title"}), 30_000)
@@ -533,6 +603,10 @@ async fn bridge_dying_mid_command_fails_pending_command_fast() {
     )
     .await
     .expect("spawn sh stub");
+    let registry_entry = bridge
+        .registry_entry
+        .clone()
+        .expect("bridge registered as a resource");
 
     let start = std::time::Instant::now();
     let err = bridge
@@ -559,6 +633,14 @@ async fn bridge_dying_mid_command_fails_pending_command_fast() {
     assert!(
         msg.contains("chromium crashed"),
         "stderr tail expected: {msg}"
+    );
+    assert!(
+        crate::resources::ResourceRegistry::global()
+            .get(&registry_entry)
+            .expect("bridge resource remains inspectable")
+            .state
+            .is_released(),
+        "transport EOF must release the reaped bridge resource immediately"
     );
 }
 
@@ -592,4 +674,128 @@ async fn bridge_write_to_closed_stdin_is_typed_broken_pipe() {
     let again = bridge.send(json!({"action": "url"}), 0).await.unwrap_err();
     assert!(start.elapsed() < std::time::Duration::from_millis(200));
     assert_eq!(again.downcast_ref::<BridgeTransportError>(), Some(&broken));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_other_write_failure_reaps_child_and_releases_resource() {
+    let bridge = PlaywrightBridge::spawn_program("sleep", &["30"])
+        .await
+        .expect("spawn bridge stub");
+    let registry_entry = bridge.registry_entry.clone().expect("registered bridge");
+
+    let cause = bridge
+        .write_failed(std::io::Error::other("simulated partial-frame failure"))
+        .await;
+    assert!(matches!(cause, BridgeTransportError::WriteFailed { .. }));
+    assert!(
+        bridge.child.lock().await.id().is_none(),
+        "child was not reaped"
+    );
+    assert!(
+        crate::resources::ResourceRegistry::global()
+            .get(&registry_entry)
+            .expect("resource remains inspectable")
+            .state
+            .is_released(),
+        "fatal write failure must release the reaped bridge resource"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_bridge_pgid_is_not_signalled_after_child_is_reaped() {
+    let mut unrelated = tokio::process::Command::new("sleep");
+    unrelated.arg("30").process_group(0);
+    let mut unrelated = unrelated.spawn().expect("spawn unrelated group");
+    let unrelated_pgid = unrelated.id().expect("unrelated pid");
+
+    let mut reaped = tokio::process::Command::new("true")
+        .spawn()
+        .expect("spawn short-lived child");
+    reaped.wait().await.expect("reap short-lived child");
+    assert!(reaped.id().is_none(), "test child must be reaped");
+
+    kill_bridge_group_while_unreaped(&reaped, Some(unrelated_pgid));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        unrelated
+            .try_wait()
+            .expect("inspect unrelated process")
+            .is_none(),
+        "a retained bridge pgid must never signal a recycled/unrelated group"
+    );
+
+    let _ = unrelated.kill().await;
+    let _ = unrelated.wait().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_exit_monitor_reaps_descendant_that_holds_stdout_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("descendant.pid");
+    let script = format!("sleep 30 & echo $! > '{}'; exit 0", pidfile.display());
+    let bridge = PlaywrightBridge::spawn_program("sh", &["-c", &script])
+        .await
+        .expect("spawn bridge stub");
+    let registry_entry = bridge.registry_entry.clone().expect("registered bridge");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let descendant = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "missing pidfile");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    while bridge.dead_cause().is_none() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        bridge.dead_cause().is_some(),
+        "direct exit was not observed"
+    );
+    while !matches!(
+        crate::resources::driver::probe_pid(descendant, None),
+        crate::resources::Probe::Gone
+    ) && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        matches!(
+            crate::resources::driver::probe_pid(descendant, None),
+            crate::resources::Probe::Gone
+        ),
+        "bridge descendant {descendant} survived leader exit"
+    );
+    assert!(crate::resources::ResourceRegistry::global()
+        .get(&registry_entry)
+        .expect("resource remains inspectable")
+        .state
+        .is_released());
+}
+
+#[tokio::test]
+async fn relative_page_outputs_are_anchored_before_bridge_forwarding() {
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let base = root.path().to_path_buf();
+    let anchored = workspace_root::scope(WorkspaceRoot::fixed(base.clone()), async {
+        anchor_page_output_args(json!({
+            "action": "screenshot",
+            "path": "artifacts/page.png"
+        }))
+    })
+    .await;
+
+    assert_eq!(
+        anchored["path"].as_str(),
+        Some(base.join("artifacts/page.png").to_string_lossy().as_ref())
+    );
 }

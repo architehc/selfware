@@ -127,12 +127,13 @@ where
     // was reaped, so an unbounded collection would stall verification
     // indefinitely past its timeout (review finding: QA hang beyond timeout).
     let deadline = std::time::Instant::now() + timeout;
-    let mut exit_code = None;
-    let (success, wait_timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => {
-            exit_code = status.code();
-            (status.success(), false)
-        }
+    let (status_before_drain, wait_timed_out) = match tokio::time::timeout(
+        timeout,
+        crate::tools::process_guard::wait_for_exit_without_reaping(&mut child),
+    )
+    .await
+    {
+        Ok(Ok(status)) => (status, false),
         Ok(Err(e)) => return Err(e).with_context(|| format!("{} wait failed", program)),
         Err(_) => {
             #[cfg(unix)]
@@ -141,9 +142,11 @@ where
                 use nix::unistd::Pid;
                 let _ = killpg(Pid::from_raw(p as i32), Signal::SIGKILL);
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            (false, true)
+            // Keep the killed leader unreaped through the drain phase below,
+            // where its pgid may be signalled again. Reaping here would allow
+            // that numeric pgid to be recycled first.
+            let _ = child.start_kill();
+            (None, true)
         }
     };
 
@@ -189,6 +192,22 @@ where
             drain_timed_out,
         )
     };
+    // Keep the Unix group leader unreaped until every possible group signal
+    // above is complete. This pins its pid so a drain-timeout cleanup cannot
+    // target a newly recycled, unrelated process group.
+    let status = match status_before_drain {
+        Some(status) => Some(status),
+        None => Some(
+            child
+                .wait()
+                .await
+                .with_context(|| format!("{} reap failed", program))?,
+        ),
+    };
+    let exit_code = status.as_ref().and_then(std::process::ExitStatus::code);
+    let success = status
+        .as_ref()
+        .is_some_and(std::process::ExitStatus::success);
     // Run complete (and any timeout already killed the group above).
     pg_guard.disarm();
     let timed_out = wait_timed_out || drain_timed_out;

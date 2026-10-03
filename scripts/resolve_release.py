@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,7 +35,41 @@ def resolve_release(repository, tag, fallback, allow_missing, get):
     return obj["sha"]
 
 
+def cargo_package_version(manifest_path):
+    """Read the root `[package].version` without requiring third-party TOML."""
+    in_package = False
+    with open(manifest_path, encoding="utf-8") as manifest:
+        for line in manifest:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                if stripped == "[package]":
+                    in_package = True
+                    continue
+                if in_package:
+                    break
+            if in_package:
+                match = re.fullmatch(r'version\s*=\s*"([^"]+)"\s*(?:#.*)?', stripped)
+                if match:
+                    return match.group(1)
+    raise ValueError(f"{manifest_path} has no [package].version")
+
+
+def validate_release_tag(tag, manifest_path):
+    """Require a release tag to name the exact package version it builds."""
+    expected = f"v{cargo_package_version(manifest_path)}"
+    if tag != expected:
+        raise ValueError(f"release tag {tag!r} does not match package version {expected!r}")
+    return expected
+
+
 def main():
+    if len(sys.argv) > 1:
+        if len(sys.argv) != 4 or sys.argv[1] != "--validate-version":
+            raise SystemExit("usage: resolve_release.py --validate-version TAG Cargo.toml")
+        tag = validate_release_tag(sys.argv[2], sys.argv[3])
+        print(f"Release tag {tag} matches the package version")
+        return
+
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
 
     def get(path):

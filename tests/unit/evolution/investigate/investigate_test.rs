@@ -341,6 +341,13 @@ fn test_find_affected_callers_real_lookup() {
         "use crate::module_a::target_action;\nfn call_it() { target_action(); }\n",
     )
     .unwrap();
+    let private = repo_root.join("src/.claude/worktrees");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(
+        private.join("private.rs"),
+        "fn leaked() { target_action(); }\n",
+    )
+    .unwrap();
 
     let symbols = vec!["target_action".to_string()];
     let files_touched = vec!["src/module_a/lib.rs".to_string()];

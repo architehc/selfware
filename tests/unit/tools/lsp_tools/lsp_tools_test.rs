@@ -119,6 +119,20 @@ fn test_validate_lsp_file_allows_workspace_file() {
     );
 }
 
+#[test]
+fn validate_lsp_file_returns_the_active_workspace_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "pub fn scoped() {}\n").unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+
+    let resolved = crate::tools::workspace_root::sync_scope(root, || {
+        validate_lsp_file("src/lib.rs", Some(&default_test_safety_config())).unwrap()
+    });
+
+    assert_eq!(resolved, dir.path().join("src/lib.rs").to_string_lossy());
+}
+
 #[tokio::test]
 async fn test_goto_definition_rejects_etc_passwd() {
     let (goto, _, _, _) = create_lsp_tools(

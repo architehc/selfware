@@ -204,15 +204,17 @@ pub(crate) fn workspace_fingerprint(root: &std::path::Path) -> Option<u64> {
     let mut seen = 0usize;
     for entry in walkdir::WalkDir::new(root)
         .max_depth(4)
+        .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            !(e.file_type().is_dir()
-                && e.depth() > 0
-                && SKIP.contains(&e.file_name().to_string_lossy().as_ref()))
+            e.depth() == 0
+                || !e.file_type().is_dir()
+                || (crate::evolve::graph::retain_repository_entry(e)
+                    && !SKIP.contains(&e.file_name().to_string_lossy().as_ref()))
         })
         .filter_map(|e| e.ok())
     {
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_file() || entry.path_is_symlink() {
             continue;
         }
         if seen >= 2000 {

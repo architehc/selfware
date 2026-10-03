@@ -133,26 +133,10 @@ impl CheckpointStore {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("cannot create {}", self.dir.display()))?;
         let json = serde_json::to_vec_pretty(checkpoint)?;
-        let tmp = self.dir.join(format!(".{}.json.tmp", checkpoint.run_id));
-        write_private(&tmp, &json).with_context(|| format!("cannot write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("cannot move checkpoint into {}", path.display()))?;
+        crate::session::checkpoint::write_bytes_atomically(&path, &json, 0o600)
+            .with_context(|| format!("cannot atomically write {}", path.display()))?;
         Ok(path)
     }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
 }
 
 /// A run id is 1..=128 ASCII alphanumerics, `-`, `_` or `.`, not starting

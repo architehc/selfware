@@ -386,14 +386,17 @@ async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileG
     // alone left rustc holding target/ locks.
     #[cfg(unix)]
     cmd.process_group(0);
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             return CompileGate::Unavailable(format!("compile gate failed to spawn cargo: {e}"));
         }
     };
     let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child.id());
-    let wait_fut = tokio::time::timeout(CARGO_CHECK_TIMEOUT, child.wait_with_output());
+    let wait_fut = tokio::time::timeout(
+        CARGO_CHECK_TIMEOUT,
+        crate::tools::process_guard::wait_with_output_without_reaping(&mut child),
+    );
     tokio::pin!(wait_fut);
     let wait_res = loop {
         if crate::is_shutdown_requested() {
@@ -718,7 +721,8 @@ pub async fn spawn(
         .arg("--yolo")
         .current_dir(&staged.shadow_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     // Own process group: `selfware run` spawns cargo/rustc, and the wall-clock
     // ceiling below has to be able to kill the whole tree — killing only the
     // direct child leaves compilers holding target/ locks for later runs.
@@ -764,6 +768,7 @@ pub async fn spawn(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child.id());
     let reg = registry.clone();
     let rid = id.clone();
     let shadow_for_verify = staged.shadow_path.clone();
@@ -781,21 +786,28 @@ pub async fn spawn(
 
         // Bound the run itself. The compile gate's timeout starts only after
         // the child exits, so nothing else caps a child that hangs.
-        let (code, timed_out) = match tokio::time::timeout(STAGED_RUN_TIMEOUT, child.wait()).await {
-            Ok(Ok(status)) => (status.code(), false),
-            Ok(Err(_)) => (None, false),
+        let (status_before_drain, timed_out, wait_failed) = match tokio::time::timeout(
+            STAGED_RUN_TIMEOUT,
+            crate::tools::process_guard::wait_for_exit_without_reaping(&mut child),
+        )
+        .await
+        {
+            Ok(Ok(status)) => (status, false, false),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "staged apply run {rid}: failed while waiting for child exit: {error}"
+                );
+                pg_guard.kill();
+                let _ = child.start_kill();
+                (None, false, true)
+            }
             Err(_) => {
                 // Signal the whole process group so descendants die with it,
-                // then reap the direct child.
-                #[cfg(unix)]
-                if let Some(pid) = child.id() {
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::Pid;
-                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                }
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                (None, true)
+                // but keep the leader unreaped until pipe cleanup is complete
+                // so its pgid cannot be recycled under a later group signal.
+                pg_guard.kill();
+                let _ = child.start_kill();
+                (None, true, false)
             }
         };
 
@@ -805,14 +817,29 @@ pub async fn spawn(
             let _ = (&mut stdout_task).await;
             let _ = (&mut stderr_task).await;
         };
-        if tokio::time::timeout(PIPE_DRAIN_GRACE, drain).await.is_err() {
+        let drain_timed_out = tokio::time::timeout(PIPE_DRAIN_GRACE, drain).await.is_err();
+        if drain_timed_out {
+            // A normal-looking direct-child exit is not successful while its
+            // descendants still hold output pipes. Kill the group while the
+            // unreaped leader pins its identity, then abandon stuck drains.
+            pg_guard.kill();
             stdout_task.abort();
             stderr_task.abort();
             tracing::warn!(
                 "staged apply run {rid}: output pipes stayed open after the child exited; \
-                 abandoning the drain rather than holding the apply lock"
+                 killed its process group and abandoned the drain"
             );
         }
+        let status = match status_before_drain {
+            Some(status) => Some(status),
+            None => child.wait().await.ok(),
+        };
+        pg_guard.disarm();
+        let code = if timed_out || wait_failed || drain_timed_out {
+            None
+        } else {
+            status.and_then(|status| status.code())
+        };
         if timed_out {
             tracing::warn!(
                 "staged apply run {rid}: no exit within {}s; killed its process group",

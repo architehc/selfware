@@ -82,26 +82,25 @@ fn test_health_determination() {
 
 #[test]
 fn test_version_at_least_equal() {
-    assert!(version_at_least("1.91.0", "1.91"));
-    assert!(version_at_least("1.91.0", "1.91.0"));
+    assert!(version_at_least("1.95.0", "1.95"));
+    assert!(version_at_least("1.95.0", "1.95.0"));
 }
 
 #[test]
 fn test_version_at_least_higher() {
-    assert!(version_at_least("1.95.0", "1.91"));
-    assert!(version_at_least("2.0.0", "1.91.0"));
+    assert!(version_at_least("1.96.0", "1.95"));
+    assert!(version_at_least("2.0.0", "1.95.0"));
 }
 
 #[test]
 fn test_version_at_least_lower() {
-    assert!(!version_at_least("1.79.0", "1.91"));
-    assert!(!version_at_least("1.91.0", "1.95.0"));
+    assert!(!version_at_least("1.94.0", "1.95"));
+    assert!(!version_at_least("1.95.0", "1.96.0"));
 }
 
 #[test]
 fn test_version_at_least_with_suffix() {
-    // rustc 1.95.0-nightly should satisfy >= 1.91
-    assert!(version_at_least("1.95.0-nightly", "1.91"));
+    assert!(version_at_least("1.95.0-nightly", "1.95"));
 }
 
 // ---- install_hint_for ----

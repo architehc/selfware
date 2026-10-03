@@ -206,6 +206,24 @@ async fn test_memory_index_index_entry() {
 }
 
 #[tokio::test]
+async fn memory_index_reindex_moves_id_without_duplicates() {
+    let index = MemoryIndex::new();
+    let first =
+        MemoryEntry::new(7, "test", MemoryTier::ShortTerm).with_tags(vec!["old".to_string()]);
+    let second =
+        MemoryEntry::new(7, "test", MemoryTier::Working).with_tags(vec!["new".to_string()]);
+
+    index.index_entry(&first).await;
+    index.index_entry(&second).await;
+    index.index_entry(&second).await;
+
+    assert!(index.get_by_tier(MemoryTier::ShortTerm).await.is_empty());
+    assert_eq!(index.get_by_tier(MemoryTier::Working).await, vec![7]);
+    assert!(index.get_by_tag("old").await.is_empty());
+    assert_eq!(index.get_by_tag("new").await, vec![7]);
+}
+
+#[tokio::test]
 async fn test_memory_index_multiple_entries() {
     let index = MemoryIndex::new();
 
@@ -726,10 +744,30 @@ async fn test_working_memory_store_and_retrieve() {
     let entry = MemoryEntry::new(1, "test", MemoryTier::ShortTerm);
     wm.store(entry).await.unwrap();
 
-    // WorkingMemory uses ShortTermMemory internally
-    // The tier is set to ShortTerm by the underlying store
     let retrieved = wm.retrieve(1).await.unwrap();
     assert_eq!(retrieved.content, "test");
+    assert_eq!(retrieved.tier, MemoryTier::Working);
+}
+
+#[tokio::test]
+async fn working_remove_and_clear_keep_shared_index_in_sync() {
+    let index = std::sync::Arc::new(MemoryIndex::new());
+    let wm = WorkingMemory::new(10, index.clone());
+    wm.store(
+        MemoryEntry::new(1, "one", MemoryTier::Working).with_tags(vec!["tracked".to_string()]),
+    )
+    .await
+    .unwrap();
+    wm.store(MemoryEntry::new(2, "two", MemoryTier::Working))
+        .await
+        .unwrap();
+
+    wm.remove(1).await;
+    assert!(index.get_by_tag("tracked").await.is_empty());
+    assert_eq!(index.get_by_tier(MemoryTier::Working).await, vec![2]);
+
+    wm.clear().await;
+    assert!(index.get_by_tier(MemoryTier::Working).await.is_empty());
 }
 
 #[tokio::test]
@@ -1047,8 +1085,9 @@ async fn test_long_term_consolidate_removes_orphaned_index_ids() {
 #[tokio::test]
 async fn test_long_term_memory_archive_oldest() {
     let index = std::sync::Arc::new(MemoryIndex::new());
+    let archive = ArchiveMemory::with_index(index.clone());
     // Small capacity to trigger archiving
-    let ltm = LongTermMemory::new(2, index);
+    let ltm = LongTermMemory::with_archive(2, index.clone(), archive.clone());
 
     // Add entries with importance < 0.5 (eligible for archiving)
     for i in 0..3 {
@@ -1060,6 +1099,10 @@ async fn test_long_term_memory_archive_oldest() {
 
     // Count should be at capacity
     assert_eq!(ltm.count().await, 2);
+    let archived = archive.retrieve(0).await.expect("oldest entry was dropped");
+    assert_eq!(archived.tier, MemoryTier::Archive);
+    assert_eq!(index.get_by_tier(MemoryTier::Archive).await, vec![0]);
+    assert!(!index.get_by_tier(MemoryTier::LongTerm).await.contains(&0));
 }
 
 #[test]
@@ -1105,6 +1148,25 @@ async fn test_archive_memory_store_sets_tier() {
 
     let retrieved = am.retrieve(1).await.unwrap();
     assert_eq!(retrieved.tier, MemoryTier::Archive);
+}
+
+#[tokio::test]
+async fn archive_memory_queries_and_indexes_entries() {
+    let index = std::sync::Arc::new(MemoryIndex::new());
+    let am = ArchiveMemory::with_index(index.clone());
+    am.store(
+        MemoryEntry::new(4, "archived needle", MemoryTier::Working)
+            .with_tags(vec!["history".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let results = am
+        .query(&MemoryQuery::new("needle").with_tier(MemoryTier::Archive))
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(index.get_by_tier(MemoryTier::Archive).await, vec![4]);
+    assert_eq!(index.get_by_tag("history").await, vec![4]);
 }
 
 #[tokio::test]
@@ -1173,6 +1235,7 @@ fn test_memory_stats_default() {
     assert_eq!(stats.working_count, 0);
     assert_eq!(stats.short_term_count, 0);
     assert_eq!(stats.long_term_count, 0);
+    assert_eq!(stats.archive_count, 0);
     assert_eq!(stats.total_inserts, 0);
     assert_eq!(stats.total_queries, 0);
     assert_eq!(stats.total_promotions, 0);

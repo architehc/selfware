@@ -1785,7 +1785,8 @@ impl Agent {
             return false;
         }
 
-        let current_mtime = tokio::fs::metadata(path)
+        let anchored = self.tools.workspace_root().anchor_str(path);
+        let current_mtime = tokio::fs::metadata(&anchored)
             .await
             .ok()
             .and_then(|metadata| metadata.modified().ok())
@@ -1892,7 +1893,8 @@ impl Agent {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
                 let content_hash = super::recovery::hash_text_signature(content);
-                let last_modified = tokio::fs::metadata(&path_str)
+                let anchored = self.tools.workspace_root().anchor_str(&path_str);
+                let last_modified = tokio::fs::metadata(&anchored)
                     .await
                     .ok()
                     .and_then(|metadata| metadata.modified().ok())
@@ -1952,7 +1954,7 @@ impl Agent {
                 }
             }
             "file_delete" => {
-                self.file_tracker.remove_deleted(&path_str);
+                self.remove_context_file(&path_str);
                 self.push_task_state_note(format!(
                     "Removed deleted file `{}` from task-state tracking",
                     path_str
@@ -2075,15 +2077,17 @@ impl Agent {
                     // can't masquerade as a missing file; cap the injection at
                     // ESCALATION_CONTENT_CHAR_BUDGET so large targets can't
                     // bloat the message history without bound.
-                    let file_read = if let Err(error) =
-                        self.validate_context_path(std::path::Path::new(path))
-                    {
+                    let anchored = self
+                        .tools
+                        .workspace_root()
+                        .anchor_path(std::path::Path::new(path));
+                    let file_read = if let Err(error) = self.validate_context_path(&anchored) {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
                             error.to_string(),
                         ))
                     } else {
-                        tokio::fs::read_to_string(path).await
+                        tokio::fs::read_to_string(&anchored).await
                     };
                     let read_result = match file_read {
                         Ok(content) => {
@@ -2899,7 +2903,7 @@ impl Agent {
                 if let Some(path) = vt.args.get("path").and_then(|v| v.as_str()) {
                     let path_str = path.to_string();
                     if vt.name == "file_read" {
-                        if self.file_tracker.context_files.len() < 500
+                        if self.file_tracker.context_files.len() < super::MAX_TRACKED_CONTEXT_FILES
                             && !self.file_tracker.context_files.contains(&path_str)
                         {
                             self.file_tracker.context_files.push(path_str.clone());
@@ -3264,7 +3268,7 @@ impl Agent {
                 match name.as_str() {
                     "file_read" => {
                         self.last_read_file = Some(path_str.clone());
-                        if self.file_tracker.context_files.len() < 500
+                        if self.file_tracker.context_files.len() < super::MAX_TRACKED_CONTEXT_FILES
                             && !self.file_tracker.context_files.contains(&path_str)
                         {
                             self.file_tracker.context_files.push(path_str.clone());
@@ -3273,7 +3277,7 @@ impl Agent {
                             .await;
                     }
                     "file_delete" => {
-                        self.file_tracker.remove_deleted(&path_str);
+                        self.remove_context_file(&path_str);
                     }
                     "file_write" | "file_edit" => {
                         self.file_tracker.mark_stale(&path_str);
@@ -3332,20 +3336,12 @@ impl Agent {
                 let max_files =
                     args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
-                // Collect matching files from context map.
+                // Collect matching files from context map. The bounded walk
+                // never follows symlinks and prunes private coding-agent
+                // state unless the literal prefix of the caller's pattern
+                // explicitly selects that private directory.
                 let root = super::current_project_root();
-                let mut paths: Vec<std::path::PathBuf> = Vec::new();
-                let glob_pattern = root.join(pattern).to_string_lossy().to_string();
-                if let Ok(entries) = glob::glob(&glob_pattern) {
-                    for entry in entries.flatten() {
-                        if let Ok(rel) = entry.strip_prefix(&root) {
-                            paths.push(rel.to_path_buf());
-                        }
-                        if paths.len() >= max_files {
-                            break;
-                        }
-                    }
-                }
+                let paths = context_bulk_read_paths(&root, pattern, max_files);
 
                 let total_files = paths.len();
                 let (loaded, skipped, tokens) = self.parallel_bulk_read(paths).await;
@@ -5088,6 +5084,169 @@ impl Agent {
                 duration_ms: Some(duration_ms),
             });
         }
+    }
+}
+
+/// Return the non-pattern prefix of a project-relative glob. Walking from
+/// that prefix makes a literal `.claude` (or sibling private directory) an
+/// explicit depth-zero root, while `**/*.rs` starts at the project root and
+/// prunes the same directory before descent.
+fn context_glob_scan_root(root: &std::path::Path, pattern: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+
+    let pattern_path = std::path::Path::new(pattern);
+    if pattern_path.is_absolute() {
+        return None;
+    }
+
+    let mut prefix = std::path::PathBuf::new();
+    for component in pattern_path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => {
+                let text = value.to_string_lossy();
+                if text.contains(['*', '?', '[', ']']) {
+                    break;
+                }
+                prefix.push(value);
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(root.join(prefix))
+}
+
+fn retain_context_bulk_entry(entry: &walkdir::DirEntry) -> bool {
+    crate::evolve::graph::retain_repository_entry(entry)
+}
+
+/// Refuse a literal glob prefix containing a discovered symlink. WalkDir does
+/// not descend through child symlinks with `follow_links(false)`, but it does
+/// accept a symlink as its starting path. Check every root-relative prefix
+/// component so an intermediate link cannot redirect the walk either.
+fn context_glob_scan_root_is_real(root: &std::path::Path, scan_root: &std::path::Path) -> bool {
+    use std::path::Component;
+
+    let Ok(relative) = scan_root.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            return false;
+        };
+        current.push(value);
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Expand a context bulk-read glob without `glob`'s symlink-following walk.
+/// Returned paths are project-relative, regular, non-symlink files.
+fn context_bulk_read_paths(
+    root: &std::path::Path,
+    pattern: &str,
+    max_files: usize,
+) -> Vec<std::path::PathBuf> {
+    if max_files == 0 {
+        return Vec::new();
+    }
+    let Some(scan_root) = context_glob_scan_root(root, pattern) else {
+        return Vec::new();
+    };
+    if !context_glob_scan_root_is_real(root, &scan_root) {
+        return Vec::new();
+    }
+    let Ok(glob) = glob::Pattern::new(pattern) else {
+        return Vec::new();
+    };
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(scan_root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(retain_context_bulk_entry)
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.path_is_symlink() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if glob.matches_path_with(relative, options) {
+            paths.push(relative.to_path_buf());
+            if paths.len() >= max_files {
+                break;
+            }
+        }
+    }
+    paths
+}
+
+#[cfg(test)]
+mod private_context_glob_tests {
+    use super::*;
+
+    fn write(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(path, "pub fn marker() {}\n").expect("write fixture");
+    }
+
+    #[test]
+    fn broad_glob_prunes_private_state_but_literal_private_root_is_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write(&temp.path().join("src/visible.rs"));
+        for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
+            write(&temp.path().join(dir).join("private.rs"));
+        }
+
+        let broad = context_bulk_read_paths(temp.path(), "**/*.rs", 20);
+        assert_eq!(broad, vec![std::path::PathBuf::from("src/visible.rs")]);
+        let normal_default = context_bulk_read_paths(temp.path(), "src/**/*.rs", 20);
+        assert_eq!(
+            normal_default,
+            vec![std::path::PathBuf::from("src/visible.rs")]
+        );
+
+        let explicit = context_bulk_read_paths(temp.path(), ".claude/**/*.rs", 20);
+        assert_eq!(
+            explicit,
+            vec![std::path::PathBuf::from(".claude/private.rs")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_glob_does_not_follow_discovered_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        write(&outside.path().join("outside.rs"));
+        write(&outside.path().join("nested/deeper.rs"));
+        symlink(outside.path(), root.path().join("linked_dir")).expect("dir symlink");
+        symlink(
+            outside.path().join("outside.rs"),
+            root.path().join("linked_file.rs"),
+        )
+        .expect("file symlink");
+
+        assert!(context_bulk_read_paths(root.path(), "**/*.rs", 20).is_empty());
+        assert!(context_bulk_read_paths(root.path(), "linked_dir/**/*.rs", 20).is_empty());
+        assert!(context_bulk_read_paths(root.path(), "linked_dir/nested/**/*.rs", 20).is_empty());
+        assert!(context_bulk_read_paths(root.path(), "linked_file.rs", 20).is_empty());
     }
 }
 

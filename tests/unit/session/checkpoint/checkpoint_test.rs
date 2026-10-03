@@ -12,6 +12,23 @@ fn test_task_checkpoint_new() {
 }
 
 #[test]
+fn task_checkpoint_records_task_local_workspace_root() {
+    let workspace = tempdir().unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(workspace.path());
+    let checkpoint = crate::tools::workspace_root::sync_scope(root, || {
+        TaskCheckpoint::new("task-local-root".to_string(), "test".to_string())
+    });
+
+    let expected = workspace
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(checkpoint.project_root.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
 fn test_task_checkpoint_to_summary() {
     let checkpoint = TaskCheckpoint::new("task_123".to_string(), "Test task".to_string());
     let summary = checkpoint.to_summary();
@@ -85,7 +102,7 @@ fn checkpoint_dir_0700_and_files_0600() {
     let dmode = fs::metadata(&cpdir).unwrap().permissions().mode() & 0o777;
     assert_eq!(dmode, 0o700, "dir should be 0700, got {:o}", dmode);
 
-    let cp = TaskCheckpoint::new("perm-test".to_string(), "d".to_string());
+    let mut cp = TaskCheckpoint::new("perm-test".to_string(), "d".repeat(8_192));
     manager.save(&cp).unwrap();
 
     let file = fs::read_dir(&cpdir)
@@ -99,6 +116,17 @@ fn checkpoint_dir_0700_and_files_0600() {
         "checkpoint file should be 0600, got {:o}",
         fmode
     );
+
+    cp.set_step(1);
+    manager.save(&cp).unwrap();
+    let delta = cpdir.join("perm-test.delta.jsonl");
+    assert!(delta.exists(), "small update should use the delta log");
+    let delta_mode = fs::metadata(delta).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        delta_mode, 0o600,
+        "checkpoint delta log should be 0600, got {:o}",
+        delta_mode
+    );
 }
 
 #[test]
@@ -106,6 +134,24 @@ fn test_checkpoint_manager_new() {
     let dir = tempdir().unwrap();
     let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
     assert!(manager.checkpoints_dir().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_manager_rejects_symlink_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("target");
+    let link = dir.path().join("checkpoints");
+    std::fs::create_dir(&target).unwrap();
+    symlink(&target, &link).unwrap();
+
+    let error = CheckpointManager::new(link)
+        .err()
+        .expect("symlink directory must be rejected");
+    assert!(format!("{error:#}").contains("symlink or non-directory"));
+    assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
 }
 
 #[test]
@@ -1011,6 +1057,28 @@ fn test_sanitize_task_id_rejects_empty() {
     assert!(sanitize_task_id("").is_err());
     assert!(sanitize_task_id("   ").is_err());
     assert!(sanitize_task_id("..").is_err());
+}
+
+#[test]
+fn colliding_sanitized_task_ids_cannot_cross_read_overwrite_or_delete() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let original = TaskCheckpoint::new("foo/bar".to_string(), "original".to_string());
+    manager.save_final(&original).unwrap();
+
+    let load_error = manager.load("foo_bar").unwrap_err();
+    assert!(format!("{load_error:#}").contains("not requested task"));
+
+    let collision = TaskCheckpoint::new("foo_bar".to_string(), "collision".to_string());
+    let save_error = manager.save_final(&collision).unwrap_err();
+    assert!(format!("{save_error:#}").contains("not requested task"));
+
+    let delete_error = manager.delete("foo_bar").unwrap_err();
+    assert!(format!("{delete_error:#}").contains("not requested task"));
+    assert_eq!(
+        manager.load("foo/bar").unwrap().task_description,
+        "original"
+    );
 }
 
 #[test]
@@ -1960,6 +2028,22 @@ fn recover_from_corruption_never_prefers_backup_over_healthy_primary() {
 
 // ── Atomic replace fallback (Windows rename semantics) ──────────────
 
+fn assert_no_checkpoint_temp_files(dir: &std::path::Path) {
+    let temp_files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(".json.tmp."))
+        })
+        .collect();
+    assert!(
+        temp_files.is_empty(),
+        "rejected checkpoint temp must be cleaned up: {temp_files:?}"
+    );
+}
+
 #[test]
 fn atomic_replace_overwrites_existing_destination_directly() {
     // Unix path: rename over an existing destination succeeds first try —
@@ -1976,9 +2060,222 @@ fn atomic_replace_overwrites_existing_destination_directly() {
 }
 
 #[test]
-fn atomic_replace_retries_after_removing_existing_destination() {
+fn atomic_replace_refuses_directory_destination() {
+    let dir = tempdir().unwrap();
+    let tmp = dir.path().join("src.tmp");
+    let dest = dir.path().join("dest.json");
+    let sentinel = dest.join("keep.txt");
+    std::fs::write(&tmp, "new bytes").unwrap();
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(&sentinel, "directory contents").unwrap();
+
+    let error = replace_atomically(&tmp, &dest).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error
+        .to_string()
+        .contains("refusing to replace non-regular destination"));
+    assert!(
+        !tmp.exists(),
+        "rejected replacement temp must be cleaned up"
+    );
+    assert!(dest.is_dir(), "destination directory must remain in place");
+    assert_eq!(
+        std::fs::read_to_string(sentinel).unwrap(),
+        "directory contents"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "a rejected replacement must not leave a backup sibling"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_refuses_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let tmp = dir.path().join("src.tmp");
+    let target = dir.path().join("target.json");
+    let dest = dir.path().join("dest.json");
+    std::fs::write(&tmp, "new bytes").unwrap();
+    std::fs::write(&target, "target bytes").unwrap();
+    symlink(&target, &dest).unwrap();
+
+    let error = replace_atomically(&tmp, &dest).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        !tmp.exists(),
+        "rejected replacement temp must be cleaned up"
+    );
+    assert!(
+        std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "destination symlink must remain in place"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "target bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_refuses_symlink_source() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    let source = dir.path().join("source.tmp");
+    let destination = dir.path().join("destination.txt");
+    std::fs::write(&target, "target bytes").unwrap();
+    std::fs::write(&destination, "old bytes").unwrap();
+    symlink(&target, &source).unwrap();
+
+    let error = replace_atomically(&source, &destination).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "target bytes");
+    assert_eq!(std::fs::read_to_string(&destination).unwrap(), "old bytes");
+}
+
+#[test]
+fn direct_atomic_replace_failure_never_moves_destination_aside() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.tmp");
+    let destination = dir.path().join("destination.txt");
+    std::fs::write(&source, "new bytes").unwrap();
+    std::fs::write(&destination, "old bytes").unwrap();
+    let calls = std::cell::Cell::new(0);
+
+    let error = replace_atomically_direct_with(&source, &destination, |_, _| {
+        calls.set(calls.get() + 1);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "simulated rename failure",
+        ))
+    })
+    .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(calls.get(), 1, "production Unix path attempts one rename");
+    assert_eq!(std::fs::read_to_string(&destination).unwrap(), "old bytes");
+    assert!(!source.exists(), "failed replacement temp is cleaned up");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "no backup sibling is created on a rename failure"
+    );
+}
+
+#[test]
+fn checkpoint_save_refuses_directory_primary() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let destination = dir.path().join("directory-primary.json");
+    let sentinel = destination.join("keep.txt");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(&sentinel, "directory contents").unwrap();
+    let checkpoint = TaskCheckpoint::new(
+        "directory-primary".to_string(),
+        "replacement state".to_string(),
+    );
+
+    let error = manager.save_final(&checkpoint).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("refusing checkpoint that is a symlink or non-regular file"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        destination.is_dir(),
+        "checkpoint directory must remain in place"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sentinel).unwrap(),
+        "directory contents"
+    );
+    assert_no_checkpoint_temp_files(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_save_refuses_symlink_primary() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let target = dir.path().join("primary-target.json");
+    let destination = dir.path().join("symlink-primary.json");
+    std::fs::write(&target, "target bytes").unwrap();
+    symlink(&target, &destination).unwrap();
+    let checkpoint = TaskCheckpoint::new(
+        "symlink-primary".to_string(),
+        "replacement state".to_string(),
+    );
+
+    let error = manager.save_final(&checkpoint).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("refusing checkpoint that is a symlink or non-regular file"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "checkpoint symlink must remain in place"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "target bytes");
+    assert_no_checkpoint_temp_files(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_save_refuses_symlink_backup() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut checkpoint =
+        TaskCheckpoint::new("symlink-backup".to_string(), "original state".to_string());
+    manager.save_final(&checkpoint).unwrap();
+    let primary = dir.path().join("symlink-backup.json");
+    let original_primary = std::fs::read(&primary).unwrap();
+    let backup = dir.path().join("symlink-backup.json.bak");
+    let target = dir.path().join("backup-target.json");
+    std::fs::write(&target, "target bytes").unwrap();
+    symlink(&target, &backup).unwrap();
+    checkpoint.task_description = "replacement state".to_string();
+
+    let error = manager.save_final(&checkpoint).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("refusing to replace non-regular destination"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        std::fs::read(&primary).unwrap(),
+        original_primary,
+        "failed backup validation must preserve the current checkpoint"
+    );
+    assert!(
+        std::fs::symlink_metadata(&backup)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "checkpoint backup symlink must remain in place"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "target bytes");
+    assert_no_checkpoint_temp_files(dir.path());
+}
+
+#[test]
+fn atomic_replace_retries_after_preserving_existing_destination() {
     // Windows rename semantics: rename fails while the destination exists.
-    // replace_atomically must remove the destination and retry — asserted
+    // replace_atomically must preserve the destination and retry — asserted
     // via the injectable rename seam (no Windows machine needed).
     let dir = tempdir().unwrap();
     let tmp = dir.path().join("src.tmp");
@@ -1998,8 +2295,9 @@ fn atomic_replace_retries_after_removing_existing_destination() {
             std::fs::rename(src, dst)
         }
     });
-    result.unwrap_or_else(|e| panic!("the retry after removing the destination must succeed: {e}"));
-    assert_eq!(calls.get(), 2, "first attempt fails, second succeeds");
+    result
+        .unwrap_or_else(|e| panic!("the retry after preserving the destination must succeed: {e}"));
+    assert_eq!(calls.get(), 3, "fail, preserve, then install");
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new bytes");
     assert!(
         !tmp.exists(),
@@ -2008,7 +2306,7 @@ fn atomic_replace_retries_after_removing_existing_destination() {
 }
 
 #[test]
-fn atomic_replace_gives_up_when_retry_also_fails_and_cleans_tmp() {
+fn atomic_replace_failed_retry_restores_destination_and_cleans_tmp() {
     let dir = tempdir().unwrap();
     let tmp = dir.path().join("src.tmp");
     let dest = dir.path().join("dest.json");
@@ -2016,24 +2314,29 @@ fn atomic_replace_gives_up_when_retry_also_fails_and_cleans_tmp() {
     std::fs::write(&dest, "old bytes").unwrap();
 
     let calls = std::cell::Cell::new(0u32);
-    let result = replace_atomically_with(&tmp, &dest, |_, _| {
+    let result = replace_atomically_with(&tmp, &dest, |src, dst| {
         calls.set(calls.get() + 1);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "denied",
-        ))
+        if matches!(calls.get(), 1 | 3) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        } else {
+            std::fs::rename(src, dst)
+        }
     });
     assert!(result.is_err());
-    assert_eq!(calls.get(), 2, "exactly one remove-then-retry attempt");
+    assert_eq!(calls.get(), 4, "fail, preserve, fail install, restore");
     assert!(
         !tmp.exists(),
         "tmp must be cleaned up after a double failure"
     );
-    assert!(
-        !dest.exists(),
-        "the remove-then-retry convention removes the destination for the retry; \
-         after a failed retry NO partial file may be left behind"
+    assert_eq!(
+        std::fs::read_to_string(&dest).unwrap(),
+        "old bytes",
+        "the previous valid destination must be restored after a failed retry"
     );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 // ── Advisory file locking (finding: concurrent writers clobber state) ──

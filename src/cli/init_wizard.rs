@@ -406,10 +406,11 @@ fn probe_endpoint_tcp(endpoint: &str, timeout: std::time::Duration) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    let resolver_host = crate::tools::net_policy::host_for_socket_resolution(host);
     let Some(port) = url.port_or_known_default() else {
         return false;
     };
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+    let Ok(mut addrs) = (resolver_host, port).to_socket_addrs() else {
         return false;
     };
     addrs.any(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())

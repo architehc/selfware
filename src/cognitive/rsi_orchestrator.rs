@@ -152,8 +152,6 @@ impl RSIOrchestrator {
     /// mid-write can never leave a truncated `rsi_state.json` (same pattern
     /// as `session::chat_store`).
     pub fn save_state(&self) -> std::result::Result<(), std::io::Error> {
-        use std::io::Write;
-
         let state = RSIState {
             total_iterations: self.total_iterations,
             consecutive_failures: self.consecutive_failures,
@@ -165,22 +163,11 @@ impl RSIOrchestrator {
         }
         let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
 
-        let tmp_path = self
-            .state_path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp_path)?;
-            f.write_all(json.as_bytes())?;
-            f.sync_all()?;
-        }
-        if let Err(err) = std::fs::rename(&tmp_path, &self.state_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
+        crate::session::checkpoint::write_bytes_atomically(
+            &self.state_path,
+            json.as_bytes(),
+            0o600,
+        )?;
         Ok(())
     }
 
