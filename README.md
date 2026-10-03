@@ -433,6 +433,28 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.7
+
+0.9.7 hardens browser isolation, process teardown and durable local state.
+The full list is in [CHANGELOG.md](CHANGELOG.md):
+
+- **Browser network policy closes IPv6 bypasses.** Connection-time checks
+  recognize hexadecimal IPv4-mapped IPv6 addresses, handle bracketed IPv6
+  literals, and block private or cloud-metadata destinations.
+- **Secrets stay out of browser actions.** Fetch, screenshot, PDF,
+  evaluation and page-control inputs are scanned before browser execution.
+- **Process shutdown is race-safe.** Graceful stops no longer block unrelated
+  process operations, and process-group teardown is protected from PID reuse.
+- **PTY commands are isolated.** Each command runs in a clean subshell and
+  reports completion over an authenticated control socket; only validated
+  standalone `cd` changes persist.
+- **State survives crashes and concurrency.** Checkpoints, chat state, caches
+  and RAG vector generations use locked, atomic, synchronized publication.
+- **Workspace context stays scoped.** Repository discovery is rooted in the
+  active workspace and excludes symlinks and private coding-agent state.
+- **Dependencies and release checks are current.** Compatible Cargo packages
+  are refreshed while Rust 1.95 remains the minimum supported toolchain.
+
 ## What's New in 0.9.6
 
 0.9.6 makes repository review fast and grounded. The full list is in

@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-10-03
+
+0.9.7 is an end-to-end security and reliability release. It closes browser
+network-policy bypasses, makes process teardown race-safe, hardens durable
+state against crashes and concurrent writers, and keeps repository context
+inside the active workspace. The dependency lockfile is refreshed to the
+latest versions allowed by the existing manifests.
+
+### Security
+- **Browser requests enforce policy at connection time.** The Playwright
+  bridge rejects private, loopback, link-local, multicast and cloud metadata
+  addresses after URL canonicalization, including hexadecimal IPv4-mapped
+  IPv6 forms such as `::ffff:a9fe:a9fe`. Rust socket resolution now handles
+  bracketed IPv6 literals consistently across the proxy, browser tools and
+  endpoint probes.
+- **Browser-bound secrets are rejected before execution.** Credential-shape
+  scanning covers fetch, screenshot, PDF, evaluation and page-control URLs,
+  scripts and interaction fields, both in the shared safety checker and at
+  direct tool entry points.
+- **Repository discovery stays inside its trust boundary.** Context loading
+  is anchored to the task's active workspace; broad readers prune symlinks
+  and private coding-agent directories such as `.claude`, `.codex`,
+  `.agents`, `.qwen` and `.superpowers`.
+
+### Fixed
+- **Process and PTY teardown is race-safe.** Graceful process stops no longer
+  hold the global process map while polling. Process groups retain their
+  leader until group termination completes, closing PID-reuse races, and PTY
+  command completion travels over a nonce-authenticated control socket.
+- **Persistent state is crash-consistent.** Checkpoints, chat state, caches
+  and vector indexes use private unique temporary files, atomic replacement,
+  directory synchronization and advisory locking. RAG indexes publish
+  immutable generation snapshots through an atomic manifest.
+- **Recovery reports what really happened.** Missing or corrupt checkpoints
+  return typed recovery outcomes, telemetry survives failures, and status
+  labels describe only checks that actually ran.
+- **Evolution and retrieval scale correctly.** Symbol deduplication avoids
+  quadratic comparisons, graph/cache paths resolve from the project root,
+  and token/context sizing uses measured content projections.
+- **CI and release validation match supported builds.** Docker validation,
+  offline integration tests, documentation warnings, no-default-feature
+  tests and immutable release revision checks are aligned with Rust 1.95.
+
+### Changed
+- PTY sessions persist only a validated standalone `cd`; aliases, exports,
+  traps, shell options, environment mutations and interactive command stdin
+  do not cross command boundaries.
+- Input census runs only for data-processing tasks, and the default evolution
+  iteration limit is now 400.
+- Cargo dependencies were updated to the latest compatible releases without
+  raising the declared Rust 1.95 minimum.
+
+### Review notes (AGENTS.md rule 2)
+The maintainer explicitly approved the PTY state and stdin reductions, the
+narrower discovery and input-census behaviour, the stale-context trust change,
+and the iteration-limit change. Tests updated for isolated subshell completion
+and preservation of the previous destination after failed atomic replacement
+retain or strengthen their assertions. Splitting live endpoint tests from the
+offline integration target was mechanical and retained coverage.
+
 ## [0.9.6] - 2026-09-29
 
 Repository review gets fast and grounded: the reading plan is read by
@@ -1814,7 +1874,18 @@ notes are folded in below.
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/architehc/selfware/compare/v0.9.6...v0.9.7
+[0.9.6]: https://github.com/architehc/selfware/compare/v0.9.5...v0.9.6
+[0.9.5]: https://github.com/architehc/selfware/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/architehc/selfware/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/architehc/selfware/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/architehc/selfware/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/architehc/selfware/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/architehc/selfware/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/architehc/selfware/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/architehc/selfware/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/architehc/selfware/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/architehc/selfware/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/architehc/selfware/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/architehc/selfware/compare/v0.7.2...v0.7.3
