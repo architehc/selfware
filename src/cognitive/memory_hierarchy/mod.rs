@@ -118,8 +118,12 @@ impl SemanticMemory {
 
         for entry in WalkDir::new(path)
             .max_depth(8)
+            .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return !crate::safety::source_context::discovery_root_is_private(e.path());
+                }
                 let name = e.file_name().to_string_lossy();
                 // Skip hidden dirs, target, node_modules
                 !name.starts_with('.') && name != "target" && name != "node_modules"
@@ -130,6 +134,9 @@ impl SemanticMemory {
                 Err(_) => continue,
             };
             if !entry.file_type().is_file() {
+                continue;
+            }
+            if !crate::safety::source_context::broad_discovery_file_is_safe(entry.path()) {
                 continue;
             }
             let ext = entry

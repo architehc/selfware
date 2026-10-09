@@ -1444,6 +1444,9 @@ fn task_root_has_implementation_source(root: &Path) -> bool {
     if !root.is_dir() {
         return true;
     }
+    if crate::safety::source_context::discovery_root_is_private(root) {
+        return true;
+    }
     let walker = walkdir::WalkDir::new(root)
         .max_depth(6)
         .into_iter()
@@ -1464,6 +1467,9 @@ fn task_root_has_implementation_source(root: &Path) -> bool {
         if !entry.file_type().is_file() {
             continue;
         }
+        if !crate::safety::source_context::broad_discovery_file_is_safe(entry.path()) {
+            continue;
+        }
         let relative = entry
             .path()
             .strip_prefix(root)
@@ -1474,7 +1480,12 @@ fn task_root_has_implementation_source(root: &Path) -> bool {
             continue;
         }
         if entry.file_name() == "__init__.py" {
-            let marker = std::fs::read_to_string(entry.path())
+            let marker = crate::safety::source_context::open_broad_discovery_regular(entry.path())
+                .and_then(|mut file| {
+                    let mut content = String::new();
+                    std::io::Read::read_to_string(&mut file, &mut content)?;
+                    Ok(content)
+                })
                 .map(|content| python_init_is_package_marker(&content))
                 .unwrap_or(false);
             if marker {

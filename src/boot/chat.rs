@@ -5,7 +5,7 @@
 //! invents endpoints or TOML. Retrieval uses setup documentation bundled
 //! with the binary, never documentation from the current checkout.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -51,6 +51,9 @@ pub fn retrieve_bundled_snippet(question: &str) -> Option<String> {
 }
 
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
+    if crate::safety::source_context::discovery_root_is_private(dir) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -61,7 +64,10 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
         };
         if kind.is_dir() {
             collect_markdown(&path, out);
-        } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if kind.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("md")
+            && crate::safety::source_context::broad_discovery_file_is_safe(&path)
+        {
             out.push(path);
         }
     }
@@ -76,7 +82,13 @@ pub fn retrieve_snippet(docs_dir: &Path, question: &str) -> Option<String> {
     collect_markdown(docs_dir, &mut files);
     let documents: Vec<String> = files
         .into_iter()
-        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .filter_map(|file| {
+            let mut opened =
+                crate::safety::source_context::open_broad_discovery_regular(&file).ok()?;
+            let mut content = String::new();
+            opened.read_to_string(&mut content).ok()?;
+            Some(content)
+        })
         .collect();
     select_snippet(documents.iter().map(String::as_str), question)
 }

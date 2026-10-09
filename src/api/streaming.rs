@@ -107,6 +107,9 @@ pub struct StreamingResponse {
     /// stop only when THIS instant has passed.
     run_deadline: Option<Instant>,
     wall_limit_secs: Option<u64>,
+    /// Raw response byte ceiling, including SSE framing. `None` preserves the
+    /// ordinary streaming client's existing behavior.
+    response_byte_limit: Option<usize>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -135,6 +138,7 @@ impl StreamingResponse {
             call_cap_secs: None,
             run_deadline: None,
             wall_limit_secs: None,
+            response_byte_limit: None,
         }
     }
 
@@ -168,6 +172,11 @@ impl StreamingResponse {
     ) -> Self {
         self.run_deadline = run_deadline;
         self.wall_limit_secs = limit_secs;
+        self
+    }
+
+    pub(crate) fn with_response_byte_limit(mut self, limit: Option<usize>) -> Self {
+        self.response_byte_limit = limit;
         self
     }
 
@@ -214,6 +223,8 @@ impl StreamingResponse {
             let chunk_timeout = self.chunk_timeout;
             let deadline = self.deadline;
             let mut saw_valid_event = false;
+            let mut received_bytes = 0usize;
+            let response_byte_limit = self.response_byte_limit;
 
             let call_cap_secs = self.call_cap_secs;
             let run_deadline = self.run_deadline;
@@ -291,6 +302,18 @@ impl StreamingResponse {
                 };
                 match chunk_result {
                     Ok(bytes) => {
+                        received_bytes = received_bytes.saturating_add(bytes.len());
+                        if let Some(limit) = response_byte_limit {
+                            if received_bytes > limit {
+                                let _ = tx
+                                    .send(Err(ApiError::Parse(format!(
+                                        "provider stream exceeded the {limit}-byte response limit"
+                                    ))
+                                    .into()))
+                                    .await;
+                                return;
+                            }
+                        }
                         append_utf8_chunk(&mut buffer, &mut pending_utf8, &bytes);
 
                         // Normalize CRLF line endings so the delimiter scan only

@@ -28,6 +28,18 @@ fn retrieval_does_not_follow_symlink_cycles_or_external_files() {
     assert!(retrieve_snippet(docs.path(), "endpoint").is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn retrieval_omits_multiply_linked_markdown() {
+    let docs = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "# Endpoint\n\nHARD_LINK_SECRET endpoint recipe").unwrap();
+    std::fs::hard_link(&secret, docs.path().join("guide.md")).unwrap();
+
+    assert!(retrieve_snippet(docs.path(), "endpoint recipe").is_none());
+}
+
 fn write_docs(dir: &tempfile::TempDir) {
     std::fs::write(
         dir.path().join("configuration.md"),
@@ -76,6 +88,20 @@ fn retrieve_snippet_searches_nested_dirs() {
     write_docs(&dir);
     let snippet = retrieve_snippet(dir.path(), "endpoint context_length window").unwrap();
     assert!(snippet.contains("context_length"));
+}
+
+#[test]
+fn retrieve_snippet_ignores_private_discovery_roots() {
+    let parent = tempfile::tempdir().unwrap();
+    let docs = parent.path().join(".agents/session/docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(
+        docs.join("secret.md"),
+        "# Endpoint\n\nprivate endpoint context_length window",
+    )
+    .unwrap();
+
+    assert!(retrieve_snippet(&docs, "endpoint context_length window").is_none());
 }
 
 #[test]

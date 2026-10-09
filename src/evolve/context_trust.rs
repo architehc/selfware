@@ -194,6 +194,10 @@ fn hidden_char_name(c: char) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn is_hidden_unicode(c: char) -> bool {
+    hidden_char_name(c).is_some()
+}
+
 /// Invisible characters that are only suspicious *adjacent to ASCII words*.
 /// ZWJ and variation selectors are legitimate inside emoji sequences
 /// (🧑‍🎄, ❤️), but between ASCII letters they split keywords

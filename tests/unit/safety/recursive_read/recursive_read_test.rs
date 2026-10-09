@@ -151,6 +151,28 @@ fn symlinks_are_vetted_by_target() {
     assert!(violation("grep -R x docs", d).is_some());
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn recursive_readers_refuse_discovered_hard_links_but_exact_reads_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    let private = root.join("private-state.txt");
+    std::fs::write(&private, "private marker\n").unwrap();
+    let public_alias = root.join("src/public-looking.txt");
+    std::fs::hard_link(&private, &public_alias).unwrap();
+
+    let why = violation("grep -r marker src", root)
+        .expect("a recursively discovered hard link must be refused");
+    assert!(why.contains("file identity"), "{why}");
+
+    assert_eq!(
+        violation("grep marker src/public-looking.txt", root),
+        None,
+        "an explicitly selected file keeps the exact-read policy"
+    );
+}
+
 #[test]
 fn sensitive_components_are_matched_per_component() {
     assert_eq!(sensitive_component("src/environment.rs", false), None);

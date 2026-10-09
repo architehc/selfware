@@ -712,6 +712,36 @@ fn dependency_tree_fixture() -> (tempfile::TempDir, CodeIntrospect) {
     (dir, tool)
 }
 
+#[test]
+fn introspection_source_walk_rejects_a_root_below_private_state() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join(".qwen/worktrees/project");
+    write_file(&root, "src/private.rs", "pub fn private_state() {}\n");
+
+    let walked = walk::source_files(&root, None, MAX_WALK_DEPTH).unwrap();
+
+    assert!(walked.files.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn introspection_walk_omits_discovered_hard_links_but_keeps_an_exact_file() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write_file(root.path(), "src/visible.rs", "pub fn visible() {}\n");
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, "pub fn hard_link_secret() {}\n").unwrap();
+    let linked = root.path().join("src/linked.rs");
+    std::fs::hard_link(&secret, &linked).unwrap();
+
+    let broad = walk::source_files(root.path(), None, MAX_WALK_DEPTH).unwrap();
+    assert!(broad.files.iter().any(|path| path.ends_with("visible.rs")));
+    assert!(!broad.files.iter().any(|path| path.ends_with("linked.rs")));
+
+    let exact = walk::source_files(&linked, None, MAX_WALK_DEPTH).unwrap();
+    assert_eq!(exact.files, vec![linked]);
+}
+
 #[tokio::test]
 async fn introspect_skips_dependency_trees_at_the_top_level() {
     let (dir, tool) = dependency_tree_fixture();

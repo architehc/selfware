@@ -474,6 +474,28 @@ async fn vector_store_refuses_symlinked_source_file() {
     assert!(store.get_collection("project").unwrap().is_empty());
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn vector_store_refuses_hard_linked_source_file() {
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let mut store = VectorStore::new(provider);
+    store.collection("project", CollectionScope::Project);
+
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let target = outside.path().join("private.rs");
+    std::fs::write(&target, "pub fn private_material() {}").unwrap();
+    let linked = root.path().join("visible.rs");
+    std::fs::hard_link(&target, &linked).unwrap();
+
+    let error = store.index_file("project", &linked).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("indexed source file"),
+        "unexpected error: {error:#}"
+    );
+    assert!(store.get_collection("project").unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn reindex_file_replaces_chunks_not_accumulates() {
     let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));

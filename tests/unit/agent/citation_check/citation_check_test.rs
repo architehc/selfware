@@ -700,6 +700,26 @@ fn suffix_index_excludes_symlinks_to_outside_targets() {
     )));
 }
 
+#[cfg(unix)]
+#[test]
+fn suffix_index_excludes_hard_links_but_an_exact_citation_remains_readable() {
+    let (base, ws, policy) = confinement_fixture();
+    let linked = ws.join("src/hard_alias.rs");
+    std::fs::hard_link(base.path().join("outside.rs"), &linked).unwrap();
+
+    let mut suffix = CitationResolver::with_policy(&ws, &policy);
+    let report = suffix.verify_text("`outside_marker` (`hard_alias.rs:1`)", ANSWER_SOURCE);
+    assert_eq!(report.verified, 0, "{report:?}");
+    assert!(suffix
+        .index()
+        .iter()
+        .all(|path| !path.ends_with("hard_alias.rs")));
+
+    let mut exact = CitationResolver::with_policy(&ws, &policy);
+    let report = exact.verify_text("`outside_marker` (`src/hard_alias.rs:1`)", ANSWER_SOURCE);
+    assert_eq!((report.total, report.verified), (1, 1), "{report:?}");
+}
+
 #[test]
 fn denied_path_inside_the_workspace_is_unverifiable() {
     let (_base, ws, policy) = confinement_fixture();

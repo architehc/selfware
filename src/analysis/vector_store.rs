@@ -2016,10 +2016,11 @@ impl VectorStore {
 
     /// Index a file into a collection
     pub async fn index_file(&mut self, collection_name: &str, file_path: &Path) -> Result<usize> {
-        let content = String::from_utf8(Self::read_regular_file(file_path, "indexed source file")?)
-            .with_context(|| {
-                format!("Indexed source file is not UTF-8: {}", file_path.display())
-            })?;
+        let content = String::from_utf8(Self::read_discovered_source_file(
+            file_path,
+            "indexed source file",
+        )?)
+        .with_context(|| format!("Indexed source file is not UTF-8: {}", file_path.display()))?;
         let chunks = self.chunker.chunk(&content, file_path);
         let chunk_count = chunks.len();
 
@@ -2568,6 +2569,22 @@ impl VectorStore {
         Ok(bytes)
     }
 
+    /// Read model-visible source through the shared broad-discovery gate.
+    ///
+    /// Persistence files use `read_regular_file`; repository source has the
+    /// additional single-link requirement that prevents a public-looking
+    /// hard link from importing private or out-of-root bytes. The descriptor
+    /// returned by the gate is the descriptor read here, so a pathname swap
+    /// cannot race the link-count decision.
+    fn read_discovered_source_file(path: &Path, label: &str) -> Result<Vec<u8>> {
+        let mut file = crate::safety::source_context::open_broad_discovery_regular(path)
+            .with_context(|| format!("Failed to open {label}"))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("Failed to read {label}"))?;
+        Ok(bytes)
+    }
+
     /// Return whether the persisted chunks for `file_path` are exactly the
     /// chunks produced from the file's current bytes and the current chunker.
     /// Persisted RAG content is model-visible, so path eligibility alone is
@@ -2583,7 +2600,7 @@ impl VectorStore {
             .get(collection_name)
             .with_context(|| format!("Collection not found: {collection_name}"))?;
         let persisted_ids = collection.chunk_ids_for_file(file_path);
-        let content = String::from_utf8(Self::read_regular_file(
+        let content = String::from_utf8(Self::read_discovered_source_file(
             file_path,
             "current indexed source file",
         )?)

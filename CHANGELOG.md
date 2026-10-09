@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Read-only artifact harness.** `selfware artifact-harness` activates a
+  bounded set of source artifacts, gives each a narrow tool-free model context,
+  checks reported evidence against the delivered snapshot, and supports up to
+  three rounds of metadata-only coordination.
+
+### Security
+- Activation plans bind the eligible-source census, selected file bytes, Git
+  tree and advisory graph. Each artifact read walks from a pinned repository
+  descriptor with no-follow semantics; graph paths can rank only independently
+  eligible source files and cannot grant reads or message routes.
+- Remote source egress is denied unless the command explicitly authorizes it.
+  Remote artifact endpoints require HTTPS unless the existing trusted-LAN
+  plaintext opt-in is also present, and endpoint userinfo is refused.
+  Artifact transports ignore environment proxies, use one physical request per
+  reserved worker call, discard general-purpose `extra_body` overrides, bound
+  raw response bytes, and refuse HTTP redirects.
+  Inter-worker messages exclude model prose and source excerpts; the broker
+  may forward only bounded ASCII identifiers derived from verified evidence.
+  Workers have no tools, writes, execution, MCP, hooks or task-acceptance authority.
+- Artifact source admission rejects symlinks and multiply linked files. Walk
+  and checked-read failures are bound into the census and force a partial or
+  not-run result instead of silently shrinking a supposedly complete analysis.
+- CLI cost caps now reject zero, negative, NaN, and infinite values before a
+  run can begin.
+- Broad repository discovery rejects private coding-agent and VCS directories
+  even when one is supplied as the explicit scan root. Exact checked file reads
+  remain available for deliberate access.
+
+### Review notes (AGENTS.md rule 2)
+The user authorized the security architecture implemented here. As part of
+that boundary, broad discovery of an explicitly selected `.claude`, `.codex`,
+`.agents`, `.qwen`, `.superpowers`, `.git`, or `.selfware` root is intentionally
+removed; tests now require these roots to remain unscanned. This prevents an
+explicit-root bypass of the same private-state pruning already applied to
+nested directories.
+Broad repository discovery also intentionally omits multiply linked files so
+an innocuous in-tree hard-link name cannot re-admit bytes from private or
+out-of-root state. Exact checked file reads remain available when a caller
+deliberately names one file.
+Checkpoint replay also intentionally withholds persisted output from broad
+repository readers when that output references these private roots or the
+recorded call selected one. Replay therefore enforces the current discovery
+policy instead of restoring content that a new run would no longer discover.
+Model API POST redirects are also intentionally refused process-wide so prompts
+and credentials cannot be replayed to a different authority. The artifact
+transport additionally ignores environment proxies; operators that require a
+proxy should keep using the existing agent path until an explicit, validated
+proxy authority is available for the harness. General `extra_body` request
+extensions are intentionally ignored by the harness; use the existing agent
+path when those provider-specific controls are required.
+
 ## [0.9.7] - 2026-10-03
 
 0.9.7 is an end-to-end security and reliability release. It closes browser

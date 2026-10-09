@@ -12,10 +12,11 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::evolve::module_graph::from_lib_rs;
+use crate::evolve::module_graph::parse as parse_module_graph;
 use crate::evolve::symbols::extract_pub_symbols;
 
 /// AST symbol entry in the Collection Map.
@@ -110,10 +111,16 @@ impl TheseusScaffold {
     /// Generates the Collection Map from `root`.
     pub fn generate_collection_map(root: &Path) -> Result<CollectionMap> {
         let mut map = CollectionMap::default();
+        if crate::safety::source_context::discovery_root_is_private(root) {
+            return Ok(map);
+        }
 
         // 1. Module graph from lib.rs (if available)
-        if root.join("src/lib.rs").exists() {
-            if let Ok(manifest) = from_lib_rs(root) {
+        let lib_rs = root.join("src/lib.rs");
+        if let Ok(mut file) = crate::safety::source_context::open_broad_discovery_regular(&lib_rs) {
+            let mut source = String::new();
+            if file.read_to_string(&mut source).is_ok() {
+                let manifest = parse_module_graph(&source);
                 map.modules = manifest.modules.into_iter().map(|m| m.name).collect();
                 map.reexports = manifest.reexports.into_iter().map(|r| r.path).collect();
             }
@@ -126,7 +133,14 @@ impl TheseusScaffold {
             collect_rs_files(&src_dir, &mut rs_files, 3);
 
             for file_path in rs_files {
-                if let Ok(content) = fs::read_to_string(&file_path) {
+                let content =
+                    crate::safety::source_context::open_broad_discovery_regular(&file_path)
+                        .and_then(|mut file| {
+                            let mut content = String::new();
+                            file.read_to_string(&mut content)?;
+                            Ok(content)
+                        });
+                if let Ok(content) = content {
                     let symbols = extract_pub_symbols(&content);
                     let rel_path = file_path
                         .strip_prefix(root)
@@ -322,7 +336,10 @@ fn collect_rs_files(dir: &Path, rs_files: &mut Vec<PathBuf>, depth_left: usize) 
             if !name.starts_with('.') && name != "target" {
                 collect_rs_files(&path, rs_files, depth_left - 1);
             }
-        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && crate::safety::source_context::broad_discovery_file_is_safe(&path)
+        {
             rs_files.push(path);
         }
     }

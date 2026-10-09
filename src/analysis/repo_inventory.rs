@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path};
 
 use crate::evolve::graph::{
-    classify_repository_paths, is_tooling_module_path, repository_file_walk, rust_use_paths,
+    classify_repository_paths, is_tooling_module_path, repository_file_census_walk, rust_use_paths,
     RepositoryFileClass,
 };
 
@@ -255,7 +255,7 @@ impl RepoInventory {
     /// output (paths sorted, ties broken by path).
     pub fn scan(root: &Path) -> Result<Self> {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mut paths = repository_file_walk(&root)?;
+        let mut paths = repository_file_census_walk(&root)?;
         let gitignore = match git_visible_files(&root) {
             Some(visible) => {
                 paths.retain(|p| {
@@ -273,25 +273,54 @@ impl RepoInventory {
         let mut files: Vec<InventoryFile> = Vec::with_capacity(paths.len());
         for path in &paths {
             let rel = slash_path(path.strip_prefix(&root).unwrap_or(path));
-            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let language = language_of(&rel);
             let mut unreadable: Option<String> = None;
-            let (text, binary) = if bytes > MAX_TEXT_BYTES {
-                unreadable = Some(format!("over {}", human_bytes(MAX_TEXT_BYTES)));
-                (None, false)
-            } else {
-                match std::fs::read(path) {
-                    Ok(raw) => {
-                        let sniff = &raw[..raw.len().min(BINARY_SNIFF_BYTES)];
-                        if sniff.contains(&0) {
-                            (None, true)
-                        } else {
-                            (Some(String::from_utf8_lossy(&raw).into_owned()), false)
-                        }
-                    }
-                    Err(e) => {
-                        unreadable = Some(format!("read failed: {}", e.kind()));
+            let opened = crate::safety::source_context::open_broad_discovery_regular(path);
+            let bytes = opened
+                .as_ref()
+                .ok()
+                .and_then(|file| file.metadata().ok())
+                .map(|metadata| metadata.len())
+                .or_else(|| {
+                    std::fs::symlink_metadata(path)
+                        .ok()
+                        .map(|metadata| metadata.len())
+                })
+                .unwrap_or(0);
+            let (text, binary) = match opened {
+                Err(error) => {
+                    unreadable = Some(format!("read failed: {}", error.kind()));
+                    (None, false)
+                }
+                Ok(mut file) => {
+                    use std::io::Read;
+
+                    if bytes > MAX_TEXT_BYTES {
+                        unreadable = Some(format!("over {}", human_bytes(MAX_TEXT_BYTES)));
                         (None, false)
+                    } else {
+                        let mut raw = Vec::with_capacity(bytes as usize);
+                        match (&mut file)
+                            .take(MAX_TEXT_BYTES.saturating_add(1))
+                            .read_to_end(&mut raw)
+                        {
+                            Ok(_) if raw.len() as u64 > MAX_TEXT_BYTES => {
+                                unreadable = Some(format!("over {}", human_bytes(MAX_TEXT_BYTES)));
+                                (None, false)
+                            }
+                            Ok(_) => {
+                                let sniff = &raw[..raw.len().min(BINARY_SNIFF_BYTES)];
+                                if sniff.contains(&0) {
+                                    (None, true)
+                                } else {
+                                    (Some(String::from_utf8_lossy(&raw).into_owned()), false)
+                                }
+                            }
+                            Err(error) => {
+                                unreadable = Some(format!("read failed: {}", error.kind()));
+                                (None, false)
+                            }
+                        }
                     }
                 }
             };
@@ -2093,6 +2122,39 @@ mod tests {
         // Out of scope: not reported for that scope.
         let scoped = inv.review_plan(resolve_review_scope("review src/b", &inv));
         assert!(scoped.unreadable.is_empty());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hard_linked_code_files_are_named_unreadable_not_ingested() {
+        let dir = rust_fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let private = outside.path().join("private.rs");
+        std::fs::write(&private, "pub fn private_material() {}\n").unwrap();
+        let alias = dir.path().join("src/public_looking.rs");
+        std::fs::hard_link(&private, &alias).unwrap();
+
+        let inventory = RepoInventory::scan(dir.path()).unwrap();
+        assert!(
+            inventory
+                .unreadable
+                .iter()
+                .any(|item| item.starts_with("src/public_looking.rs (read failed")),
+            "{:?}",
+            inventory.unreadable
+        );
+        let file = inventory
+            .files
+            .iter()
+            .find(|file| file.path == "src/public_looking.rs")
+            .expect("hard-link candidate remains visible for honest coverage accounting");
+        assert!(!file.code);
+        assert!(file.unreadable.is_some());
+        assert!(inventory
+            .review_plan(ReviewScope::whole_repository())
+            .unreadable
+            .iter()
+            .any(|item| item.starts_with("src/public_looking.rs")));
     }
 
     #[test]

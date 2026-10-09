@@ -41,6 +41,13 @@ pub use tool_metadata::{
     PermissionChecker, PermissionResult, RiskLevel, ToolMetadata,
 };
 
+/// Internal bridge for standalone workspace binaries, which are separate
+/// crates and cannot call the crate-private source-context module directly.
+#[doc(hidden)]
+pub fn broad_discovery_file_is_safe(path: &std::path::Path) -> bool {
+    source_context::broad_discovery_file_is_safe(path)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/safety/mod_test.rs"]
 mod tests;

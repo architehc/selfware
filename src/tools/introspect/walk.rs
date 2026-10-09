@@ -58,6 +58,9 @@ pub(crate) fn source_files(
     max_depth: usize,
 ) -> Result<SourceWalk> {
     let mut walk = SourceWalk::default();
+    if crate::safety::source_context::discovery_root_is_private(target) {
+        return Ok(walk);
+    }
     let is_code = super::CodeIntrospect::is_source_file;
     let Ok(target_metadata) = std::fs::symlink_metadata(target) else {
         return Ok(walk);
@@ -108,7 +111,9 @@ pub(crate) fn source_files(
                 continue;
             }
             if file_type.is_file() {
-                if is_code(&path) {
+                if is_code(&path)
+                    && crate::safety::source_context::broad_discovery_file_is_safe(&path)
+                {
                     if let Some(safety) = safety {
                         validate_tool_path(&path.to_string_lossy(), safety)?;
                     }

@@ -48,6 +48,27 @@ fn census_reads_csv_headers_and_toml_and_yaml() {
     assert!(joined.contains("redact"), "{joined}");
 }
 
+#[cfg(unix)]
+#[test]
+fn census_omits_multiply_linked_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(&root, "visible.json", r#"{"visible_field": true}"#);
+    let secret = outside.path().join("secret.json");
+    std::fs::write(&secret, r#"{"outside_secret_field": true}"#).unwrap();
+    std::fs::hard_link(&secret, root.path().join("innocent.json")).unwrap();
+
+    let census = census_task_inputs(root.path());
+    let fields = census.key_paths.join("\n");
+    assert!(
+        census.truncated,
+        "an omitted input must mark the census partial"
+    );
+    assert!(fields.contains("visible_field"), "{fields}");
+    assert!(!fields.contains("outside_secret_field"), "{fields}");
+    assert!(!fields.contains("innocent.json"), "{fields}");
+}
+
 #[test]
 fn census_flags_suspicious_identifiers() {
     let dir = tempfile::tempdir().unwrap();

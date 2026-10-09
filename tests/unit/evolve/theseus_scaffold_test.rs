@@ -46,6 +46,45 @@ pub enum Operation {
     assert!(md.contains("`Calculator`"));
 }
 
+#[test]
+fn test_generate_collection_map_rejects_a_root_below_private_state() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join(".superpowers/worktrees/project");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn private_state() {}\n").unwrap();
+
+    let map = TheseusScaffold::generate_collection_map(&root).unwrap();
+
+    assert!(map.modules.is_empty());
+    assert!(map.reexports.is_empty());
+    assert!(map.symbols.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_generate_collection_map_omits_multiply_linked_source() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("src/visible.rs"),
+        "pub fn visible_symbol() {}\n",
+    )
+    .unwrap();
+    let secret = outside.path().join("secret.rs");
+    fs::write(&secret, "pub fn hard_link_secret_symbol() {}\n").unwrap();
+    fs::hard_link(&secret, root.path().join("src/linked.rs")).unwrap();
+
+    let map = TheseusScaffold::generate_collection_map(root.path()).unwrap();
+    let names: Vec<_> = map
+        .symbols
+        .iter()
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    assert!(names.contains(&"visible_symbol"), "{names:?}");
+    assert!(!names.contains(&"hard_link_secret_symbol"), "{names:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn test_generate_collection_map_does_not_follow_source_symlinks() {

@@ -874,7 +874,7 @@ impl McpServer {
             .into_iter()
             .filter_entry(|e| {
                 if e.depth() == 0 {
-                    return true;
+                    return !crate::safety::source_context::discovery_root_is_private(e.path());
                 }
                 let name = e.file_name().to_string_lossy();
                 // Skip hidden dirs, target, node_modules, etc.
@@ -902,7 +902,9 @@ impl McpServer {
                 break;
             }
             if let Ok(entry) = entry {
-                if entry.file_type().is_file() {
+                if entry.file_type().is_file()
+                    && crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+                {
                     if let Ok(relative) = entry.path().strip_prefix(&self.project_root) {
                         let rel_str = relative.to_string_lossy();
                         if !self.safety.is_path_denied(relative)
@@ -921,7 +923,9 @@ impl McpServer {
     /// Build a simple directory tree string.
     #[allow(clippy::only_used_in_recursion)]
     fn build_directory_tree(&self, path: &Path, depth: usize, max_depth: usize) -> String {
-        if depth >= max_depth {
+        if depth >= max_depth
+            || (depth == 0 && crate::safety::source_context::discovery_root_is_private(path))
+        {
             return String::new();
         }
 
@@ -960,7 +964,8 @@ impl McpServer {
                         depth + 1,
                         max_depth,
                     ));
-                } else {
+                } else if crate::safety::source_context::broad_discovery_file_is_safe(&entry.path())
+                {
                     result.push_str(&format!("{}  {}\n", indent, name));
                 }
             }

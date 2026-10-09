@@ -171,9 +171,18 @@ fn canonical_workspace_root() -> std::path::PathBuf {
 /// validate-then-reopen race. FIFOs, sockets, devices and directories are
 /// refused without blocking.
 pub(crate) fn open_checked_regular(path: &str, config: &SafetyConfig) -> Result<std::fs::File> {
+    open_checked_regular_with_path(path, config).map(|validated| validated.file)
+}
+
+/// Open a policy-checked regular file and retain the real path proven from the
+/// descriptor. Discovery callers use this to enforce an additional corpus
+/// boundary without resolving or reopening the caller-controlled path.
+pub(crate) fn open_checked_regular_with_path(
+    path: &str,
+    config: &SafetyConfig,
+) -> Result<crate::safety::path_validator::ValidatedFile> {
     tool_path_validator(config)
         .open_regular_file(path)
-        .map(|v| v.file)
         .map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -1265,7 +1274,7 @@ impl Tool for DirectoryTree {
                 .into_iter()
                 .filter_entry(|e| {
                     if e.depth() == 0 {
-                        return true;
+                        return !crate::safety::source_context::discovery_root_is_private(e.path());
                     }
                     if !crate::evolve::graph::retain_repository_entry(e) {
                         return false;

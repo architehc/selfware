@@ -15,6 +15,7 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -41,9 +42,9 @@ const GREP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Directory globs passed to ripgrep after caller-supplied globs so an
 /// include pattern cannot re-admit private state, generated output, or
 /// dependency trees during broad discovery. These mirror the shared
-/// `retain_repository_entry` policy used by the built-in backend. An
-/// explicitly selected excluded directory remains readable because ripgrep
-/// evaluates these patterns relative to that selected root.
+/// `retain_repository_entry` policy used by the built-in backend. Search
+/// entry points separately reject private roots because ripgrep evaluates
+/// these patterns relative to its selected root.
 const REPOSITORY_EXCLUSION_GLOBS: &[&str] = &[
     "!.git/",
     "!.claude/",
@@ -79,9 +80,7 @@ const REPOSITORY_EXCLUSION_GLOBS: &[&str] = &[
     "!.gnupg/",
 ];
 
-/// Root-aware pruning for the built-in backend. Depth zero is the path the
-/// caller explicitly selected; matching private directories below it are
-/// discovery noise and are pruned before descent.
+/// Root-aware pruning for the built-in backend.
 fn retain_grep_entry(entry: &walkdir::DirEntry) -> bool {
     crate::evolve::graph::retain_repository_entry(entry)
 }
@@ -193,6 +192,15 @@ fn run_ripgrep(
     exclude_pattern: Option<&str>,
     safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
+    let broad_discovery = Path::new(path).is_dir();
+    if broad_discovery && crate::safety::source_context::discovery_root_is_private(Path::new(path))
+    {
+        return Ok(GrepSearchResult {
+            matches: Vec::new(),
+            total_matches: 0,
+            file_count: 0,
+        });
+    }
     let mut cmd = build_rg_command(
         pattern,
         path,
@@ -265,6 +273,11 @@ fn run_ripgrep(
         if file.is_empty() {
             continue;
         }
+        if broad_discovery
+            && !crate::safety::source_context::broad_discovery_file_is_safe(Path::new(&file))
+        {
+            continue;
+        }
         let policy_allows = match safety {
             None => true,
             Some(s) => validate_tool_path(&file, s).is_ok(),
@@ -320,15 +333,43 @@ fn run_ripgrep(
     let mut files_read: HashMap<String, Vec<String>> = HashMap::new();
 
     for raw in window {
-        let lines = files_read.entry(raw.file.clone()).or_insert_with(|| {
-            std::fs::read_to_string(&raw.file)
-                .unwrap_or_default()
-                .lines()
-                .map(|s| s.to_string())
-                .collect()
-        });
+        if !files_read.contains_key(&raw.file) {
+            let content = if broad_discovery {
+                let mut file = match crate::safety::source_context::open_broad_discovery_regular(
+                    Path::new(&raw.file),
+                ) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                let mut content = String::new();
+                if file.read_to_string(&mut content).is_err() {
+                    continue;
+                }
+                content
+            } else {
+                match std::fs::read_to_string(&raw.file) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                }
+            };
+            files_read.insert(
+                raw.file.clone(),
+                content.lines().map(str::to_string).collect(),
+            );
+        }
+        let Some(lines) = files_read.get(&raw.file) else {
+            continue;
+        };
 
         let line_idx = raw.line.saturating_sub(1) as usize;
+        let Some(current_line) = lines.get(line_idx) else {
+            continue;
+        };
+        // Bind rg's subprocess output back to the checked descriptor. If the
+        // path changed between rg's read and ours, omit the stale result.
+        if current_line != raw.content.trim_end_matches('\r') {
+            continue;
+        }
         let start = line_idx.saturating_sub(context_lines);
         let end = (line_idx + context_lines + 1).min(lines.len());
 
@@ -348,7 +389,7 @@ fn run_ripgrep(
             file: raw.file,
             line: raw.line,
             column: raw.column,
-            content: raw.content,
+            content: current_line.clone(),
             context_before,
             context_after,
         });
@@ -614,10 +655,18 @@ fn run_builtin_grep(
         .context("Invalid exclude pattern")?;
 
     let path = Path::new(path_str);
+    let exact_file = path.is_file();
+    if !exact_file && crate::safety::source_context::discovery_root_is_private(path) {
+        return Ok(GrepSearchResult {
+            matches: Vec::new(),
+            total_matches: 0,
+            file_count: 0,
+        });
+    }
     let mut matches = Vec::new();
     let mut total_matches = 0;
 
-    let files: Vec<_> = if path.is_file() {
+    let files: Vec<_> = if exact_file {
         vec![path.to_path_buf()]
     } else {
         let walker = if recursive {
@@ -672,7 +721,17 @@ fn run_builtin_grep(
         .collect();
 
     for file_path in files {
-        let content = match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
+        let content = match tokio::task::block_in_place(|| {
+            if exact_file {
+                std::fs::read_to_string(&file_path)
+            } else {
+                let mut file =
+                    crate::safety::source_context::open_broad_discovery_regular(&file_path)?;
+                let mut content = String::new();
+                file.read_to_string(&mut content)?;
+                Ok(content)
+            }
+        }) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -798,7 +857,7 @@ mod private_state_walk_tests {
     }
 
     #[tokio::test]
-    async fn broad_grep_prunes_private_state_but_explicit_root_remains_readable() {
+    async fn broad_grep_and_explicit_private_roots_prune_private_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write(&temp.path().join("public.txt"), "private_state_marker\n");
         for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
@@ -832,7 +891,18 @@ mod private_state_walk_tests {
             }))
             .await
             .expect("explicit private grep root");
-        assert_eq!(explicit["matches"].as_array().expect("matches").len(), 1);
+        assert!(explicit["matches"].as_array().expect("matches").is_empty());
+
+        let exact_private_file = temp.path().join(".claude/private.txt");
+        let exact = tool
+            .execute(serde_json::json!({
+                "pattern": "private_state_marker",
+                "path": exact_private_file,
+                "include": "*.txt"
+            }))
+            .await
+            .expect("exact private file grep");
+        assert_eq!(exact["matches"].as_array().expect("matches").len(), 1);
 
         let builtin_root = temp.path().to_path_buf();
         let builtin = tokio::task::spawn_blocking(move || {
@@ -872,7 +942,7 @@ mod private_state_walk_tests {
         .await
         .expect("builtin task")
         .expect("builtin explicit private grep");
-        assert_eq!(builtin.matches.len(), 1);
+        assert!(builtin.matches.is_empty());
     }
 
     #[test]
@@ -892,6 +962,83 @@ mod private_state_walk_tests {
                 .position(|arg| arg == private)
                 .unwrap_or_else(|| panic!("missing private exclusion {private}: {args:?}"));
             assert!(position > include, "{args:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_backends_omit_hard_links_but_exact_file_search_remains_available() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        write(
+            &root.path().join("visible.txt"),
+            "hard_link_marker visible\n",
+        );
+        let secret = outside.path().join("secret.txt");
+        write(&secret, "hard_link_marker secret\n");
+        let linked = root.path().join("linked.txt");
+        std::fs::hard_link(&secret, &linked).expect("hard link");
+
+        let builtin = run_builtin_grep(
+            "hard_link_marker",
+            root.path().to_str().expect("utf8 root"),
+            true,
+            false,
+            0,
+            20,
+            0,
+            None,
+            None,
+            None,
+        )
+        .expect("builtin broad grep");
+        assert_eq!(builtin.matches.len(), 1, "{:?}", builtin.matches);
+        assert!(builtin.matches[0].file.ends_with("visible.txt"));
+
+        let exact = run_builtin_grep(
+            "hard_link_marker",
+            linked.to_str().expect("utf8 link"),
+            true,
+            false,
+            0,
+            20,
+            0,
+            None,
+            None,
+            None,
+        )
+        .expect("builtin exact grep");
+        assert_eq!(exact.matches.len(), 1);
+
+        if rg_available() {
+            let external = run_ripgrep(
+                "hard_link_marker",
+                root.path().to_str().expect("utf8 root"),
+                false,
+                0,
+                20,
+                0,
+                None,
+                None,
+                None,
+            )
+            .expect("external broad grep");
+            assert_eq!(external.matches.len(), 1, "{:?}", external.matches);
+            assert!(external.matches[0].file.ends_with("visible.txt"));
+
+            let exact = run_ripgrep(
+                "hard_link_marker",
+                linked.to_str().expect("utf8 link"),
+                false,
+                0,
+                20,
+                0,
+                None,
+                None,
+                None,
+            )
+            .expect("external exact grep");
+            assert_eq!(exact.matches.len(), 1);
         }
     }
 }

@@ -1451,14 +1451,19 @@ impl CitationResolver {
                 .into_iter()
                 .filter_entry(|e| {
                     let name = e.file_name().to_string_lossy();
-                    e.depth() == 0
-                        || !(name.starts_with('.')
-                            || name == "target"
-                            || name == "node_modules"
-                            || name == "__pycache__")
+                    (e.depth() == 0
+                        && !crate::safety::source_context::discovery_root_is_private(e.path()))
+                        || (e.depth() > 0
+                            && !(name.starts_with('.')
+                                || name == "target"
+                                || name == "node_modules"
+                                || name == "__pycache__"))
                 });
             for entry in walker.flatten() {
-                if entry.file_type().is_file() && !entry.path_is_symlink() {
+                if entry.file_type().is_file()
+                    && !entry.path_is_symlink()
+                    && crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+                {
                     entries.push(entry.into_path());
                     if entries.len() >= MAX_INDEX_ENTRIES {
                         break;

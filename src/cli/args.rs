@@ -6,6 +6,16 @@ use crate::config::ExecutionMode;
 
 pub(crate) const DEFAULT_MULTI_CHAT_CONCURRENCY: usize = 4;
 
+fn parse_positive_finite_f64(value: &str) -> Result<f64, String> {
+    let parsed: f64 = value
+        .parse()
+        .map_err(|_| format!("invalid number: {value}"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err("value must be a finite number greater than 0".to_string());
+    }
+    Ok(parsed)
+}
+
 /// Clap value parser rejecting zero — for counts that must be >= 1
 /// (e.g. `evolve --generations`, where 0 used to mean "infinite").
 #[cfg(feature = "self-improvement")]
@@ -115,7 +125,12 @@ pub(crate) struct Cli {
     pub(crate) max_wall_secs: Option<u64>,
 
     /// Maximum provider-reported USD cost before stopping (e.g. OpenRouter usage.cost)
-    #[arg(long, global = true, help_heading = "Limits")]
+    #[arg(
+        long,
+        global = true,
+        value_parser = parse_positive_finite_f64,
+        help_heading = "Limits"
+    )]
     pub(crate) max_cost_usd: Option<f64>,
 
     /// Resume a named chat session (alias for `selfware chat --resume <name>`)
@@ -438,6 +453,38 @@ pub(crate) enum Commands {
         /// Maximum concurrent agents (1-16)
         #[arg(short = 'n', long, default_value_t = DEFAULT_MULTI_CHAT_CONCURRENCY)]
         concurrency: usize,
+    },
+
+    /// Run bounded, read-only artifact workers over a repository task
+    #[command(display_order = 17)]
+    ArtifactHarness {
+        /// Task for the artifact workers to investigate
+        task: String,
+
+        /// Repository path to inspect
+        #[arg(long, default_value = ".")]
+        path: String,
+
+        /// Maximum analysis and typed message-reactivation rounds (1-3)
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u8).range(1..=3)
+        )]
+        rounds: u8,
+
+        /// Maximum artifacts to activate per run (1-8)
+        #[arg(
+            long,
+            default_value_t = 4,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=8)
+        )]
+        max_artifacts: usize,
+
+        /// Allow selected source, relative paths, and hashes to be sent to a
+        /// non-local model endpoint
+        #[arg(long)]
+        allow_remote_source_egress: bool,
     },
 
     /// Analyze a codebase

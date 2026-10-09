@@ -139,6 +139,21 @@ async fn test_semantic_memory_index_skips_hidden_dirs() {
 }
 
 #[tokio::test]
+async fn test_semantic_memory_rejects_root_below_private_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".codex/worktrees/project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("private.rs"), "fn private_state() {}").unwrap();
+
+    let sm = SemanticMemory::new();
+    sm.index_codebase(&root).await.unwrap();
+
+    let ctx = sm.retrieve_code_context("q", 100_000, false).await.unwrap();
+    assert!(ctx.files.is_empty());
+    assert_eq!(ctx.total_tokens, 0);
+}
+
+#[tokio::test]
 async fn test_semantic_memory_language_detection() {
     let tmp = tempfile::tempdir().unwrap();
     let base = test_dir(&tmp);

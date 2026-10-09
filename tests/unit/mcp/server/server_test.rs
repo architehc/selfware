@@ -989,6 +989,40 @@ fn test_build_directory_tree() {
     assert!(tree.contains('/'));
 }
 
+#[cfg(unix)]
+#[test]
+fn project_inventories_omit_hard_links_but_exact_resource_reads_remain_available() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("visible.txt"), "visible").unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "HARD_LINK_SECRET").unwrap();
+    std::fs::hard_link(&secret, root.path().join("linked.txt")).unwrap();
+    let server = McpServer::with_project_root_and_safety_config(
+        root.path().to_path_buf(),
+        crate::config::SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..crate::config::SafetyConfig::default()
+        },
+    );
+
+    let files = server.list_project_files();
+    assert!(files.iter().any(|path| path == "visible.txt"), "{files:?}");
+    assert!(!files.iter().any(|path| path == "linked.txt"), "{files:?}");
+    let tree = server.build_directory_tree(root.path(), 0, 2);
+    assert!(tree.contains("visible.txt"), "{tree}");
+    assert!(!tree.contains("linked.txt"), "{tree}");
+
+    let (resource, error) =
+        server.read_project_file("selfware://project/file/linked.txt", "linked.txt");
+    assert!(error.is_none(), "{error:?}");
+    assert!(resource
+        .as_ref()
+        .and_then(|value| value.pointer("/contents/0/text"))
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("HARD_LINK_SECRET")));
+}
+
 /// Verify that a cloned `McpServer` (as used by per-request tasks)
 /// shares the `initialized` flag — i.e. that `initialize` on one clone
 /// is visible to all others.  This is the core concurrency invariant.

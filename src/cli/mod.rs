@@ -13,8 +13,9 @@ use std::sync::mpsc;
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+use std::path::Path;
 #[cfg(feature = "bench-harness")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules
@@ -1175,6 +1176,7 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
                 | Commands::Boot { .. }
                 | Commands::Test { .. }
                 | Commands::Status
+                | Commands::ArtifactHarness { .. }
         )
     );
     if is_diagnostic {
@@ -1223,6 +1225,25 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
 fn endpoint_is_local(endpoint: &str) -> bool {
     // URL-parsed (the loader's predicate), never a substring match.
     crate::config::is_local_endpoint(endpoint)
+}
+
+/// Reject global entry modes that would otherwise swallow the dedicated
+/// artifact-harness subcommand and silently run a different agent surface.
+fn artifact_harness_flag_conflict(cli: &Cli) -> Option<&'static str> {
+    if !matches!(cli.command, Some(Commands::ArtifactHarness { .. })) {
+        return None;
+    }
+    if cli.prompt.is_some() {
+        return Some(
+            "-p/--prompt cannot be combined with `artifact-harness`; pass the task as the subcommand's TASK argument",
+        );
+    }
+    if cli.tui {
+        return Some(
+            "--tui cannot be combined with `artifact-harness`; the artifact harness is a bounded headless command",
+        );
+    }
+    None
 }
 
 /// Parse task-file contents into a list of tasks.
@@ -1597,6 +1618,10 @@ pub async fn run() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
+
+    if let Some(reason) = artifact_harness_flag_conflict(&cli) {
+        anyhow::bail!(reason);
+    }
 
     // Apply --no-color early to disable all color output
     if cli.no_color || std::env::var("NO_COLOR").is_ok() {
@@ -2133,6 +2158,11 @@ pub async fn run() -> Result<()> {
         eprintln!(
             "note: --max-turns has no effect in multi-chat mode \
              (each agent makes a single completion)"
+        );
+    }
+    if cli.max_turns.is_some() && matches!(cli.command, Some(Commands::ArtifactHarness { .. })) {
+        eprintln!(
+            "note: --max-turns has no effect in artifact-harness mode; use --rounds to bound analysis and typed message reactivation"
         );
     }
 
@@ -3358,6 +3388,44 @@ async fn handle_command(
                 multi_agent.interactive_swarm().await?;
             } else {
                 multi_agent.interactive().await?;
+            }
+        }
+
+        Commands::ArtifactHarness {
+            task,
+            path,
+            rounds,
+            max_artifacts,
+            allow_remote_source_egress,
+        } => {
+            let report = crate::orchestration::primitives::run_artifact_harness(
+                &config,
+                &task,
+                Path::new(&path),
+                rounds,
+                max_artifacts,
+                allow_remote_source_egress,
+            )
+            .await?;
+            match output_format {
+                HeadlessOutputFormat::Text => {
+                    let rendered = report.render_text(quiet);
+                    if !rendered.is_empty() {
+                        println!("{rendered}");
+                    }
+                }
+                HeadlessOutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                HeadlessOutputFormat::StreamJson => {
+                    println!("{}", serde_json::to_string(&report)?);
+                }
+            }
+            if !report.analysis_succeeded() {
+                anyhow::bail!(
+                    "artifact harness did not complete every planned analysis call ({:?})",
+                    report.status
+                );
             }
         }
 

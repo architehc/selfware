@@ -3337,9 +3337,8 @@ impl Agent {
                     args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
                 // Collect matching files from context map. The bounded walk
-                // never follows symlinks and prunes private coding-agent
-                // state unless the literal prefix of the caller's pattern
-                // explicitly selects that private directory.
+                // never follows symlinks and rejects private coding-agent
+                // state both as a selected root and below a broader root.
                 let root = super::current_project_root();
                 let paths = context_bulk_read_paths(&root, pattern, max_files);
 
@@ -5088,9 +5087,8 @@ impl Agent {
 }
 
 /// Return the non-pattern prefix of a project-relative glob. Walking from
-/// that prefix makes a literal `.claude` (or sibling private directory) an
-/// explicit depth-zero root, while `**/*.rs` starts at the project root and
-/// prunes the same directory before descent.
+/// that prefix keeps normal narrow globs efficient; private roots and private
+/// descendants are rejected by the shared repository discovery policy.
 fn context_glob_scan_root(root: &std::path::Path, pattern: &str) -> Option<std::path::PathBuf> {
     use std::path::Component;
 
@@ -5171,10 +5169,14 @@ fn context_bulk_read_paths(
         require_literal_leading_dot: false,
     };
 
-    let mut paths = Vec::new();
+    // Keep only the lexicographically first `max_files` matches. WalkDir's
+    // `sort_by_file_name` buffers every sibling in a directory before yielding
+    // any entry, so one hostile wide directory could defeat this caller's
+    // advertised file bound. A max-heap makes the result deterministic with
+    // O(max_files) retained paths regardless of directory width.
+    let mut paths = std::collections::BinaryHeap::new();
     for entry in walkdir::WalkDir::new(scan_root)
         .follow_links(false)
-        .sort_by_file_name()
         .into_iter()
         .filter_entry(retain_context_bulk_entry)
         .filter_map(Result::ok)
@@ -5186,13 +5188,16 @@ fn context_bulk_read_paths(
             continue;
         };
         if glob.matches_path_with(relative, options) {
-            paths.push(relative.to_path_buf());
-            if paths.len() >= max_files {
-                break;
+            let relative = relative.to_path_buf();
+            if paths.len() < max_files {
+                paths.push(relative);
+            } else if paths.peek().is_some_and(|largest| relative < *largest) {
+                paths.pop();
+                paths.push(relative);
             }
         }
     }
-    paths
+    paths.into_sorted_vec()
 }
 
 #[cfg(test)]
@@ -5205,7 +5210,7 @@ mod private_context_glob_tests {
     }
 
     #[test]
-    fn broad_glob_prunes_private_state_but_literal_private_root_is_readable() {
+    fn broad_glob_and_literal_private_root_prune_private_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write(&temp.path().join("src/visible.rs"));
         for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
@@ -5221,9 +5226,22 @@ mod private_context_glob_tests {
         );
 
         let explicit = context_bulk_read_paths(temp.path(), ".claude/**/*.rs", 20);
+        assert!(explicit.is_empty());
+    }
+
+    #[test]
+    fn context_glob_cap_keeps_a_deterministic_lexical_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for name in ["z.rs", "b.rs", "m.rs", "a.rs"] {
+            write(&temp.path().join("src").join(name));
+        }
+
         assert_eq!(
-            explicit,
-            vec![std::path::PathBuf::from(".claude/private.rs")]
+            context_bulk_read_paths(temp.path(), "src/**/*.rs", 2),
+            vec![
+                std::path::PathBuf::from("src/a.rs"),
+                std::path::PathBuf::from("src/b.rs")
+            ]
         );
     }
 

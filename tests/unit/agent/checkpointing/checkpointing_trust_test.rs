@@ -196,11 +196,13 @@ async fn restored_patch_apply_output_obeys_policy_for_its_diff_targets() {
 }
 
 #[tokio::test]
-async fn restored_broad_walk_with_private_state_is_withheld_but_explicit_root_is_preserved() {
+async fn restored_broad_walk_and_explicit_private_root_are_withheld() {
     let mut agent = agent().await;
     let broad_payload = r#"{"entries":[{"path":".claude/history/private.json","secret":"BROAD_PRIVATE_SENTINEL"}]}"#;
+    // Old explicit-root walkers could serialize entries relative to their
+    // selected root, so the payload alone need not repeat `.claude`.
     let explicit_payload =
-        r#"{"entries":[{"path":".claude/README.md","content":"EXPLICIT_PRIVATE_SENTINEL"}]}"#;
+        r#"{"entries":[{"path":"README.md","content":"EXPLICIT_PRIVATE_SENTINEL"}]}"#;
     let mut messages = vec![
         native_tool_call("broad", "directory_tree", serde_json::json!({"path":"."})),
         Message::tool(broad_payload, "broad"),
@@ -223,16 +225,76 @@ async fn restored_broad_walk_with_private_state_is_withheld_but_explicit_root_is
         .content
         .text_all()
         .contains("broad scans no longer read"));
-    assert!(messages[3]
+    // Rule 2 behavior change: broad discovery no longer reads an explicit
+    // private root, so checkpoint replay intentionally removes the formerly
+    // preserved payload as well.
+    assert!(!messages[3]
         .content
         .text_all()
         .contains("EXPLICIT_PRIVATE_SENTINEL"));
+    assert!(messages[3]
+        .content
+        .text_all()
+        .contains("broad scans no longer read"));
     assert_eq!(
         messages[4].content.text(),
         "Please discuss the literal path .claude/history/private.json",
         "ordinary user-authored messages are not checkpoint migration targets"
     );
-    assert_eq!(agent.trust_gate_findings, 1);
+    assert_eq!(agent.trust_gate_findings, 2);
+}
+
+#[tokio::test]
+async fn restored_exact_private_file_grep_is_preserved_but_ambiguous_targets_are_withheld() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let private_dir = workspace.path().join(".claude");
+    std::fs::create_dir(&private_dir).expect("private directory");
+    std::fs::write(private_dir.join("private.txt"), "EXACT_PRIVATE_SENTINEL\n")
+        .expect("private file");
+
+    let mut agent = agent().await;
+    agent
+        .tools
+        .set_workspace_root(crate::tools::workspace_root::WorkspaceRoot::fixed(
+            workspace.path(),
+        ));
+    let mut messages = vec![
+        native_tool_call(
+            "exact",
+            "grep_search",
+            serde_json::json!({"path":".claude/private.txt","pattern":"SENTINEL"}),
+        ),
+        Message::tool(
+            r#"{"matches":[{"file":".claude/private.txt","content":"EXACT_PRIVATE_SENTINEL"}]}"#,
+            "exact",
+        ),
+        native_tool_call(
+            "directory",
+            "grep_search",
+            serde_json::json!({"path":".claude","pattern":"SENTINEL"}),
+        ),
+        Message::tool("DIRECTORY_PRIVATE_SENTINEL", "directory"),
+        native_tool_call(
+            "missing",
+            "grep_search",
+            serde_json::json!({"path":".claude/missing.txt","pattern":"SENTINEL"}),
+        ),
+        Message::tool("MISSING_PRIVATE_SENTINEL", "missing"),
+    ];
+
+    agent.sanitize_restored_tool_messages(&mut messages, &[]);
+
+    assert!(messages[1]
+        .content
+        .text_all()
+        .contains("EXACT_PRIVATE_SENTINEL"));
+    for index in [3, 5] {
+        assert!(messages[index]
+            .content
+            .text_all()
+            .contains("broad scans no longer read"));
+    }
+    assert_eq!(agent.trust_gate_findings, 2);
 }
 
 #[tokio::test]

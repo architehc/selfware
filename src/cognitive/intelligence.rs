@@ -14,6 +14,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -1177,8 +1178,11 @@ impl ProjectIntelligence {
 
         // Parse Cargo.toml
         let cargo_path = self.root.join("Cargo.toml");
-        if cargo_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&cargo_path) {
+        if let Ok(mut file) =
+            crate::safety::source_context::open_broad_discovery_regular(&cargo_path)
+        {
+            let mut content = String::new();
+            if file.read_to_string(&mut content).is_ok() {
                 if let Ok(deps) = DependencyGraph::parse(&content) {
                     if let Ok(mut graph) = self.dependencies.write() {
                         *graph = deps;
@@ -1219,7 +1223,7 @@ impl ProjectIntelligence {
             .into_iter()
             .filter_entry(|e| {
                 if e.depth() == 0 {
-                    return true;
+                    return !crate::safety::source_context::discovery_root_is_private(e.path());
                 }
                 let name = e.file_name().to_string_lossy();
                 !name.starts_with('.') && name != "target" && name != "node_modules"
@@ -1228,15 +1232,35 @@ impl ProjectIntelligence {
         {
             if entry.file_type().is_file() {
                 let path = entry.path().to_path_buf();
-                if let Ok(file_entry) = FileEntry::from_path(path.clone()) {
-                    file_index.add(file_entry);
+                let Ok(mut file) =
+                    crate::safety::source_context::open_broad_discovery_regular(&path)
+                else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                let Ok(modified) = metadata.modified() else {
+                    continue;
+                };
+                let extension = path.extension().map(|e| e.to_string_lossy().to_string());
+                let language = extension.as_ref().and_then(|e| detect_language(e));
+                file_index.add(FileEntry {
+                    path: path.clone(),
+                    size: metadata.len(),
+                    modified: modified.into(),
+                    extension,
+                    language,
+                    lines: None,
+                });
 
-                    // Index Rust files for symbols and patterns
-                    if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            self.index_rust_symbols(&mut symbol_index, &path, &content);
-                            pattern_detector.analyze(&path, &content);
-                        }
+                // Index Rust files for symbols and patterns from the same
+                // descriptor whose link count was checked above.
+                if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                    let mut content = String::new();
+                    if file.read_to_string(&mut content).is_ok() {
+                        self.index_rust_symbols(&mut symbol_index, &path, &content);
+                        pattern_detector.analyze(&path, &content);
                     }
                 }
             }

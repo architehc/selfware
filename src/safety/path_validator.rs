@@ -83,6 +83,38 @@ pub(crate) fn fd_real_path(file: &std::fs::File, fallback: &Path) -> std::io::Re
     fallback.canonicalize()
 }
 
+/// Resolve the final path from the opened Windows handle. Unlike
+/// `canonicalize(path)`, this cannot be redirected by swapping the pathname
+/// after `File::open` returns.
+#[cfg(windows)]
+pub(crate) fn fd_real_path(file: &std::fs::File, _fallback: &Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    // SAFETY: the handle is live and owned by `file`; a null output buffer
+    // asks Windows for the required UTF-16 size.
+    let required = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u16; required as usize + 1];
+    // SAFETY: `buffer` is writable for the supplied length and `handle`
+    // remains live throughout the call.
+    let written =
+        unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+    if written == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    buffer.truncate(written as usize);
+
+    // Keep Windows' verbatim `\\?\` form. `std::fs::canonicalize` uses the
+    // same representation, so descriptor paths remain comparable with the
+    // canonical repository root and retain their exact UNC/drive semantics.
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
+}
+
 /// Refusal for a path that exists but is not a regular file (FIFO, socket,
 /// device, directory). Reading a FIFO blocks forever; writing through a
 /// device node is never what a file tool means.
@@ -878,9 +910,9 @@ impl PathValidator {
             }
         }
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let real_path = fd_real_path(&file, &target)?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let real_path = canonicalize_or_fail(&target)?;
 
         self.validate(&real_path.to_string_lossy())?;

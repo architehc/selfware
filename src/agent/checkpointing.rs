@@ -38,7 +38,7 @@ pub(crate) fn backend_mismatch_warning(
 }
 
 const RESTORED_PRIVATE_STATE_WITHHELD: &str =
-    "[trust-gate: restored repository output withheld because it referenced private coding-tool state that broad scans no longer read]";
+    "[trust-gate: restored repository output withheld because it referenced private repository state that broad scans no longer read]";
 const RESTORED_PRIVATE_CONTEXT_WITHHELD: &str =
     "[trust-gate: restored context file withheld because automatic context loading no longer reads private coding-tool state]";
 
@@ -46,14 +46,14 @@ const RESTORED_PRIVATE_CONTEXT_WITHHELD: &str =
 /// `.claude-example.md` do not turn an unrelated restored message into a
 /// false positive. Tool output can be JSON, a tree, or plain text, hence the
 /// small tokenizer instead of parsing one particular result schema.
-fn references_private_tool_state_path(text: &str) -> bool {
+fn references_private_discovery_state_path(text: &str) -> bool {
     text.split(|character: char| {
         !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | '\\' | '~'))
     })
     .filter(|token| !token.is_empty())
     .any(|token| {
         token.split(['/', '\\']).any(|component| {
-            crate::safety::source_context::is_private_tool_state_dir_name(std::ffi::OsStr::new(
+            crate::safety::source_context::is_private_discovery_dir_name(std::ffi::OsStr::new(
                 component,
             ))
         })
@@ -78,22 +78,45 @@ fn generated_context_references_private_state(message: &Message, text: &str) -> 
     // label; old checkpoints stored it verbatim.
     if let Some(label) = text.lines().find_map(|line| line.strip_prefix("// FILE: ")) {
         let decoded = serde_json::from_str::<String>(label).unwrap_or_else(|_| label.to_string());
-        return references_private_tool_state_path(&decoded);
+        return references_private_discovery_state_path(&decoded);
     }
 
     // An internally named generated message without its required header is
     // malformed. If its remaining body names private state, fail closed.
-    internally_named && references_private_tool_state_path(text)
+    internally_named && references_private_discovery_state_path(text)
 }
 
 /// Repository-derived tools that could have persisted private paths or source
 /// before the shared walker policy excluded coding-tool state.
-fn is_repository_wide_reader(tool_name: &str) -> bool {
+///
+/// `grep_search` is broad only when its selected path is not an existing,
+/// regular, non-symlink file in this agent's workspace. Live grep deliberately
+/// preserves explicit-file reads (including files under otherwise private
+/// discovery roots), so checkpoint replay must preserve the same boundary.
+/// Missing, malformed, directory, and symlink targets remain broad/fail-closed.
+fn is_repository_wide_reader(
+    tool_name: &str,
+    arguments: &str,
+    workspace_root: &crate::tools::workspace_root::WorkspaceRoot,
+) -> bool {
+    if tool_name == "grep_search" {
+        let exact_regular_file = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|arguments| {
+                arguments
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|path| workspace_root.resolve(std::path::Path::new(path)))
+            })
+            .and_then(|path| std::fs::symlink_metadata(path).ok())
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        return !exact_regular_file;
+    }
+
     tool_name.starts_with("lsp_")
         || matches!(
             tool_name,
             "directory_tree"
-                | "grep_search"
                 | "glob_find"
                 | "symbol_search"
                 | "search"
@@ -118,20 +141,20 @@ fn is_repository_wide_reader(tool_name: &str) -> bool {
         )
 }
 
-fn value_explicitly_selects_private_state(value: &serde_json::Value) -> bool {
+fn value_selects_private_discovery_state(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(value) => references_private_tool_state_path(value),
+        serde_json::Value::String(value) => references_private_discovery_state_path(value),
         serde_json::Value::Array(values) => {
-            values.iter().any(value_explicitly_selects_private_state)
+            values.iter().any(value_selects_private_discovery_state)
         }
         _ => false,
     }
 }
 
-/// A private directory remains readable when the caller explicitly selected
-/// it. Preserve that intent across resume, but do not mistake a search query
-/// for a selected root (for example grep pattern `.claude` under `.`).
-fn arguments_explicitly_select_private_state(tool_name: &str, arguments: &str) -> bool {
+/// Detect a persisted repository-wide call whose selected root is private
+/// under today's discovery policy. The result must be withheld even when its
+/// entries are relative and do not repeat the private root in their payload.
+fn arguments_select_private_discovery_state(tool_name: &str, arguments: &str) -> bool {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return false;
     };
@@ -142,9 +165,16 @@ fn arguments_explicitly_select_private_state(tool_name: &str, arguments: &str) -
         "filename",
         "target",
         "root",
+        "root_path",
+        "repo_path",
+        "project_root",
+        "workspace_root",
+        "workspace",
         "scope",
+        "codebase_root",
         "directory",
         "dir",
+        "focus",
         "paths",
         "files",
         "node",
@@ -153,14 +183,14 @@ fn arguments_explicitly_select_private_state(tool_name: &str, arguments: &str) -
     if PATH_KEYS.iter().any(|key| {
         arguments
             .get(*key)
-            .is_some_and(value_explicitly_selects_private_state)
+            .is_some_and(value_selects_private_discovery_state)
     }) {
         return true;
     }
     matches!(tool_name, "glob_find" | "context_bulk_read")
         && arguments
             .get("pattern")
-            .is_some_and(value_explicitly_selects_private_state)
+            .is_some_and(value_selects_private_discovery_state)
 }
 
 fn replace_restored_message_content(message: &mut Message, replacement: &str, xml: bool) {
@@ -256,15 +286,16 @@ impl Agent {
             let Some((tool_name, arguments)) = provenance else {
                 continue;
             };
-            // A legacy broad repository result can pass today's path check via
-            // its allowed root (`.`) while its persisted payload still names
-            // nested private state. Keep explicit private-root reads, whose
-            // provenance proves user selection; fail closed when provenance
-            // is absent or the old tool walked a broader root.
-            if references_private_tool_state_path(&text)
-                && ((tool_name == "restored_tool")
-                    || (is_repository_wide_reader(&tool_name)
-                        && !arguments_explicitly_select_private_state(&tool_name, &arguments)))
+            // A legacy repository result can pass today's path check via its
+            // old allowed root while its payload still contains state that
+            // broad discovery now excludes. Explicit private roots are also
+            // withheld: replay must enforce the current policy, including
+            // relative result entries that omit their private root.
+            let references_private_state = references_private_discovery_state_path(&text);
+            if (tool_name == "restored_tool" && references_private_state)
+                || (is_repository_wide_reader(&tool_name, &arguments, self.tools.workspace_root())
+                    && (references_private_state
+                        || arguments_select_private_discovery_state(&tool_name, &arguments)))
             {
                 replace_restored_message_content(
                     message,
@@ -274,7 +305,7 @@ impl Agent {
                 self.trust_gate_findings = self.trust_gate_findings.saturating_add(1);
                 warn!(
                     tool = %tool_name,
-                    "Withheld restored broad repository output that referenced private coding-tool state"
+                    "Withheld restored broad repository output that referenced private repository state"
                 );
                 continue;
             }

@@ -35,7 +35,10 @@ fn main() {
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
-            if entry.depth() == 0 || !entry.file_type().is_dir() {
+            if entry.depth() == 0 {
+                return !discovery_root_is_private(entry.path());
+            }
+            if !entry.file_type().is_dir() {
                 return true;
             }
             !matches!(
@@ -58,6 +61,7 @@ fn main() {
         if entry.file_type().is_file()
             && !entry.path_is_symlink()
             && path.extension().is_some_and(|ext| ext == "rs")
+            && selfware::safety::broad_discovery_file_is_safe(&path)
         {
             files.push(path);
         }
@@ -412,6 +416,21 @@ fn main() {
     println!("  Lines: {}", total_lines);
     println!("  Tokens (est): {}", total_tokens);
     println!("  Fusion groups: {}", fusion_groups.len());
+}
+
+fn discovery_root_is_private(path: &std::path::Path) -> bool {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved.components().any(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        name.to_str().is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                ".git" | ".selfware" | ".claude" | ".codex" | ".agents" | ".qwen" | ".superpowers"
+            )
+        })
+    })
 }
 
 fn path_to_module_id(path: &Path) -> String {

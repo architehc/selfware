@@ -15,6 +15,7 @@
 //! injected directive names selfware as its source. Firing on every small task
 //! taxed ordinary code/review runs with manifest-accounting prose.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -98,6 +99,10 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
         suspicious_identifiers: Vec::new(),
         truncated: false,
     };
+    if crate::safety::source_context::discovery_root_is_private(root) {
+        census.truncated = true;
+        return census;
+    }
 
     let walker = walkdir::WalkDir::new(root)
         .max_depth(CENSUS_MAX_DEPTH)
@@ -110,17 +115,31 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
         });
 
     let mut files_seen = 0usize;
-    'files: for entry in walker.filter_map(|e| e.ok()) {
+    'files: for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                census.truncated = true;
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
+        let path = entry.path();
+        let mut file = match crate::safety::source_context::open_broad_discovery_regular(path) {
+            Ok(file) => file,
+            Err(_) => {
+                census.truncated = true;
+                continue;
+            }
+        };
         if files_seen >= CENSUS_MAX_FILES || census.key_paths.len() >= CENSUS_MAX_ENTRIES {
             census.truncated = true;
             break 'files;
         }
         files_seen += 1;
 
-        let path = entry.path();
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -138,17 +157,26 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
             }
         }
 
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.len() > CENSUS_MAX_FILE_BYTES {
-            continue;
-        }
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let Ok(text) = std::fs::read_to_string(path) else {
+        if !matches!(ext.as_str(), "json" | "yaml" | "yml" | "toml" | "csv") {
+            continue;
+        }
+        let Ok(meta) = file.metadata() else {
+            census.truncated = true;
             continue;
         };
+        if meta.len() > CENSUS_MAX_FILE_BYTES {
+            census.truncated = true;
+            continue;
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            census.truncated = true;
+            continue;
+        }
 
         match ext.as_str() {
             "json" => {
@@ -515,7 +543,9 @@ pub(crate) fn collect_gate_outputs(root: &Path, diff_paths: Option<Vec<String>>)
                     .into_iter()
                     .filter_map(|e| e.ok())
                 {
-                    if entry.file_type().is_file() {
+                    if entry.file_type().is_file()
+                        && crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+                    {
                         out.push(entry.path().to_path_buf());
                         if out.len() >= MAX_GATE_OUTPUT_FILES {
                             return out;

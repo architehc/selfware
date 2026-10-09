@@ -97,6 +97,26 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 ╰───────────────────────────────────────────────────────────╯
 ```
 
+### Read-only Artifact Harness (`selfware artifact-harness`)
+
+For repository analysis that benefits from narrow per-file contexts, the
+artifact harness activates a bounded set of relevant files and runs tool-free
+model calls against sanitized, hash-bound snapshots:
+
+```bash
+selfware artifact-harness "trace cache invalidation across the request path"
+selfware artifact-harness "review the parser" --rounds 3 --max-artifacts 6
+# Required when the configured model endpoint is not loopback:
+selfware artifact-harness "review the parser" --allow-remote-source-egress
+```
+
+Reported findings need exact source evidence. Later rounds receive only
+broker-generated coordination metadata; model prose and source quotes never
+travel between workers. Remote endpoints are denied unless source egress is
+explicitly authorized. The harness cannot edit files, run commands, or declare
+a coding task verified. Secure artifact traversal is currently Unix-only. See
+[the architecture and security model](docs/artifact-harness.md).
+
 ---
 
 ## Quick Start
@@ -1451,6 +1471,7 @@ bash system_tests/projecte2e/run_full_sab.sh
 |---------|-------|-------------|
 | `selfware chat` | `c` | Interactive chat session |
 | `selfware multi-chat` | `m` | Multi-agent swarm chat |
+| `selfware artifact-harness <task>` | | Read-only, evidence-bound artifact analysis |
 | `selfware run <task>` | `r` | Execute a specific task |
 | `selfware analyze <path>` | `a` | Survey codebase structure |
 | `selfware garden` | | View code as a digital garden |

@@ -12,6 +12,7 @@
 #![allow(unused_imports)] // Re-exports are for public API, not internal use
 
 pub mod multiagent;
+pub(crate) mod primitives;
 pub mod swarm;
 pub mod visual_loop;
 pub mod workflows;

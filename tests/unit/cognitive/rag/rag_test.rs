@@ -234,7 +234,7 @@ async fn full_and_incremental_scans_prune_private_tool_state() {
 }
 
 #[tokio::test]
-async fn explicitly_selected_private_named_root_remains_scannable() {
+async fn explicitly_selected_private_named_root_is_not_broadly_scanned() {
     let parent = tempdir().unwrap();
     let root = parent.path().join(".claude");
     std::fs::create_dir(&root).unwrap();
@@ -252,16 +252,59 @@ async fn explicitly_selected_private_named_root_remains_scannable() {
     let mut engine = RagEngine::new(&root, provider, config.clone());
 
     let stats = engine.build_index().await.unwrap();
-    assert_eq!(stats.total_files, 1);
-    assert_eq!(
-        engine.indexed_files.keys().collect::<Vec<_>>(),
-        vec![&visible]
-    );
+    assert_eq!(stats.total_files, 0);
+    assert!(engine.indexed_files.is_empty());
 
     let mut watcher = FileWatcher::new(&root, config);
     let changes = watcher.scan_changes();
-    assert_eq!(changes.len(), 1);
-    assert!(matches!(&changes[0], FileChange::Added(path) if path == &visible));
+    assert!(changes.is_empty());
+}
+
+#[tokio::test]
+async fn root_nested_below_private_state_is_not_broadly_scanned() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join(".claude/worktrees/project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("visible.rs"), "fn visible() {}").unwrap();
+
+    let config = RagConfig {
+        include_extensions: vec!["rs".into()],
+        exclude_patterns: Vec::new(),
+        ..Default::default()
+    };
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let mut engine = RagEngine::new(&root, provider, config.clone());
+
+    let stats = engine.build_index().await.unwrap();
+    assert_eq!(stats.total_files, 0);
+    assert!(engine.indexed_files.is_empty());
+    assert!(FileWatcher::new(&root, config).scan_changes().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_alias_to_private_state_is_not_broadly_scanned() {
+    use std::os::unix::fs::symlink;
+
+    let parent = tempdir().unwrap();
+    let private_root = parent.path().join(".agents/worktrees/project");
+    std::fs::create_dir_all(&private_root).unwrap();
+    std::fs::write(private_root.join("private.rs"), "fn private_state() {}").unwrap();
+    let alias = parent.path().join("public-project-alias");
+    symlink(&private_root, &alias).unwrap();
+
+    let config = RagConfig {
+        include_extensions: vec!["rs".into()],
+        exclude_patterns: Vec::new(),
+        ..Default::default()
+    };
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let mut engine = RagEngine::new(&alias, provider, config.clone());
+
+    let stats = engine.build_index().await.unwrap();
+    assert_eq!(stats.total_files, 0);
+    assert!(engine.indexed_files.is_empty());
+    assert!(FileWatcher::new(&alias, config).scan_changes().is_empty());
 }
 
 #[tokio::test]
@@ -269,13 +312,12 @@ async fn load_scrubs_each_stale_path_class_and_update_reindexes_current_files() 
     let mut cases = vec!["private", "deleted", "excluded", "outside"];
     #[cfg(unix)]
     cases.push("symlink");
+    #[cfg(any(unix, windows))]
+    cases.push("hardlink");
 
     for case in cases {
         let parent = tempdir().unwrap();
-        // An explicitly selected root is allowed even when its own name is a
-        // private-state name. Only private directories nested below it are
-        // excluded.
-        let root = parent.path().join(".claude");
+        let root = parent.path().join("project");
         let storage = parent.path().join("cache");
         std::fs::create_dir(&root).unwrap();
         let visible = root.join("visible.rs");
@@ -308,6 +350,12 @@ async fn load_scrubs_each_stale_path_class_and_update_reindexes_current_files() 
             "symlink" => {
                 let path = root.join("linked.rs");
                 std::fs::write(&path, "fn symlink_cache_sentinel() {}").unwrap();
+                path
+            }
+            #[cfg(any(unix, windows))]
+            "hardlink" => {
+                let path = root.join("hardlinked.rs");
+                std::fs::write(&path, "fn hardlink_cache_sentinel() {}").unwrap();
                 path
             }
             _ => unreachable!(),
@@ -353,6 +401,10 @@ async fn load_scrubs_each_stale_path_class_and_update_reindexes_current_files() 
             std::fs::write(&target, "fn external_symlink_target() {}").unwrap();
             std::fs::remove_file(&stale).unwrap();
             std::os::unix::fs::symlink(&target, &stale).unwrap();
+        }
+        #[cfg(any(unix, windows))]
+        if case == "hardlink" {
+            std::fs::hard_link(&stale, outside.path().join("hardlink-alias.rs")).unwrap();
         }
         std::fs::write(&visible, "fn current_version() {}").unwrap();
 
@@ -425,6 +477,39 @@ async fn full_and_incremental_scans_skip_file_and_directory_symlinks() {
     let changes = watcher.scan_changes();
     assert_eq!(changes.len(), 1);
     assert!(matches!(&changes[0], FileChange::Added(path) if path == &visible));
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn full_and_incremental_scans_skip_multiply_linked_files() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join("project");
+    let outside = parent.path().join("outside");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+
+    let private_dir = root.join(".codex");
+    std::fs::create_dir(&private_dir).unwrap();
+    let private = private_dir.join("private.rs");
+    std::fs::write(&private, "fn private_state() {}").unwrap();
+    std::fs::hard_link(&private, root.join("public-looking.rs")).unwrap();
+
+    let external = outside.join("external.rs");
+    std::fs::write(&external, "fn external_state() {}").unwrap();
+    std::fs::hard_link(&external, root.join("external-looking.rs")).unwrap();
+
+    let config = RagConfig {
+        include_extensions: vec!["rs".into()],
+        exclude_patterns: Vec::new(),
+        ..Default::default()
+    };
+    let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+    let mut engine = RagEngine::new(&root, provider, config.clone());
+
+    let stats = engine.build_index().await.unwrap();
+    assert_eq!(stats.total_files, 0);
+    assert!(engine.indexed_files.is_empty());
+    assert!(FileWatcher::new(&root, config).scan_changes().is_empty());
 }
 
 #[tokio::test]

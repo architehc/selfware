@@ -704,6 +704,41 @@ serde = "1.0"
     // File indexing depends on walkdir behavior with temp dirs
 }
 
+#[cfg(unix)]
+#[test]
+fn project_intelligence_omits_discovered_hard_links() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    let visible = src.join("visible.rs");
+    std::fs::write(&visible, "pub fn visible_symbol() {}\n").unwrap();
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, "pub fn hard_link_secret_symbol() {}\n").unwrap();
+    let linked = src.join("linked.rs");
+    std::fs::hard_link(&secret, &linked).unwrap();
+
+    let mut intel = ProjectIntelligence::new(root.path().to_path_buf());
+    intel.refresh().unwrap();
+
+    let files = intel
+        .files()
+        .read()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(files.get(&visible).is_some());
+    assert!(files.get(&linked).is_none());
+    drop(files);
+    let symbols = intel
+        .symbols()
+        .read()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(symbols.get("visible_symbol").is_some());
+    assert!(symbols.get("hard_link_secret_symbol").is_none());
+
+    // The exact-file API remains available for a caller that names the file.
+    assert!(FileEntry::from_path(linked).is_ok());
+}
+
 #[test]
 fn test_project_intelligence_index_files_manually() {
     let intel = ProjectIntelligence::new(PathBuf::from("/tmp/test"));

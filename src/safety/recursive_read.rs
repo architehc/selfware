@@ -388,7 +388,7 @@ fn vet_root(
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 {
-                return true;
+                return !crate::safety::source_context::discovery_root_is_private(e.path());
             }
             let name = e.file_name().to_string_lossy();
             match plan.walk {
@@ -435,6 +435,19 @@ fn vet_root(
         };
         let rel = display_path(root, &root_path, entry.path());
         let is_dir = entry.file_type().is_dir();
+        // A recursively discovered hard link can give private or out-of-root
+        // bytes an innocuous name. Refuse the whole recursive command when
+        // the discovered file identity cannot be confined. Depth zero is an
+        // explicitly selected file and retains the ordinary exact-read path.
+        if entry.depth() > 0
+            && entry.file_type().is_file()
+            && !crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+        {
+            return Some(format!(
+                "`{}` would read `{rel}` whose file identity is not safe for broad discovery",
+                plan.program
+            ));
+        }
         let mut candidates = vec![rel.clone()];
         if entry.path_is_symlink() {
             if let Ok(target) = std::fs::read_link(entry.path()) {

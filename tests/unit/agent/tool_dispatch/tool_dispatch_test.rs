@@ -16,6 +16,20 @@ fn workspace_fingerprint_ignores_private_tool_state() {
 }
 
 #[test]
+fn workspace_fingerprint_ignores_a_root_below_private_state() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join(".claude/worktrees/project");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("private.rs");
+    std::fs::write(&source, "x").unwrap();
+    let before = workspace_fingerprint(&root).unwrap();
+
+    std::fs::write(&source, "content whose size definitely changed").unwrap();
+
+    assert_eq!(before, workspace_fingerprint(&root).unwrap());
+}
+
+#[test]
 fn confirm_response_requires_explicit_yolo_word() {
     use super::{parse_confirm_response, ConfirmDecision};
     assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);

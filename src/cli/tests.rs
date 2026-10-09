@@ -318,6 +318,22 @@ fn cli_trailing_max_budget_flags_after_run() {
     assert_eq!(cli.max_cost_usd, Some(0.5));
 }
 
+#[test]
+fn cli_rejects_non_finite_or_non_positive_cost_caps() {
+    use clap::Parser;
+
+    for value in ["NaN", "inf", "-inf", "0", "-0.5"] {
+        let parsed = Cli::try_parse_from([
+            "selfware",
+            "artifact-harness",
+            "inspect",
+            "--max-cost-usd",
+            value,
+        ]);
+        assert!(parsed.is_err(), "cost cap {value:?} must be rejected");
+    }
+}
+
 // ── apply_cli_limit_overrides tests ──
 // Regression: the CLI used to write clap's `None` over the loaded config, so
 // budgets set only in selfware.toml never applied (a TOML-only
@@ -940,6 +956,138 @@ fn cli_prompt_combined_with_multi_chat_parses() {
         Commands::MultiChat { task, .. } => assert!(task.is_none()),
         other => panic!("Expected MultiChat, got {:?}", other),
     }
+}
+
+#[test]
+fn cli_artifact_harness_parses_defaults_and_global_output_format() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "artifact-harness",
+        "trace the request path",
+        "--output-format",
+        "json",
+    ])
+    .unwrap();
+
+    assert_eq!(cli.output_format, HeadlessOutputFormat::Json);
+    match cli.command.unwrap() {
+        Commands::ArtifactHarness {
+            task,
+            path,
+            rounds,
+            max_artifacts,
+            allow_remote_source_egress,
+        } => {
+            assert_eq!(task, "trace the request path");
+            assert_eq!(path, ".");
+            assert_eq!(rounds, 1);
+            assert_eq!(max_artifacts, 4);
+            assert!(!allow_remote_source_egress);
+        }
+        other => panic!("Expected ArtifactHarness, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_artifact_harness_parses_explicit_bounds() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "artifact-harness",
+        "review the policy boundary",
+        "--path",
+        "fixtures/repo",
+        "--rounds",
+        "3",
+        "--max-artifacts",
+        "8",
+        "--allow-remote-source-egress",
+    ])
+    .unwrap();
+
+    match cli.command.unwrap() {
+        Commands::ArtifactHarness {
+            task,
+            path,
+            rounds,
+            max_artifacts,
+            allow_remote_source_egress,
+        } => {
+            assert_eq!(task, "review the policy boundary");
+            assert_eq!(path, "fixtures/repo");
+            assert_eq!(rounds, 3);
+            assert_eq!(max_artifacts, 8);
+            assert!(allow_remote_source_egress);
+        }
+        other => panic!("Expected ArtifactHarness, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_artifact_harness_rejects_out_of_range_rounds() {
+    use clap::Parser;
+    for rounds in ["0", "4"] {
+        let parsed = Cli::try_parse_from([
+            "selfware",
+            "artifact-harness",
+            "inspect",
+            "--rounds",
+            rounds,
+        ]);
+        assert!(parsed.is_err(), "rounds={rounds} must be rejected");
+    }
+}
+
+#[test]
+fn cli_artifact_harness_rejects_out_of_range_artifact_counts() {
+    use clap::Parser;
+    for max_artifacts in ["0", "9"] {
+        let parsed = Cli::try_parse_from([
+            "selfware",
+            "artifact-harness",
+            "inspect",
+            "--max-artifacts",
+            max_artifacts,
+        ]);
+        assert!(
+            parsed.is_err(),
+            "max-artifacts={max_artifacts} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn cli_artifact_harness_rejects_prompt_and_tui_entry_modes() {
+    use clap::Parser;
+
+    let prompt_cli = Cli::try_parse_from([
+        "selfware",
+        "-p",
+        "wrong entry path",
+        "artifact-harness",
+        "inspect",
+    ])
+    .unwrap();
+    let prompt_error = artifact_harness_flag_conflict(&prompt_cli).unwrap();
+    assert!(
+        prompt_error.contains("cannot be combined"),
+        "{prompt_error}"
+    );
+    assert!(prompt_error.contains("TASK"), "{prompt_error}");
+
+    let tui_cli =
+        Cli::try_parse_from(["selfware", "--tui", "artifact-harness", "inspect"]).unwrap();
+    let tui_error = artifact_harness_flag_conflict(&tui_cli).unwrap();
+    assert!(tui_error.contains("--tui"), "{tui_error}");
+    assert!(tui_error.contains("headless"), "{tui_error}");
+}
+
+#[test]
+fn artifact_harness_skips_auto_calibration() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "artifact-harness", "inspect"]).unwrap();
+    assert!(should_skip_calibration(&cli, &Config::default()));
 }
 
 // ── P1-4: one-shot fan-out against a mock LLM endpoint ──

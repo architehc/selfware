@@ -23,8 +23,8 @@ fn estimate_tool_definitions_tokens_opt(tools: Option<&Vec<ToolDefinition>>) -> 
 use super::streaming::StreamingResponse;
 use super::types::*;
 use super::{
-    attach_tools_to_body, canonicalize_message_order, maybe_prepend_disabled_thinking_instruction,
-    merge_extra_body, LlmClient, ThinkingMode,
+    attach_tools_to_body, canonicalize_message_order, estimate_request_message_tokens,
+    merge_extra_body, prepare_request_messages, LlmClient, ThinkingMode,
 };
 
 /// Print a request body to stderr when the configured debug `requests`
@@ -162,6 +162,15 @@ pub struct SideCall {
     /// whole 12,288-token budget reasoning and answered nothing, and the
     /// "thinking off" retry did the same for 2 of them).
     pub thinking_off: bool,
+    /// Maximum physical HTTP attempts within one transport invocation. The
+    /// gateway wrapper below may start one additional invocation unless
+    /// `retry_gateway_timeout` is disabled.
+    pub max_attempts: u32,
+    /// Whether the wrapper may retry one typed gateway timeout with a smaller
+    /// output budget after the transport loop returns it.
+    pub retry_gateway_timeout: bool,
+    /// Optional cap on raw streamed response bytes, including SSE framing.
+    pub response_byte_limit: Option<usize>,
 }
 
 impl SideCall {
@@ -182,6 +191,9 @@ impl SideCall {
             thinking_workload: None,
             thinking: ThinkingMode::Disabled,
             thinking_off: false,
+            max_attempts: 2,
+            retry_gateway_timeout: true,
+            response_byte_limit: None,
         }
     }
 
@@ -211,6 +223,20 @@ impl SideCall {
 
     pub fn time_cap_secs(mut self, secs: u64) -> Self {
         self.time_cap_secs = secs.max(1);
+        self
+    }
+
+    /// Permit exactly one physical request. This is required when the caller
+    /// reserves a hard token/cost budget per request.
+    pub fn single_attempt(mut self) -> Self {
+        self.max_attempts = 1;
+        self.retry_gateway_timeout = false;
+        self
+    }
+
+    /// Bound raw response bytes before the SSE parser or collector can grow.
+    pub fn response_byte_limit(mut self, bytes: usize) -> Self {
+        self.response_byte_limit = Some(bytes.max(1));
         self
     }
 
@@ -363,13 +389,14 @@ pub(crate) fn apply_side_call_bounds(body: &mut serde_json::Value, max_tokens: u
 
 /// Per-request knobs for the streaming send loop. The main turn uses the
 /// session retry count and `agent.max_call_secs`; a side call uses its own
-/// short cap, at most one retry, and returns a gateway timeout immediately
-/// (the side-call wrapper retries it once with a reduced budget).
+/// short cap and explicit attempt budget, and returns a gateway timeout to
+/// the wrapper, which may make one reduced-budget retry when enabled.
 #[derive(Debug, Clone, Copy)]
 struct StreamSendOpts {
     call_cap_secs: Option<u64>,
     max_attempts: u32,
     side_call: bool,
+    response_byte_limit: Option<usize>,
 }
 
 /// Typed cap error when a per-call timeout was actually the configured
@@ -716,11 +743,46 @@ pub fn extra_body_pins_reasoning(
 
 impl ApiClient {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
+        Self::new_with_transport_policy(config, false)
+    }
+
+    /// Build the model transport used for source-bearing artifact calls.
+    /// Environment proxies are disabled so a loopback endpoint remains local;
+    /// redirects are disabled for every API client because replaying a POST can
+    /// move prompts and credentials to a different authority.
+    pub(crate) fn new_for_artifact_harness(config: &crate::config::Config) -> Result<Self> {
+        // The artifact runtime reserves one bounded completion against the
+        // measured messages it constructs. General-purpose `extra_body`
+        // fields can add unmeasured schemas, re-enable thinking, multiply
+        // generations (`best_of`/beam search), or route to another provider.
+        // Remove them from both top-level and named profiles at this authority
+        // boundary instead of trying to maintain a growing denylist.
+        let mut artifact_config = config.clone();
+        artifact_config.extra_body = None;
+        for profile in artifact_config.models.values_mut() {
+            profile.extra_body = None;
+        }
+        Self::new_with_transport_policy(&artifact_config, true)
+    }
+
+    fn new_with_transport_policy(
+        config: &crate::config::Config,
+        disable_environment_proxies: bool,
+    ) -> Result<Self> {
+        let disable_environment_proxies =
+            disable_environment_proxies || crate::config::is_local_endpoint(&config.endpoint);
         // Total-timeout client, used only by the short FIM `complete` path.
         let request_timeout = config.agent.step_timeout_secs.max(60);
-        let client = Client::builder()
+        let client_builder = Client::builder()
             .timeout(Duration::from_secs(request_timeout))
             .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none());
+        let client_builder = if disable_environment_proxies {
+            client_builder.no_proxy()
+        } else {
+            client_builder
+        };
+        let client = client_builder
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -729,8 +791,15 @@ impl ApiClient {
         // header timeout + per-chunk stall detection; non-streaming: a generous
         // header/response `tokio::time::timeout`) so a slow-but-healthy
         // generation from a local model is never aborted mid-flight.
-        let stream_client = Client::builder()
+        let stream_client_builder = Client::builder()
             .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none());
+        let stream_client_builder = if disable_environment_proxies {
+            stream_client_builder.no_proxy()
+        } else {
+            stream_client_builder
+        };
+        let stream_client = stream_client_builder
             .build()
             .context("Failed to build streaming HTTP client")?;
 
@@ -1224,7 +1293,7 @@ impl ApiClient {
         // Compute the prompt-token estimate before `messages` is moved into
         // `build_chat_body` so the progress event reports the actual outgoing
         // size (messages + tool definitions).
-        let estimated_tokens = estimate_messages_tokens(&messages)
+        let estimated_tokens = estimate_request_message_tokens(&messages, thinking)
             + estimate_tool_definitions_tokens_opt(tools.as_ref());
         let body = self.build_chat_body(messages, tools, thinking, false)?;
         maybe_log_request_body(&self.config.debug, &body, "chat");
@@ -1366,9 +1435,7 @@ impl ApiClient {
         thinking: ThinkingMode,
         stream: bool,
     ) -> Result<serde_json::Value> {
-        let mut messages = messages;
-        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
-        canonicalize_message_order(&mut messages);
+        let messages = prepare_request_messages(messages, thinking);
 
         let message_tokens = estimate_messages_tokens(&messages);
         let tool_tokens = tools
@@ -1504,7 +1571,7 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<(StreamingResponse, ChatMetadata)> {
         crate::safety::killswitch::check_killswitch(None)?;
-        let estimated_tokens = estimate_messages_tokens(&messages)
+        let estimated_tokens = estimate_request_message_tokens(&messages, thinking)
             + estimate_tool_definitions_tokens_opt(tools.as_ref());
         let body = self.build_chat_body(messages, tools, thinking, true)?;
         maybe_log_request_body(&self.config.debug, &body, "chat_stream");
@@ -1603,7 +1670,7 @@ impl ApiClient {
         #[cfg(not(test))]
         let tick = crate::agent::llm_wait::LLM_WAIT_TICK;
         let mut wait_ticker = LlmWaitTicker::with_interval(tokio::time::Instant::now(), tick);
-        let estimated_tokens = estimate_messages_tokens(&messages);
+        let estimated_tokens = estimate_request_message_tokens(&messages, spec.thinking);
         let mut body = self.build_chat_body(messages, None, spec.thinking, true)?;
         let mut max_tokens = spec.max_tokens;
         apply_side_call_bounds(&mut body, max_tokens);
@@ -1640,8 +1707,9 @@ impl ApiClient {
                 });
             let opts = StreamSendOpts {
                 call_cap_secs: Some(remaining.as_secs().max(1)),
-                max_attempts: 2,
+                max_attempts: spec.max_attempts,
                 side_call: true,
+                response_byte_limit: spec.response_byte_limit,
             };
             let attempt_body = body.clone();
             let call = async {
@@ -1700,7 +1768,7 @@ impl ApiClient {
                     Some(ApiError::GatewayTimeout { .. })
                 )
             });
-            if is_gateway && !gateway_retry_used {
+            if is_gateway && spec.retry_gateway_timeout && !gateway_retry_used {
                 gateway_retry_used = true;
                 max_tokens = (max_tokens / 2).max(1024).min(max_tokens);
                 apply_side_call_bounds(&mut body, max_tokens);
@@ -1723,6 +1791,7 @@ impl ApiClient {
             // chat_with_profile, leaving the knob inert on the streaming path.
             max_attempts: self.effective_max_retries() + 1,
             side_call: false,
+            response_byte_limit: None,
         }
     }
 
@@ -1880,7 +1949,8 @@ impl ApiClient {
                                         // applies, so the reported limit matches
                                         // the deadline it came from.
                                         self.config.agent.max_wall_secs.map(|s| s.max(1)),
-                                    ),
+                                    )
+                                    .with_response_byte_limit(opts.response_byte_limit),
                                     body,
                                 ));
                             }
@@ -2771,15 +2841,14 @@ impl ApiClient {
         let _call_timing =
             self.usage_ledger
                 .timing_guard(&profile.model, "chat_with_profile", Instant::now());
-        let mut messages: Vec<Message> = if !profile.supports_vision() {
+        let messages: Vec<Message> = if !profile.supports_vision() {
             messages.iter().map(|m| m.strip_images()).collect()
         } else {
             messages
         };
 
         // Apply the same message normalization as the main chat path.
-        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
-        canonicalize_message_order(&mut messages);
+        let messages = prepare_request_messages(messages, thinking);
 
         // Context budgeting: cap output tokens to what the profile can produce.
         let message_tokens = estimate_messages_tokens(&messages);

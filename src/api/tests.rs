@@ -5655,6 +5655,94 @@ async fn side_chat_is_streamed_and_bounded_on_the_wire() {
     server.stop().await;
 }
 
+#[tokio::test]
+async fn side_chat_single_attempt_sends_once_on_retryable_failure() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    async fn assert_one_request(body: &str) {
+        let server = MockLlmServer::builder()
+            .with_error(503, body)
+            .with_response("must not be reached")
+            .build()
+            .await;
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config)
+            .unwrap()
+            .with_retry_config(fast_retry_config(3));
+
+        client
+            .side_chat(
+                vec![Message::user("audit this")],
+                client::SideCall::new("artifact_primitive").single_attempt(),
+            )
+            .await
+            .expect_err("the first 503 must be returned without a retry");
+
+        assert_eq!(
+            server.captured_request_bodies().await.len(),
+            1,
+            "single_attempt must permit exactly one physical request for {body}"
+        );
+        server.stop().await;
+    }
+
+    // Exercise both retry layers: the ordinary transport retry policy and the
+    // side-call wrapper's special reduced-budget gateway retry.
+    assert_one_request("Service Unavailable").await;
+    assert_one_request(NGROK_3004_BODY).await;
+}
+
+#[tokio::test]
+async fn artifact_client_drops_general_extra_body_authority() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("checked")
+        .build()
+        .await;
+    let mut config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    config.extra_body = serde_json::json!({
+        "best_of": 64,
+        "use_beam_search": true,
+        "guided_json": {"type": "object", "padding": "x".repeat(100_000)},
+        "provider": {"order": ["untrusted-upstream"]},
+        "chat_template_kwargs": {"enable_thinking": true}
+    })
+    .as_object()
+    .cloned();
+
+    let client = ApiClient::new_for_artifact_harness(&config).unwrap();
+    client
+        .side_chat(
+            vec![Message::user("bounded artifact")],
+            client::SideCall::new("artifact_primitive")
+                .max_tokens(32)
+                .single_attempt()
+                .thinking_off(),
+        )
+        .await
+        .unwrap();
+
+    let bodies = server.captured_request_bodies().await;
+    server.stop().await;
+    assert_eq!(bodies.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    for key in ["best_of", "use_beam_search", "guided_json", "provider"] {
+        assert!(body.get(key).is_none(), "artifact request retained {key}");
+    }
+    assert_ne!(
+        body.pointer("/chat_template_kwargs/enable_thinking"),
+        Some(&serde_json::Value::Bool(true)),
+        "artifact request re-enabled hidden thinking"
+    );
+}
+
 /// A review shard's retry must switch thinking off in the request where the
 /// endpoint takes the switch (a workload table sets `enable_thinking`), and
 /// never send the key to an endpoint that is not known to take it.
@@ -5828,6 +5916,78 @@ async fn side_chat_dripping_stream_is_cut_at_the_cap_and_typed() {
         "expected SideCallTimeout, got {err:?}"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn side_chat_response_byte_limit_rejects_oversized_unterminated_sse() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&request).to_lowercase();
+            if let Some(header_end) = text.find("\r\n\r\n") {
+                let content_length: usize = text[..header_end]
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+
+        // Deliberately omit the SSE event terminator. Without a byte limit,
+        // a provider can grow this parser buffer for the life of the stream.
+        let body = format!("data: {}", "x".repeat(512));
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
+    });
+    let config = crate::config::Config {
+        endpoint: format!("http://{addr}/v1"),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .side_chat(
+            vec![Message::user("read this")],
+            client::SideCall::new("artifact_primitive")
+                .single_attempt()
+                .response_byte_limit(64),
+        )
+        .await
+        .expect_err("an oversized unterminated SSE event must be rejected");
+    let parse_message = err.chain().find_map(|cause| {
+        if let crate::errors::ApiError::Parse(message) =
+            cause.downcast_ref::<crate::errors::ApiError>()?
+        {
+            Some(message.as_str())
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        parse_message,
+        Some("provider stream exceeded the 64-byte response limit"),
+        "expected a typed byte-limit failure, got {err:?}"
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test]

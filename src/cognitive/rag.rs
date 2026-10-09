@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -31,14 +32,29 @@ use crate::token_count::estimate_content_tokens;
 /// particular, repository-local AI/tool state is private implementation data,
 /// and symlinks must not make a repository scan escape its selected root.
 fn indexable_files(watcher: &FileWatcher) -> Vec<PathBuf> {
+    if crate::safety::source_context::discovery_root_is_private(&watcher.root) {
+        return Vec::new();
+    }
+
     WalkDir::new(&watcher.root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| !entry.file_type().is_symlink() && !watcher.is_excluded(entry.path()))
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file() && watcher.is_included(entry.path()))
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && watcher.is_included(entry.path())
+                && crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+        })
         .map(|entry| entry.into_path())
         .collect()
+}
+
+fn read_indexable_text(path: &Path) -> std::io::Result<String> {
+    let mut file = crate::safety::source_context::open_broad_discovery_regular(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
 }
 
 fn is_excluded_path(path: &Path, config: &RagConfig) -> bool {
@@ -279,6 +295,13 @@ impl FileWatcher {
     pub fn new(root: impl Into<PathBuf>, config: RagConfig) -> Self {
         Self {
             tracked_files: HashMap::new(),
+            // Preserve the caller's path spelling as the public identity of
+            // discovered files. On macOS, canonicalizing `/var` to
+            // `/private/var` here made full builds, watcher events, persisted
+            // chunk paths, and explicit file arguments disagree about the
+            // same file. The discovery trust gate separately checks both the
+            // supplied and canonical root, so retaining this spelling does
+            // not weaken alias-to-private-state rejection.
             root: root.into(),
             config,
         }
@@ -349,11 +372,7 @@ impl FileWatcher {
 
     /// Check if path is excluded
     fn is_excluded(&self, path: &Path) -> bool {
-        // The selected scan root is explicit user input. Only private state
-        // nested below it is pruned; otherwise a checkout intentionally kept
-        // under (for example) ~/.claude/worktrees would appear empty.
-        let relative = path.strip_prefix(&self.root).unwrap_or(path);
-        if crate::safety::source_context::path_contains_private_tool_state(relative) {
+        if crate::safety::source_context::path_contains_private_discovery_state(path) {
             return true;
         }
         is_excluded_path(path, &self.config)
@@ -476,7 +495,7 @@ impl RagEngine {
             // Full-build statistics describe the staged index that will be
             // published. A failed read or a concurrent source change aborts
             // the build instead of returning partial success.
-            let content = std::fs::read_to_string(&path)
+            let content = read_indexable_text(&path)
                 .with_context(|| format!("Failed to read {} for RAG statistics", path.display()))
                 .context("RAG full index rebuild failed; previous index retained")?;
             let metadata = path
@@ -624,7 +643,7 @@ impl RagEngine {
             self.stats.total_tokens = self
                 .indexed_files
                 .keys()
-                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .filter_map(|path| read_indexable_text(path).ok())
                 .map(|content| estimate_content_tokens(&content))
                 .sum();
             self.stats.files_by_language.clear();
@@ -856,9 +875,9 @@ impl RagEngine {
         // not let chunks for files which the current scan would refuse reach
         // search: that includes deleted/excluded files, nested private tool
         // state, symlinks, and paths outside the explicitly selected root.
-        // Comparing against the walk result also preserves the important
-        // root semantic: a root named `.claude` is allowed, while a nested
-        // `.codex` below it is not.
+        // Comparing against the walk result also applies the current root
+        // policy to legacy cache entries: explicit private discovery roots,
+        // canonical aliases to them, and nested private state are all denied.
         let allowed_paths: HashSet<PathBuf> = indexable_files(&self.watcher).into_iter().collect();
         let disallowed_paths: HashSet<PathBuf> = self
             .store

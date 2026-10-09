@@ -712,3 +712,18 @@ mod fd_checked_io {
         assert!(err.contains("FIFO"), "error should name the FIFO: {err}");
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn descriptor_real_path_matches_the_opened_windows_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("opened.txt");
+    std::fs::write(&path, "bound to this handle").unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+
+    let from_handle = super::fd_real_path(&file, &path).unwrap();
+    assert_eq!(
+        crate::safety::checker::normalize_path(&from_handle),
+        crate::safety::checker::normalize_path(&path)
+    );
+}

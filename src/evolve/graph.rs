@@ -367,7 +367,6 @@ pub(crate) fn repository_source_inventory(
     let mut paths = Vec::new();
     let walker = walkdir::WalkDir::new(project_root)
         .follow_links(false)
-        .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
             retain_repository_entry(entry)
@@ -429,7 +428,23 @@ pub(crate) fn classify_repository_paths(
 /// filter (`selfware.toml`, `.env*`, credential files) — WITHOUT the graph's
 /// source-format allowlist, so docs and data count too. Sorted. Binary
 /// detection is the caller's concern (nothing here opens a file).
+#[cfg(test)]
 pub(crate) fn repository_file_walk(project_root: &Path) -> Result<Vec<PathBuf>> {
+    repository_file_walk_impl(project_root, false)
+}
+
+/// Inventory-oriented repository walk that keeps unsafe or unreadable file
+/// candidates so the caller can report incomplete coverage without consuming
+/// their bytes. Directory pruning and private-file exclusions remain the same
+/// as the ordinary repository walk.
+pub(crate) fn repository_file_census_walk(project_root: &Path) -> Result<Vec<PathBuf>> {
+    repository_file_walk_impl(project_root, true)
+}
+
+fn repository_file_walk_impl(
+    project_root: &Path,
+    keep_rejected_file_candidates: bool,
+) -> Result<Vec<PathBuf>> {
     let root_metadata = std::fs::symlink_metadata(project_root)?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         anyhow::bail!("repository root must be a real directory");
@@ -438,10 +453,10 @@ pub(crate) fn repository_file_walk(project_root: &Path) -> Result<Vec<PathBuf>> 
     let mut paths = Vec::new();
     let walker = walkdir::WalkDir::new(project_root)
         .follow_links(false)
-        .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
-            retain_repository_entry(entry)
+            (keep_rejected_file_candidates && entry.file_type().is_file()
+                || retain_repository_entry(entry))
                 && visibility
                     .as_ref()
                     .is_none_or(|visible| visible.retains(entry, project_root))
@@ -547,12 +562,19 @@ pub(crate) fn repository_relative_path_supported(path: &Path) -> bool {
 }
 
 /// Prune generated, dependency, private tool-state, and Python-environment
-/// directories before descent. The explicit scan root remains user-selected
-/// input even when its own name or marker would normally be pruned. This is
-/// discovery pruning, not a restriction on explicitly requested reads.
+/// directories before descent. Generated/dependency directories remain valid
+/// explicit roots, but private agent/VCS state is never a broad-discovery root;
+/// callers that need one exact private file must use an explicit checked read.
 pub(crate) fn retain_repository_entry(entry: &walkdir::DirEntry) -> bool {
-    entry.depth() == 0
-        || !entry.file_type().is_dir()
+    if entry.depth() == 0 {
+        return !crate::safety::source_context::discovery_root_is_private(entry.path());
+    }
+    if entry.file_type().is_file()
+        && !crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+    {
+        return false;
+    }
+    !entry.file_type().is_dir()
         || (!is_excluded_repository_directory(entry.file_name())
             && !entry.path().join("pyvenv.cfg").is_file())
 }
@@ -611,7 +633,7 @@ impl GitVisibleRepository {
 }
 
 pub(crate) fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
-    if crate::safety::source_context::is_private_tool_state_dir_name(name) {
+    if crate::safety::source_context::is_private_discovery_dir_name(name) {
         return true;
     }
     let name = name.to_str().unwrap_or_default();
@@ -623,9 +645,7 @@ pub(crate) fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
     }
     matches!(
         name,
-        ".git"
-            | ".selfware"
-            | ".worktrees"
+        ".worktrees"
             // NOTE: `scratchpad` is deliberately NOT excluded here — the
             // sw_auto self-evolution workspace lives there and the graph
             // must model it (test: keeps_real_source_dirs). The duplicate
@@ -690,8 +710,14 @@ fn is_private_repository_file(path: &Path, file_name: &str) -> bool {
 }
 
 fn is_utf8_text(path: &Path) -> bool {
-    std::fs::read(path)
-        .is_ok_and(|bytes| !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok())
+    use std::io::Read;
+
+    let Ok(mut file) = crate::safety::source_context::open_broad_discovery_regular(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .is_ok_and(|_| !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok())
 }
 
 fn structurally_test_path(relative: &Path) -> bool {
@@ -741,7 +767,15 @@ fn discover_test_sources(src_root: &Path, source_files: &[PathBuf]) -> Result<Te
         // An unreadable (or non-UTF-8) source contributes no module edges;
         // it must not fail the whole partition — the repository inventory
         // names such files instead (review 2026-09-27, F3).
-        let Ok(content) = std::fs::read_to_string(source) else {
+        let Ok(content) = crate::safety::source_context::open_broad_discovery_regular(source)
+            .and_then(|mut file| {
+                use std::io::Read;
+
+                let mut content = String::new();
+                file.read_to_string(&mut content)?;
+                Ok(content)
+            })
+        else {
             continue;
         };
         let Ok(file) = syn::parse_file(&content) else {
@@ -1318,7 +1352,7 @@ fn edge_type_order(edge_type: &EdgeType) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::is_excluded_repository_directory;
+    use super::{is_excluded_repository_directory, repository_file_walk};
     use std::ffi::OsStr;
 
     #[test]
@@ -1355,5 +1389,27 @@ mod tests {
                 "{dir} must stay indexed"
             );
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn shared_repository_walk_omits_multiply_linked_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(root.join("src")).expect("create source directory");
+        let visible = root.join("src/visible.rs");
+        std::fs::write(&visible, "pub fn visible() {}\n").expect("write visible source");
+
+        let private_dir = root.join(".codex");
+        std::fs::create_dir(&private_dir).expect("create private directory");
+        let private = private_dir.join("private.rs");
+        std::fs::write(&private, "pub fn private_state() {}\n").expect("write private source");
+        let public_alias = root.join("src/public-looking.rs");
+        std::fs::hard_link(&private, &public_alias).expect("create hard link");
+
+        let paths = repository_file_walk(&root).expect("walk repository");
+        assert!(paths.contains(&visible), "{paths:?}");
+        assert!(!paths.contains(&private), "{paths:?}");
+        assert!(!paths.contains(&public_alias), "{paths:?}");
     }
 }

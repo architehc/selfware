@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -345,7 +346,12 @@ impl<'g> GraphOverlay<'g> {
     /// when the graph covers the file and is not older than it; otherwise a
     /// live measured read whose held content also feeds the dependency scan
     /// (the fallback is per-file — no full re-walk, no second cache).
-    fn tokens_and_deps(&self, path: &Path, rel: &str) -> (usize, Vec<String>, bool) {
+    fn tokens_and_deps(
+        &self,
+        path: &Path,
+        rel: &str,
+        broad_discovery: bool,
+    ) -> (usize, Vec<String>, bool) {
         let fresh = std::fs::metadata(path)
             .and_then(|m| m.modified())
             .map(|mtime| mtime <= self.graph_mtime)
@@ -361,7 +367,11 @@ impl<'g> GraphOverlay<'g> {
                 return (node.tokens, deps, false);
             }
         }
-        let content = std::fs::read_to_string(path).ok();
+        let content = if broad_discovery {
+            read_broad_discovery_to_string(path)
+        } else {
+            std::fs::read_to_string(path).ok()
+        };
         let tokens = content
             .as_deref()
             .map(crate::token_count::estimate_content_tokens)
@@ -369,6 +379,13 @@ impl<'g> GraphOverlay<'g> {
         let deps = content.as_deref().map(extract_use_deps).unwrap_or_default();
         (tokens, deps, true)
     }
+}
+
+fn read_broad_discovery_to_string(path: &Path) -> Option<String> {
+    let mut file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    Some(content)
 }
 
 fn is_regular_file_without_symlink(path: &Path) -> bool {
@@ -391,9 +408,16 @@ fn is_directory_without_symlink(path: &Path) -> bool {
 fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String, CodeMapNode> {
     let mut nodes: HashMap<String, CodeMapNode> = HashMap::new();
 
+    if crate::safety::source_context::discovery_root_is_private(root) {
+        return nodes;
+    }
+
     let scan_dir = if let Some(focus_path) = focus {
         // Resolve focus as a subpath under root/src
         let candidate = root.join("src").join(focus_path.replace("::", "/"));
+        if crate::safety::source_context::discovery_root_is_private(&candidate) {
+            return nodes;
+        }
         if is_directory_without_symlink(&candidate) {
             candidate
         } else {
@@ -409,7 +433,7 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
                     .to_string_lossy()
                     .to_string();
                 let (tokens, dependencies, live) = match &overlay {
-                    Some(overlay) => overlay.tokens_and_deps(&rs_file, &rel),
+                    Some(overlay) => overlay.tokens_and_deps(&rs_file, &rel, false),
                     None => {
                         let content = std::fs::read_to_string(&rs_file).ok();
                         (
@@ -441,7 +465,9 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
         root.join("src")
     };
 
-    if !is_directory_without_symlink(&scan_dir) {
+    if crate::safety::source_context::discovery_root_is_private(&scan_dir)
+        || !is_directory_without_symlink(&scan_dir)
+    {
         return nodes;
     }
 
@@ -505,16 +531,19 @@ fn collect_rs_files(
                 },
             );
             collect_rs_files(&path, root, max_depth, current_depth + 1, overlay, nodes);
-        } else if file_type.is_file() && path.extension().is_some_and(|e| e == "rs") {
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|e| e == "rs")
+            && crate::safety::source_context::broad_discovery_file_is_safe(&path)
+        {
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
             let (tokens, dependencies, live) = match overlay {
-                Some(overlay) => overlay.tokens_and_deps(&path, &rel),
+                Some(overlay) => overlay.tokens_and_deps(&path, &rel, true),
                 None => {
-                    let content = std::fs::read_to_string(&path).ok();
+                    let content = read_broad_discovery_to_string(&path);
                     (
                         content
                             .as_deref()
@@ -872,7 +901,7 @@ mod private_state_walk_tests {
     }
 
     #[test]
-    fn broad_map_prunes_private_state_but_explicit_focus_remains_readable() {
+    fn broad_map_and_explicit_private_focus_prune_private_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write(&temp.path().join("src/visible.rs"), "pub fn visible() {}\n");
         for dir in [".claude", ".codex", ".agents", ".qwen", ".superpowers"] {
@@ -892,10 +921,7 @@ mod private_state_walk_tests {
         );
 
         let explicit = build_code_map(temp.path(), Some(".claude"), 2);
-        assert!(
-            explicit.contains_key("src/.claude/private.rs"),
-            "{explicit:?}"
-        );
+        assert!(explicit.is_empty(), "{explicit:?}");
     }
 
     #[cfg(unix)]
@@ -919,6 +945,26 @@ mod private_state_walk_tests {
 
         let map = build_code_map(root.path(), None, 4);
         assert!(map.is_empty(), "{map:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn map_omits_discovered_hard_links_but_keeps_an_exact_file_focus() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        write(&root.path().join("src/visible.rs"), "pub fn visible() {}\n");
+        let secret = outside.path().join("secret.rs");
+        write(&secret, "pub fn hard_link_secret() {}\n");
+        let linked = root.path().join("src/linked.rs");
+        std::fs::hard_link(&secret, &linked).expect("hard link");
+
+        let broad = build_code_map(root.path(), None, 4);
+        assert!(broad.contains_key("src/visible.rs"), "{broad:?}");
+        assert!(!broad.contains_key("src/linked.rs"), "{broad:?}");
+
+        let exact = build_code_map(root.path(), Some("linked"), 4);
+        assert!(exact.contains_key("src/linked.rs"), "{exact:?}");
     }
 }
 

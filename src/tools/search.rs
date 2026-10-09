@@ -5,18 +5,20 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(test)]
 use std::path::Path;
 use tracing::instrument;
 use walkdir::WalkDir;
 
 use crate::config::SafetyConfig;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
+#[cfg(test)]
 use crate::tools::grep_search::cached_regex;
 #[cfg(test)]
 use crate::tools::grep_search::MAX_PATTERN_LENGTH;
 
-/// Keep an explicitly selected search root readable, but never discover
-/// repository-local coding-agent state beneath a broader search root.
+/// Apply the shared repository discovery policy to selected roots and to
+/// directories found beneath them.
 fn retain_search_entry(entry: &walkdir::DirEntry) -> bool {
     crate::evolve::graph::retain_repository_entry(entry)
 }
@@ -344,9 +346,20 @@ impl Tool for SymbolSearch {
                     continue;
                 }
 
-                // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
-                let content = match tokio::task::block_in_place(|| std::fs::read_to_string(path)) {
-                    Ok(c) => c,
+                // Bind the broad-discovery decision to the descriptor whose
+                // bytes are consumed. Re-opening the pathname after the
+                // walker check would let a concurrent hard-link swap bypass
+                // the repository-discovery policy.
+                let content = match tokio::task::block_in_place(|| {
+                    use std::io::Read;
+
+                    let mut file =
+                        crate::safety::source_context::open_broad_discovery_regular(path)?;
+                    let mut content = String::new();
+                    file.read_to_string(&mut content)?;
+                    Ok::<_, std::io::Error>(content)
+                }) {
+                    Ok(content) => content,
                     Err(_) => continue,
                 };
 
@@ -471,7 +484,7 @@ mod private_state_walk_tests {
     }
 
     #[tokio::test]
-    async fn broad_searches_prune_private_state_but_explicit_root_remains_readable() {
+    async fn broad_searches_and_explicit_private_roots_prune_private_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write(
             &temp.path().join("visible.rs"),
@@ -500,7 +513,7 @@ mod private_state_walk_tests {
             .execute(json!({"pattern": "**/*.rs", "path": explicit_root}))
             .await
             .expect("explicit private glob root");
-        assert_eq!(explicit["files"].as_array().expect("files").len(), 1);
+        assert!(explicit["files"].as_array().expect("files").is_empty());
 
         let symbols = SymbolSearch::with_safety_config(permissive_safety());
         let broad = symbols
@@ -517,7 +530,7 @@ mod private_state_walk_tests {
             .execute(json!({"name": "shared_search_marker", "path": explicit_root}))
             .await
             .expect("explicit private symbol root");
-        assert_eq!(explicit["symbols"].as_array().expect("symbols").len(), 1);
+        assert!(explicit["symbols"].as_array().expect("symbols").is_empty());
 
         let standalone = grep_search(
             "shared_search_marker",
@@ -535,8 +548,19 @@ mod private_state_walk_tests {
             20,
             0,
         );
-        assert_eq!(explicit.file_count, 1);
-        assert_eq!(explicit.total_matches, 1);
+        assert_eq!(explicit.file_count, 0);
+        assert_eq!(explicit.total_matches, 0);
+
+        let exact_private_file = explicit_root.join("private.rs");
+        let exact = grep_search(
+            "shared_search_marker",
+            exact_private_file.to_str().expect("utf8 private file"),
+            true,
+            20,
+            0,
+        );
+        assert_eq!(exact.file_count, 1);
+        assert_eq!(exact.total_matches, 1);
     }
 
     #[cfg(unix)]
@@ -596,74 +620,5 @@ pub fn grep_search(
     max_matches: usize,
     offset: usize,
 ) -> GrepSearchResult {
-    let mut matches = Vec::new();
-    let mut file_count = 0;
-    let re = cached_regex(pattern).unwrap_or_else(|_| {
-        // Fallback to simple regex if caching fails
-        regex::Regex::new(pattern).expect("Invalid regex pattern")
-    });
-
-    if Path::new(path).is_file() {
-        // Search single file
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        let lines: Vec<&str> = content.lines().collect();
-
-        for (line_idx, line) in lines.iter().enumerate() {
-            if re.is_match(line) {
-                let line_num = (line_idx + 1) as u32;
-                let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-
-                matches.push(GrepMatch {
-                    file: path.to_string(),
-                    line: line_num,
-                    column,
-                    content: line.to_string(),
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                });
-            }
-        }
-        file_count = 1;
-    } else if recursive {
-        // Search directory recursively
-        for entry in WalkDir::new(path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(retain_search_entry)
-            .flatten()
-        {
-            if entry.file_type().is_file() && !entry.path_is_symlink() {
-                let path_str = entry.path().to_string_lossy();
-                let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                let lines: Vec<&str> = content.lines().collect();
-
-                for (line_idx, line) in lines.iter().enumerate() {
-                    if re.is_match(line) {
-                        let line_num = (line_idx + 1) as u32;
-                        let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-
-                        matches.push(GrepMatch {
-                            file: path_str.to_string(),
-                            line: line_num,
-                            column,
-                            content: line.to_string(),
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        });
-                    }
-                }
-                file_count += 1;
-            }
-        }
-    }
-
-    let total_matches = matches.len();
-    // Apply offset and limit
-    matches = matches.into_iter().skip(offset).take(max_matches).collect();
-
-    GrepSearchResult {
-        matches,
-        total_matches,
-        file_count,
-    }
+    crate::tools::grep_search::grep_search(pattern, path, recursive, max_matches, offset)
 }

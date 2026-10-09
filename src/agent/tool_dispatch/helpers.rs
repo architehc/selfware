@@ -207,10 +207,10 @@ pub(crate) fn workspace_fingerprint(root: &std::path::Path) -> Option<u64> {
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            e.depth() == 0
-                || !e.file_type().is_dir()
-                || (crate::evolve::graph::retain_repository_entry(e)
-                    && !SKIP.contains(&e.file_name().to_string_lossy().as_ref()))
+            crate::evolve::graph::retain_repository_entry(e)
+                && (e.depth() == 0
+                    || !e.file_type().is_dir()
+                    || !SKIP.contains(&e.file_name().to_string_lossy().as_ref()))
         })
         .filter_map(|e| e.ok())
     {

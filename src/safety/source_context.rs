@@ -57,6 +57,16 @@ pub(crate) fn is_private_tool_state_dir_name(name: &OsStr) -> bool {
     })
 }
 
+/// Return whether a directory name must be excluded from repository-wide
+/// discovery. This includes private coding-agent state, VCS internals, and
+/// Selfware's own generated state.
+pub(crate) fn is_private_discovery_dir_name(name: &OsStr) -> bool {
+    is_private_tool_state_dir_name(name)
+        || name.to_str().is_some_and(|name| {
+            name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".selfware")
+        })
+}
+
 /// Return whether any normal component of `path` is private tool state.
 /// Component matching avoids substring false positives such as
 /// `docs/.claude-example.md`.
@@ -65,6 +75,156 @@ pub(crate) fn path_contains_private_tool_state(path: &Path) -> bool {
         Component::Normal(name) => is_private_tool_state_dir_name(name),
         _ => false,
     })
+}
+
+/// Return whether any normal component belongs to private discovery state.
+/// Checking the complete path closes the explicit-root and nested-root bypass
+/// shared by broad repository walkers.
+pub(crate) fn path_contains_private_discovery_state(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => is_private_discovery_dir_name(name),
+        _ => false,
+    })
+}
+
+/// Check a repository-discovery root in both its caller-supplied and resolved
+/// forms. Resolving is necessary for relative `.` roots and aliases whose
+/// private ancestor is otherwise absent from the walked path strings.
+pub(crate) fn discovery_root_is_private(path: &Path) -> bool {
+    path_contains_private_discovery_state(path)
+        || std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|resolved| path_contains_private_discovery_state(&resolved))
+}
+
+fn broad_discovery_refusal(reason: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason)
+}
+
+/// Validate the identity of an already opened implicit-corpus file.
+///
+/// Returning the descriptor's metadata lets callers apply size limits to the
+/// same object whose regular-file, reparse-point, and hard-link properties
+/// were checked. Exact reads do not use this additional corpus policy.
+pub(crate) fn validate_broad_discovery_file_handle(
+    file: &std::fs::File,
+) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(broad_discovery_refusal(
+                "broad discovery requires a regular file",
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(broad_discovery_refusal(
+                "broad discovery refuses files with multiple hard links",
+            ));
+        }
+        Ok(metadata)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+
+        let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: `file` owns a live OS handle and `information` points to
+        // writable storage for the exact structure required by the API.
+        let result = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a nonzero API result initialized the complete structure.
+        let information = unsafe { information.assume_init() };
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(broad_discovery_refusal(
+                "broad discovery refuses reparse points",
+            ));
+        }
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(broad_discovery_refusal(
+                "broad discovery requires a regular file",
+            ));
+        }
+        if information.nNumberOfLinks != 1 {
+            return Err(broad_discovery_refusal(
+                "broad discovery refuses files with multiple hard links",
+            ));
+        }
+        Ok(metadata)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "broad discovery cannot verify hard-link count on this platform",
+        ))
+    }
+}
+
+/// Open one implicitly discovered corpus file without following a final
+/// symlink and require that its inode has exactly one filesystem name.
+///
+/// Private-directory pruning is path based. A hard link can give bytes from
+/// private or out-of-root state an innocuous in-root name, so repository-wide
+/// discovery must refuse multiply linked files. Exact, explicitly named file
+/// reads deliberately use their existing checked-read path instead.
+pub(crate) fn open_broad_discovery_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // O_NONBLOCK prevents a raced special file from hanging the open;
+        // O_NOFOLLOW binds the decision to the final component actually
+        // opened rather than to earlier path metadata.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        validate_broad_discovery_file_handle(&file)?;
+        Ok(file)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        validate_broad_discovery_file_handle(&file)?;
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "broad discovery cannot verify hard-link count on this platform",
+        ))
+    }
+}
+
+/// Whether a path is safe to admit through implicit repository discovery.
+/// Any open, type, reparse/symlink, or link-count failure is fail-closed.
+pub(crate) fn broad_discovery_file_is_safe(path: &Path) -> bool {
+    open_broad_discovery_regular(path).is_ok()
 }
 
 /// Encode an untrusted display label (most commonly a filesystem path) for
@@ -696,4 +856,87 @@ pub(crate) fn with_redaction_note(content: &str, redacted: usize) -> String {
         }
     }
     format!("{note}\n{content}")
+}
+
+#[cfg(test)]
+mod private_discovery_root_tests {
+    use super::*;
+
+    #[test]
+    fn private_discovery_components_are_exact_and_case_insensitive() {
+        for name in [
+            ".git",
+            ".GIT",
+            ".selfware",
+            ".SELFWARE",
+            ".claude",
+            ".CoDeX",
+            ".agents",
+            ".QWEN",
+            ".SuperPowers",
+        ] {
+            assert!(is_private_discovery_dir_name(OsStr::new(name)), "{name}");
+        }
+
+        for name in ["git", "selfware", ".claude-example", "agents"] {
+            assert!(!is_private_discovery_dir_name(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn discovery_root_rejects_a_lexical_private_ancestor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join(".agents/worktrees/project");
+        std::fs::create_dir_all(&root).expect("create private root");
+
+        assert!(path_contains_private_discovery_state(&root));
+        assert!(discovery_root_is_private(&root));
+        assert!(!discovery_root_is_private(
+            &temp.path().join("docs/.agents-example")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_root_rejects_a_public_alias_to_private_state() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let private_root = temp.path().join(".codex/worktrees/project");
+        std::fs::create_dir_all(&private_root).expect("create private root");
+        let alias = temp.path().join("public-project-alias");
+        symlink(&private_root, &alias).expect("create alias");
+
+        assert!(!path_contains_private_discovery_state(&alias));
+        assert!(discovery_root_is_private(&alias));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn broad_discovery_refuses_hard_links_but_exact_checked_reads_remain_available() {
+        use std::io::Read;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original = temp.path().join("original.rs");
+        let alias = temp.path().join("public-looking.rs");
+        std::fs::write(&original, "pub fn hard_link_fixture() {}\n").expect("write fixture");
+
+        assert!(broad_discovery_file_is_safe(&original));
+        std::fs::hard_link(&original, &alias).expect("create hard link");
+        assert!(!broad_discovery_file_is_safe(&original));
+        assert!(!broad_discovery_file_is_safe(&alias));
+
+        // The restriction belongs to implicit corpus admission. A caller that
+        // explicitly names an allowed file still uses the ordinary checked
+        // descriptor path and can read a legitimate hard-linked file.
+        let safety = crate::config::SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..crate::config::SafetyConfig::default()
+        };
+        let mut file = crate::tools::file::open_checked_regular(&alias.to_string_lossy(), &safety)
+            .expect("exact checked read");
+        let mut content = String::new();
+        file.read_to_string(&mut content).expect("read exact file");
+        assert!(content.contains("hard_link_fixture"));
+    }
 }

@@ -191,6 +191,28 @@ fn maybe_prepend_disabled_thinking_instruction(
     }
 }
 
+/// Return the exact normalized message list placed in a chat request body.
+///
+/// Callers that reserve or report prompt tokens must measure this list rather
+/// than their pre-wire input: disabled-thinking mode injects a system message,
+/// and canonicalization can merge adjacent plain turns.
+pub(crate) fn prepare_request_messages(
+    mut messages: Vec<Message>,
+    thinking: ThinkingMode,
+) -> Vec<Message> {
+    maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
+    canonicalize_message_order(&mut messages);
+    messages
+}
+
+pub(crate) fn estimate_request_message_tokens(
+    messages: &[Message],
+    thinking: ThinkingMode,
+) -> usize {
+    let prepared = prepare_request_messages(messages.to_vec(), thinking);
+    crate::token_count::estimate_messages_tokens(&prepared)
+}
+
 /// Attach tool definitions to a chat-completion request body.
 ///
 /// Thin wrapper over [`tool_calling::attach_tools`] — kept for backward

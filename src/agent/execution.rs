@@ -222,7 +222,7 @@ pub(super) async fn count_source_files_in_workdir(cap: usize) -> usize {
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
                 if e.depth() == 0 {
-                    return true;
+                    return !crate::safety::source_context::discovery_root_is_private(e.path());
                 }
                 crate::evolve::graph::retain_repository_entry(e)
                     && !EXCLUDED_DIRS.contains(&name.as_ref())
