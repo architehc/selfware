@@ -150,7 +150,7 @@ impl GraphBuilder {
                 if !is_rust_source(&full_path) {
                     continue;
                 }
-                let Ok(content) = std::fs::read_to_string(&full_path) else {
+                let Ok(content) = read_broad_discovery_utf8(&full_path) else {
                     continue;
                 };
                 let decls = super::symbols::extract_pub_symbols(&content);
@@ -274,7 +274,7 @@ impl GraphBuilder {
                 let content = content_cache
                     .entry(rel)
                     .or_insert_with(|| {
-                        std::fs::read_to_string(project_root.join(rel)).unwrap_or_default()
+                        read_broad_discovery_utf8(&project_root.join(rel)).unwrap_or_default()
                     })
                     .clone();
                 let Some((start, end)) = node.line_range else {
@@ -577,6 +577,20 @@ pub(crate) fn retain_repository_entry(entry: &walkdir::DirEntry) -> bool {
     !entry.file_type().is_dir()
         || (!is_excluded_repository_directory(entry.file_name())
             && !entry.path().join("pyvenv.cfg").is_file())
+}
+
+/// One no-follow descriptor: reopening the path can observe a hard-link swap.
+pub(crate) fn read_broad_discovery_utf8(path: &Path) -> std::io::Result<String> {
+    if crate::safety::source_context::path_contains_private_discovery_state(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private discovery state",
+        ));
+    }
+    let mut file = crate::safety::source_context::open_broad_discovery_regular(path)?;
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut file, &mut buf)?;
+    Ok(buf)
 }
 
 /// Files and ancestor directories that Git considers visible (tracked or
@@ -1073,7 +1087,7 @@ fn imported_modules(path: &Path, current_id: &str) -> Vec<Vec<String>> {
     if !is_rust_source(path) {
         return Vec::new();
     }
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(content) = read_broad_discovery_utf8(path) else {
         return Vec::new();
     };
     rust_use_paths(&content)
@@ -1175,7 +1189,7 @@ fn analyze_quality(analyzer: &QualityAnalyzer, node: &mut Node, label: &str) {
 }
 
 fn populate_metrics(node: &mut Node, path: &Path, partitioner: &AstAnalyzer) -> Result<()> {
-    let content = std::fs::read_to_string(path)?;
+    let content = read_broad_discovery_utf8(path)?;
     node.lines = content.lines().count();
     // Real tokenizer (HF model-matched → tiktoken cl100k_base), cached per
     // content hash, instead of the bytes/4 heuristic — precise context sizes.
@@ -1411,5 +1425,24 @@ mod tests {
         assert!(paths.contains(&visible), "{paths:?}");
         assert!(!paths.contains(&private), "{paths:?}");
         assert!(!paths.contains(&public_alias), "{paths:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn broad_read_skips_private_and_multiply_linked_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original = temp.path().join("original.rs");
+        std::fs::write(&original, "pub fn visible() {}\n").expect("write source");
+        assert!(super::read_broad_discovery_utf8(&original).is_ok());
+
+        let alias = temp.path().join("alias.rs");
+        std::fs::hard_link(&original, &alias).expect("create hard link");
+        assert!(super::read_broad_discovery_utf8(&original).is_err());
+        assert!(super::read_broad_discovery_utf8(&alias).is_err());
+
+        let private = temp.path().join(".git/config");
+        std::fs::create_dir_all(private.parent().unwrap()).expect("create .git");
+        std::fs::write(&private, "secret").expect("write private file");
+        assert!(super::read_broad_discovery_utf8(&private).is_err());
     }
 }

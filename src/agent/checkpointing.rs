@@ -42,22 +42,87 @@ const RESTORED_PRIVATE_STATE_WITHHELD: &str =
 const RESTORED_PRIVATE_CONTEXT_WITHHELD: &str =
     "[trust-gate: restored context file withheld because automatic context loading no longer reads private coding-tool state]";
 
-/// Check path-like tokens rather than substrings so ordinary names such as
-/// `.claude-example.md` do not turn an unrelated restored message into a
-/// false positive. Tool output can be JSON, a tree, or plain text, hence the
-/// small tokenizer instead of parsing one particular result schema.
+/// Prose mentions are not paths. A bare token such as `.git`, or a sentence
+/// such as "the .git directory", does not identify private discovery state,
+/// and neither do ordinary names such as `.gitignore` or `.claude-example.md`.
+/// Restored output is private only when a structured path field (`path`,
+/// `file`, `file_path`, `filename`, `root`, `directory`) names a private
+/// discovery component, or a tree/grep location prefix is itself a path: a
+/// token containing `/` or `\` with a private component, for example
+/// `.claude/projects/x` or `src/.git/config`. Source lines, match text, and
+/// other prose bodies are not scanned.
 fn references_private_discovery_state_path(text: &str) -> bool {
+    let body = tool_result_body(text).trim();
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::String(text)) => location_prefix_names_private_discovery(&text),
+        Ok(value) => json_has_private_discovery_path(&value),
+        Err(_) => location_prefix_names_private_discovery(body),
+    }
+}
+
+fn tool_result_body(text: &str) -> &str {
+    let text = text.trim();
+    let Some(body) = text
+        .strip_prefix("<tool_result>")
+        .and_then(|body| body.strip_suffix("</tool_result>"))
+    else {
+        return text;
+    };
+    body.strip_prefix("<error>")
+        .and_then(|inner| inner.strip_suffix("</error>"))
+        .unwrap_or(body)
+}
+
+fn component_is_private_discovery(component: &str) -> bool {
+    crate::safety::source_context::is_private_discovery_dir_name(std::ffi::OsStr::new(component))
+}
+
+/// `text` is a path or a path argument, not a tool body. A component equal
+/// to a private discovery directory matches; `.claude-example.md` does not.
+fn path_text_has_private_discovery_component(text: &str) -> bool {
     text.split(|character: char| {
         !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | '\\' | '~'))
     })
     .filter(|token| !token.is_empty())
-    .any(|token| {
-        token.split(['/', '\\']).any(|component| {
-            crate::safety::source_context::is_private_discovery_dir_name(std::ffi::OsStr::new(
-                component,
-            ))
-        })
+    .any(|token| token.split(['/', '\\']).any(component_is_private_discovery))
+}
+
+fn path_value_names_private_discovery(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|component| component_is_private_discovery(component.trim()))
+}
+
+fn location_prefix_names_private_discovery(text: &str) -> bool {
+    text.split(|character: char| {
+        !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | '\\' | '~'))
     })
+    .filter(|token| !token.is_empty() && (token.contains('/') || token.contains('\\')))
+    .any(path_value_names_private_discovery)
+}
+
+const RESULT_PATH_KEYS: &[&str] = &["path", "file", "file_path", "filename", "root", "directory"];
+
+fn json_has_private_discovery_path(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(json_has_private_discovery_path),
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, child)| {
+            if RESULT_PATH_KEYS.contains(&key.as_str()) {
+                path_field_names_private_discovery(child)
+            } else {
+                json_has_private_discovery_path(child)
+            }
+        }),
+        _ => false,
+    }
+}
+
+fn path_field_names_private_discovery(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(path) => path_value_names_private_discovery(path),
+        serde_json::Value::Array(items) => items.iter().any(path_field_names_private_discovery),
+        serde_json::Value::Object(_) => json_has_private_discovery_path(value),
+        _ => false,
+    }
 }
 
 fn generated_context_references_private_state(message: &Message, text: &str) -> bool {
@@ -78,12 +143,12 @@ fn generated_context_references_private_state(message: &Message, text: &str) -> 
     // label; old checkpoints stored it verbatim.
     if let Some(label) = text.lines().find_map(|line| line.strip_prefix("// FILE: ")) {
         let decoded = serde_json::from_str::<String>(label).unwrap_or_else(|_| label.to_string());
-        return references_private_discovery_state_path(&decoded);
+        return path_text_has_private_discovery_component(&decoded);
     }
 
     // An internally named generated message without its required header is
     // malformed. If its remaining body names private state, fail closed.
-    internally_named && references_private_discovery_state_path(text)
+    internally_named && path_text_has_private_discovery_component(text)
 }
 
 /// Repository-derived tools that could have persisted private paths or source
@@ -143,7 +208,7 @@ fn is_repository_wide_reader(
 
 fn value_selects_private_discovery_state(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(value) => references_private_discovery_state_path(value),
+        serde_json::Value::String(value) => path_text_has_private_discovery_component(value),
         serde_json::Value::Array(values) => {
             values.iter().any(value_selects_private_discovery_state)
         }
@@ -287,10 +352,11 @@ impl Agent {
                 continue;
             };
             // A legacy repository result can pass today's path check via its
-            // old allowed root while its payload still contains state that
-            // broad discovery now excludes. Explicit private roots are also
-            // withheld: replay must enforce the current policy, including
-            // relative result entries that omit their private root.
+            // old allowed root while a structured path in the payload still
+            // names state broad discovery excludes. Explicit private roots
+            // are also withheld: replay must enforce the current policy,
+            // including relative result entries that omit their private root.
+            // Prose mentions are not paths.
             let references_private_state = references_private_discovery_state_path(&text);
             if (tool_name == "restored_tool" && references_private_state)
                 || (is_repository_wide_reader(&tool_name, &arguments, self.tools.workspace_root())

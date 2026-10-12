@@ -151,6 +151,8 @@ fn build_rg_command(
         .arg("--line-number")
         .arg("--column")
         .arg("--hidden")
+        // `-g` does not case-fold unless asked, so `!.git/` must also cover `.GIT`.
+        .arg("--glob-case-insensitive")
         .arg("--max-columns")
         .arg("500")
         .arg("--max-filesize")
@@ -273,10 +275,20 @@ fn run_ripgrep(
         if file.is_empty() {
             continue;
         }
-        if broad_discovery
-            && !crate::safety::source_context::broad_discovery_file_is_safe(Path::new(&file))
-        {
-            continue;
+        if broad_discovery {
+            let reported = Path::new(&file);
+            if crate::safety::source_context::path_contains_private_discovery_state(reported) {
+                continue;
+            }
+            let Ok(canonical) = std::fs::canonicalize(reported) else {
+                continue;
+            };
+            if crate::safety::source_context::path_contains_private_discovery_state(&canonical) {
+                continue;
+            }
+            if !crate::safety::source_context::broad_discovery_file_is_safe(reported) {
+                continue;
+            }
         }
         let policy_allows = match safety {
             None => true,
@@ -946,6 +958,97 @@ mod private_state_walk_tests {
     }
 
     #[test]
+    fn broad_directory_search_omits_alternate_case_private_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("search_root");
+        fs::create_dir(&root).expect("search root");
+        assert!(
+            !crate::safety::source_context::is_private_discovery_dir_name(
+                root.file_name().expect("search root name")
+            ),
+            "search root must not itself be a private discovery name"
+        );
+        let marker = "alternate_case_private_marker";
+        for dir in [".Claude", ".GIT", ".Selfware"] {
+            write(&root.join(dir).join("secret.txt"), &format!("{marker}\n"));
+        }
+        write(&root.join("visible.txt"), "public_visible_marker\n");
+        let root_str = root.to_str().expect("utf8 root");
+
+        let assert_private_omitted = |result: &GrepSearchResult| {
+            assert!(
+                result.matches.is_empty() && result.total_matches == 0,
+                "{:?}",
+                result.matches
+            );
+        };
+        let assert_public_visible = |result: &GrepSearchResult| {
+            assert_eq!(result.matches.len(), 1, "{:?}", result.matches);
+            assert_eq!(result.total_matches, 1);
+            assert!(result.matches[0].file.ends_with("visible.txt"));
+        };
+
+        if rg_available() {
+            let external = run_ripgrep(marker, root_str, false, 0, 20, 0, None, None, None)
+                .expect("external broad grep");
+            assert_private_omitted(&external);
+            let public = run_ripgrep(
+                "public_visible_marker",
+                root_str,
+                false,
+                0,
+                20,
+                0,
+                None,
+                None,
+                None,
+            )
+            .expect("external public grep");
+            assert_public_visible(&public);
+        }
+
+        let builtin = run_builtin_grep(marker, root_str, true, false, 0, 20, 0, None, None, None)
+            .expect("builtin broad grep");
+        assert_private_omitted(&builtin);
+        let builtin_public = run_builtin_grep(
+            "public_visible_marker",
+            root_str,
+            true,
+            false,
+            0,
+            20,
+            0,
+            None,
+            None,
+            None,
+        )
+        .expect("builtin public grep");
+        assert_public_visible(&builtin_public);
+    }
+
+    #[test]
+    fn exact_file_search_under_dot_claude_still_returns_the_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = "exact_dot_claude_marker";
+        let file = temp.path().join(".claude").join("notes.txt");
+        write(&file, &format!("{marker}\n"));
+        let file_str = file.to_str().expect("utf8 file");
+
+        if rg_available() {
+            let external = run_ripgrep(marker, file_str, false, 0, 20, 0, None, None, None)
+                .expect("external exact grep");
+            assert_eq!(external.matches.len(), 1, "{:?}", external.matches);
+            assert_eq!(external.total_matches, 1);
+            assert!(external.matches[0].content.contains(marker));
+        }
+
+        let builtin = run_builtin_grep(marker, file_str, true, false, 0, 20, 0, None, None, None)
+            .expect("builtin exact grep");
+        assert_eq!(builtin.matches.len(), 1, "{:?}", builtin.matches);
+        assert!(builtin.matches[0].content.contains(marker));
+    }
+
+    #[test]
     fn repository_exclusions_follow_caller_globs() {
         let command = build_rg_command("needle", ".", false, Some("*"), None);
         let args = command
@@ -956,6 +1059,10 @@ mod private_state_walk_tests {
             .iter()
             .position(|arg| arg == "--glob=*")
             .expect("caller include");
+        assert!(
+            args.iter().any(|arg| arg == "--glob-case-insensitive"),
+            "{args:?}"
+        );
         for private in REPOSITORY_EXCLUSION_GLOBS {
             let position = args
                 .iter()

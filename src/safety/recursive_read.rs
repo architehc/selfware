@@ -18,9 +18,12 @@
 //!
 //! - `grep -r`/`-R`, `diff -r`, `ag`, `cp -r`, `rsync -r`/`-a`, `scp -r`,
 //!   `tar -c`, `zip -r`, and `find` feeding `-exec`/`-ok`/`xargs`: every
-//!   entry (hidden ones included);
-//! - `git grep`: every entry except the `.git` directory (tracked-ness is
-//!   not checked: an untracked `.env` still refuses);
+//!   entry (hidden ones included). A private discovery directory in that
+//!   walk refuses the command — the binary would read it, and the vet
+//!   cannot stop it;
+//! - `git grep`: every entry except a `.git` directory, any case
+//!   (tracked-ness is not checked: an untracked `.env` still refuses).
+//!   Any other private discovery directory still refuses;
 //! - `rg` with no flag that widens it: non-hidden entries, pruning only
 //!   directories the repository's top-level `.gitignore` names with a plain
 //!   pattern (and only when that file has no `!` re-include). `-u`,
@@ -44,7 +47,7 @@ pub const MAX_ENTRIES: usize = 50_000;
 enum Walk {
     /// Every entry.
     All,
-    /// Every entry except a `.git` directory (`git grep`).
+    /// Every entry except a `.git` directory (`git grep`), any case.
     SkipGitDir,
     /// ripgrep's default: no hidden entries, `.gitignore`d dirs pruned.
     RgDefault,
@@ -369,6 +372,49 @@ fn vet_plans(plans: &[Plan], base: &Path, denied: &[String]) -> Option<String> {
     None
 }
 
+fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+}
+
+/// Private discovery state this walk cannot keep the program from reading.
+///
+/// Dot-skipping walks already omit every private discovery name, so only a
+/// non-hidden symlink into that state is a hit. `git grep` prunes `.git`
+/// before this runs; any other private directory stays in its walk because
+/// tracked-ness is not checked. Full walks read every directory, including
+/// `.git`.
+fn walk_entry_is_private_discovery(walk: Walk, entry: &walkdir::DirEntry) -> bool {
+    let named = !matches!(walk, Walk::NoHidden | Walk::RgDefault)
+        && crate::safety::source_context::path_contains_private_discovery_state(entry.path());
+    named || symlink_target_is_private_discovery(entry)
+}
+
+/// A symlink is not `is_dir()`, but its name was already covered by the path
+/// check. The target text and, when resolution succeeds, the canonical target
+/// are private discovery state the same way a sensitive link target is. A
+/// nested loop or unreadable link is left alone: the program skips it, and
+/// the root check is the fail-closed boundary.
+fn symlink_target_is_private_discovery(entry: &walkdir::DirEntry) -> bool {
+    if !entry.path_is_symlink() {
+        return false;
+    }
+    let Ok(target) = std::fs::read_link(entry.path()) else {
+        return false;
+    };
+    let joined = entry
+        .path()
+        .parent()
+        .map(|parent| parent.join(&target))
+        .unwrap_or_else(|| target.clone());
+    let resolved = std::fs::canonicalize(entry.path());
+    crate::safety::source_context::path_contains_private_discovery_state(&target)
+        || crate::safety::source_context::path_contains_private_discovery_state(&joined)
+        || resolved.is_ok_and(|path| {
+            crate::safety::source_context::path_contains_private_discovery_state(&path)
+        })
+}
+
 fn vet_root(
     plan: &Plan,
     base: &Path,
@@ -377,6 +423,17 @@ fn vet_root(
     budget: &mut usize,
 ) -> Option<String> {
     let root_path = base.join(root);
+    // Refuse before walking. Dropping a private root from `filter_entry`
+    // yields nothing, so `grep -r KEY .claude` was allowed and a nested
+    // `.env` was never seen. `is_dir()` is not consulted: a symlink root is
+    // not a directory to walkdir, but its name or canonical target can still
+    // be private discovery state, and a failed canonicalize is private.
+    if crate::safety::source_context::discovery_root_is_private(&root_path) {
+        return Some(format!(
+            "`{}` would read `{root}` (private discovery state)",
+            plan.program
+        ));
+    }
     let prune = if plan.walk == Walk::RgDefault {
         repo_root_of(&root_path).map(|repo| (gitignored_dirs(&repo), repo))
     } else {
@@ -386,16 +443,23 @@ fn vet_root(
     let walk = walkdir::WalkDir::new(&root_path)
         .follow_links(plan.follow)
         .into_iter()
+        // Depth 0 is the explicit root, already refused when private.
+        // Prune only what the program itself skips. `git grep` skips `.git`
+        // (any case, including a symlink — `is_dir()` is false for one).
+        // Ripgrep's default skips dot entries. `grep -r` skips nothing, so a
+        // private directory stays visible and is refused below; filtering it
+        // out here would allow the command.
         .filter_entry(|e| {
             if e.depth() == 0 {
-                return !crate::safety::source_context::discovery_root_is_private(e.path());
+                return true;
             }
-            let name = e.file_name().to_string_lossy();
+            let name = e.file_name();
             match plan.walk {
                 Walk::All => true,
-                Walk::SkipGitDir => !(name == ".git" && e.file_type().is_dir()),
-                Walk::NoHidden => !name.starts_with('.'),
+                Walk::SkipGitDir => !is_git_dir_name(name),
+                Walk::NoHidden => !name.to_string_lossy().starts_with('.'),
                 Walk::RgDefault => {
+                    let name = name.to_string_lossy();
                     if name.starts_with('.') {
                         return false;
                     }
@@ -435,6 +499,12 @@ fn vet_root(
         };
         let rel = display_path(root, &root_path, entry.path());
         let is_dir = entry.file_type().is_dir();
+        if entry.depth() > 0 && walk_entry_is_private_discovery(plan.walk, &entry) {
+            return Some(format!(
+                "`{}` would read `{rel}` inside `{root}` (private discovery state)",
+                plan.program
+            ));
+        }
         // A recursively discovered hard link can give private or out-of-root
         // bytes an innocuous name. Refuse the whole recursive command when
         // the discovered file identity cannot be confined. Depth zero is an

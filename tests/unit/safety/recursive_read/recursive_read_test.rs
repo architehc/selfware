@@ -190,6 +190,108 @@ fn sensitive_components_are_matched_per_component() {
 }
 
 #[test]
+fn explicit_private_discovery_root_is_a_violation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join(".claude")).unwrap();
+    std::fs::write(d.join(".claude/.env"), "API_KEY=sk-live\n").unwrap();
+    let why = violation("grep -r KEY .claude", d).expect("private root must be refused");
+    assert!(why.contains("private discovery"), "{why}");
+    assert!(why.contains("grep"), "{why}");
+}
+
+#[test]
+fn grep_recursive_refuses_nested_private_discovery_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("src/.claude")).unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(d.join("src/.claude/secret"), "transcript\n").unwrap();
+    let why = violation("grep -r fn src", d).expect("nested .claude must be refused");
+    assert!(why.contains("private discovery"), "{why}");
+    let why = violation("git grep fn src", d).expect("git grep does not skip .claude");
+    assert!(why.contains("private discovery"), "{why}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("src/.Selfware")).unwrap();
+    std::fs::write(d.join("src/lib.rs"), "fn lib() {}\n").unwrap();
+    std::fs::write(d.join("src/.Selfware/notes"), "state\n").unwrap();
+    let why = violation("grep -r fn src", d).expect("nested .Selfware must be refused");
+    assert!(why.contains("private discovery"), "{why}");
+}
+
+#[test]
+fn git_grep_allows_a_repo_git_dir_that_grep_recursive_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::create_dir_all(d.join(".git")).unwrap();
+    std::fs::write(d.join(".git/.env"), "GIT_SECRET=1\n").unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let why = violation("grep -r fn .", d).expect("grep -r reads .git");
+    assert!(why.contains("private discovery"), "{why}");
+    assert_eq!(violation("git grep fn", d), None);
+    assert_eq!(violation("git grep fn .", d), None);
+    assert_eq!(
+        violation("rg fn", d),
+        None,
+        "rg default skips dot directories"
+    );
+    assert!(violation("rg -uu fn", d).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_discovery_symlinks_are_refused_without_relying_on_is_dir() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let private = d.join("state/.codex");
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::write(private.join("secret"), "transcript\n").unwrap();
+    let public = d.join("public");
+    std::fs::create_dir_all(&public).unwrap();
+    std::fs::write(public.join("readme.txt"), "ok\n").unwrap();
+
+    // Link name is not private; the canonical target is. `is_dir()` on the
+    // unfollowed link is false.
+    symlink(&private, d.join("alias")).unwrap();
+    let why = violation("grep -r KEY alias", d).expect("alias target");
+    assert!(why.contains("private discovery"), "{why}");
+
+    // Link name is private even when the target is an ordinary file.
+    symlink(public.join("readme.txt"), d.join(".claude")).unwrap();
+    let why = violation("grep -r KEY .claude", d).expect("private link name");
+    assert!(why.contains("private discovery"), "{why}");
+
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    symlink(public.join("readme.txt"), d.join("src/.claude")).unwrap();
+    let why = violation("grep -r fn src", d).expect("nested private symlink name");
+    assert!(why.contains("private discovery"), "{why}");
+
+    let outside = tempfile::tempdir().unwrap();
+    let gitdir = outside.path().join("real-git");
+    std::fs::create_dir(&gitdir).unwrap();
+    std::fs::write(gitdir.join(".env"), "SECRET\n").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    symlink(&gitdir, d.join(".git")).unwrap();
+    std::fs::create_dir(d.join("src")).unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(
+        violation("git grep fn", d),
+        None,
+        "a .git symlink is still skipped by git grep"
+    );
+    let why = violation("grep -r fn .", d).expect("grep -r sees the .git symlink");
+    assert!(why.contains("private discovery"), "{why}");
+}
+
+#[test]
 fn wrappers_and_assignments_are_seen_through() {
     let cmds = lenient_commands("RIPGREP_CONFIG_PATH=/x rg -n foo | head; echo $(grep -r a b)");
     assert_eq!(

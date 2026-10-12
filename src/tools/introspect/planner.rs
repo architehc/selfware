@@ -647,7 +647,9 @@ pub(super) async fn analyze_impact_with_safety(
         if path == target_file {
             continue;
         }
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        // The walk already chose this path. Read that descriptor so a
+        // hard-link swap cannot replace the bytes after the link-count check.
+        if let Some(content) = super::read_introspect_source(&path, false).await {
             // Check for imports/references to target
             let file_name = path.to_string_lossy().to_lowercase();
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-10-12
+
+0.9.8 ships the read-only artifact harness and closes the holes found in its
+review. Cargo package versions are semantic, so this patch is 0.9.8.
+
 ### Added
 - **Read-only artifact harness.** `selfware artifact-harness` activates a
   bounded set of source artifacts, gives each a narrow tool-free model context,
@@ -47,10 +52,11 @@ Broad repository discovery also intentionally omits multiply linked files so
 an innocuous in-tree hard-link name cannot re-admit bytes from private or
 out-of-root state. Exact checked file reads remain available when a caller
 deliberately names one file.
-Checkpoint replay also intentionally withholds persisted output from broad
-repository readers when that output references these private roots or the
-recorded call selected one. Replay therefore enforces the current discovery
-policy instead of restoring content that a new run would no longer discover.
+Checkpoint replay withholds persisted output from broad repository readers
+when the recorded call selected a private root or a structured path field
+names one. A prose mention of those names is not treated as a path. Replay
+therefore enforces the current discovery policy instead of restoring content
+that a new run would no longer discover.
 Model API POST redirects are also intentionally refused process-wide so prompts
 and credentials cannot be replayed to a different authority. The artifact
 transport additionally ignores environment proxies; operators that require a
@@ -58,6 +64,32 @@ proxy should keep using the existing agent path until an explicit, validated
 proxy authority is available for the harness. General `extra_body` request
 extensions are intentionally ignored by the harness; use the existing agent
 path when those provider-specific controls are required.
+Checkpoint replay no longer treats a prose mention of `.git` or `.selfware`
+as proof that a restored tool result came from that directory. Arguments that
+selected a private root, and structured path fields that name one, are still
+withheld. `grep -r` (and the other full-walk readers) is refused when the
+walk contains a private discovery directory, including a repository `.git`;
+`git grep` still skips `.git`, and default `rg` still skips dot directories.
+
+### Fixed
+- Artifact reads refuse a file whose device id differs from the pinned root,
+  so a mount placed under the root is not accepted on path prefix alone.
+- An explicitly selected private discovery root is a shell-vet violation.
+  Dropping it from the walk no longer makes `grep -r` of that root look empty
+  and therefore allowed.
+- Ripgrep directory search case-folds its exclusion globs and drops matches
+  whose returned or canonical path contains private discovery state.
+- Broad discovery reads model-facing bytes from the same descriptor that
+  enforced the hard-link check. Exact named-file reads are unchanged.
+- Completion-gate output scans do not descend into private directories under
+  `dist`, `build`, `out`, `output`, or `target`.
+- A truncated or trust-gate-redacted artifact, and a run whose provider
+  omitted token usage, is `AnalysisPartial` and does not exit 0. A configured
+  token cap runs workers serially and skips a job that no longer fits.
+- The artifact harness HTTP client does not replay a reserved POST on an
+  HTTP/2 stream reset. Ordinary agent clients keep protocol-nack retries.
+- `discovery_root_is_private` is fail-closed when an existing path cannot be
+  canonicalized. A missing path stays not-private so callers can probe it.
 
 ## [0.9.7] - 2026-10-03
 
@@ -1928,7 +1960,8 @@ notes are folded in below.
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/architehc/selfware/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/architehc/selfware/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/architehc/selfware/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/architehc/selfware/compare/v0.9.4...v0.9.5

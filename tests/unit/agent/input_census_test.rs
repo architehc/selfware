@@ -8,6 +8,13 @@
 
 use super::*;
 
+fn exact_gate(path: std::path::PathBuf) -> GateOutputs {
+    GateOutputs {
+        paths: vec![path],
+        discovered: false,
+    }
+}
+
 fn write(dir: &tempfile::TempDir, rel: &str, content: &str) {
     let path = dir.path().join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -209,7 +216,7 @@ fn leak_check_catches_module_leaked_via_suspicious_key_value() {
     let census = census_task_inputs(dir.path());
     let hits = leak_check_identifiers(
         &census.suspicious_identifiers,
-        &[dir.path().join("dist/client-entry.js.map")],
+        &exact_gate(dir.path().join("dist/client-entry.js.map")),
     );
     assert!(
         hits.iter().any(|h| h.contains("handler")),
@@ -268,7 +275,7 @@ fn leak_check_finds_copied_identifier_in_outputs() {
     let census = census_task_inputs(dir.path());
     let hits = leak_check_identifiers(
         &census.suspicious_identifiers,
-        &[dir.path().join("dist/client.js.map")],
+        &exact_gate(dir.path().join("dist/client.js.map")),
     );
     assert_eq!(hits.len(), 1, "the leaked identifier must be caught");
     assert!(hits[0].contains("private-probe"));
@@ -286,7 +293,7 @@ fn leak_check_passes_clean_outputs() {
     let census = census_task_inputs(dir.path());
     assert!(leak_check_identifiers(
         &census.suspicious_identifiers,
-        &[dir.path().join("dist/client.js.map")],
+        &exact_gate(dir.path().join("dist/client.js.map")),
     )
     .is_empty());
 }
@@ -318,6 +325,104 @@ fn gate_outputs_fall_back_to_output_dirs_without_git_paths() {
         !names.iter().any(|n| n.contains("src/main.py")),
         "source dirs are not output dirs: {names:?}"
     );
+}
+
+#[test]
+fn gate_outputs_skip_private_dirs_and_still_read_ordinary_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "dist/public.js", "ordinary_marker");
+    write(&dir, "dist/.claude/leak.txt", "claude_private_marker");
+    write(&dir, "target/.selfware/leak.txt", "selfware_private_marker");
+    let outputs = collect_gate_outputs(dir.path(), None);
+    let names: Vec<String> = outputs
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("dist/public.js")),
+        "{names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.contains(".claude") || name.contains(".selfware")),
+        "{names:?}"
+    );
+    let hits = leak_check_identifiers(
+        &[
+            "ordinary_marker".to_string(),
+            "claude_private_marker".to_string(),
+            "selfware_private_marker".to_string(),
+        ],
+        &outputs,
+    );
+    assert!(
+        hits.iter().any(|hit| hit.contains("ordinary_marker")),
+        "{hits:?}"
+    );
+    assert!(
+        !hits.iter().any(|hit| {
+            hit.contains("claude_private_marker") || hit.contains("selfware_private_marker")
+        }),
+        "{hits:?}"
+    );
+    // The read itself refuses a private path even if the walk list is bypassed.
+    let forced = GateOutputs {
+        paths: vec![
+            dir.path().join("dist/.claude/leak.txt"),
+            dir.path().join("dist/public.js"),
+        ],
+        discovered: true,
+    };
+    let forced_hits = leak_check_identifiers(
+        &[
+            "ordinary_marker".to_string(),
+            "claude_private_marker".to_string(),
+        ],
+        &forced,
+    );
+    assert!(forced_hits
+        .iter()
+        .any(|hit| hit.contains("ordinary_marker")));
+    assert!(!forced_hits
+        .iter()
+        .any(|hit| hit.contains("claude_private_marker")));
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_outputs_omit_hard_linked_artifacts_but_diff_paths_still_read_them() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(&root, "dist/visible.txt", "visible_marker");
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "hard_link_secret_marker").unwrap();
+    std::fs::hard_link(&secret, root.path().join("dist/linked.txt")).unwrap();
+
+    let outputs = collect_gate_outputs(root.path(), None);
+    assert!(outputs.iter().any(|path| path.ends_with("visible.txt")));
+    assert!(!outputs.iter().any(|path| path.ends_with("linked.txt")));
+    let hits = leak_check_identifiers(
+        &[
+            "visible_marker".to_string(),
+            "hard_link_secret_marker".to_string(),
+        ],
+        &outputs,
+    );
+    assert!(
+        hits.iter().any(|hit| hit.contains("visible_marker")),
+        "{hits:?}"
+    );
+    assert!(
+        !hits
+            .iter()
+            .any(|hit| hit.contains("hard_link_secret_marker")),
+        "{hits:?}"
+    );
+
+    let diff = collect_gate_outputs(root.path(), Some(vec!["dist/linked.txt".to_string()]));
+    let diff_hits = leak_check_identifiers(&["hard_link_secret_marker".to_string()], &diff);
+    assert_eq!(diff_hits.len(), 1, "{diff_hits:?}");
 }
 
 #[test]

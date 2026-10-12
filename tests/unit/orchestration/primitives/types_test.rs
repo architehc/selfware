@@ -239,6 +239,8 @@ fn render_text_does_not_misstate_incomplete_census_cause() {
             accounted: AccountedUsage::default(),
             token_accounting_complete: true,
             unknown_token_attempts: 0,
+            fallback_token_attempts: 0,
+            fallback_tokens: 0,
             cost_accounting_complete: true,
             unmetered_cost_attempts: 0,
         },
@@ -251,4 +253,86 @@ fn render_text_does_not_misstate_incomplete_census_cause() {
         "Selection census: incomplete because a configured discovery limit or checked discovery failure was encountered"
     ));
     assert!(!rendered.contains("incomplete at a configured discovery limit"));
+}
+
+#[test]
+fn render_text_prints_analyzed_line_range_and_redaction_count() {
+    let mut report = ArtifactRunReport {
+        status: ArtifactRunStatus::AnalysisPartial,
+        task_outcome: TaskOutcome::NotEvaluated,
+        task: "review the parser".to_string(),
+        authority: AuthorityReport {
+            read_only: true,
+            model_tools: false,
+            model_filesystem_write: false,
+            model_command_execution: false,
+            model_network_tools: false,
+            source_egress: SourceEgress::LocalEndpoint,
+            source_content_transmission_attempted: true,
+            relative_paths_transmission_attempted: true,
+            content_hashes_transmission_attempted: true,
+            acceptance_owner: "deterministic_harness",
+        },
+        evidence_validation: "exact_full_lines_matched_against_delivered_snapshot",
+        plan: plan(Vec::new()),
+        rounds_requested: 1,
+        rounds_completed: 1,
+        turns_planned: 1,
+        calls_scheduled: 1,
+        turns_analyzed: 1,
+        evidence_matched_findings: 0,
+        rejected_findings: 0,
+        messages: Vec::new(),
+        turns: vec![WorkerTurnReport {
+            artifact: "artifact-001".to_string(),
+            path: "src/lib.rs".to_string(),
+            round: 1,
+            status: WorkerCallStatus::Analyzed,
+            summary: None,
+            evidence_matched_findings: Vec::new(),
+            rejected_findings: 0,
+            messages_sent: 0,
+            rejected_messages: 0,
+            source: SourceScope {
+                start_line: 1,
+                end_line: 40,
+                total_lines: 180,
+                content_tokens: 30,
+                whole_file: false,
+                trust_gate_neutralized: 2,
+            },
+            accounted_usage: None,
+            error: None,
+        }],
+        usage: UsageReport {
+            accounted: AccountedUsage::default(),
+            token_accounting_complete: false,
+            unknown_token_attempts: 0,
+            fallback_token_attempts: 1,
+            fallback_tokens: 15,
+            cost_accounting_complete: true,
+            unmetered_cost_attempts: 0,
+        },
+        elapsed_ms: 0,
+        stop_reason: Some("analyzed source is partial".to_string()),
+    };
+
+    let rendered = report.render_text(false);
+    assert!(rendered.contains("source lines 1-40 of 180"));
+    assert!(rendered.contains("redacted findings: 2"));
+    assert!(
+        rendered.contains("15 measured fallback token(s) across 1 attempt(s), not provider usage")
+    );
+    let quiet = report.render_text(true);
+    assert!(quiet.contains("source lines 1-40 of 180"));
+    assert!(quiet.contains("redacted findings: 2"));
+
+    report.turns[0].source.trust_gate_neutralized = 0;
+    report.usage.fallback_token_attempts = 0;
+    report.usage.fallback_tokens = 0;
+    let clean = report.render_text(false);
+    assert!(clean.contains("source lines 1-40 of 180"));
+    assert!(!clean.contains("redacted findings"));
+    assert!(!clean.contains("measured fallback"));
+    assert!(clean.contains("coverage incomplete (0 unknown attempt(s)); cost"));
 }

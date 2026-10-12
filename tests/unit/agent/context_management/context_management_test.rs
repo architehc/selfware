@@ -708,6 +708,65 @@ async fn workspace_root_ctx_copy_payload_walks_entered_worktree() {
     server.stop().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn ctx_walk_omits_hard_links_and_private_state_but_an_exact_file_is_read() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        workspace.path().join("visible.rs"),
+        "fn visible_neighbor() {}",
+    )
+    .unwrap();
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, "fn hard_link_secret_symbol() {}").unwrap();
+    std::fs::hard_link(&secret, workspace.path().join("linked.rs")).unwrap();
+    std::fs::create_dir_all(workspace.path().join(".selfware")).unwrap();
+    std::fs::write(
+        workspace.path().join(".selfware/leak.rs"),
+        "fn private_state_leak() {}",
+    )
+    .unwrap();
+
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(workspace.path());
+    agent.file_tracker.root = root.path();
+    let payload =
+        crate::tools::workspace_root::scope(root.clone(), agent.source_context_for_copy()).await;
+    assert!(payload.contains("visible_neighbor"), "{payload}");
+    assert!(!payload.contains("hard_link_secret_symbol"), "{payload}");
+    assert!(!payload.contains("private_state_leak"), "{payload}");
+
+    let loaded =
+        crate::tools::workspace_root::scope(root.clone(), agent.load_files_to_context("rs"))
+            .await
+            .unwrap();
+    assert_eq!(loaded, 1);
+    let loaded_text = agent
+        .messages
+        .iter()
+        .map(|message| message.content.text())
+        .collect::<String>();
+    assert!(loaded_text.contains("visible_neighbor"), "{loaded_text}");
+    assert!(
+        !loaded_text.contains("hard_link_secret_symbol"),
+        "{loaded_text}"
+    );
+    assert!(!loaded_text.contains("private_state_leak"), "{loaded_text}");
+
+    let input = "show @linked.rs";
+    let (expanded, included) =
+        crate::tools::workspace_root::scope(root, agent.expand_file_references(input)).await;
+    assert_eq!(included, vec!["linked.rs".to_string()]);
+    assert!(
+        expanded.contains("hard_link_secret_symbol"),
+        "an exact @file must still be read: {expanded}"
+    );
+
+    server.stop().await;
+}
+
 // =====================================================================
 // clear_context  (lightweight Agent state test)
 // =====================================================================

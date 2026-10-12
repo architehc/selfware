@@ -618,6 +618,10 @@ pub struct ApiClient {
     /// adaptive non-streaming response timeout so slow local CPU servers get
     /// proportionally longer budgets than fast remote ones.
     pub(crate) speed_tracker: Arc<std::sync::Mutex<ServerSpeedTracker>>,
+    /// Selects `reqwest::retry::never()` for both reqwest clients. True only
+    /// on the artifact harness; ordinary clients keep protocol-nack retries.
+    /// A local endpoint forces `no_proxy` and does not set this.
+    pub(crate) single_physical_request: bool,
     /// Test-only override for the zero-content long-call threshold, so unit
     /// tests can exercise the typed outcome without waiting out the real
     /// (60 s) constant.
@@ -742,14 +746,33 @@ pub fn extra_body_pins_reasoning(
 }
 
 impl ApiClient {
+    fn apply_transport_policy(
+        builder: reqwest::ClientBuilder,
+        disable_environment_proxies: bool,
+        single_physical_request: bool,
+    ) -> reqwest::ClientBuilder {
+        let builder = if disable_environment_proxies {
+            builder.no_proxy()
+        } else {
+            builder
+        };
+        if single_physical_request {
+            // A reserved source POST must not be replayed by HTTP/2 nack handling.
+            builder.retry(reqwest::retry::never())
+        } else {
+            builder
+        }
+    }
+
     pub fn new(config: &crate::config::Config) -> Result<Self> {
-        Self::new_with_transport_policy(config, false)
+        Self::new_with_transport_policy(config, false, false)
     }
 
     /// Build the model transport used for source-bearing artifact calls.
     /// Environment proxies are disabled so a loopback endpoint remains local;
     /// redirects are disabled for every API client because replaying a POST can
-    /// move prompts and credentials to a different authority.
+    /// move prompts and credentials to a different authority. HTTP/2
+    /// protocol-nack retries are disabled so that POST is not replayed in place.
     pub(crate) fn new_for_artifact_harness(config: &crate::config::Config) -> Result<Self> {
         // The artifact runtime reserves one bounded completion against the
         // measured messages it constructs. General-purpose `extra_body`
@@ -762,46 +785,46 @@ impl ApiClient {
         for profile in artifact_config.models.values_mut() {
             profile.extra_body = None;
         }
-        Self::new_with_transport_policy(&artifact_config, true)
+        Self::new_with_transport_policy(&artifact_config, true, true)
     }
 
+    /// `single_physical_request` selects `reqwest::retry::never()` and is set
+    /// only by the artifact harness. A local endpoint forces `no_proxy` and
+    /// does not disable protocol-nack retries.
     fn new_with_transport_policy(
         config: &crate::config::Config,
         disable_environment_proxies: bool,
+        single_physical_request: bool,
     ) -> Result<Self> {
         let disable_environment_proxies =
             disable_environment_proxies || crate::config::is_local_endpoint(&config.endpoint);
         // Total-timeout client, used only by the short FIM `complete` path.
         let request_timeout = config.agent.step_timeout_secs.max(60);
-        let client_builder = Client::builder()
-            .timeout(Duration::from_secs(request_timeout))
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none());
-        let client_builder = if disable_environment_proxies {
-            client_builder.no_proxy()
-        } else {
-            client_builder
-        };
-        let client = client_builder
-            .build()
-            .context("Failed to build HTTP client")?;
+        let client = Self::apply_transport_policy(
+            Client::builder()
+                .timeout(Duration::from_secs(request_timeout))
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none()),
+            disable_environment_proxies,
+            single_physical_request,
+        )
+        .build()
+        .context("Failed to build HTTP client")?;
 
         // Chat/stream client: NO total `.timeout()`. Both the streaming and the
         // non-streaming chat paths bound their own response wait (streaming: a
         // header timeout + per-chunk stall detection; non-streaming: a generous
         // header/response `tokio::time::timeout`) so a slow-but-healthy
         // generation from a local model is never aborted mid-flight.
-        let stream_client_builder = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none());
-        let stream_client_builder = if disable_environment_proxies {
-            stream_client_builder.no_proxy()
-        } else {
-            stream_client_builder
-        };
-        let stream_client = stream_client_builder
-            .build()
-            .context("Failed to build streaming HTTP client")?;
+        let stream_client = Self::apply_transport_policy(
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none()),
+            disable_environment_proxies,
+            single_physical_request,
+        )
+        .build()
+        .context("Failed to build streaming HTTP client")?;
 
         // Request-boundary credential enforcement: never build a client that
         // would send the API key to an endpoint that leaks it — plaintext HTTP
@@ -835,6 +858,7 @@ impl ApiClient {
             native_fc_disabled: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             usage_ledger: super::usage::UsageLedger::default(),
             speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
+            single_physical_request,
             #[cfg(test)]
             zero_content_threshold_override_ms: None,
             #[cfg(test)]
@@ -2084,7 +2108,8 @@ impl ApiClient {
 
     /// A rebuild changes transport/provider settings, never the running task's budget.
     pub fn rebuild(&self, config: &crate::config::Config) -> Result<Self> {
-        let mut client = Self::new(config)?;
+        let mut client =
+            Self::new_with_transport_policy(config, false, self.single_physical_request)?;
         client.wall_budget_start = Arc::clone(&self.wall_budget_start);
         client.usage_ledger = self.usage_ledger.clone();
         client.native_fc_disabled = Arc::clone(&self.native_fc_disabled);

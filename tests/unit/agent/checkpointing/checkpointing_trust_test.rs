@@ -342,3 +342,160 @@ async fn restored_generated_context_from_private_state_is_withheld() {
         .contains("USER_CONTEXT_SENTINEL"));
     assert_eq!(agent.trust_gate_findings, 2);
 }
+
+#[tokio::test]
+async fn restored_reader_prose_mentions_are_not_private_paths() {
+    // Prose in a repository-wide reader is not a private path. Structured
+    // path fields and tree/grep location prefixes are. A recorded root of
+    // `.claude` is withheld even when the payload never repeats that root.
+    let mut agent = agent().await;
+    let prose = "the .git directory and .selfware; see src/.git/config and .gitignore";
+    let grep_prose = serde_json::json!({
+        "matches": [
+            {"file": "src/main.rs", "content": prose},
+            {"file": "docs/.claude-example.md", "content": ".selfware"},
+            {"file": ".gitignore", "content": "the .git directory"}
+        ]
+    })
+    .to_string();
+    let symbol_prose = serde_json::json!({
+        "results": [{
+            "path": "src/lib.rs",
+            "signature": "the .git directory",
+            "note": ".selfware and src/.git/config"
+        }]
+    })
+    .to_string();
+    let intro_prose = serde_json::json!({
+        "content": prose,
+        "files": [
+            {"path": "src/main.rs"},
+            {"path": "docs/.claude-example.md"},
+            {"path": ".gitignore"}
+        ]
+    })
+    .to_string();
+    let plain_prose = [
+        "src/main.rs:12: the .git directory and .selfware",
+        "docs/.claude-example.md:1: .gitignore",
+    ]
+    .join("\n");
+    let claude_path = serde_json::json!({
+        "file": ".claude/secret.txt",
+        "content": "CLAUDE_PATH_SENTINEL"
+    })
+    .to_string();
+    let selfware_path = serde_json::json!({
+        "path": ".selfware/cache.db",
+        "note": "SELFWARE_PATH_SENTINEL"
+    })
+    .to_string();
+    let bare_root = serde_json::json!({
+        "root": ".git",
+        "note": "BARE_ROOT_SENTINEL"
+    })
+    .to_string();
+    let location = [
+        "src/.git/config:1: LOCATION_GIT_SENTINEL",
+        ".claude/projects/x:2: LOCATION_TREE_SENTINEL",
+    ]
+    .join("\n");
+    let restored_prose = "restored notes mention the .git directory and .selfware only";
+    let restored_path = serde_json::json!({
+        "path": ".claude/secret.txt",
+        "content": "RESTORED_PATH_SENTINEL"
+    })
+    .to_string();
+
+    let mut messages = vec![
+        native_tool_call(
+            "grep",
+            "grep_search",
+            serde_json::json!({"path":"src","pattern":"directory"}),
+        ),
+        Message::tool(grep_prose, "grep"),
+        native_tool_call("symbols", "symbol_search", serde_json::json!({"path":"."})),
+        Message::tool(symbol_prose, "symbols"),
+        native_tool_call(
+            "intro",
+            "code_introspect",
+            serde_json::json!({"target":"src"}),
+        ),
+        Message::tool(intro_prose, "intro"),
+        native_tool_call(
+            "plain",
+            "grep_search",
+            serde_json::json!({"path":"src","pattern":"directory"}),
+        ),
+        Message::tool(plain_prose, "plain"),
+        native_tool_call(
+            "claude",
+            "grep_search",
+            serde_json::json!({"path":".","pattern":"secret"}),
+        ),
+        Message::tool(claude_path, "claude"),
+        native_tool_call("cache", "directory_tree", serde_json::json!({"path":"."})),
+        Message::tool(selfware_path, "cache"),
+        native_tool_call("bare", "directory_tree", serde_json::json!({"path":"."})),
+        Message::tool(bare_root, "bare"),
+        native_tool_call(
+            "location",
+            "grep_search",
+            serde_json::json!({"path":".","pattern":"core"}),
+        ),
+        Message::tool(location, "location"),
+        Message::tool(restored_prose, "orphan-prose"),
+        Message::tool(restored_path, "orphan-path"),
+        native_tool_call(
+            "explicit",
+            "code_introspect",
+            serde_json::json!({"target":".claude"}),
+        ),
+        Message::tool("ARG_ROOT_SENTINEL", "explicit"),
+    ];
+
+    agent.sanitize_restored_tool_messages(&mut messages, &[]);
+
+    let tool_text = |id: &str| -> String {
+        messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some(id))
+            .unwrap_or_else(|| panic!("missing {id}"))
+            .content
+            .text_all()
+    };
+    for id in ["grep", "symbols", "intro", "plain", "orphan-prose"] {
+        let text = tool_text(id);
+        assert!(
+            text.contains("the .git directory") || text.contains(".selfware"),
+            "{id} dropped a prose mention: {text}"
+        );
+        assert!(
+            !text.contains("broad scans no longer read"),
+            "{id} withheld prose: {text}"
+        );
+    }
+    assert!(tool_text("grep").contains("src/.git/config"));
+    assert!(tool_text("grep").contains(".gitignore"));
+    assert!(tool_text("grep").contains("docs/.claude-example.md"));
+    assert!(tool_text("plain").contains(".claude-example.md"));
+    assert_eq!(tool_text("orphan-prose"), restored_prose);
+
+    for (id, sentinel) in [
+        ("claude", "CLAUDE_PATH_SENTINEL"),
+        ("cache", "SELFWARE_PATH_SENTINEL"),
+        ("bare", "BARE_ROOT_SENTINEL"),
+        ("location", "LOCATION_GIT_SENTINEL"),
+        ("orphan-path", "RESTORED_PATH_SENTINEL"),
+        ("explicit", "ARG_ROOT_SENTINEL"),
+    ] {
+        let text = tool_text(id);
+        assert!(!text.contains(sentinel), "{id} kept {sentinel}: {text}");
+        assert!(
+            text.contains("broad scans no longer read"),
+            "{id} was not withheld: {text}"
+        );
+    }
+    assert!(!tool_text("location").contains("LOCATION_TREE_SENTINEL"));
+    assert_eq!(agent.trust_gate_findings, 6);
+}

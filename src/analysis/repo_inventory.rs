@@ -362,7 +362,7 @@ impl RepoInventory {
             };
         }
 
-        let importers = import_graph(&root, &files, &contents);
+        let importers = import_graph(&files, &contents);
         let mut import_edges = 0;
         for (target, from) in importers.iter().enumerate() {
             files[target].in_degree = from.len();
@@ -1275,11 +1275,7 @@ pub fn resolve_review_scope(task: &str, inventory: &RepoInventory) -> ReviewScop
 
 /// `importers[i]` = distinct indices of files whose imports resolve to file
 /// `i` (self-imports excluded).
-fn import_graph(
-    root: &Path,
-    files: &[InventoryFile],
-    contents: &[Option<String>],
-) -> Vec<HashSet<usize>> {
+fn import_graph(files: &[InventoryFile], contents: &[Option<String>]) -> Vec<HashSet<usize>> {
     let mut importers: Vec<HashSet<usize>> = vec![HashSet::new(); files.len()];
     let by_path: HashMap<&str, usize> = files
         .iter()
@@ -1293,7 +1289,7 @@ fn import_graph(
             importers[to].insert(from);
         }
     };
-    for (from, to) in rust_edges(root, files, contents, &by_path) {
+    for (from, to) in rust_edges(files, contents, &by_path) {
         add(from, to);
     }
     for (from, to) in python_edges(files, contents) {
@@ -1302,7 +1298,7 @@ fn import_graph(
     for (from, to) in js_edges(files, contents, &by_path) {
         add(from, to);
     }
-    for (from, to) in go_edges(root, files, contents) {
+    for (from, to) in go_edges(files, contents) {
         add(from, to);
     }
     importers
@@ -1344,6 +1340,28 @@ struct RustCrate {
     modules: HashMap<String, usize>,
 }
 
+// Scan text only: a second open by path can see a hard link the safe open refused.
+fn captured_manifest_text<'a>(
+    file: &InventoryFile,
+    contents: &'a [Option<String>],
+    index: usize,
+) -> Option<&'a str> {
+    if file.unreadable.is_some() {
+        return None;
+    }
+    contents.get(index).and_then(|text| text.as_deref())
+}
+
+fn package_name(text: &str) -> Option<String> {
+    text.parse::<toml::Table>().ok().and_then(|table| {
+        table
+            .get("package")?
+            .get("name")?
+            .as_str()
+            .map(|name| name.replace('-', "_"))
+    })
+}
+
 /// The crate owning `rel` (`crates` sorted deepest first).
 fn crate_index(crates: &[RustCrate], rel: &str) -> Option<usize> {
     crates
@@ -1352,25 +1370,16 @@ fn crate_index(crates: &[RustCrate], rel: &str) -> Option<usize> {
 }
 
 fn rust_edges(
-    root: &Path,
     files: &[InventoryFile],
     contents: &[Option<String>],
     by_path: &HashMap<&str, usize>,
 ) -> Vec<(usize, usize)> {
     // Crates: every directory holding a Cargo.toml with a [package].
     let mut crates: Vec<RustCrate> = Vec::new();
-    for f in files {
+    for (i, f) in files.iter().enumerate() {
         if f.path == "Cargo.toml" || f.path.ends_with("/Cargo.toml") {
             let dir = parent_dir(&f.path).to_string();
-            let name = std::fs::read_to_string(root.join(&f.path))
-                .ok()
-                .and_then(|t| t.parse::<toml::Table>().ok())
-                .and_then(|t| {
-                    t.get("package")?
-                        .get("name")?
-                        .as_str()
-                        .map(|n| n.replace('-', "_"))
-                });
+            let name = captured_manifest_text(f, contents, i).and_then(package_name);
             if name.is_some() || by_path.contains_key(join_rel(&dir, "src/lib.rs").as_str()) {
                 crates.push(RustCrate {
                     dir,
@@ -1678,18 +1687,14 @@ static GO_IMPORT_BLOCK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?s)\bimport\s*\((.*?)\)"#).expect("valid regex"));
 static GO_QUOTED: Lazy<Regex> = Lazy::new(|| Regex::new(r#""([^"]+)""#).expect("valid regex"));
 
-fn go_edges(
-    root: &Path,
-    files: &[InventoryFile],
-    contents: &[Option<String>],
-) -> Vec<(usize, usize)> {
+fn go_edges(files: &[InventoryFile], contents: &[Option<String>]) -> Vec<(usize, usize)> {
     // go.mod dir → module path.
     let mut modules: Vec<(String, String)> = files
         .iter()
-        .filter(|f| f.path == "go.mod" || f.path.ends_with("/go.mod"))
-        .filter_map(|f| {
-            let text = std::fs::read_to_string(root.join(&f.path)).ok()?;
-            let module = text
+        .enumerate()
+        .filter(|(_, f)| f.path == "go.mod" || f.path.ends_with("/go.mod"))
+        .filter_map(|(i, f)| {
+            let module = captured_manifest_text(f, contents, i)?
                 .lines()
                 .find_map(|l| l.trim().strip_prefix("module "))?
                 .trim()
@@ -2155,6 +2160,51 @@ mod tests {
             .unreadable
             .iter()
             .any(|item| item.starts_with("src/public_looking.rs")));
+    }
+
+    #[test]
+    fn cargo_package_name_resolves_an_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "Cargo.toml", "[package]\nname = \"demo-crate\"\n");
+        write(r, "src/lib.rs", "pub mod api;\n");
+        write(r, "src/api.rs", "pub fn run() {}\n");
+        write(
+            r,
+            "src/main.rs",
+            "use demo_crate::api::run;\nfn main() { run(); }\n",
+        );
+        let inv = RepoInventory::scan(r).unwrap();
+        let api = inv.files.iter().find(|f| f.path == "src/api.rs").unwrap();
+        assert_eq!(api.in_degree, 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hard_linked_cargo_manifest_is_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "src/lib.rs", "pub mod api;\n");
+        write(r, "src/api.rs", "pub fn run() {}\n");
+        write(
+            r,
+            "src/main.rs",
+            "use demo_crate::api::run;\nfn main() { run(); }\n",
+        );
+        let outside = tempfile::tempdir().unwrap();
+        let private_manifest = outside.path().join("Cargo.toml");
+        std::fs::write(&private_manifest, "[package]\nname = \"demo-crate\"\n").unwrap();
+        std::fs::hard_link(&private_manifest, r.join("Cargo.toml")).unwrap();
+
+        let inv = RepoInventory::scan(r).unwrap();
+        let manifest = inv
+            .files
+            .iter()
+            .find(|f| f.path == "Cargo.toml")
+            .expect("refused manifest stays in the inventory");
+        assert_eq!(manifest.lines, 0);
+        let api = inv.files.iter().find(|f| f.path == "src/api.rs").unwrap();
+        assert_eq!(api.in_degree, 0);
     }
 
     #[test]

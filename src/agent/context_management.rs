@@ -1412,9 +1412,9 @@ impl Agent {
             }
 
             let full_path = root.join(&path);
-            let content = match tokio::fs::read_to_string(&full_path).await {
-                Ok(c) => c,
-                Err(_) => continue,
+            let content = match read_discovered_context_file(&full_path).await {
+                Some(content) => content,
+                None => continue,
             };
 
             let content = self.sanitize_context_data(&path, &content);
@@ -1523,10 +1523,9 @@ impl Agent {
             let full_path = root.join(path);
             let p = path.clone();
             join_set.spawn(async move {
-                match tokio::fs::read_to_string(&full_path).await {
-                    Ok(content) => Some((p, content)),
-                    Err(_) => None,
-                }
+                read_discovered_context_file(&full_path)
+                    .await
+                    .map(|content| (p, content))
             });
         }
 
@@ -1951,6 +1950,24 @@ pub(crate) fn compact_tool_call_arguments(arguments: &str) -> Option<String> {
         .to_string(),
     };
     (compacted.chars().count() < original_chars).then_some(compacted)
+}
+
+/// Walked context bytes stay on the descriptor checked for `nlink == 1`.
+/// A later `read_to_string` of the pathname can follow a swapped hard link.
+async fn read_discovered_context_file(path: &std::path::Path) -> Option<String> {
+    let path = path.to_path_buf();
+    crate::tools::workspace_root::spawn_blocking(move || {
+        if crate::safety::source_context::path_contains_private_discovery_state(&path) {
+            return None;
+        }
+        let mut file = crate::safety::source_context::open_broad_discovery_regular(&path).ok()?;
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+        Some(buf)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

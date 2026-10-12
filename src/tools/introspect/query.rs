@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::budget::TokenBudget;
 use super::parser::{parse, Language, ParsedFile, Symbol};
@@ -23,6 +23,32 @@ pub struct CodeQueryEngine {
     total_docs: usize,
     /// Average document length (in tokens)
     avg_doc_len: f64,
+    /// Walked corpus files must be read from the checked discovery descriptor.
+    /// Exact user-named files leave this false.
+    discovered: bool,
+}
+
+/// Discovered corpus bytes stay on the descriptor checked for `nlink == 1`.
+/// A later `read_to_string` of the pathname can follow a swapped hard link.
+fn read_discovered_source(path: &Path) -> Option<String> {
+    if crate::safety::source_context::path_contains_private_discovery_state(path) {
+        return None;
+    }
+    let mut file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+    Some(buf)
+}
+
+async fn read_query_source(path: &Path, discovered: bool) -> Option<String> {
+    if !discovered {
+        return tokio::fs::read_to_string(path).await.ok();
+    }
+    let path = path.to_path_buf();
+    crate::tools::workspace_root::spawn_blocking(move || read_discovered_source(&path))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// A ranked search result
@@ -50,7 +76,13 @@ impl CodeQueryEngine {
             doc_freq: HashMap::new(),
             total_docs: 0,
             avg_doc_len: 0.0,
+            discovered: false,
         }
+    }
+
+    /// `discovered` selects the walk read. An exact user-named file stays false.
+    pub(super) fn set_discovered_sources(&mut self, discovered: bool) {
+        self.discovered = discovered;
     }
 
     /// Rank files by relevance to query.
@@ -67,7 +99,7 @@ impl CodeQueryEngine {
 
         for (path, base_score) in files {
             // Read and parse file
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if let Some(content) = read_query_source(path, self.discovered).await {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
 
@@ -106,7 +138,7 @@ impl CodeQueryEngine {
         let mut matches: Vec<(RankedResult, usize)> = Vec::new();
 
         for path in files {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if let Some(content) = read_query_source(path, self.discovered).await {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
 
@@ -239,7 +271,7 @@ impl CodeQueryEngine {
         let mut term_doc_freq: HashMap<String, usize> = HashMap::new();
 
         for path in files {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if let Some(content) = read_query_source(path, self.discovered).await {
                 total_len += content.len();
                 let terms = tokenize(&content);
 
@@ -286,7 +318,9 @@ pub async fn find_related_symbols(
     files: &[PathBuf],
     max_results: usize,
 ) -> Result<Vec<(PathBuf, Symbol)>> {
-    let engine = CodeQueryEngine::new();
+    let mut engine = CodeQueryEngine::new();
+    // Callers pass the introspection walk, not one user-named file.
+    engine.set_discovered_sources(true);
     let budget = TokenBudget::new(usize::MAX); // No budget limit for this search
 
     let results = engine.search(query, files, &budget).await?;

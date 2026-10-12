@@ -95,6 +95,22 @@ fn openat_component(
 }
 
 #[cfg(unix)]
+fn refuse_crossed_device(file: &std::fs::File, root_dev: u64, relative: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // Mount points are not symlinks, so O_NOFOLLOW still crosses onto another st_dev.
+    let dev = file
+        .metadata()
+        .context("cannot stat pinned artifact descriptor")?
+        .dev();
+    anyhow::ensure!(
+        dev == root_dev,
+        "artifact read refused {}: the artifact crossed onto another device / mount",
+        relative.display()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
 fn read_relative_regular_sync(
     root: &Path,
     relative: &Path,
@@ -102,6 +118,7 @@ fn read_relative_regular_sync(
     limit: u64,
 ) -> Result<(String, Vec<u8>)> {
     use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
 
     let components = relative_components(relative)?;
@@ -110,6 +127,10 @@ fn read_relative_regular_sync(
         .context("artifact read path is outside path policy")?;
 
     let (mut directory, pinned_root) = open_root(root)?;
+    let root_dev = directory
+        .metadata()
+        .context("cannot stat pinned artifact harness root")?
+        .dev();
     for component in &components[..components.len() - 1] {
         directory = openat_component(&directory, component, true).with_context(|| {
             format!(
@@ -117,19 +138,20 @@ fn read_relative_regular_sync(
                 relative.display()
             )
         })?;
+        refuse_crossed_device(&directory, root_dev, relative)?;
     }
     let name = components
         .last()
         .expect("relative_components always returns a non-empty vector");
     let mut file = openat_component(&directory, name, false)
         .with_context(|| format!("artifact read refused {}", relative.display()))?;
+    refuse_crossed_device(&file, root_dev, relative)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(anyhow::anyhow!(
             crate::safety::path_validator::not_regular_error(&lexical, &metadata)
         ));
     }
-    use std::os::unix::fs::MetadataExt;
     anyhow::ensure!(
         metadata.nlink() == 1,
         "artifact read refuses files with multiple hard links"

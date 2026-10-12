@@ -41,19 +41,9 @@ fn main() {
             if !entry.file_type().is_dir() {
                 return true;
             }
-            !matches!(
-                entry.file_name().to_str(),
-                Some(
-                    ".claude"
-                        | ".codex"
-                        | ".agents"
-                        | ".qwen"
-                        | ".superpowers"
-                        | ".git"
-                        | "target"
-                        | "node_modules"
-                )
-            )
+            let name = entry.file_name();
+            !is_private_discovery_dir_name(name)
+                && !matches!(name.to_str(), Some("target" | "node_modules"))
         })
         .filter_map(|e| e.ok())
     {
@@ -97,9 +87,9 @@ fn main() {
         let rel_path = file_path.strip_prefix(".").unwrap_or(file_path);
         let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
-        let content = match fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let content = match read_indexed_source(file_path) {
+            Some(c) => c,
+            None => continue,
         };
 
         let line_count = content.lines().count();
@@ -418,19 +408,139 @@ fn main() {
     println!("  Fusion groups: {}", fusion_groups.len());
 }
 
-fn discovery_root_is_private(path: &std::path::Path) -> bool {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    resolved.components().any(|component| {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        name.to_str().is_some_and(|name| {
-            matches!(
-                name.to_ascii_lowercase().as_str(),
-                ".git" | ".selfware" | ".claude" | ".codex" | ".agents" | ".qwen" | ".superpowers"
-            )
-        })
+fn is_private_discovery_dir_name(name: &std::ffi::OsStr) -> bool {
+    const PRIVATE_DIRS: &[&str] = &[
+        ".claude",
+        ".codex",
+        ".agents",
+        ".qwen",
+        ".superpowers",
+        ".git",
+        ".selfware",
+    ];
+    name.to_str().is_some_and(|name| {
+        PRIVATE_DIRS
+            .iter()
+            .any(|private| name.eq_ignore_ascii_case(private))
     })
+}
+
+fn path_contains_private_discovery_state(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(name) => is_private_discovery_dir_name(name),
+        _ => false,
+    })
+}
+
+fn discovery_root_is_private(path: &Path) -> bool {
+    path_contains_private_discovery_state(path)
+        || std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|resolved| path_contains_private_discovery_state(&resolved))
+}
+
+fn read_indexed_source(path: &Path) -> Option<String> {
+    if path_contains_private_discovery_state(path) {
+        return None;
+    }
+    let mut file = open_broad_discovery_regular(path).ok()?;
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// No-follow, single-link open. Reopening the path can observe a hard-link swap.
+fn open_broad_discovery_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        validate_broad_discovery_file_handle(&file)?;
+        Ok(file)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        validate_broad_discovery_file_handle(&file)?;
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, options);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "broad discovery cannot verify hard-link count on this platform",
+        ))
+    }
+}
+
+fn validate_broad_discovery_file_handle(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "broad discovery refuses non-regular or multiply linked files",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+
+        let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: `file` owns a live OS handle and `information` points to
+        // writable storage for the exact structure required by the API.
+        let result = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a nonzero API result initialized the complete structure.
+        let information = unsafe { information.assume_init() };
+        let metadata = file.metadata()?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_file()
+            || information.nNumberOfLinks != 1
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "broad discovery refuses non-regular or multiply linked files",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "broad discovery cannot verify hard-link count on this platform",
+        ))
+    }
 }
 
 fn path_to_module_id(path: &Path) -> String {

@@ -724,6 +724,89 @@ fn introspection_source_walk_rejects_a_root_below_private_state() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn introspection_omits_discovered_hard_link_content_but_reads_an_exact_file() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write_file(
+        root.path(),
+        "src/visible.rs",
+        "pub fn visible_neighbor() {}\n",
+    );
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, "pub fn hard_link_secret_symbol() {}\n").unwrap();
+    let linked = root.path().join("src/linked.rs");
+    std::fs::hard_link(&secret, &linked).unwrap();
+
+    let config = scoped_config(format!("{}/**", root.path().to_string_lossy()), vec![]);
+    let tool = CodeIntrospect::with_safety_config(config.clone());
+    let broad = introspect(
+        &tool,
+        json!({"target": root.path().to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    assert!(
+        broad.content.contains("visible_neighbor"),
+        "{}",
+        broad.content
+    );
+    assert!(
+        !broad.content.contains("hard_link_secret_symbol"),
+        "{}",
+        broad.content
+    );
+
+    let exact_tool = CodeIntrospect::with_safety_config(config);
+    let exact = introspect(
+        &exact_tool,
+        json!({"target": linked.to_string_lossy(), "max_tokens": 8000}),
+    )
+    .await;
+    assert!(
+        exact.content.contains("hard_link_secret_symbol"),
+        "{}",
+        exact.content
+    );
+
+    let query = CodeQuery::with_safety_config(scoped_config(
+        format!("{}/**", root.path().to_string_lossy()),
+        vec![],
+    ));
+    let broad_query = query
+        .execute(json!({
+            "query": "visible_neighbor hard_link_secret_symbol",
+            "scope": root.path().to_string_lossy(),
+        }))
+        .await
+        .unwrap();
+    let broad_rendered = serde_json::to_string(&broad_query["results"]).unwrap();
+    assert!(
+        broad_rendered.contains("visible_neighbor"),
+        "{broad_rendered}"
+    );
+    assert!(
+        !broad_rendered.contains("hard_link_secret_symbol"),
+        "{broad_rendered}"
+    );
+    let exact_query = CodeQuery::with_safety_config(scoped_config(
+        format!("{}/**", root.path().to_string_lossy()),
+        vec![],
+    ));
+    let exact_out = exact_query
+        .execute(json!({
+            "query": "hard_link_secret_symbol",
+            "scope": linked.to_string_lossy(),
+        }))
+        .await
+        .unwrap();
+    let exact_rendered = serde_json::to_string(&exact_out["results"]).unwrap();
+    assert!(
+        exact_rendered.contains("hard_link_secret_symbol"),
+        "{exact_rendered}"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn introspection_walk_omits_discovered_hard_links_but_keeps_an_exact_file() {
     let root = tempfile::tempdir().unwrap();

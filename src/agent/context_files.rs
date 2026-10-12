@@ -138,6 +138,24 @@ async fn collect_context_paths(
     .unwrap_or_default()
 }
 
+/// Walked context bytes stay on the descriptor checked for `nlink == 1`.
+/// A later `read_to_string` of the pathname can follow a swapped hard link.
+async fn read_walked_context_file(path: &std::path::Path) -> Option<String> {
+    let path = path.to_path_buf();
+    crate::tools::workspace_root::spawn_blocking(move || {
+        if crate::safety::source_context::path_contains_private_discovery_state(&path) {
+            return None;
+        }
+        let mut file = crate::safety::source_context::open_broad_discovery_regular(&path).ok()?;
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+        Some(buf)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 fn replace_context_file_messages(
     messages: &mut Vec<Message>,
     existing_indices: &[usize],
@@ -403,7 +421,7 @@ impl Agent {
                 warn!("Skipping unsafe context file {}: {error}", path.display());
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Some(content) = read_walked_context_file(&path).await {
                 let raw = format!("{}{}", context_file_header(&path), content);
                 let full_content = self.sanitize_context_data(&path, &raw);
                 let message = context_file_message(&path, full_content);
@@ -576,7 +594,7 @@ impl Agent {
                 warn!("Skipping unsafe context file {}: {error}", path.display());
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Some(content) = read_walked_context_file(&path).await {
                 let raw = format!("{}{}\n", context_file_header(&path), content);
                 output.push_str(&self.sanitize_context_data(&path, &raw));
             }

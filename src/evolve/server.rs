@@ -420,7 +420,7 @@ impl EvolveServer {
         let read_root = root.clone();
         let envelope =
             build_envelope_with_root(&graph, &mode, &included, &revision, &root, move |rel| {
-                std::fs::read_to_string(read_root.join(rel)).ok()
+                super::graph::read_broad_discovery_utf8(&read_root.join(rel)).ok()
             });
         *self
             .envelope
@@ -523,7 +523,7 @@ fn reject_over_budget(
         &composer.included_nodes(),
         &revision,
         &root,
-        move |rel| std::fs::read_to_string(read_root.join(rel)).ok(),
+        move |rel| super::graph::read_broad_discovery_utf8(&read_root.join(rel)).ok(),
     );
     let budget = server.fit_budget.usable();
     if candidate.total_tokens > budget {
@@ -1066,7 +1066,7 @@ fn symbol_selection_json(
         if !file.path.ends_with(".rs") {
             continue;
         }
-        let Ok(src) = std::fs::read_to_string(root.join(&file.path)) else {
+        let Ok(src) = super::graph::read_broad_discovery_utf8(&root.join(&file.path)) else {
             continue;
         };
         files_scanned += 1;

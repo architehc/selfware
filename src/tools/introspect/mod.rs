@@ -386,6 +386,27 @@ fn pack(
     }
 }
 
+/// Walked files are read from the descriptor that already enforced `nlink == 1`.
+/// Re-opening the pathname lets a hard-link swap (or a final symlink) through.
+pub(super) async fn read_introspect_source(path: &Path, exact_file: bool) -> Option<String> {
+    if exact_file {
+        return tokio::fs::read_to_string(path).await.ok();
+    }
+    let path = path.to_path_buf();
+    crate::tools::workspace_root::spawn_blocking(move || {
+        if crate::safety::source_context::path_contains_private_discovery_state(&path) {
+            return None;
+        }
+        let mut file = crate::safety::source_context::open_broad_discovery_regular(&path).ok()?;
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+        Some(buf)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 // ============================================================================
 // Code Introspect Tool
 // ============================================================================
@@ -439,6 +460,10 @@ impl CodeIntrospect {
         // (2026-09-21 review sweep).
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&target, &safety)?;
+        // A path the user named as one file keeps the exact read, including
+        // a multiply linked file. A directory's children are discovered.
+        let exact_file =
+            std::fs::symlink_metadata(&target_path).is_ok_and(|meta| meta.file_type().is_file());
 
         let format = args.format.as_deref().unwrap_or("tree");
         let renderer = OutputRenderer::new(format);
@@ -461,6 +486,7 @@ impl CodeIntrospect {
         //    an average of 1.
         let ordered: Vec<PathBuf> = if let Some(ref query) = args.query {
             let mut engine = CodeQueryEngine::new();
+            engine.set_discovered_sources(!exact_file);
             engine.build_index(&files).await?;
             let with_score: Vec<(PathBuf, f64)> = files.into_iter().map(|f| (f, 1.0)).collect();
             engine
@@ -476,11 +502,12 @@ impl CodeIntrospect {
         // 3. Read and parse every candidate once.
         let mut candidates = Vec::with_capacity(ordered.len());
         for path in ordered {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let language = Language::detect(&path, args.language.as_deref());
-                let parsed = parser::parse(&content, language);
-                candidates.push(Candidate { path, parsed });
-            }
+            let Some(content) = read_introspect_source(&path, exact_file).await else {
+                continue;
+            };
+            let language = Language::detect(&path, args.language.as_deref());
+            let parsed = parser::parse(&content, language);
+            candidates.push(Candidate { path, parsed });
         }
 
         // 4. Depth: explicit, or chosen from measured packings of the
@@ -780,6 +807,8 @@ impl Tool for CodeQuery {
         // unvalidated, unlike the checker's `path`-key checks).
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&scope, &safety)?;
+        let exact_file =
+            std::fs::symlink_metadata(&scope_path).is_ok_and(|meta| meta.file_type().is_file());
 
         // Collect files in scope (every discovered candidate is validated
         // against the same path policy before it is read).
@@ -788,6 +817,7 @@ impl Tool for CodeQuery {
 
         // Build query engine and search
         let mut engine = CodeQueryEngine::new();
+        engine.set_discovered_sources(!exact_file);
         engine.build_index(&files).await?;
 
         let budget = TokenBudget::new(4000);

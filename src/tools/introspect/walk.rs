@@ -111,6 +111,11 @@ pub(crate) fn source_files(
                 continue;
             }
             if file_type.is_file() {
+                // A private component can sit on a path the descent check did
+                // not see (the root, or a non-utf8 name). Do not open it.
+                if crate::safety::source_context::path_contains_private_discovery_state(&path) {
+                    continue;
+                }
                 if is_code(&path)
                     && crate::safety::source_context::broad_discovery_file_is_safe(&path)
                 {
@@ -120,7 +125,11 @@ pub(crate) fn source_files(
                     walk.files.push(path);
                 }
             } else if file_type.is_dir() {
-                if is_skipped_dir(&name, &path) {
+                // Use the original name: lossy UTF-8 would miss a private dir.
+                let file_name = entry.file_name();
+                if crate::safety::source_context::is_private_discovery_dir_name(&file_name)
+                    || is_skipped_dir(&name, &path)
+                {
                     continue;
                 }
                 if let Some(safety) = safety {

@@ -240,12 +240,37 @@ fn extract_candidate_paths_from_text(text: &str) -> Vec<String> {
 
     paths
 }
-async fn read_bounded_file(
+async fn read_discovered_bounded_file(
     path: &std::path::Path,
     max_chars: usize,
     safety: &crate::config::SafetyConfig,
 ) -> Option<String> {
-    let content = tokio::fs::read_to_string(path).await.ok()?;
+    let path = path.to_path_buf();
+    let read_path = path.clone();
+    let content = tokio::task::spawn_blocking(move || {
+        if crate::safety::source_context::path_contains_private_discovery_state(&read_path) {
+            return None;
+        }
+        // The walk checked a different open. The bytes have to come from the
+        // descriptor that enforced nlink == 1.
+        let mut file =
+            crate::safety::source_context::open_broad_discovery_regular(&read_path).ok()?;
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+        Some(buf)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    bound_recovered_text(path, content, max_chars, safety)
+}
+
+fn bound_recovered_text(
+    path: std::path::PathBuf,
+    content: String,
+    max_chars: usize,
+    safety: &crate::config::SafetyConfig,
+) -> Option<String> {
     // Scan the complete source before truncation can split a credential or
     // hostile directive at the excerpt boundary.
     let args = serde_json::json!({"path":path.to_string_lossy()}).to_string();
@@ -258,6 +283,15 @@ async fn read_bounded_file(
     .content;
     let bounded: String = content.chars().take(max_chars).collect();
     Some(bounded)
+}
+
+async fn read_bounded_file(
+    path: &std::path::Path,
+    max_chars: usize,
+    safety: &crate::config::SafetyConfig,
+) -> Option<String> {
+    let content = tokio::fs::read_to_string(path).await.ok()?;
+    bound_recovered_text(path.to_path_buf(), content, max_chars, safety)
 }
 
 /// Detect the project type from marker files in the working directory or its ancestors.
@@ -2564,6 +2598,7 @@ To call a tool, use this EXACT XML structure:
         let root = current_project_root();
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
+        let mut discovered_from_walk = HashSet::new();
 
         for relative in extract_candidate_paths_from_text(task) {
             add_candidate_path(self, &root, relative, &mut candidates, &mut seen).await;
@@ -2637,6 +2672,7 @@ To call a tool, use this EXACT XML structure:
             })
             .await
             .unwrap_or_default();
+            discovered_from_walk.extend(walk_result.iter().cloned());
             discovered.extend(walk_result);
             discovered.sort();
 
@@ -2662,9 +2698,12 @@ To call a tool, use this EXACT XML structure:
             if self.validate_context_path(&full).is_err() {
                 continue;
             }
-            let Some(content) =
+            let content = if discovered_from_walk.contains(&relative) {
+                read_discovered_bounded_file(&full, MAX_CHARS_PER_FILE, &self.config.safety).await
+            } else {
                 read_bounded_file(&full, MAX_CHARS_PER_FILE, &self.config.safety).await
-            else {
+            };
+            let Some(content) = content else {
                 continue;
             };
             let section = format!(

@@ -405,10 +405,23 @@ pub(crate) struct UsageReport {
     /// Usage included in the run ledger. Consult the completeness flags before
     /// treating zero or partial values as the full provider-side consumption.
     pub accounted: AccountedUsage,
+    /// True only when every attempt reported prompt, completion, and total.
+    /// A measured fallback does not make this true.
     pub token_accounting_complete: bool,
     pub unknown_token_attempts: usize,
+    /// Attempts that charged a measured fallback. Omitted from JSON when zero
+    /// so older report readers keep the previous shape.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fallback_token_attempts: usize,
+    /// Tokens charged from measured fallbacks. They are not provider usage.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fallback_tokens: usize,
     pub cost_accounting_complete: bool,
     pub unmetered_cost_attempts: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -551,9 +564,18 @@ impl ArtifactRunReport {
                 let _ = writeln!(out, "Graph: rejected — {}", inline_text(reason));
             }
         }
+        let fallback_tokens = self.usage.fallback_tokens;
+        let fallback_token_attempts = self.usage.fallback_token_attempts;
+        let fallback_note = if fallback_tokens > 0 || fallback_token_attempts > 0 {
+            format!(
+                "; {fallback_tokens} measured fallback token(s) across {fallback_token_attempts} attempt(s), not provider usage"
+            )
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "Accounting: {} token(s) accounted, coverage {} ({} unknown attempt(s)); cost {} ({} unmetered attempt(s))",
+            "Accounting: {} token(s) accounted, coverage {} ({} unknown attempt(s){fallback_note}); cost {} ({} unmetered attempt(s))",
             self.usage.accounted.total_tokens,
             if self.usage.token_accounting_complete {
                 "complete"
@@ -569,6 +591,9 @@ impl ArtifactRunReport {
             self.usage.unmetered_cost_attempts
         );
         if quiet {
+            for turn in &self.turns {
+                write_turn_coverage(&mut out, turn);
+            }
             if let Some(reason) = &self.stop_reason {
                 let _ = writeln!(out, "Stopped: {}", inline_text(reason));
             }
@@ -582,6 +607,7 @@ impl ArtifactRunReport {
                 turn.artifact,
                 turn.status
             );
+            write_turn_coverage(&mut out, turn);
             if let Some(summary) = &turn.summary {
                 let _ = writeln!(
                     out,
@@ -620,6 +646,25 @@ impl ArtifactRunReport {
             let _ = writeln!(out, "\nStopped: {}", inline_text(reason));
         }
         out
+    }
+}
+
+fn write_turn_coverage(out: &mut String, turn: &WorkerTurnReport) {
+    use std::fmt::Write as _;
+    if turn.status != WorkerCallStatus::Analyzed {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "  source lines {}-{} of {}",
+        turn.source.start_line, turn.source.end_line, turn.source.total_lines
+    );
+    if turn.source.trust_gate_neutralized > 0 {
+        let _ = writeln!(
+            out,
+            "  redacted findings: {}",
+            turn.source.trust_gate_neutralized
+        );
     }
 }
 

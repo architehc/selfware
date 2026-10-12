@@ -492,20 +492,14 @@ fn collect_key_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<Stri
 /// match, no heuristics.
 pub(crate) fn leak_check_identifiers(
     suspicious_identifiers: &[String],
-    outputs: &[PathBuf],
+    outputs: &GateOutputs,
 ) -> Vec<String> {
     let mut hits = Vec::new();
     if suspicious_identifiers.is_empty() {
         return hits;
     }
-    for path in outputs {
-        let Ok(meta) = std::fs::metadata(path) else {
-            continue;
-        };
-        if meta.len() > CENSUS_MAX_FILE_BYTES * 4 {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
+    for path in &outputs.paths {
+        let Some(content) = read_gate_output(path, outputs.discovered) else {
             continue;
         };
         for ident in suspicious_identifiers {
@@ -520,40 +514,102 @@ pub(crate) fn leak_check_identifiers(
     hits
 }
 
+/// Git diff paths stay on the pathname read. Walked output files are read
+/// from the descriptor checked for `nlink == 1` — a second open by name can
+/// follow a hard-link swap or a final symlink.
+fn read_gate_output(path: &Path, discovered: bool) -> Option<String> {
+    if discovered {
+        if crate::safety::source_context::path_contains_private_discovery_state(path) {
+            return None;
+        }
+        let mut file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
+        let meta = file.metadata().ok()?;
+        if meta.len() > CENSUS_MAX_FILE_BYTES * 4 {
+            return None;
+        }
+        let mut content = String::new();
+        file.read_to_string(&mut content).ok()?;
+        return Some(content);
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return None;
+    };
+    if meta.len() > CENSUS_MAX_FILE_BYTES * 4 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Conventional output directories scanned when no git diff is available
 /// (TB task containers have no .git — the leak check must not go blind).
 const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", "output", "target"];
 const MAX_GATE_OUTPUT_FILES: usize = 100;
 
+/// Paths the completion-time leak check scans, plus whether they were
+/// discovered by walking output directories (as opposed to an explicit git diff).
+pub(crate) struct GateOutputs {
+    paths: Vec<PathBuf>,
+    discovered: bool,
+}
+
+impl std::ops::Deref for GateOutputs {
+    type Target = [PathBuf];
+
+    fn deref(&self) -> &Self::Target {
+        &self.paths
+    }
+}
+
 /// Files the completion-time leak check scans. With git diff paths, those are
 /// the run's changed files. Without git (benchmark containers), the
 /// conventional output dirs are scanned — generated artifacts land there.
-pub(crate) fn collect_gate_outputs(root: &Path, diff_paths: Option<Vec<String>>) -> Vec<PathBuf> {
+pub(crate) fn collect_gate_outputs(root: &Path, diff_paths: Option<Vec<String>>) -> GateOutputs {
     match diff_paths {
-        Some(paths) => paths.iter().map(|p| root.join(p)).collect(),
+        Some(paths) => GateOutputs {
+            paths: paths.iter().map(|p| root.join(p)).collect(),
+            discovered: false,
+        },
         None => {
             let mut out = Vec::new();
             for dir_name in OUTPUT_DIRS {
                 let dir = root.join(dir_name);
-                if !dir.is_dir() {
+                if !dir.is_dir() || crate::safety::source_context::discovery_root_is_private(&dir) {
                     continue;
                 }
                 for entry in walkdir::WalkDir::new(&dir)
                     .max_depth(3)
                     .into_iter()
-                    .filter_map(|e| e.ok())
+                    .filter_entry(|entry| {
+                        let name = entry.file_name();
+                        let private_dir = entry.depth() > 0
+                            && entry.file_type().is_dir()
+                            && crate::safety::source_context::is_private_discovery_dir_name(name);
+                        !private_dir
+                    })
+                    .filter_map(|entry| entry.ok())
                 {
-                    if entry.file_type().is_file()
-                        && crate::safety::source_context::broad_discovery_file_is_safe(entry.path())
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if crate::safety::source_context::path_contains_private_discovery_state(path)
+                        || !crate::safety::source_context::broad_discovery_file_is_safe(path)
                     {
-                        out.push(entry.path().to_path_buf());
-                        if out.len() >= MAX_GATE_OUTPUT_FILES {
-                            return out;
-                        }
+                        continue;
+                    }
+                    out.push(path.to_path_buf());
+                    if out.len() >= MAX_GATE_OUTPUT_FILES {
+                        return GateOutputs {
+                            paths: out,
+                            discovered: true,
+                        };
                     }
                 }
             }
-            out
+            GateOutputs {
+                paths: out,
+                discovered: true,
+            }
         }
     }
 }

@@ -1938,6 +1938,14 @@ impl Agent {
                 println!("{} Not a directory: {}", "!!".bright_red(), dir_str.trim());
                 return;
             }
+            if crate::safety::source_context::discovery_root_is_private(&dir_path) {
+                println!(
+                    "{} Refusing private discovery state: {}",
+                    "!!".bright_red(),
+                    dir_str.trim()
+                );
+                return;
+            }
 
             let extractor = ConceptExtractor::new();
             let mut all_concepts = Vec::new();
@@ -1949,7 +1957,26 @@ impl Agent {
                         if self.validate_context_path(&path).is_err() {
                             continue;
                         }
-                        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        let read_path = path.clone();
+                        let content = tokio::task::spawn_blocking(move || {
+                            if crate::safety::source_context::path_contains_private_discovery_state(
+                                &read_path,
+                            ) {
+                                return None;
+                            }
+                            let mut file =
+                                crate::safety::source_context::open_broad_discovery_regular(
+                                    &read_path,
+                                )
+                                .ok()?;
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+                            Some(buf)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(content) = content {
                             let content = self.sanitize_context_data(&path, &content);
                             let concepts = extractor.extract_from_code(&content, &path);
                             all_concepts.extend(concepts);

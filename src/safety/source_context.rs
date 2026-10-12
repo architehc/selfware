@@ -90,11 +90,20 @@ pub(crate) fn path_contains_private_discovery_state(path: &Path) -> bool {
 /// Check a repository-discovery root in both its caller-supplied and resolved
 /// forms. Resolving is necessary for relative `.` roots and aliases whose
 /// private ancestor is otherwise absent from the walked path strings.
+///
+/// Callers treat `true` as "do not read this root". A path that exists but
+/// cannot be resolved (a symlink loop, a permission error, an I/O error) is
+/// private. A missing path is not: callers probe candidates that do not exist
+/// yet, such as a focus stem before a `.rs` suffix is added.
 pub(crate) fn discovery_root_is_private(path: &Path) -> bool {
-    path_contains_private_discovery_state(path)
-        || std::fs::canonicalize(path)
-            .ok()
-            .is_some_and(|resolved| path_contains_private_discovery_state(&resolved))
+    if path_contains_private_discovery_state(path) {
+        return true;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => path_contains_private_discovery_state(&resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn broad_discovery_refusal(reason: &'static str) -> std::io::Error {
@@ -891,9 +900,44 @@ mod private_discovery_root_tests {
 
         assert!(path_contains_private_discovery_state(&root));
         assert!(discovery_root_is_private(&root));
+        let example = temp.path().join("docs/.agents-example");
+        std::fs::create_dir_all(&example).expect("create public root");
+        assert!(!path_contains_private_discovery_state(&example));
+        assert!(!discovery_root_is_private(&example));
+    }
+
+    #[test]
+    fn discovery_root_is_private_when_the_path_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
         assert!(!discovery_root_is_private(
-            &temp.path().join("docs/.agents-example")
+            &temp.path().join("does-not-exist")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_root_is_private_when_canonicalize_cannot_resolve() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let loop_path = temp.path().join("loop");
+        symlink(&loop_path, &loop_path).expect("symlink loop");
+        assert!(!path_contains_private_discovery_state(&loop_path));
+        assert!(discovery_root_is_private(&loop_path));
+
+        // Mode 000 on the directory itself still canonicalizes on macOS.
+        // A child of an unsearchable directory fails with EACCES, which is
+        // the permission error that must not be treated as a public root.
+        let blocked = temp.path().join("blocked");
+        let unreadable = blocked.join("unreadable");
+        std::fs::create_dir_all(&unreadable).expect("create unreadable dir");
+        let saved = std::fs::metadata(&blocked).expect("metadata").permissions();
+        let mut denied = saved.clone();
+        denied.set_mode(0o000);
+        std::fs::set_permissions(&blocked, denied).expect("deny search");
+        let saw_private = discovery_root_is_private(&unreadable);
+        std::fs::set_permissions(&blocked, saved).expect("restore mode");
+        assert!(saw_private);
     }
 
     #[cfg(unix)]

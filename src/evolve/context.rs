@@ -391,7 +391,7 @@ impl ContextComposer {
             return cached;
         }
         let value = match node.path.as_deref() {
-            Some(rel) => match std::fs::read_to_string(self.root.join(rel)) {
+            Some(rel) => match super::graph::read_broad_discovery_utf8(&self.root.join(rel)) {
                 Ok(src) => project(Path::new(rel), &src),
                 Err(_) => fallback,
             },

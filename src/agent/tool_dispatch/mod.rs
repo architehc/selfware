@@ -3390,7 +3390,30 @@ impl Agent {
                         continue;
                     }
                     let full_path = root.join(path);
-                    if let Ok(content) = tokio::fs::read_to_string(&full_path).await {
+                    // Focus promotes files the context map already discovered.
+                    // Read the checked descriptor, not a second pathname open.
+                    let loaded_content =
+                        if crate::safety::source_context::path_contains_private_discovery_state(
+                            &full_path,
+                        ) {
+                            None
+                        } else {
+                            let read_path = full_path.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let mut file =
+                                    crate::safety::source_context::open_broad_discovery_regular(
+                                        &read_path,
+                                    )
+                                    .ok()?;
+                                let mut buf = String::new();
+                                std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
+                                Some(buf)
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        };
+                    if let Some(content) = loaded_content {
                         let content = self.sanitize_context_data(path, &content);
                         self.context_map.load_full(path, content);
                         loaded.push(path.to_string_lossy().to_string());

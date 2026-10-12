@@ -5695,6 +5695,53 @@ async fn side_chat_single_attempt_sends_once_on_retryable_failure() {
     assert_one_request(NGROK_3004_BODY).await;
 }
 
+/// `reqwest::Client` does not expose its retry policy. `single_physical_request`
+/// is the value `new_with_transport_policy` passes to both builders to select
+/// `.retry(reqwest::retry::never())`.
+#[test]
+fn artifact_harness_selects_single_physical_request() {
+    let remote = crate::config::Config {
+        endpoint: "https://example.test/v1".to_string(),
+        ..Default::default()
+    };
+    let local = crate::config::Config {
+        endpoint: "http://127.0.0.1:9/v1".to_string(),
+        ..Default::default()
+    };
+
+    let ordinary_remote = ApiClient::new(&remote).unwrap();
+    let ordinary_local = ApiClient::new(&local).unwrap();
+    assert!(
+        !ordinary_remote.single_physical_request,
+        "ordinary clients keep reqwest's protocol-nack retries"
+    );
+    assert!(
+        !ordinary_local.single_physical_request,
+        "a local endpoint forces no_proxy and must still keep protocol-nack retries"
+    );
+
+    let harness_local = ApiClient::new_for_artifact_harness(&local).unwrap();
+    let harness_remote = ApiClient::new_for_artifact_harness(&remote).unwrap();
+    assert!(
+        harness_local.single_physical_request,
+        "the harness flag must select reqwest::retry::never() for both clients"
+    );
+    assert!(harness_remote.single_physical_request);
+
+    assert!(
+        !ordinary_remote
+            .rebuild(&remote)
+            .unwrap()
+            .single_physical_request
+    );
+    assert!(
+        harness_local
+            .rebuild(&local)
+            .unwrap()
+            .single_physical_request
+    );
+}
+
 #[tokio::test]
 async fn artifact_client_drops_general_extra_body_authority() {
     use crate::testing::mock_api::MockLlmServer;

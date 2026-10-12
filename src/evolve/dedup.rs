@@ -121,12 +121,15 @@ impl Default for DeduplicationAnalyzer {
 /// would hash identically for any two such nodes, producing false
 /// duplicates).
 fn read_content(path: &Path) -> Option<String> {
+    if crate::safety::source_context::path_contains_private_discovery_state(path) {
+        return None;
+    }
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if metadata.file_type().is_symlink() {
         return None;
     }
     if metadata.is_file() {
-        let content = std::fs::read_to_string(path).ok()?;
+        let content = super::graph::read_broad_discovery_utf8(path).ok()?;
         return (!content.is_empty()).then_some(content);
     }
     if metadata.is_dir() {
@@ -145,7 +148,9 @@ fn read_content(path: &Path) -> Option<String> {
         files.sort();
         let mut buf = String::new();
         for file in files {
-            buf.push_str(&std::fs::read_to_string(file).unwrap_or_default());
+            if let Ok(text) = super::graph::read_broad_discovery_utf8(&file) {
+                buf.push_str(&text);
+            }
         }
         return (!buf.is_empty()).then_some(buf);
     }
@@ -168,4 +173,46 @@ pub fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     let intersection = a.intersection(b).count() as f64;
     let union = a.union(b).count() as f64;
     intersection / union
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
+    use crate::evolve::{Graph, Node};
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn multiply_linked_discovered_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let body = "fn hello() { println!(\"hi\"); }\n";
+        let secret = outside.path().join("secret.rs");
+        std::fs::write(&secret, body).unwrap();
+        let linked = dir.path().join("linked.rs");
+        std::fs::hard_link(&secret, &linked).unwrap();
+        let normal = dir.path().join("normal.rs");
+        let twin = dir.path().join("twin.rs");
+        std::fs::write(&normal, body).unwrap();
+        std::fs::write(&twin, body).unwrap();
+
+        let graph = Graph {
+            nodes: vec![
+                Node::code("normal", normal.to_str().unwrap()),
+                Node::code("twin", twin.to_str().unwrap()),
+                Node::code("linked", linked.to_str().unwrap()),
+            ],
+            edges: vec![],
+        };
+        let dupes = DeduplicationAnalyzer::new()
+            .find_duplicates_in(&graph, dir.path())
+            .unwrap();
+        assert_eq!(
+            dupes,
+            vec![DuplicatePair {
+                first: "normal".to_string(),
+                second: "twin".to_string(),
+                kind: DuplicateKind::Exact,
+            }]
+        );
+    }
 }

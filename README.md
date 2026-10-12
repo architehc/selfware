@@ -453,6 +453,17 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.8
+
+0.9.8 adds the read-only artifact harness and corrects its review findings.
+`selfware artifact-harness` analyzes a bounded set of files with no tools.
+A partial window, a redacted snapshot, or missing provider token usage is
+reported as partial and does not exit 0. The harness client sends each
+reserved request once. Broad discovery reads the checked file descriptor,
+and `grep -r` is refused when the tree contains private discovery state
+such as `.git` or `.claude`. `git grep` and default `rg` are unchanged.
+Details are in [CHANGELOG.md](CHANGELOG.md).
+
 ## What's New in 0.9.7
 
 0.9.7 hardens browser isolation, process teardown and durable local state.
