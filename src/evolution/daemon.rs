@@ -3610,7 +3610,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     // commit landing mid-run from being promoted as the
                     // candidate's improvement.
                     if let Err(reason) = winner_base_revision_gate(
-                        baseline_node.base_commit.as_deref(),
+                        expected_head_commit
+                            .as_deref()
+                            .or(baseline_node.base_commit.as_deref()),
                         candidate.base_commit.as_deref(),
                     ) {
                         log_phase(&format!(
@@ -4759,6 +4761,31 @@ fn sanitize_patch(patch: &str) -> String {
 /// 1. Search-and-replace JSON edits: every entry's `file` field.
 /// 2. Unified diffs: every `+++ b/<path>` header, plus `--- a/<path>` for
 ///    pure deletions (whose `+++` target is `/dev/null`).
+fn push_unique_diff_path(paths: &mut Vec<PathBuf>, raw: &str, prefix: &str) {
+    let without_ts = raw.split('\t').next().unwrap_or("").trim();
+    if without_ts.is_empty() || without_ts == "/dev/null" {
+        return;
+    }
+    // Preserve C-quoted paths so `is_protected` rejects them immediately;
+    // also unquote and strip prefix so `a/...` / `b/...` inside quotes cannot
+    // hide a protected path.
+    let candidate = if without_ts.starts_with('"') {
+        without_ts.to_string()
+    } else {
+        without_ts
+            .strip_prefix(prefix)
+            .unwrap_or(without_ts)
+            .trim()
+            .to_string()
+    };
+    if !candidate.is_empty() && candidate != "/dev/null" {
+        let path = PathBuf::from(&candidate);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+}
+
 fn patch_edited_paths(patch: &str) -> Vec<PathBuf> {
     // Search-and-replace format (mirrors apply_edits' dispatch).
     if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
@@ -4773,19 +4800,25 @@ fn patch_edited_paths(patch: &str) -> Vec<PathBuf> {
     // Unified diff.
     let mut paths = Vec::new();
     for line in patch.lines() {
-        let (header, prefix) = if let Some(rest) = line.strip_prefix("+++ ") {
-            (rest, "b/")
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            push_unique_diff_path(&mut paths, rest, "b/");
         } else if let Some(rest) = line.strip_prefix("--- ") {
-            (rest, "a/")
-        } else {
-            continue;
-        };
-        let p = header.trim().trim_start_matches(prefix);
-        if !p.is_empty() && p != "/dev/null" {
-            let path = PathBuf::from(p);
-            if !paths.contains(&path) {
-                paths.push(path);
+            push_unique_diff_path(&mut paths, rest, "a/");
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            let trimmed = rest.trim();
+            if trimmed.contains('"') {
+                push_unique_diff_path(&mut paths, trimmed, "");
+            } else if let Some((left, right)) = trimmed.split_once(" b/") {
+                push_unique_diff_path(&mut paths, left, "a/");
+                push_unique_diff_path(&mut paths, right, "");
             }
+        } else if let Some(rest) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+            .or_else(|| line.strip_prefix("copy from "))
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            push_unique_diff_path(&mut paths, rest, "");
         }
     }
     paths
@@ -4826,6 +4859,10 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
             Some(f) => f,
             None => return false,
         };
+        if is_protected(Path::new(file)) {
+            log_warning(&format!("Refusing edit to protected path: {}", file));
+            return false;
+        }
         let search = match edit["search"].as_str() {
             Some(s) => s,
             None => return false,
@@ -4841,6 +4878,10 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
     }
 
     for (file, edits) in &file_edits {
+        if is_protected(Path::new(file)) {
+            log_warning(&format!("Refusing edit to protected path: {}", file));
+            return false;
+        }
         // Contain the model-produced edit path inside the working dir: an
         // absolute or `../` path must not read or overwrite host files.
         let Some(path) = contained_path(dir, Path::new(file)) else {
@@ -5021,6 +5062,15 @@ fn leading_whitespace(line: &str) -> &str {
 /// 2. `git apply --ignore-whitespace -C1`
 /// 3. `patch -p1 -F3` (fuzz factor 3)
 fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
+    for edited in patch_edited_paths(patch) {
+        if is_protected(&edited) || contained_path(dir, &edited).is_none() {
+            log_warning(&format!(
+                "Refusing unified diff touching protected or out-of-bounds path: {}",
+                edited.display()
+            ));
+            return false;
+        }
+    }
     let patch_file = dir.join(".evolution-patch");
     if std::fs::write(&patch_file, patch).is_err() {
         return false;

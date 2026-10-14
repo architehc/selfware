@@ -718,25 +718,27 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
                 SelfwareError::Api(_) => EXIT_API_ERROR,
                 SelfwareError::Safety(_) => EXIT_SAFETY_ERROR,
                 SelfwareError::Interrupted => EXIT_INTERRUPTED,
+                SelfwareError::Agent(AgentError::Terminated(_)) => EXIT_TERMINATED,
+                SelfwareError::Agent(
+                    AgentError::Cancelled | AgentError::CancelledWithReason(_),
+                ) => EXIT_INTERRUPTED,
+                SelfwareError::Agent(_) => EXIT_ERROR,
                 _ => EXIT_ERROR,
             };
         }
-    }
-
-    // Direct enum unwraps fallback
-    if e.downcast_ref::<ApiError>().is_some() {
-        return EXIT_API_ERROR;
-    }
-    if e.downcast_ref::<SafetyError>().is_some() {
-        return EXIT_SAFETY_ERROR;
-    }
-    if let Some(agent_err) = e.downcast_ref::<AgentError>() {
-        return match agent_err {
-            AgentError::Terminated(_) => EXIT_TERMINATED,
-            AgentError::Cancelled => EXIT_INTERRUPTED,
-            AgentError::CancelledWithReason(_) => EXIT_INTERRUPTED,
-            _ => EXIT_ERROR,
-        };
+        if cause.downcast_ref::<ApiError>().is_some() {
+            return EXIT_API_ERROR;
+        }
+        if cause.downcast_ref::<SafetyError>().is_some() {
+            return EXIT_SAFETY_ERROR;
+        }
+        if let Some(agent_err) = cause.downcast_ref::<AgentError>() {
+            return match agent_err {
+                AgentError::Terminated(_) => EXIT_TERMINATED,
+                AgentError::Cancelled | AgentError::CancelledWithReason(_) => EXIT_INTERRUPTED,
+                _ => EXIT_ERROR,
+            };
+        }
     }
 
     // Fallback string matching only for cases where specific types aren't available

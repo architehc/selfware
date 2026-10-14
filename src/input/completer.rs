@@ -305,14 +305,17 @@ impl Completer for SelfwareCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let before_cursor = &line[..pos];
 
+        let word_start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+
         match self.detect_context(line, pos) {
             CompletionContext::Command(prefix) => self.complete_commands_with_span(&prefix, 0, pos),
             CompletionContext::Tool(prefix) => {
                 // Tool completion starts at the beginning of the current word
-                let word_start = before_cursor
-                    .rfind(char::is_whitespace)
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
                 let tool_suggestions = self.complete_tools_with_span(&prefix, word_start, pos);
                 if !tool_suggestions.is_empty() {
                     tool_suggestions
@@ -324,18 +327,10 @@ impl Completer for SelfwareCompleter {
             }
             CompletionContext::Path(prefix) => {
                 // Path completion starts at the beginning of the path
-                let word_start = before_cursor
-                    .rfind(char::is_whitespace)
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
                 self.complete_paths_with_span(&prefix, word_start, pos)
             }
             CompletionContext::FileReference(prefix) => {
                 // @ file reference: span starts at the @ character
-                let word_start = before_cursor
-                    .rfind(char::is_whitespace)
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
                 self.complete_file_refs_with_span(&prefix, word_start, pos)
             }
             CompletionContext::None => {

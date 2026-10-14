@@ -137,16 +137,6 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     Some(snapshot.content_hash != current_hash)
 }
 
-/// Read a file as raw bytes and convert to String, handling non-UTF8 gracefully.
-///
-/// Path-based: kept for callers outside this module that have not moved to
-/// descriptor-checked reads. File tools here use [`read_file_checked`].
-pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<u8>)> {
-    let bytes = tokio::fs::read(path).await?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok((text, bytes))
-}
-
 /// The validator file tools use: the tool's resolved config anchored at the
 /// calling agent's workspace root (the same anchor `validate_tool_path` uses),
 /// NOT the process cwd — entering a git worktree moves only the agent's root.
@@ -202,9 +192,8 @@ fn read_checked_handle(mut file: std::fs::File, limit: Option<u64>) -> Result<(S
     Ok((text, bytes))
 }
 
-/// Descriptor-checked counterpart of [`read_file_with_encoding`]: validate,
-/// open once, re-validate the descriptor's real path, read from that same
-/// descriptor.
+/// Descriptor-checked file read: validate, open once, re-validate the
+/// descriptor's real path, and read from that same descriptor.
 pub(crate) async fn read_file_checked(
     path: &str,
     config: &SafetyConfig,

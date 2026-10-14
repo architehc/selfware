@@ -299,16 +299,73 @@ $stream.Dispose()
     /// Capture a specific screen region.
     pub async fn capture_region(region: ScreenRegion) -> Result<CapturedScreen> {
         Self::validate_capture_dimensions(region.x, region.y, region.width, region.height)?;
+        if region.x < 0 || region.y < 0 {
+            bail!(
+                "Screen region coordinates ({}, {}) must be non-negative",
+                region.x,
+                region.y
+            );
+        }
 
         info!(
             "Capturing screen region: ({}, {}) {}x{}",
             region.x, region.y, region.width, region.height
         );
 
-        // For now, capture full screen and crop
         let full = Self::capture_full().await?;
-        // In a real implementation, we'd crop the image to the region
-        Ok(full)
+        Self::crop_captured_screen(&full, region)
+    }
+
+    /// Crop a full-screen capture to `region`, validating bounds and re-encoding PNG.
+    pub(crate) fn crop_captured_screen(
+        full: &CapturedScreen,
+        region: ScreenRegion,
+    ) -> Result<CapturedScreen> {
+        Self::validate_capture_dimensions(region.x, region.y, region.width, region.height)?;
+        if region.x < 0 || region.y < 0 {
+            bail!(
+                "Screen region coordinates ({}, {}) must be non-negative",
+                region.x,
+                region.y
+            );
+        }
+
+        use base64::Engine as _;
+        let png_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&full.base64_png)
+            .map_err(|e| anyhow::anyhow!("Failed to decode captured screen base64: {}", e))?;
+        let img = xcap::image::load_from_memory(&png_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode captured screen PNG: {}", e))?;
+
+        let rx = region.x as u32;
+        let ry = region.y as u32;
+        if rx.saturating_add(region.width) > img.width()
+            || ry.saturating_add(region.height) > img.height()
+        {
+            bail!(
+                "Screen region ({}, {}) {}x{} exceeds screen bounds {}x{}",
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                img.width(),
+                img.height()
+            );
+        }
+
+        let cropped = img.crop_imm(rx, ry, region.width, region.height);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        cropped
+            .write_to(&mut buf, xcap::image::ImageFormat::Png)
+            .map_err(|e| anyhow::anyhow!("PNG encoding failed: {}", e))?;
+        let base64_png = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+
+        Ok(CapturedScreen {
+            width: region.width,
+            height: region.height,
+            base64_png,
+            analysis: full.analysis.clone(),
+        })
     }
 
     /// Validate capture dimensions to prevent unreasonable values.

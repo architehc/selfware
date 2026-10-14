@@ -243,17 +243,40 @@ pub fn extract_touched_files(patch: &str) -> Vec<String> {
     }
 
     // 2. Unified diff format
-    for line in patch.lines() {
-        let (header, prefix) = if let Some(rest) = line.strip_prefix("+++ ") {
-            (rest, "b/")
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            (rest, "a/")
+    let mut push_diff_path = |raw: &str, prefix: &str| {
+        let without_ts = raw.split('\t').next().unwrap_or("").trim();
+        if without_ts.is_empty() || without_ts == "/dev/null" {
+            return;
+        }
+        let p = if without_ts.starts_with('"') {
+            without_ts
         } else {
-            continue;
+            without_ts.strip_prefix(prefix).unwrap_or(without_ts).trim()
         };
-        let p = header.trim().trim_start_matches(prefix).trim();
         if !p.is_empty() && p != "/dev/null" {
             files.push(p.to_string());
+        }
+    };
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            push_diff_path(rest, "b/");
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            push_diff_path(rest, "a/");
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            let trimmed = rest.trim();
+            if trimmed.contains('"') {
+                push_diff_path(trimmed, "");
+            } else if let Some((left, right)) = trimmed.split_once(" b/") {
+                push_diff_path(left, "a/");
+                push_diff_path(right, "");
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+            .or_else(|| line.strip_prefix("copy from "))
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            push_diff_path(rest, "");
         }
     }
 
@@ -752,31 +775,30 @@ pub fn scan_patch_for_opaque_structures(
         }
     } else {
         // 2. Unified diff format
+        for touched in extract_touched_files(patch_str) {
+            if crate::evolution::is_protected(Path::new(&touched)) {
+                let cite =
+                    make_citation(&touched, &touched, None, None, Some(touched.clone()), None);
+                findings.push(OpaqueStructureFinding {
+                    category: OpaqueCategory::BlastRadiusLeak,
+                    severity: FindingSeverity::Critical,
+                    title: "Protected path targeted in unified diff".to_string(),
+                    explanation: format!(
+                        "Unified diff modifies protected path '{touched}', violating evolutionary safety invariants."
+                    ),
+                    citation: cite.clone(),
+                    remediation: "Re-target mutation strictly to unconstrained code files.".to_string(),
+                });
+                citations.push(cite);
+            }
+        }
         let mut current_file = "unknown_file".to_string();
         for line in patch_str.lines() {
             if let Some(stripped) = line.strip_prefix("+++ ") {
-                let p = stripped.trim().trim_start_matches("b/").trim();
-                current_file = p.to_string();
-                if crate::evolution::is_protected(Path::new(&current_file)) {
-                    let cite = make_citation(
-                        &current_file,
-                        &current_file,
-                        None,
-                        None,
-                        Some(current_file.clone()),
-                        None,
-                    );
-                    findings.push(OpaqueStructureFinding {
-                        category: OpaqueCategory::BlastRadiusLeak,
-                        severity: FindingSeverity::Critical,
-                        title: "Protected path targeted in unified diff".to_string(),
-                        explanation: format!(
-                            "Unified diff modifies protected path '{current_file}', violating evolutionary safety invariants."
-                        ),
-                        citation: cite.clone(),
-                        remediation: "Re-target mutation strictly to unconstrained code files.".to_string(),
-                    });
-                    citations.push(cite);
+                let without_ts = stripped.split('\t').next().unwrap_or("").trim();
+                let p = without_ts.strip_prefix("b/").unwrap_or(without_ts).trim();
+                if !p.is_empty() && p != "/dev/null" {
+                    current_file = p.to_string();
                 }
             } else if let Some(removed) = line.strip_prefix('-') {
                 if !removed.starts_with('-') {

@@ -230,6 +230,9 @@ impl ContextComposer {
     /// the envelope renders); per-node fallbacks only when a source cannot be
     /// read (included content never estimates to zero).
     pub fn estimate_tokens(&self) -> usize {
+        if matches!(self.mode, ContextMode::Map) {
+            return super::map::build_map(&self.graph, &self.root).map_tokens;
+        }
         self.graph
             .nodes
             .iter()
@@ -261,10 +264,14 @@ impl ContextComposer {
             (!nodes.is_empty()).then(|| ContextLayerSummary {
                 layer,
                 nodes: nodes.len(),
-                tokens: nodes
-                    .iter()
-                    .map(|node| self.projected_tokens(node, &self.mode))
-                    .sum(),
+                tokens: if matches!(self.mode, ContextMode::Map) && layer == NodeLayer::Code {
+                    super::map::build_map(&self.graph, &self.root).map_tokens
+                } else {
+                    nodes
+                        .iter()
+                        .map(|node| self.projected_tokens(node, &self.mode))
+                        .sum()
+                },
                 files: nodes.iter().map(|node| node.files).sum(),
             })
         })
@@ -304,10 +311,15 @@ impl ContextComposer {
             }
         }
 
+        let estimated_tokens = self.estimate_tokens();
+        if matches!(self.mode, ContextMode::Map) {
+            production.tokens = estimated_tokens;
+        }
+
         ContextSummary {
             mode: self.mode.clone(),
             included: self.included.clone(),
-            estimated_tokens: self.estimate_tokens(),
+            estimated_tokens,
             production,
             tests,
             examples,
@@ -339,8 +351,8 @@ impl ContextComposer {
         let code_tokens = total.saturating_sub(node.inline_test_tokens);
         match mode {
             // Map: a compiled component-index artifact, not a per-node projection.
-            // Its real resident cost is measured by `evolve::map` and reported by
-            // the server; per node it contributes nothing to the composer estimate.
+            // Its real resident cost is measured by `evolve::map` in
+            // `estimate_tokens` / `summary`; per node it contributes 0.
             ContextMode::Map => 0,
             // Lite: interface signatures only — the smallest useful tier.
             // Custom selections also load at skeleton detail, so they cost the
@@ -391,11 +403,18 @@ impl ContextComposer {
             return cached;
         }
         let value = match node.path.as_deref() {
-            Some(rel) => match super::graph::read_broad_discovery_utf8(&self.root.join(rel)) {
-                Ok(src) => project(Path::new(rel), &src),
-                Err(_) => fallback,
-            },
-            None => fallback,
+            Some(rel)
+                if !Path::new(rel).is_absolute()
+                    && Path::new(rel)
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))) =>
+            {
+                match super::graph::read_broad_discovery_utf8(&self.root.join(rel)) {
+                    Ok(src) => project(Path::new(rel), &src),
+                    Err(_) => fallback,
+                }
+            }
+            _ => fallback,
         };
         self.cache_lock().insert(key, value);
         value

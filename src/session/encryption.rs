@@ -36,10 +36,18 @@ fn salt_file_path() -> PathBuf {
 fn load_or_create_salt() -> Result<Vec<u8>> {
     let path = salt_file_path();
 
-    if path.exists() {
-        let data = std::fs::read(&path).context("Failed to read encryption salt file")?;
-        if data.len() == SALT_LEN {
-            return Ok(data);
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to use symlinked encryption salt file: {}",
+                path.display()
+            );
+        }
+        if meta.is_file() {
+            let data = std::fs::read(&path).context("Failed to read encryption salt file")?;
+            if data.len() == SALT_LEN {
+                return Ok(data);
+            }
         }
     }
 
@@ -50,21 +58,46 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
     let mut salt = vec![0u8; SALT_LEN];
     rand::rng().fill_bytes(&mut salt);
 
+    let mut tmp_suffix = [0u8; 8];
+    rand::rng().fill_bytes(&mut tmp_suffix);
+    let tmp_name = format!(
+        "encryption_salt.tmp.{}.{:016x}",
+        std::process::id(),
+        u64::from_le_bytes(tmp_suffix)
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(&path)
-            .context("Failed to create encryption salt file with secure permissions")?;
-        std::io::Write::write_all(&mut file, &salt).context("Failed to write encryption salt")?;
+            .open(&tmp_path)
+            .context("Failed to create temporary encryption salt file with secure permissions")?;
+        if let Err(e) = std::io::Write::write_all(&mut file, &salt)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::rename(&tmp_path, &path))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).context("Failed to atomically write encryption salt");
+        }
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, &salt).context("Failed to write encryption salt file")?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .context("Failed to create temporary encryption salt file")?;
+        if let Err(e) = std::io::Write::write_all(&mut file, &salt)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::rename(&tmp_path, &path))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).context("Failed to atomically write encryption salt file");
+        }
     }
 
     Ok(salt)

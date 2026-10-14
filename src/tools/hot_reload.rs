@@ -21,9 +21,41 @@ pub struct DynamicTool {
     _lib_path: PathBuf,
 }
 
+pub(crate) fn is_blocked_system_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    const BLOCKED_PREFIXES: &[&str] = &[
+        "/etc",
+        "/private/etc",
+        "/var",
+        "/private/var",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/System",
+        "/Library",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/boot",
+        "/root",
+    ];
+    BLOCKED_PREFIXES.iter().any(|prefix| {
+        s == *prefix || (s.starts_with(prefix) && s.as_bytes().get(prefix.len()) == Some(&b'/'))
+    })
+}
+
 impl DynamicTool {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let lib_path = path.as_ref().to_path_buf();
+
+        if is_blocked_system_path(&lib_path) {
+            anyhow::bail!(
+                "Dynamic tool loading restricted: blocked system path {:?}",
+                lib_path
+            );
+        }
 
         // Security: only allow loading from explicitly configured plugin directories
         let canonical = lib_path
@@ -34,17 +66,26 @@ impl DynamicTool {
         // The workspace root of the calling agent (its entered worktree, if
         // any) — never the process-global cwd.
         let cwd = crate::tools::workspace_root::current_path();
-        let plugin_dir = cwd.join(".selfware").join("plugins");
-        if !canonical.starts_with(&plugin_dir) {
+        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        let plugin_dir = canonical_cwd.join(".selfware").join("plugins");
+        let allowed_dir = plugin_dir.canonicalize().unwrap_or(plugin_dir);
+        if !canonical.starts_with(&allowed_dir) {
             anyhow::bail!(
                 "Dynamic tool loading restricted to {:?}. Got: {:?}",
-                plugin_dir,
+                allowed_dir,
+                canonical
+            );
+        }
+
+        if is_blocked_system_path(&canonical) {
+            anyhow::bail!(
+                "Dynamic tool loading restricted: blocked system path {:?}",
                 canonical
             );
         }
 
         unsafe {
-            let library = Arc::new(Library::new(&lib_path)?);
+            let library = Arc::new(Library::new(&canonical)?);
 
             let get_name: Symbol<unsafe extern "C" fn() -> *const c_char> =
                 library.get(b"get_name")?;
@@ -73,7 +114,7 @@ impl DynamicTool {
 
             info!(
                 "Successfully loaded dynamic tool '{}' from {:?}",
-                name, lib_path
+                name, canonical
             );
 
             Ok(Self {
@@ -81,7 +122,7 @@ impl DynamicTool {
                 name,
                 description,
                 schema,
-                _lib_path: lib_path,
+                _lib_path: canonical,
             })
         }
     }
@@ -310,10 +351,10 @@ impl Tool for HotReloadTool {
     fn metadata(&self) -> crate::safety::ToolMetadata {
         crate::safety::ToolMetadata {
             read_only: false,
-            destructive: false,
+            destructive: true,
             risk_level: crate::safety::RiskLevel::High,
             network_access: false,
-            shell_execution: false,
+            shell_execution: true,
         }
     }
 }
@@ -321,3 +362,49 @@ impl Tool for HotReloadTool {
 #[cfg(test)]
 #[path = "../../tests/unit/tools/hot_reload/hot_reload_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hot_reload_safety_regression_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn hot_reload_metadata_is_high_risk_destructive_and_protected() {
+        let tool = HotReloadTool::new();
+        let meta = tool.metadata();
+        assert_eq!(meta.risk_level, crate::safety::RiskLevel::High);
+        assert!(meta.destructive);
+        assert!(meta.shell_execution);
+        assert!(!meta.read_only);
+
+        let grants = crate::safety::permissions::PermissionStore::new();
+        assert!(crate::safety::normal_mode_needs_confirmation(
+            "hot_reload",
+            &[],
+            &grants
+        ));
+
+        for mode in [
+            crate::safety::ExecutionMode::Normal,
+            crate::safety::ExecutionMode::Auto,
+            crate::safety::ExecutionMode::Yolo,
+        ] {
+            let checker = crate::safety::PermissionChecker::new(mode);
+            assert!(
+                matches!(
+                    checker.check("hot_reload", &meta, &Value::Null),
+                    crate::safety::PermissionResult::Prompt { .. }
+                ),
+                "hot_reload must require confirmation in {mode:?} mode"
+            );
+        }
+
+        assert!(is_blocked_system_path(Path::new("/etc/evil.dylib")));
+        assert!(is_blocked_system_path(Path::new(
+            "/usr/lib/libSystem.dylib"
+        )));
+        assert!(crate::evolve::is_protected_path(Path::new(
+            "src/safety/checker/mod.rs"
+        )));
+    }
+}

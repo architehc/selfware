@@ -220,12 +220,12 @@ fn fake_docker_on_path(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+    let guard = crate::test_support::EnvGuard::capture(&["PATH"]);
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let mut new_path = std::ffi::OsString::from(bin.path());
     new_path.push(":");
     new_path.push(old_path);
     std::env::set_var("PATH", new_path);
-    let guard = crate::test_support::EnvGuard::capture(&["PATH"]);
     (bin, guard, lock)
 }
 

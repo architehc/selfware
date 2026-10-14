@@ -586,7 +586,7 @@ impl FileStats {
 
     /// Calculate age in days
     pub fn age_days(&self) -> u64 {
-        (current_timestamp_secs() - self.created_at) / 86400
+        current_timestamp_secs().saturating_sub(self.created_at) / 86400
     }
 
     /// Calculate churn rate (changes per month)

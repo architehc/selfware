@@ -150,7 +150,13 @@ impl SelfReferenceSystem {
         goal: &str,
         max_tokens: usize,
     ) -> anyhow::Result<crate::cognitive::memory_hierarchy::SelfImprovementContext> {
-        let self_model = self.self_model.read().await;
+        let self_model_summary = {
+            let self_model = self.self_model.read().await;
+            format!(
+                "Version: {}, Capabilities: {:?}",
+                self_model.version, self_model.capabilities
+            )
+        };
         let code_context = self
             .semantic
             .read()
@@ -160,10 +166,7 @@ impl SelfReferenceSystem {
 
         Ok(crate::cognitive::memory_hierarchy::SelfImprovementContext {
             goal: goal.to_string(),
-            self_model: format!(
-                "Version: {}, Capabilities: {:?}",
-                self_model.version, self_model.capabilities
-            ),
+            self_model: self_model_summary,
             architecture: "Hierarchical memory system with self-reference".to_string(),
             recent_modifications: self
                 .get_recent_modifications()

@@ -499,3 +499,58 @@ async fn restored_reader_prose_mentions_are_not_private_paths() {
     assert!(!tool_text("location").contains("LOCATION_TREE_SENTINEL"));
     assert_eq!(agent.trust_gate_findings, 6);
 }
+
+#[tokio::test]
+async fn restored_graph_and_localization_tools_enforce_local_path_keys() {
+    let mut agent = agent().await;
+    let mut messages = vec![
+        native_tool_call(
+            "localize-safe",
+            "localize_issue",
+            serde_json::json!({"repo_path": "src", "issue": "bug"}),
+        ),
+        Message::tool("SAFE_LOCALIZE_SENTINEL", "localize-safe"),
+        native_tool_call(
+            "localize-blocked",
+            "localize_issue",
+            serde_json::json!({"repo_path": ".env", "issue": "bug"}),
+        ),
+        Message::tool("BLOCKED_LOCALIZE_SENTINEL", "localize-blocked"),
+        native_tool_call(
+            "query-safe",
+            "code_query",
+            serde_json::json!({"scope": "src", "query": "fn"}),
+        ),
+        Message::tool("SAFE_QUERY_SENTINEL", "query-safe"),
+        native_tool_call(
+            "query-blocked",
+            "code_query",
+            serde_json::json!({"scope": ".env", "query": "fn"}),
+        ),
+        Message::tool("BLOCKED_QUERY_SENTINEL", "query-blocked"),
+    ];
+
+    agent.sanitize_restored_tool_messages(&mut messages, &[]);
+
+    assert!(messages[1]
+        .content
+        .text()
+        .contains("SAFE_LOCALIZE_SENTINEL"));
+    assert!(!messages[3]
+        .content
+        .text()
+        .contains("BLOCKED_LOCALIZE_SENTINEL"));
+    assert!(messages[3]
+        .content
+        .text()
+        .contains("source path is no longer allowed"));
+    assert!(messages[5].content.text().contains("SAFE_QUERY_SENTINEL"));
+    assert!(!messages[7]
+        .content
+        .text()
+        .contains("BLOCKED_QUERY_SENTINEL"));
+    assert!(messages[7]
+        .content
+        .text()
+        .contains("source path is no longer allowed"));
+}

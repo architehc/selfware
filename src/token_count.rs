@@ -114,8 +114,8 @@ fn configured_model_name() -> Option<String> {
 static TOKENIZER: Lazy<TokenizerState> =
     Lazy::new(|| TokenizerState::for_model(configured_model_name().as_deref()));
 
-/// Thread-safe cache mapping content hash (u64) -> token count.
-static TOKEN_CACHE: Lazy<RwLock<HashMap<u64, usize>>> =
+/// Thread-safe cache mapping (content hash, content byte length) -> token count.
+static TOKEN_CACHE: Lazy<RwLock<HashMap<(u64, usize), usize>>> =
     Lazy::new(|| RwLock::new(HashMap::with_capacity(256)));
 
 /// Fetch (once, then from the HF cache) and load `repo`'s `tokenizer.json`.
@@ -253,37 +253,34 @@ pub fn estimate_tokens(text: &str) -> usize {
     estimate_content_tokens(text).max(1)
 }
 
-/// Estimate tokens for a list of messages
-pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usize {
-    let mut total = 0;
-
-    for msg in messages {
-        // Role overhead
-        total += 4;
-        // Content (use text_all to capture all text blocks)
-        total += estimate_tokens(&msg.content.text_all());
-        // Reasoning content if preserved in history
-        if let Some(ref reasoning) = msg.reasoning_content {
-            total += estimate_tokens(reasoning);
-        }
-        // Optional sender names are serialized into the request too. This is
-        // also used to identify generated context-file messages internally.
-        if let Some(ref name) = msg.name {
-            total += estimate_tokens(name);
-        }
-        // Image tokens
-        total += msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
-        // Tool calls if present
-        if let Some(ref tool_calls) = msg.tool_calls {
-            for call in tool_calls {
-                total += 10; // Overhead per tool call
-                total += estimate_tokens(&call.function.name);
-                total += estimate_tokens(&call.function.arguments);
-            }
+/// Estimate the token cost of a single message, including text, images,
+/// reasoning content, sender name, tool call ID, and tool calls.
+pub fn estimate_message_tokens(msg: &crate::api::types::Message) -> usize {
+    let mut total = estimate_tokens_with_overhead(&msg.content.text_all(), 4)
+        + msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
+    if let Some(ref reasoning) = msg.reasoning_content {
+        total += estimate_content_tokens(reasoning);
+    }
+    if let Some(ref name) = msg.name {
+        total += estimate_content_tokens(name);
+    }
+    if let Some(ref tool_call_id) = msg.tool_call_id {
+        total += estimate_content_tokens(tool_call_id);
+    }
+    if let Some(ref tool_calls) = msg.tool_calls {
+        for call in tool_calls {
+            total += 10; // Overhead per tool call
+            total += estimate_content_tokens(&call.id);
+            total += estimate_content_tokens(&call.function.name);
+            total += estimate_content_tokens(&call.function.arguments);
         }
     }
-
     total
+}
+
+/// Estimate tokens for a list of messages
+pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usize {
+    messages.iter().map(estimate_message_tokens).sum()
 }
 
 /// Estimate the token count of tool definitions sent via native function calling.
@@ -304,13 +301,13 @@ pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefiniti
 
 /// Estimate tokens for raw content.
 ///
-/// Results are cached by content hash to avoid redundant tokenization.
+/// Results are cached by content hash and byte length to avoid redundant tokenization.
 /// Code-shaped content is calibrated up by `CODE_CALIBRATION_FACTOR`
 /// (measured 2026-09-21: the generic tokenizers ran ~9% low on code, so a
 /// 350k context cap admitted ~385k actual server tokens).
 #[inline]
 pub fn estimate_content_tokens(content: &str) -> usize {
-    let key = hash_content(content);
+    let key = (hash_content(content), content.len());
 
     // Fast path: check the read-locked cache first.
     if let Ok(cache) = TOKEN_CACHE.read() {

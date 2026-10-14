@@ -96,15 +96,47 @@ pub fn is_safe_host_mount(host: &str) -> bool {
         return false;
     }
 
-    // Disallow system directories
-    for sys in ["/etc", "/proc", "/sys", "/dev", "/boot"] {
+    let workspace = crate::tools::workspace_root::current_path();
+    let in_workspace = std::path::Path::new(clean).starts_with(&workspace);
+
+    // Disallow system and user-root directories
+    for sys in [
+        "/etc",
+        "/private/etc",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/boot",
+        "/var",
+        "/private/var",
+        "/root",
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/run",
+        "/home",
+    ] {
         if clean == sys || clean.starts_with(&format!("{}/", sys)) {
+            if in_workspace && clean != sys && matches!(sys, "/home" | "/var" | "/private/var") {
+                continue;
+            }
             return false;
         }
     }
 
-    // Disallow credential directories and git metadata
-    for cred in [".ssh", ".aws", ".gnupg", ".git"] {
+    // Disallow credential directories, selfware config, and git metadata
+    for cred in [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".git",
+        ".selfware",
+        ".kube",
+        ".docker",
+        ".azure",
+        ".config/gcloud",
+    ] {
         if clean.contains(cred) {
             return false;
         }

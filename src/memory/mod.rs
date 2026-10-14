@@ -43,11 +43,30 @@ pub struct MemoryEntry {
 
 impl MemoryEntry {
     pub fn from_message(msg: &Message) -> Self {
-        let token_estimate = estimate_tokens(msg.content.text());
+        let content = msg.content.text_all();
+        let mut token_estimate = estimate_tokens(&content)
+            + msg.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
+        if let Some(ref reasoning) = msg.reasoning_content {
+            token_estimate += crate::token_count::estimate_content_tokens(reasoning);
+        }
+        if let Some(ref name) = msg.name {
+            token_estimate += crate::token_count::estimate_content_tokens(name);
+        }
+        if let Some(ref tool_call_id) = msg.tool_call_id {
+            token_estimate += crate::token_count::estimate_content_tokens(tool_call_id);
+        }
+        if let Some(ref tool_calls) = msg.tool_calls {
+            for call in tool_calls {
+                token_estimate += 10
+                    + crate::token_count::estimate_content_tokens(&call.id)
+                    + crate::token_count::estimate_content_tokens(&call.function.name)
+                    + crate::token_count::estimate_content_tokens(&call.function.arguments);
+            }
+        }
         Self {
             timestamp: Utc::now().to_rfc3339(),
             role: msg.role.clone(),
-            content: msg.content.text().to_string(),
+            content,
             token_estimate,
             tool_calls: msg.tool_calls.clone(),
             image_count: msg.content.image_count(),
@@ -216,6 +235,7 @@ impl AgentMemory {
         let recent = self.recent(n);
         recent
             .iter()
+            .rev()
             .map(|e| {
                 let preview: String = e.content.chars().take(50).collect();
                 format!("[{}] {}: {}...", e.timestamp, e.role, preview)

@@ -295,6 +295,15 @@ impl MultiAgentChat {
             }
         }
 
+        {
+            let mut agents = self.agents.write().await;
+            for agent in agents.iter_mut() {
+                if agent.status == AgentStatus::Working {
+                    agent.status = AgentStatus::Idle;
+                }
+            }
+        }
+
         let total_duration = start.elapsed();
 
         // Collect results

@@ -258,10 +258,10 @@ fn evaluate_hypothesis(
         GenerationRating::Frost
     };
 
-    // Composite score: use the weighted fitness composite when available,
-    // falling back to the simple test-ratio score.
+    // Composite score: use the weighted fitness composite (scaled to 0..=100)
+    // when available, falling back to the simple test-ratio score.
     let composite = if compiled {
-        fitness_composite.max((tests_passed as f64 / tests_total.max(1) as f64) * 100.0)
+        (fitness_composite * 100.0).max((tests_passed as f64 / tests_total.max(1) as f64) * 100.0)
     } else {
         0.0
     };

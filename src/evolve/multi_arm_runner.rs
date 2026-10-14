@@ -629,15 +629,26 @@ fn score_arm(
     }
 
     let delta_positive = eval.fitness_delta.is_some_and(|d| d > 0.0);
-    eval.passes_consensus_gate =
-        eval.test_regressions == 0 && delta_positive && eval.separated_from_baseline;
-    eval.verdict = if eval.test_regressions > 0 {
+    eval.passes_consensus_gate = m.compiled
+        && m.error.is_none()
+        && baseline.compiled
+        && baseline.error.is_none()
+        && eval.test_regressions == 0
+        && delta_positive
+        && eval.separated_from_baseline;
+    eval.verdict = if !m.compiled {
+        "arm failed to compile".into()
+    } else if !baseline.compiled {
+        "baseline failed to compile".into()
+    } else if eval.test_regressions > 0 {
         format!(
             "{} test regression(s) against the baseline",
             eval.test_regressions
         )
     } else if let Some(e) = &m.error {
         format!("measurement incomplete: {e}")
+    } else if let Some(e) = &baseline.error {
+        format!("baseline measurement incomplete: {e}")
     } else if eval.fitness_delta.is_none() {
         "fitness not measured (no benchmark samples for the arm or the baseline)".into()
     } else if !delta_positive {

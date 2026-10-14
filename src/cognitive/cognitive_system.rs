@@ -159,8 +159,8 @@ impl CognitiveSystem {
 
         // Get working memory context
         let working = {
-            let _memory = self.memory.read().await;
-            WorkingContext::new("You are Selfware, an AI assistant.")
+            let memory = self.memory.read().await;
+            memory.working.get_context()
         };
 
         // Get episodic context

@@ -128,12 +128,14 @@ impl DiagnosticsEngine {
         } else {
             kind.args()
         };
+        use crate::tools::process_guard::GroupedOutputExt;
         let output = Command::new("cargo")
             .sanitized_env()
+            .kill_on_drop(true)
             .args(args)
             .current_dir(&self.project_root)
             .env("CARGO_TERM_COLOR", "never")
-            .output()
+            .output_grouped()
             .await
             .with_context(|| format!("failed to run {}", kind.label()))?;
 

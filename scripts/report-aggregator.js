@@ -83,12 +83,22 @@ function calculateQualityScore(stages) {
         scores[name] = coverage < 80 ? (coverage / 80) * 100 : 100;
         break;
         
-      case 'security':
-        const critical = stage.output?.critical || 0;
-        const high = stage.output?.high || 0;
-        const medium = stage.output?.medium || 0;
-        scores[name] = Math.max(0, 100 - critical * 50 - high * 20 - medium * 5);
+      case 'security': {
+        const hasCounts =
+          stage.output &&
+          ('critical' in stage.output ||
+            'high' in stage.output ||
+            'medium' in stage.output);
+        if (stage.status === 'passed' || hasCounts) {
+          const critical = stage.output?.critical || 0;
+          const high = stage.output?.high || 0;
+          const medium = stage.output?.medium || 0;
+          scores[name] = Math.max(0, 100 - critical * 50 - high * 20 - medium * 5);
+        } else {
+          scores[name] = 0;
+        }
         break;
+      }
     }
   }
   
@@ -112,7 +122,7 @@ function calculateQualityScore(stages) {
     overall: Math.round(total * 10) / 10,
     breakdown: scores,
     grade: calculateGrade(total),
-    passed: total >= 80 && (scores.security || 100) >= 70,
+    passed: total >= 80 && (scores.security ?? 0) >= 70,
   };
 }
 

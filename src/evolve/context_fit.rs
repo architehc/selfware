@@ -164,7 +164,15 @@ impl<'a> TierMeasurer<'a> {
 
     fn read_node_source(&self, node: &super::Node) -> Option<(String, String)> {
         let rel = node.path.as_deref()?;
-        let src = std::fs::read_to_string(self.root.join(rel)).ok()?;
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute()
+            || !rel_path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let src = super::graph::read_broad_discovery_utf8(&self.root.join(rel_path)).ok()?;
         self.io_reads.set(self.io_reads.get() + 1);
         Some((rel.to_string(), src))
     }

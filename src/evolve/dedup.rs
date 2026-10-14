@@ -43,7 +43,20 @@ impl DeduplicationAnalyzer {
     }
 
     pub fn find_duplicates(&self, graph: &Graph) -> Result<Vec<DuplicatePair>> {
-        self.find_duplicates_in(graph, &crate::tools::workspace_root::current_path())
+        let default_root = crate::tools::workspace_root::current_path();
+        let inferred_root = graph
+            .nodes
+            .iter()
+            .filter(|n| {
+                !matches!(
+                    n.layer,
+                    NodeLayer::Symbol | NodeLayer::Concept | NodeLayer::Preset
+                )
+            })
+            .filter_map(|n| n.path.as_deref().map(Path::new))
+            .find(|p| p.is_absolute())
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        self.find_duplicates_in(graph, inferred_root.as_deref().unwrap_or(&default_root))
     }
 
     /// Find duplicate file nodes, resolving repository-relative graph paths
@@ -64,18 +77,32 @@ impl DeduplicationAnalyzer {
         let mut line_sets: Vec<(String, HashSet<String>)> = Vec::new();
 
         for node in &graph.nodes {
-            if node.layer == NodeLayer::Symbol {
+            if matches!(
+                node.layer,
+                NodeLayer::Symbol | NodeLayer::Concept | NodeLayer::Preset
+            ) {
                 continue;
             }
             let Some(ref path) = node.path else {
                 continue;
             };
-            let path = Path::new(path);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
+            let raw = Path::new(path);
+            let rel = if raw.is_absolute() {
+                let Ok(stripped) = raw.strip_prefix(project_root) else {
+                    continue;
+                };
+                stripped
             } else {
-                project_root.join(path)
+                raw
             };
+            if rel.as_os_str().is_empty()
+                || !rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let path = project_root.join(rel);
             let Some(content) = read_content(&path) else {
                 continue;
             };

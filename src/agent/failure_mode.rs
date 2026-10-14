@@ -94,6 +94,12 @@ pub enum FailureKind {
     /// `MaxIterations`: more iterations would only buy more failing
     /// re-sends — the recurring error's cause must be fixed.
     RecoveryExhausted,
+    /// Repeated stale edit retries after a successful mutation (`EDIT_FAILURE_LOOP_AFTER_EDIT`).
+    WriteLoop,
+    /// Repeated observational shell commands after a successful mutation (`VERIFICATION_LOOP_AFTER_EDIT`).
+    VerificationSkip,
+    /// Consecutive empty assistant responses exhausted recovery (`EMPTY_RESPONSE_LOOP`).
+    EmptyResponse,
     /// Outcome could not be classified from available signals.
     Unknown,
 }
@@ -168,6 +174,9 @@ impl FailureKind {
             FailureKind::RequiredEditMissing => "NO_CHANGES_REQUIRED_EDIT",
             FailureKind::VerificationFailed => "VERIFICATION_FAILED",
             FailureKind::RecoveryExhausted => "RECOVERY_EXHAUSTED",
+            FailureKind::WriteLoop => "WRITE_LOOP",
+            FailureKind::VerificationSkip => "VERIFICATION_SKIP",
+            FailureKind::EmptyResponse => "EMPTY_RESPONSE",
             FailureKind::Unknown => "UNKNOWN",
         }
     }
@@ -430,6 +439,58 @@ impl FailureMode {
                         kind: FailureKind::ReadLoop,
                         evidence: "aborted early: read-only tool loop on a mutation task with 0 edits".to_string(),
                         advice: "the model kept reading without editing — point it at the file to change; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("WORKSPACE_STAGNATION") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::ReadLoop,
+                        evidence: format!(
+                            "aborted early: {} ({} total tool calls, {} mutating)",
+                            truncate(&reason, 400),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "the model kept reading without changing the workspace — point it at the file to change; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("EDIT_FAILURE_LOOP_AFTER_EDIT") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::WriteLoop,
+                        evidence: format!(
+                            "stopped: {} ({} total tool calls, {} mutating)",
+                            truncate(&reason, 400),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "the model kept retrying stale edits after a mutation — re-read the target file or narrow the edit scope; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("VERIFICATION_LOOP_AFTER_EDIT") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::VerificationSkip,
+                        evidence: format!(
+                            "stopped: {} ({} total tool calls, {} mutating)",
+                            truncate(&reason, 400),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "the model looped on observational shell commands after editing instead of running verification — specify the verification command in the task; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("EMPTY_RESPONSE_LOOP") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::EmptyResponse,
+                        evidence: format!(
+                            "stopped: {} ({} total tool calls, {} mutating)",
+                            truncate(&reason, 400),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "the provider returned consecutive empty responses — check the endpoint, model, or token/reasoning budget; do NOT raise max_iterations".to_string(),
                     };
                 }
                 // Permission / operator-approval stop (2026-09-21 review,

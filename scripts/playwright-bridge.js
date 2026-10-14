@@ -81,6 +81,30 @@ function workspaceRoot() {
   return process.env.SELFWARE_WORKSPACE_ROOT || process.cwd();
 }
 
+function isSensitiveWorkspacePath(relativePath) {
+  if (!relativePath || typeof relativePath !== 'string') return false;
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+  for (const seg of segments) {
+    const lower = seg.toLowerCase();
+    if (
+      lower === '.git' ||
+      lower === '.selfware' ||
+      lower === '.ssh' ||
+      lower === '.aws' ||
+      lower === '.gnupg' ||
+      lower === '.env' ||
+      lower.startsWith('.env.') ||
+      lower.endsWith('.pem') ||
+      lower.endsWith('.key') ||
+      lower === 'id_rsa' ||
+      lower === 'id_ed25519'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function isWorkspaceFileUrl(url) {
   try {
     const parsed = new URL(url);
@@ -89,10 +113,17 @@ function isWorkspaceFileUrl(url) {
     // `workspace/link -> /etc` escape the workspace, and hand-decoding URL
     // pathnames mishandles Windows drive/UNC forms.
     const targetPath = fs.realpathSync(fileURLToPath(parsed));
+    const rawTarget = fileURLToPath(parsed);
     const root = fs.realpathSync(workspaceRoot());
     const relative = path.relative(root, targetPath);
-    return relative === '' ||
+    const inWorkspace = relative === '' ||
       (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    if (!inWorkspace) return false;
+    const rawRelative = path.relative(workspaceRoot(), rawTarget);
+    if (isSensitiveWorkspacePath(relative) || isSensitiveWorkspacePath(rawRelative)) {
+      return false;
+    }
+    return true;
   } catch (_) {
     return false;
   }
@@ -222,18 +253,32 @@ async function enforceRequestPolicy(route) {
   }
 
   let page = null;
+  let reqFrame = null;
   try {
-    page = request.frame().page();
+    reqFrame = typeof request.frame === 'function' ? request.frame() : null;
+    page = reqFrame ? reqFrame.page() : null;
   } catch (_) {
     // Worker requests have no page-scoped localhost authorization.
   }
-  let allowedOrigin = page ? allowedLocalOrigins.get(page) : null;
+  const isMainFrame = Boolean(page && reqFrame && reqFrame === page.mainFrame());
+  let allowedOrigin = (page && isMainFrame) ? allowedLocalOrigins.get(page) : null;
   // Once the main frame leaves the explicitly authorized local authority,
   // revoke that exception before the new document can issue subrequests.
   if (page && allowedOrigin && request.isNavigationRequest() &&
-      request.frame() === page.mainFrame() && !sameLocalAuthority(parsed, allowedOrigin)) {
+      isMainFrame && !sameLocalAuthority(parsed, allowedOrigin)) {
     allowedLocalOrigins.delete(page);
     allowedOrigin = null;
+  } else if (page && allowedOrigin && !request.isNavigationRequest()) {
+    try {
+      const mainUrl = new URL(page.mainFrame().url());
+      if (!sameLocalAuthority(mainUrl, allowedOrigin)) {
+        allowedLocalOrigins.delete(page);
+        allowedOrigin = null;
+      }
+    } catch (_) {
+      allowedLocalOrigins.delete(page);
+      allowedOrigin = null;
+    }
   }
 
   // The Rust side validates model-authored goto/new_tab calls, but links,
@@ -311,13 +356,40 @@ async function installContextWebSocketPolicy(browserContext) {
 
 async function installWebSocketPolicy(page) {
   // A per-page WebSocket route prevents a public tab from reusing a local
-  // authority that another tab authorized in the shared connection proxy.
+  // authority that another tab authorized in the connection proxy.
   // Fail closed on old Playwright rather than losing that isolation boundary.
   if (typeof page.routeWebSocket !== 'function') {
     throw new Error('page_control requires Playwright with page.routeWebSocket support');
   }
+  if (typeof page.on === 'function') {
+    page.on('framenavigated', frame => {
+      try {
+        if (frame !== page.mainFrame()) return;
+        const allowed = allowedLocalOrigins.get(page);
+        if (!allowed) return;
+        const current = new URL(frame.url());
+        if (!sameLocalAuthority(current, allowed)) {
+          allowedLocalOrigins.delete(page);
+        }
+      } catch (_) {
+        allowedLocalOrigins.delete(page);
+      }
+    });
+  }
   await page.routeWebSocket('**/*', webSocket => {
-    const allowedOrigin = allowedLocalOrigins.get(page) || null;
+    let allowedOrigin = allowedLocalOrigins.get(page) || null;
+    if (allowedOrigin) {
+      try {
+        const mainUrl = new URL(page.mainFrame().url());
+        if (!sameLocalAuthority(mainUrl, allowedOrigin)) {
+          allowedLocalOrigins.delete(page);
+          allowedOrigin = null;
+        }
+      } catch (_) {
+        allowedLocalOrigins.delete(page);
+        allowedOrigin = null;
+      }
+    }
     return routeWebSocketWithPolicy(webSocket, allowedOrigin);
   });
 }

@@ -871,6 +871,9 @@ impl VectorIndex {
             .map(|(i, _)| i)
         {
             self.deleted.insert(pos);
+            if self.deleted.len() * 10 > self.embeddings.len() * 3 {
+                self.compact();
+            }
         }
     }
 
@@ -925,7 +928,6 @@ impl VectorIndex {
     ///
     /// Called automatically when the deletion ratio exceeds the threshold,
     /// but can also be invoked manually.
-    #[allow(dead_code)]
     pub fn compact(&mut self) {
         if self.deleted.is_empty() {
             return;
@@ -1232,6 +1234,7 @@ impl CodeChunker {
         let mut current_type = ChunkType::CodeBlock;
         let mut brace_depth = 0;
         let mut in_block = false;
+        let mut seen_open_brace = false;
 
         for (line_num, line) in lines.iter().enumerate() {
             // Check for pattern starts
@@ -1255,15 +1258,37 @@ impl CodeChunker {
                     current_start = line_num;
                     current_type = *chunk_type;
                     in_block = true;
+                    seen_open_brace = false;
                     break;
                 }
             }
 
             // Track brace depth for block detection
-            brace_depth += line.chars().filter(|c| *c == '{').count() as i32;
-            brace_depth -= line.chars().filter(|c| *c == '}').count() as i32;
+            let opens = line.chars().filter(|c| *c == '{').count() as i32;
+            let closes = line.chars().filter(|c| *c == '}').count() as i32;
+            if in_block && opens > 0 {
+                seen_open_brace = true;
+            }
+            brace_depth += opens - closes;
 
-            if in_block && brace_depth <= 0 {
+            let requires_brace = matches!(
+                current_type,
+                ChunkType::Function
+                    | ChunkType::Struct
+                    | ChunkType::Enum
+                    | ChunkType::Trait
+                    | ChunkType::Impl
+                    | ChunkType::Module
+                    | ChunkType::Test
+            );
+            let block_complete = if requires_brace {
+                seen_open_brace
+                    || (!matches!(current_type, ChunkType::Test) && line.trim_end().ends_with(';'))
+            } else {
+                true
+            };
+
+            if in_block && brace_depth <= 0 && block_complete {
                 // End of block
                 let chunk_content: String = lines[current_start..=line_num].join("\n");
 
@@ -1287,6 +1312,7 @@ impl CodeChunker {
                 current_start = line_num + 1;
                 current_type = ChunkType::CodeBlock;
                 in_block = false;
+                seen_open_brace = false;
                 brace_depth = 0;
             }
         }

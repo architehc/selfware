@@ -2,14 +2,10 @@ use super::result_compaction::ContextPresence;
 use crate::api::client::SideCall;
 use crate::api::types::{Message, Usage};
 use crate::api::ApiClient;
-use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
-
-/// Per-message overhead tokens (role header, formatting, separators).
-const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
 /// Side-call purpose of the automatic compressor's summary (typed timeout
 /// label and `side_call:<purpose>` heartbeat phase).
@@ -42,23 +38,7 @@ fn safe_tail_start(messages: &[Message], desired: usize) -> usize {
 /// for message-level token estimation — both `ContextCompressor` and
 /// `trim_message_history` use it.
 pub fn estimate_message_tokens(m: &Message) -> usize {
-    let mut total = estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)
-        + m.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
-    if let Some(ref reasoning) = m.reasoning_content {
-        total += crate::token_count::estimate_tokens(reasoning);
-    }
-    if let Some(ref name) = m.name {
-        total += crate::token_count::estimate_tokens(name);
-    }
-    // Include tool calls if present (must match estimate_messages_tokens in token_count.rs)
-    if let Some(ref tool_calls) = m.tool_calls {
-        for call in tool_calls {
-            total += 10; // Overhead per tool call
-            total += crate::token_count::estimate_content_tokens(&call.function.name);
-            total += crate::token_count::estimate_content_tokens(&call.function.arguments);
-        }
-    }
-    total
+    crate::token_count::estimate_message_tokens(m)
 }
 
 /// Summarizer instruction for a per-file findings section, parsed back by

@@ -29,6 +29,55 @@ async fn regular_file_below_root_is_read_from_its_pinned_descriptor() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn regular_file_below_uncanonicalized_tempdir_root_is_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        b"pub fn uncanonicalized_root() {}\n",
+    )
+    .unwrap();
+
+    let (text, bytes) =
+        read_relative_regular(root, Path::new("src/lib.rs"), &permissive_safety(), 1024)
+            .await
+            .unwrap();
+
+    assert_eq!(text, "pub fn uncanonicalized_root() {}\n");
+    assert_eq!(bytes, b"pub fn uncanonicalized_root() {}\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real");
+    std::fs::create_dir_all(real_root.join("src")).unwrap();
+    std::fs::write(real_root.join("src/lib.rs"), b"pub fn secret() {}\n").unwrap();
+    let link_root = temp.path().join("link");
+    symlink(&real_root, &link_root).unwrap();
+
+    let error = read_relative_regular(
+        &link_root,
+        Path::new("src/lib.rs"),
+        &permissive_safety(),
+        1024,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot pin artifact harness root"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn leaf_symlink_outside_root_is_rejected() {
     use std::os::unix::fs::symlink;
 

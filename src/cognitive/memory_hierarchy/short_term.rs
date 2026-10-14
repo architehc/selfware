@@ -111,7 +111,7 @@ impl ShortTermMemory {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            if now.saturating_sub(entry.accessed_at) > config.demotion_threshold * 1000 {
+            if now.saturating_sub(entry.accessed_at) / 1000 > config.demotion_threshold {
                 return TierTransition::Demote;
             }
         }
@@ -179,12 +179,16 @@ impl Clone for ShortTermMemory {
 /// Working memory (most immediate)
 pub struct WorkingMemory {
     inner: ShortTermMemory,
+    context: std::sync::Arc<std::sync::RwLock<super::types::WorkingContext>>,
 }
 
 impl WorkingMemory {
     pub fn new(capacity: usize, index: Arc<MemoryIndex>) -> Self {
         Self {
             inner: ShortTermMemory::new(capacity, index),
+            context: std::sync::Arc::new(std::sync::RwLock::new(
+                super::types::WorkingContext::new("You are Selfware, an AI assistant."),
+            )),
         }
     }
 
@@ -210,7 +214,10 @@ impl WorkingMemory {
     }
 
     pub async fn clear(&self) {
-        self.inner.clear().await
+        self.inner.clear().await;
+        if let Ok(mut ctx) = self.context.write() {
+            *ctx = super::types::WorkingContext::new("You are Selfware, an AI assistant.");
+        }
     }
 
     /// Get all entries in working memory
@@ -220,15 +227,19 @@ impl WorkingMemory {
 
     /// Add a message to working memory, tracking it in the working context
     pub fn add_message(&mut self, message: crate::api::types::Message, estimated_tokens: usize) {
-        // Update the internal working context with the message and token count
-        // The actual MemoryEntry storage is handled by HierarchicalMemory::add_message
-        let _ = (message, estimated_tokens);
-        // Token tracking and budget enforcement happen at the HierarchicalMemory level
+        if let Ok(mut ctx) = self.context.write() {
+            ctx.add_message(message, estimated_tokens);
+        }
     }
 
     /// Get the current working context
     pub fn get_context(&self) -> super::types::WorkingContext {
-        super::types::WorkingContext::new("You are Selfware, an AI assistant.")
+        self.context
+            .read()
+            .map(|ctx| ctx.clone())
+            .unwrap_or_else(|_| {
+                super::types::WorkingContext::new("You are Selfware, an AI assistant.")
+            })
     }
 }
 
@@ -236,6 +247,7 @@ impl Clone for WorkingMemory {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            context: self.context.clone(),
         }
     }
 }

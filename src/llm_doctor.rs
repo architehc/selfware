@@ -182,6 +182,8 @@ pub struct DoctorReport {
     pub backend: Option<String>,
     /// Model IDs listed by the endpoint.
     pub available_models: Vec<String>,
+    /// Connection test outcome (Step 5).
+    pub connection_test: Option<DoctorCheckResult>,
     /// Connection latency in milliseconds (Step 5).
     pub latency_ms: Option<u64>,
     /// Estimated throughput in tokens/second (Step 5).
@@ -211,6 +213,7 @@ impl DoctorReport {
             model_available: None,
             backend: None,
             available_models: Vec::new(),
+            connection_test: None,
             latency_ms: None,
             tokens_per_second: None,
             tool_calling_works: None,
@@ -318,7 +321,8 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
 
     // Step 1: Detect Backend
     println!("{}", "Step 1: Detecting Backend".bold().underline());
-    let detection = detect_backend(&endpoint).await;
+    let api_key = config.api_key.as_ref().map(|k| k.expose());
+    let detection = detect_backend(&endpoint, api_key).await;
 
     match &detection {
         Ok(det) => {
@@ -438,6 +442,12 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     let conn_result = connection_test(&endpoint, &model_name, config).await;
     match &conn_result {
         Ok(res) => {
+            report.connection_test = Some(DoctorCheckResult {
+                name: "connection test".to_string(),
+                status: CheckOutcome::Pass,
+                detail: format!("{}ms", res.latency.as_millis()),
+                fix_hint: None,
+            });
             report.latency_ms = Some(res.latency.as_millis() as u64);
             report.tokens_per_second = res.tokens_per_second;
             report.tool_calling_works = res.tool_calling_works;
@@ -483,6 +493,14 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
                 "!!".red().bold(),
                 e.to_string().red()
             );
+            report.connection_test = Some(DoctorCheckResult {
+                name: "connection test".to_string(),
+                status: CheckOutcome::Fail,
+                detail: e.to_string(),
+                fix_hint: Some(
+                    "Check the API key and model configuration in selfware.toml.".to_string(),
+                ),
+            });
             // A reached-but-failed completion (401 bad key, 500, timeout) is a
             // real failure — the report must not say verified. (Was printed but
             // never OR'd into had_fail; found via `selfware boot` accepting a
@@ -642,7 +660,7 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     // Step 8: Server capacity check — compare /get_server_info (SGLang)
     // against the configured model's needs. Silent when the server does not
     // expose the route or the config has no matching demand.
-    if let Some(info) = fetch_server_info(&endpoint).await {
+    if let Some(info) = fetch_server_info(&endpoint, api_key).await {
         let capacity_rows = server_capacity_checks(&info, config);
         if !capacity_rows.is_empty() {
             println!("{}", "Step 8: Server Capacity Check".bold().underline());
@@ -1457,13 +1475,19 @@ fn parse_server_info(body: &str) -> ServerInfo {
 
 /// Fetch `/get_server_info` (SGLang) and parse it. Returns `None` when the
 /// route is missing (404 — non-SGLang backend), unreachable, or not JSON.
-async fn fetch_server_info(endpoint: &str) -> Option<ServerInfo> {
+async fn fetch_server_info(endpoint: &str, api_key: Option<&str>) -> Option<ServerInfo> {
     let base = endpoint.trim_end_matches('/');
     let base_no_v1 = base.trim_end_matches("/v1");
     let url = format!("{}/get_server_info", base_no_v1);
 
     let client = Client::builder().timeout(HTTP_TIMEOUT).build().ok()?;
-    let resp = client.get(&url).send().await.ok()?;
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
+            req = req.bearer_auth(key);
+        }
+    }
+    let resp = req.send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -1600,7 +1624,7 @@ fn server_capacity_checks(
 
 // ── Step 1 implementation ────────────────────────────────────────────────────
 
-async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
+async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<DetectionResult> {
     let client = Client::builder().timeout(HTTP_TIMEOUT).build()?;
 
     // Strip trailing /v1 for base URL probes
@@ -1609,8 +1633,15 @@ async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
 
     // Try /v1/models (OpenAI-compatible)
     let models_url = format!("{}/models", base);
-    let resp = client
-        .get(&models_url)
+    let mut req = client.get(&models_url);
+    if let Some(key) = api_key {
+        if crate::config::api_key::assert_credential_endpoint_safe(&models_url, true).is_ok() {
+            req = req.bearer_auth(key);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {models_url}");
+        }
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", models_url, e))?;
@@ -1638,7 +1669,7 @@ async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
     // Header-first detection (cheap), falling back to active probes.
     let backend = match detect_backend_from_headers(&header_blob, &body) {
         Some(b) => b,
-        None => identify_backend(&client, base_no_v1, &body).await,
+        None => identify_backend(&client, base_no_v1, &body, api_key).await,
     };
 
     Ok(DetectionResult {
@@ -1720,10 +1751,24 @@ fn parse_models(body: &Value) -> Vec<ModelInfo> {
     models
 }
 
-async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) -> Backend {
+async fn identify_backend(
+    client: &Client,
+    base_url: &str,
+    models_body: &Value,
+    api_key: Option<&str>,
+) -> Backend {
+    let attach_auth = |req: reqwest::RequestBuilder, url: &str| -> reqwest::RequestBuilder {
+        if let Some(key) = api_key {
+            if crate::config::api_key::assert_credential_endpoint_safe(url, true).is_ok() {
+                return req.bearer_auth(key);
+            }
+        }
+        req
+    };
+
     // Check for sglang-specific endpoint: /get_server_info
-    if let Ok(resp) = client
-        .get(format!("{}/get_server_info", base_url))
+    let sglang_url = format!("{}/get_server_info", base_url);
+    if let Ok(resp) = attach_auth(client.get(&sglang_url), &sglang_url)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
@@ -1738,8 +1783,8 @@ async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) 
     }
 
     // Check for vllm-specific: /version or model metadata containing "vllm"
-    if let Ok(resp) = client
-        .get(format!("{}/version", base_url))
+    let vllm_url = format!("{}/version", base_url);
+    if let Ok(resp) = attach_auth(client.get(&vllm_url), &vllm_url)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
@@ -1755,8 +1800,8 @@ async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) 
     }
 
     // Check for Ollama: /api/tags endpoint
-    if let Ok(resp) = client
-        .get(format!("{}/api/tags", base_url))
+    let ollama_url = format!("{}/api/tags", base_url);
+    if let Ok(resp) = attach_auth(client.get(&ollama_url), &ollama_url)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
@@ -1777,8 +1822,8 @@ async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) 
     }
 
     // Check for llama.cpp: /health endpoint with llama.cpp specific fields
-    if let Ok(resp) = client
-        .get(format!("{}/health", base_url))
+    let llama_url = format!("{}/health", base_url);
+    if let Ok(resp) = attach_auth(client.get(&llama_url), &llama_url)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await

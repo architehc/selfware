@@ -375,6 +375,13 @@ pub fn review_client_config(config: &Config) -> Config {
     review_config
 }
 
+/// Redact secret values in arbitrary model-facing text (orientation, pair
+/// context, freeform prompts) using the model-facing redactor.
+pub fn redact_secrets(text: &str) -> String {
+    use crate::safety::redact::{redact_for_model, RedactionContext};
+    redact_for_model(text, RedactionContext::Generic).content
+}
+
 impl GroundedAssistant {
     pub fn new(config: &Config) -> Result<Self> {
         let review_config = review_client_config(config);
@@ -400,10 +407,20 @@ impl GroundedAssistant {
         if user.trim().is_empty() {
             bail!("freeform prompt cannot be empty");
         }
+        gate_evidence_trust(&[GroundingEvidence {
+            id: "FREEFORM".to_string(),
+            path: "freeform_prompt".to_string(),
+            start_line: 1,
+            end_line: user.lines().count().max(1),
+            excerpt: user.to_string(),
+            content_hash: String::new(),
+            source: "workspace_snapshot".to_string(),
+        }])?;
+        let redacted_user = redact_secrets(user);
         let response = self
             .client
             .chat(
-                vec![Message::system(system), Message::user(user)],
+                vec![Message::system(system), Message::user(&redacted_user)],
                 None,
                 ThinkingMode::Disabled,
             )
@@ -447,7 +464,26 @@ impl GroundedAssistant {
 
         // Trust gate: scan what is about to reach the model. High-severity
         // findings in non-trusted content refuse the send before any API call.
-        let trust_gate = gate_evidence_trust(&evidence)?;
+        let mut trust_gate = gate_evidence_trust(&evidence)?;
+        let redacted_orientation = match orientation {
+            Some(text) if !text.trim().is_empty() => {
+                let orientation_gate = gate_evidence_trust(&[GroundingEvidence {
+                    id: "ORIENTATION".to_string(),
+                    path: "workspace_orientation".to_string(),
+                    start_line: 1,
+                    end_line: text.lines().count().max(1),
+                    excerpt: text.to_string(),
+                    content_hash: String::new(),
+                    source: "workspace_snapshot".to_string(),
+                }])?;
+                trust_gate.findings += orientation_gate.findings;
+                trust_gate.worst_risk_score = trust_gate
+                    .worst_risk_score
+                    .max(orientation_gate.worst_risk_score);
+                Some(redact_secrets(text.trim()))
+            }
+            _ => None,
+        };
 
         // Secret values never reach the model (0.9.5 Rule 5 sweep: this path
         // sent workspace excerpts unredacted). Model-facing redaction keeps
@@ -470,14 +506,14 @@ impl GroundedAssistant {
              two valid action hops numbered contiguously from 1. If evidence is \
              insufficient, omit the item.",
         );
-        let user = Message::user(match orientation {
-            Some(text) if !text.trim().is_empty() => format!(
+        let user = Message::user(match redacted_orientation.as_deref() {
+            Some(text) => format!(
                 "Workspace orientation (background, not citeable):\n{}\n\nQuestion:\n{}\n\nGrounding evidence:\n{}",
-                text.trim(),
+                text,
                 question.trim(),
                 evidence_json
             ),
-            _ => format!(
+            None => format!(
                 "Question:\n{}\n\nGrounding evidence:\n{}",
                 question.trim(),
                 evidence_json

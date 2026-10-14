@@ -135,13 +135,18 @@ class QualityScorer:
         
         # Security score (vulnerability based)
         security = results.get("security")
-        if security and security.output:
+        has_vuln_counts = bool(
+            security
+            and security.output
+            and any(k in security.output for k in ("critical", "high", "medium"))
+        )
+        if security and (has_vuln_counts or security.status == StageStatus.PASSED):
             critical = security.output.get("critical", 0)
             high = security.output.get("high", 0)
             medium = security.output.get("medium", 0)
             scores["security"] = max(0, 100 - critical * 50 - high * 20 - medium * 5)
         else:
-            scores["security"] = 100
+            scores["security"] = 0
         
         # Weighted total
         total = sum(scores[k] * self.WEIGHTS[k] for k in self.WEIGHTS if k in scores)
@@ -150,7 +155,7 @@ class QualityScorer:
             "overall": round(total, 1),
             "breakdown": scores,
             "grade": self._grade(total),
-            "passed": total >= 80 and scores.get("security", 100) >= 70
+            "passed": total >= 80 and scores.get("security", 0) >= 70
         }
     
     def _grade(self, score: float) -> str:

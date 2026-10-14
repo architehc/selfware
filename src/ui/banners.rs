@@ -277,18 +277,25 @@ pub fn step_indicator(current: usize, total: usize) -> String {
 /// Task progress box
 pub fn task_progress(title: &str, current: usize, total: usize, status: &str) -> Banner {
     let progress_width = 20;
-    let filled = ((current as f64 / total as f64) * progress_width as f64) as usize;
-    let empty = progress_width - filled;
+    let ratio = if total > 0 {
+        (current as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let filled = ((ratio * progress_width as f64) as usize).min(progress_width);
+    let empty = progress_width.saturating_sub(filled);
     let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
-    let percent = format!("{:.0}%", (current as f64 / total as f64) * 100.0);
+    let percent = format!("{:.0}%", ratio * 100.0);
+    let status_line: String = format!("│  Status: {}                        │", status)
+        .chars()
+        .take(38)
+        .collect();
 
     Banner::new(vec![
         &format!("╭─ {} ─────────────────────────╮", title),
         "│                                    │",
         &format!("│  Progress: {} {}       │", bar, percent),
-        &format!("│  Status: {}                        │", status)
-            .get(0..40)
-            .unwrap_or("│  Status: ..."),
+        &status_line,
         "│                                    │",
         "╰────────────────────────────────────╯",
     ])
@@ -390,14 +397,14 @@ pub fn text_box(text: &str, width: usize) -> Banner {
     let wrapped = wrap_text(text, inner_width);
 
     let mut lines = Vec::new();
-    lines.push(format!("╭{}╮", "─".repeat(width - 2)));
+    lines.push(format!("╭{}╮", "─".repeat(width.saturating_sub(2))));
 
     for line in wrapped {
         let padding = inner_width.saturating_sub(line.chars().count());
         lines.push(format!("│ {}{} │", line, " ".repeat(padding)));
     }
 
-    lines.push(format!("╰{}╯", "─".repeat(width - 2)));
+    lines.push(format!("╰{}╯", "─".repeat(width.saturating_sub(2))));
 
     Banner::new(lines.iter().map(|s| s.as_str()).collect())
 }

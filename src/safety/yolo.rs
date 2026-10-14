@@ -413,6 +413,55 @@ impl YoloManager {
             }
         }
 
+        if matches!(tool_name, "vision_analyze" | "vision_compare") {
+            for key in ["image_path", "image_a", "image_b"] {
+                if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
+                    if self.config.is_protected_path(path) {
+                        return YoloDecision::Block(format!("Path '{}' is protected", path));
+                    }
+                    if let Some(denied) = self.config.matches_denied_path(path) {
+                        return YoloDecision::Block(format!(
+                            "Path '{}' matches denied pattern '{}'",
+                            path, denied
+                        ));
+                    }
+                }
+            }
+        }
+
+        if tool_name == "patch_apply" {
+            let Some(diff) = args.get("diff").and_then(|v| v.as_str()) else {
+                return YoloDecision::Block("patch_apply requires a 'diff' argument".to_string());
+            };
+            if let Err(msg) = crate::tools::patch_apply::check_diff_header_safety(diff) {
+                return YoloDecision::Block(msg);
+            }
+            let (_, _, _, targets) = crate::tools::patch_apply::parse_diff_stats(diff);
+            if targets.is_empty() {
+                return YoloDecision::Block(
+                    "patch_apply diff contains no recognizable target paths".to_string(),
+                );
+            }
+            for path in &targets {
+                if self.config.is_protected_path(path) {
+                    return YoloDecision::Block(format!("Path '{}' is protected", path));
+                }
+                if let Some(denied) = self.config.matches_denied_path(path) {
+                    return YoloDecision::Block(format!(
+                        "Path '{}' matches denied pattern '{}'",
+                        path, denied
+                    ));
+                }
+            }
+        }
+
+        if ALWAYS_CONFIRM_TOOLS.contains(&tool_name) {
+            return YoloDecision::RequireConfirmation(format!(
+                "Tool '{}' always requires confirmation",
+                tool_name
+            ));
+        }
+
         // Check command arguments against protected paths
         for cmd in extract_all_command_strings(args) {
             if let Some(p) = targets_protected_path(&cmd, &self.config.protected_paths) {
@@ -690,6 +739,9 @@ impl std::fmt::Display for AuditSummary {
     }
 }
 
+/// Tools that always require explicit human confirmation, even in YOLO mode.
+pub const ALWAYS_CONFIRM_TOOLS: &[&str] = &["hot_reload"];
+
 fn is_path_like_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     matches!(
@@ -702,6 +754,14 @@ fn is_path_like_key(key: &str) -> bool {
             | "filepaths"
             | "file"
             | "files"
+            | "image_path"
+            | "image_a"
+            | "image_b"
+            | "output_path"
+            | "output_file"
+            | "repo_path"
+            | "codebase_root"
+            | "target_file"
             | "target"
             | "targets"
             | "target_path"

@@ -973,6 +973,24 @@ impl LspServerConnection {
     }
 }
 
+impl Drop for LspServerConnection {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.reader_handle.try_lock() {
+            if let Some(h) = guard.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut child) = self.child.try_lock() {
+            kill_lsp_process_group(&child, self.process_group);
+            let _ = child.start_kill();
+            let _ = child.try_wait();
+        }
+        if let Some(id) = &self.resource_id {
+            crate::resources::ResourceRegistry::global().release(id, "LSP server dropped");
+        }
+    }
+}
+
 /// Read a single Content-Length framed LSP message from a reader.
 async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
@@ -1613,6 +1631,33 @@ impl LspClient {
             }
         }
         Ok(())
+    }
+
+    /// Non-blocking cleanup suitable for synchronous `Drop` implementations,
+    /// including single-threaded (`current_thread`) Tokio runtimes where
+    /// `tokio::task::block_in_place` would panic.
+    pub fn shutdown_nonblocking(&self) {
+        if let Ok(mut versions) = self.document_versions.try_lock() {
+            versions.clear();
+        }
+        if let Ok(mut conns) = self.connections.try_lock() {
+            for (_lang, conn) in conns.drain() {
+                if let Ok(mut guard) = conn.reader_handle.try_lock() {
+                    if let Some(h) = guard.take() {
+                        h.abort();
+                    }
+                }
+                if let Ok(mut child) = conn.child.try_lock() {
+                    kill_lsp_process_group(&child, conn.process_group);
+                    let _ = child.start_kill();
+                    let _ = child.try_wait();
+                }
+                if let Some(id) = &conn.resource_id {
+                    crate::resources::ResourceRegistry::global()
+                        .release(id, "LSP server shut down");
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

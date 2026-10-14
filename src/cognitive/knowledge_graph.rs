@@ -330,7 +330,11 @@ impl Relation {
 
     /// Set strength
     pub fn with_strength(mut self, strength: f32) -> Self {
-        self.strength = strength.clamp(0.0, 1.0);
+        self.strength = if strength.is_nan() {
+            0.0
+        } else {
+            strength.clamp(0.0, 1.0)
+        };
         self
     }
 

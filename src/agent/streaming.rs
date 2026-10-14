@@ -623,7 +623,7 @@ impl Agent {
         // call (e.g. GLM/Qwen style). Without native tool_calls this would be
         // stored as plain prose and replayed as a non-tool completion on a hit.
         let parsed = crate::tool_parser::parse_tool_calls(content);
-        if !parsed.tool_calls.is_empty() {
+        if !parsed.tool_calls.is_empty() || !parsed.rejections.is_empty() {
             return;
         }
 

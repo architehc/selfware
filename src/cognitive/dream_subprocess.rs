@@ -294,6 +294,23 @@ pub async fn run_dream_consolidation(
     let consolidate_failed = !memories.is_empty() && consolidation.is_none();
     let success = !consolidate_failed && (errors.is_empty() || phases_completed.len() >= 3);
 
+    // Update persisted state and release the consolidation lock file
+    let state_dir = dream_config.state_path();
+    if let Ok(mut state) = DreamState::load(&state_dir) {
+        if success {
+            state.last_dream_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            state.sessions_since_last_dream = 0;
+            state.dream_count += 1;
+        }
+        state.release_consolidation_lock();
+        let _ = state.save(&state_dir);
+    } else {
+        let _ = std::fs::remove_file(state_dir.join("dream.lock"));
+    }
+
     info!(
         "Dream consolidation completed for {}: {} phases, {} consolidated, {} pruned, {}s",
         project_key,
@@ -562,22 +579,24 @@ pub async fn check_and_spawn_autodream(
             "AutoDream gates not passed for {}: {} sessions, last dream {} hours ago",
             project_key,
             state.sessions_since_last_dream,
-            (std::time::SystemTime::now()
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs()
-                - state.last_dream_timestamp)
+                .saturating_sub(state.last_dream_timestamp)
                 / 3600
         );
 
         return Ok(None);
     }
 
+    // Save state before spawning background task, and transfer lock ownership
+    // to the spawned task so dropping `state` here does not delete `dream.lock`.
+    state.save(&dream_config.state_path())?;
+    state.detach_consolidation_lock();
+
     // Spawn the autoDream background task
     let handle = spawn_autodream(project_path, project_key, auto_config, dream_config).await?;
-
-    // Save state (with lock held)
-    state.save(&dream_config.state_path())?;
 
     info!("AutoDream spawned for {}", project_key);
     Ok(Some(handle))

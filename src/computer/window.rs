@@ -1407,6 +1407,7 @@ impl WindowManager {
             new_id_to_app.insert(window_id.clone(), app_name.to_string());
 
             // Get window info for each app
+            let escaped_app = escape_applescript_string(app_name);
             let mut cmd = tokio::process::Command::new("osascript");
             sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
             let window_output = cmd
@@ -1414,7 +1415,7 @@ impl WindowManager {
                     "-e",
                     &format!(
                         "tell application \"System Events\" to tell process \"{}\" to get {{position, size}} of window 1",
-                        app_name
+                        escaped_app
                     ),
                 ])
                 .output()

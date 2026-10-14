@@ -3333,8 +3333,11 @@ impl Agent {
                     .get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("src/**/*.rs");
-                let max_files =
-                    args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let max_files = args
+                    .get("max_files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .clamp(1, 100) as usize;
 
                 // Collect matching files from context map. The bounded walk
                 // never follows symlinks and rejects private coding-agent
@@ -5203,6 +5206,7 @@ fn context_bulk_read_paths(
         .into_iter()
         .filter_entry(retain_context_bulk_entry)
         .filter_map(Result::ok)
+        .take(10_000)
     {
         if !entry.file_type().is_file() || entry.path_is_symlink() {
             continue;

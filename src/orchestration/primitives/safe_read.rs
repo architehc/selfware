@@ -52,15 +52,24 @@ fn relative_components(relative: &Path) -> Result<Vec<std::ffi::OsString>> {
 fn open_root(root: &Path) -> Result<(std::fs::File, PathBuf)> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    let meta = std::fs::symlink_metadata(root)
+        .with_context(|| format!("cannot pin artifact harness root: {}", root.display()))?;
+    anyhow::ensure!(
+        !meta.file_type().is_symlink(),
+        "cannot pin artifact harness root: {} is a symlink",
+        root.display()
+    );
+    let expected = std::fs::canonicalize(root)
+        .with_context(|| format!("cannot resolve artifact harness root: {}", root.display()))?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)
         .with_context(|| format!("cannot pin artifact harness root: {}", root.display()))?;
-    let real = crate::safety::path_validator::fd_real_path(&file, root)
+    let real = crate::safety::path_validator::fd_real_path(&file, &expected)
         .context("cannot resolve pinned artifact harness root")?;
     anyhow::ensure!(
-        real == root,
+        real == expected,
         "artifact harness root changed while it was being opened"
     );
     Ok((file, real))

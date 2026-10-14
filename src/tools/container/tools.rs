@@ -15,8 +15,25 @@ use super::validation::{
 };
 use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::argv_guard::{reject_flag_like_operand, reject_flag_like_operands};
-use crate::tools::process_guard::GroupedOutputExt;
+use crate::tools::process_guard::{run_command_bounded, BoundedCommandOutput, CommandRunError};
 use crate::tools::Tool;
+
+const DEFAULT_CONTAINER_CMD_TIMEOUT_SECS: u64 = 120;
+const MAX_CONTAINER_CMD_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+async fn run_container_cmd(
+    cmd: Command,
+    timeout_secs: u64,
+    context_msg: &'static str,
+) -> Result<BoundedCommandOutput> {
+    run_command_bounded(
+        cmd,
+        std::time::Duration::from_secs(timeout_secs),
+        MAX_CONTAINER_CMD_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|e| anyhow::Error::new(e).context(context_msg))
+}
 
 /// Validate a model-supplied build/compose path operand: it must not be
 /// option-shaped and must pass the same workspace path policy as `file_read`
@@ -207,6 +224,21 @@ impl Tool for ContainerRun {
         // `--volume=/:/host` would become run flags and bypass the isolation
         // profile and the volume validation below (review, 0.9.2).
         reject_flag_like_operand("container_run", "image", Some(image))?;
+        reject_flag_like_operand(
+            "container_run",
+            "name",
+            args.get("name").and_then(|v| v.as_str()),
+        )?;
+        reject_flag_like_operand(
+            "container_run",
+            "network",
+            args.get("network").and_then(|v| v.as_str()),
+        )?;
+        reject_flag_like_operand(
+            "container_run",
+            "workdir",
+            args.get("workdir").and_then(|v| v.as_str()),
+        )?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let mut cmd = Command::new(runtime.command());
@@ -355,10 +387,12 @@ impl Tool for ContainerRun {
 
         // A spawn/wait error leaves the `starting` entry: teardown looks the
         // container up by its run label and releases the entry if none exists.
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to run container")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to run container",
+        )
+        .await?;
 
         // Settle the entry. A failed start still leaves a created container
         // behind, so the cidfile — not the exit code — decides.
@@ -477,10 +511,14 @@ impl Tool for ContainerStop {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to stop container")?;
+        let output = run_container_cmd(
+            cmd,
+            timeout
+                .saturating_add(30)
+                .max(DEFAULT_CONTAINER_CMD_TIMEOUT_SECS),
+            "Failed to stop container",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -546,6 +584,11 @@ impl Tool for ContainerList {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_flag_like_operand(
+            "container_list",
+            "filter",
+            args.get("filter").and_then(|v| v.as_str()),
+        )?;
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -565,10 +608,12 @@ impl Tool for ContainerList {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to list containers")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to list containers",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -671,6 +716,11 @@ impl Tool for ContainerLogs {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
         reject_flag_like_operand("container_logs", "container", Some(container))?;
+        reject_flag_like_operand(
+            "container_logs",
+            "since",
+            args.get("since").and_then(|v| v.as_str()),
+        )?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(100);
@@ -696,10 +746,12 @@ impl Tool for ContainerLogs {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to get container logs")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to get container logs",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -781,6 +833,16 @@ impl Tool for ContainerExec {
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
         // `--privileged` / `--user=root` here would be parsed as exec flags.
         reject_flag_like_operand("container_exec", "container", Some(container))?;
+        reject_flag_like_operand(
+            "container_exec",
+            "workdir",
+            args.get("workdir").and_then(|v| v.as_str()),
+        )?;
+        reject_flag_like_operand(
+            "container_exec",
+            "user",
+            args.get("user").and_then(|v| v.as_str()),
+        )?;
 
         let command: Vec<String> = args
             .get("command")
@@ -834,10 +896,12 @@ impl Tool for ContainerExec {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to exec in container")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to exec in container",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -914,6 +978,12 @@ impl Tool for ContainerBuild {
             .get("tag")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("tag is required"))?;
+        reject_flag_like_operand("container_build", "tag", Some(tag))?;
+        reject_flag_like_operand(
+            "container_build",
+            "target",
+            args.get("target").and_then(|v| v.as_str()),
+        )?;
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         validate_container_path("container_build", "path", path)?;
@@ -964,13 +1034,16 @@ impl Tool for ContainerBuild {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = tokio::time::timeout(
+        let output = run_command_bounded(
+            cmd,
             std::time::Duration::from_secs(600), // 10 minute timeout for builds
-            cmd.output_grouped(),
+            MAX_CONTAINER_CMD_OUTPUT_BYTES,
         )
         .await
-        .context("Build timed out")?
-        .context("Failed to build image")?;
+        .map_err(|e| match e {
+            CommandRunError::Timeout(_) => anyhow::anyhow!("Build timed out"),
+            other => anyhow::Error::new(other).context("Failed to build image"),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1038,6 +1111,11 @@ impl Tool for ContainerImages {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        reject_flag_like_operand(
+            "container_images",
+            "filter",
+            args.get("filter").and_then(|v| v.as_str()),
+        )?;
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1061,10 +1139,12 @@ impl Tool for ContainerImages {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to list images")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to list images",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1149,13 +1229,16 @@ impl Tool for ContainerPull {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = tokio::time::timeout(
+        let output = run_command_bounded(
+            cmd,
             std::time::Duration::from_secs(300), // 5 minute timeout for pulls
-            cmd.output_grouped(),
+            MAX_CONTAINER_CMD_OUTPUT_BYTES,
         )
         .await
-        .context("Pull timed out")?
-        .context("Failed to pull image")?;
+        .map_err(|e| match e {
+            CommandRunError::Timeout(_) => anyhow::anyhow!("Pull timed out"),
+            other => anyhow::Error::new(other).context("Failed to pull image"),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1244,10 +1327,12 @@ impl Tool for ContainerRemove {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to remove container")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to remove container",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1416,21 +1501,22 @@ impl Tool for ComposeUp {
         let entry_id = registry.register(entry);
 
         const COMPOSE_UP_TIMEOUT_SECS: u64 = 300;
-        let output = tokio::time::timeout(
+        let output = run_command_bounded(
+            cmd,
             std::time::Duration::from_secs(COMPOSE_UP_TIMEOUT_SECS),
-            cmd.output_grouped(),
+            MAX_CONTAINER_CMD_OUTPUT_BYTES,
         )
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
+        .map_err(|e| match e {
+            CommandRunError::Timeout(_) => anyhow::anyhow!(
                 "compose up timed out after {COMPOSE_UP_TIMEOUT_SECS}s; the compose processes \
                  were killed, but some services may already be running. The project is \
                  recorded and `compose down` runs for it when the task ends — check \
                  `docker compose ps` in {}",
                 dir.display()
-            )
-        })?
-        .context("Failed to run compose up")?;
+            ),
+            other => anyhow::Error::new(other).context("Failed to run compose up"),
+        })?;
 
         if output.status.success() {
             let _ = registry.transition(
@@ -1541,6 +1627,11 @@ impl Tool for ComposeDown {
             reject_flag_like_operand("compose_down", "file", Some(file))?;
             validate_container_path("compose_down", "file", &file_in_project)?;
         }
+        reject_flag_like_operand(
+            "compose_down",
+            "rmi",
+            args.get("rmi").and_then(|v| v.as_str()),
+        )?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
@@ -1576,10 +1667,12 @@ impl Tool for ComposeDown {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd
-            .output_grouped()
-            .await
-            .context("Failed to run compose down")?;
+        let output = run_container_cmd(
+            cmd,
+            DEFAULT_CONTAINER_CMD_TIMEOUT_SECS,
+            "Failed to run compose down",
+        )
+        .await?;
 
         if output.status.success() {
             use crate::resources::{ResourceHandle, ResourceRegistry};

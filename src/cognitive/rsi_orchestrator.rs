@@ -208,7 +208,7 @@ impl RSIOrchestrator {
             )));
         }
 
-        if self.consecutive_failures >= self.max_consecutive_failures - 1 {
+        if self.consecutive_failures >= self.max_consecutive_failures.saturating_sub(1) {
             warn!(
                 "Next failure will trip the circuit breaker ({}/{} consecutive failures)",
                 self.consecutive_failures, self.max_consecutive_failures
@@ -632,6 +632,10 @@ impl RSIOrchestrator {
         }
 
         info!("Merging sandbox changes back to main workspace...");
+
+        if applied.edited_files.is_empty() {
+            return Ok(());
+        }
 
         let canonical_project_root = self.project_root.canonicalize().map_err(|e| {
             SelfwareError::Internal(format!("Failed to canonicalize project root: {}", e))

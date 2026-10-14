@@ -250,16 +250,8 @@ impl StreamingResponse {
                     Some(d) => match d.checked_duration_since(Instant::now()) {
                         Some(remaining) if !remaining.is_zero() => remaining.min(chunk_timeout),
                         _ => {
-                            // Deadline reached: flush buffered tool calls, then
-                            // end the stream with a timeout error.
-                            for call in accumulator.flush() {
-                                if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
-                                    warn!(
-                                        "Streaming receiver dropped while flushing tool call at deadline"
-                                    );
-                                    return;
-                                }
-                            }
+                            // Deadline reached: end the stream with a timeout error
+                            // without flushing incomplete tool calls.
                             if tx.send(Err(classify_timeout())).await.is_err() {
                                 warn!(
                                     "Streaming receiver dropped while sending deadline timeout error"
@@ -283,14 +275,6 @@ impl StreamingResponse {
                     Ok(Some(result)) => Some(result),
                     Ok(None) => None, // Stream ended
                     Err(_elapsed) => {
-                        for call in accumulator.flush() {
-                            if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
-                                warn!(
-                                    "Streaming receiver dropped while sending buffered tool call after timeout"
-                                );
-                                return;
-                            }
-                        }
                         if tx.send(Err(classify_timeout())).await.is_err() {
                             warn!("Streaming receiver dropped while sending timeout error");
                         }
@@ -341,14 +325,6 @@ impl StreamingResponse {
                         }
                     }
                     Err(e) => {
-                        for call in accumulator.flush() {
-                            if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
-                                warn!(
-                                    "Streaming receiver dropped while sending buffered tool call after stream error"
-                                );
-                                return;
-                            }
-                        }
                         if tx
                             .send(Err(ApiError::Network(format!("Stream error: {}", e)).into()))
                             .await
@@ -702,7 +678,7 @@ impl ToolCallAccumulator {
                 entry.1 = call_type;
             }
             if !name.is_empty() {
-                entry.2 = name;
+                entry.2.push_str(&name);
             }
             (
                 entry.0.clone(),
@@ -749,13 +725,17 @@ impl ToolCallAccumulator {
         calls.sort_by_key(|(idx, _)| *idx);
         calls
             .into_iter()
-            .map(|(_, (id, call_type, name, args))| types::ToolCall {
-                id,
-                call_type,
-                function: types::ToolFunction {
-                    name,
-                    arguments: args,
-                },
+            .map(|(_, (id, call_type, name, args))| {
+                let arguments = if args.trim().is_empty() {
+                    "{}".to_string()
+                } else {
+                    args
+                };
+                types::ToolCall {
+                    id,
+                    call_type,
+                    function: types::ToolFunction { name, arguments },
+                }
             })
             .filter(|tc| !tc.id.is_empty() && !tc.function.name.is_empty())
             .collect()

@@ -428,7 +428,9 @@ fn extract_json(text: &str) -> &str {
     }
     if let Some(start) = text.find('{') {
         if let Some(end) = text.rfind('}') {
-            return &text[start..=end];
+            if end >= start {
+                return &text[start..=end];
+            }
         }
     }
     text.trim()

@@ -431,7 +431,7 @@ pub async fn run_multichat_tui(
                 .terminal()
                 .draw(|frame| render(frame, &state, Instant::now()))?;
 
-            if signal_received() {
+            if signal_received() || crate::is_shutdown_requested() {
                 break;
             }
             // Non-blocking poll; the sleep below paces the loop (~20 fps).

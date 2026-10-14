@@ -336,9 +336,6 @@ pub(crate) async fn run_artifact_harness(
         .buffer_unordered(parallelism)
         .collect()
         .await;
-        if !raw_results.is_empty() {
-            rounds_completed = round;
-        }
         raw_results.sort_by(|left, right| left.key.cmp(&right.key));
 
         let post_changes = binding_changes(&prepared, &config.safety).await;
@@ -351,6 +348,7 @@ pub(crate) async fn run_artifact_harness(
         }
 
         let mut round_messages = Vec::new();
+        let mut round_analyzed = false;
         for result in raw_results {
             let Some(assignment) = prepared.plan.assignment(&result.key) else {
                 continue;
@@ -404,6 +402,7 @@ pub(crate) async fn run_artifact_harness(
             );
             let messages_sent = brokered.accepted.len();
             round_messages.extend(brokered.accepted);
+            round_analyzed = true;
             turns.push(WorkerTurnReport {
                 artifact: assignment.key.clone(),
                 path: assignment.path.clone(),
@@ -418,6 +417,9 @@ pub(crate) async fn run_artifact_harness(
                 accounted_usage: result.usage,
                 error: None,
             });
+        }
+        if round_analyzed {
+            rounds_completed = round;
         }
         if binding_changed {
             break;
@@ -772,45 +774,14 @@ fn worker_messages(
     ])
 }
 
-fn prepare_artifact_context(
-    artifact: &PreparedArtifact,
-    token_budget: usize,
-) -> Result<DeliveredArtifact> {
-    anyhow::ensure!(
-        artifact.key.starts_with("artifact-"),
-        "invalid capability key"
-    );
-    anyhow::ensure!(
-        format!("{:x}", Sha256::digest(artifact.content.as_bytes())) == artifact.base_sha256,
-        "artifact snapshot does not match its content capability"
-    );
-    let skeleton_raw = if artifact.path.ends_with(".rs") {
-        let rendered =
-            crate::evolve::extract_rust_skeleton(Path::new(&artifact.path), &artifact.content)
-                .render();
-        Some(truncate_lines_to_tokens(
-            &rendered,
-            token_budget.saturating_div(4).min(2_048),
-        ))
-    } else {
-        None
-    };
-    let skeleton_tokens = skeleton_raw
-        .as_deref()
-        .map(estimate_content_tokens)
-        .unwrap_or(0);
-    let source_budget = token_budget.saturating_sub(skeleton_tokens);
-    anyhow::ensure!(
-        source_budget >= 256,
-        "artifact skeleton leaves fewer than 256 source tokens"
-    );
-    let (numbered, start, end, total, _) = select_source_window(
-        &artifact.content,
-        artifact.focus_symbol.as_deref(),
-        artifact.path.ends_with(".rs"),
-        source_budget,
-    )?;
-    let args = serde_json::json!({"path": artifact.path, "line_range": [start, end]}).to_string();
+fn sanitize_artifact_payload(
+    path: &str,
+    start: usize,
+    end: usize,
+    numbered: &str,
+    skeleton_raw: Option<&str>,
+) -> Result<(String, Option<String>, usize)> {
+    let args = serde_json::json!({"path": path, "line_range": [start, end]}).to_string();
     let payload = serde_json::json!({
         "content": numbered,
         "skeleton": skeleton_raw,
@@ -826,9 +797,119 @@ fn prepare_artifact_context(
     let content = parsed
         .get("content")
         .and_then(serde_json::Value::as_str)
-        .context("sanitized artifact payload has no content")?;
-    let skeleton = parsed.get("skeleton").and_then(serde_json::Value::as_str);
-    let evidence_lines = crate::agent::review_shards::numbered_lines(content);
+        .context("sanitized artifact payload has no content")?
+        .to_string();
+    let skeleton = parsed
+        .get("skeleton")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Ok((content, skeleton, gate.sanitized))
+}
+
+fn prepare_artifact_context(
+    artifact: &PreparedArtifact,
+    token_budget: usize,
+) -> Result<DeliveredArtifact> {
+    anyhow::ensure!(
+        artifact.key.starts_with("artifact-"),
+        "invalid capability key"
+    );
+    anyhow::ensure!(
+        format!("{:x}", Sha256::digest(artifact.content.as_bytes())) == artifact.base_sha256,
+        "artifact snapshot does not match its content capability"
+    );
+    let skeleton_budget = token_budget.saturating_div(4).min(2_048);
+    let mut skeleton_raw = if artifact.path.ends_with(".rs") {
+        let rendered =
+            crate::evolve::extract_rust_skeleton(Path::new(&artifact.path), &artifact.content)
+                .render();
+        Some(truncate_lines_to_tokens(&rendered, skeleton_budget))
+    } else {
+        None
+    };
+    let skeleton_tokens = skeleton_raw
+        .as_deref()
+        .map(estimate_content_tokens)
+        .unwrap_or(0);
+    let source_budget = token_budget.saturating_sub(skeleton_tokens);
+    anyhow::ensure!(
+        source_budget >= 256,
+        "artifact skeleton leaves fewer than 256 source tokens"
+    );
+    let (numbered, mut start, mut end, total, _) = select_source_window(
+        &artifact.content,
+        artifact.focus_symbol.as_deref(),
+        artifact.path.ends_with(".rs"),
+        source_budget,
+    )?;
+    let (mut content, mut skeleton, mut sanitized) = sanitize_artifact_payload(
+        &artifact.path,
+        start,
+        end,
+        &numbered,
+        skeleton_raw.as_deref(),
+    )?;
+    let mut content_tokens = estimate_content_tokens(&content)
+        + skeleton
+            .as_deref()
+            .map(estimate_content_tokens)
+            .unwrap_or(0);
+    if content_tokens > token_budget {
+        if let Some(raw_skel) = skeleton_raw.as_mut() {
+            let mut skel_lines: Vec<String> = raw_skel.lines().map(str::to_string).collect();
+            let mut fitted_skel = String::new();
+            while !skel_lines.is_empty() {
+                let candidate = skel_lines.join("\n");
+                let (_, san_skel, _) =
+                    sanitize_artifact_payload(&artifact.path, 1, 1, "", Some(&candidate))?;
+                if san_skel
+                    .as_deref()
+                    .map(estimate_content_tokens)
+                    .unwrap_or(0)
+                    <= skeleton_budget
+                {
+                    fitted_skel = candidate;
+                    break;
+                }
+                skel_lines.pop();
+            }
+            *raw_skel = fitted_skel;
+        }
+        let post_skel_tokens = if let Some(raw_skel) = skeleton_raw.as_deref() {
+            let (_, san_skel, _) =
+                sanitize_artifact_payload(&artifact.path, 1, 1, "", Some(raw_skel))?;
+            san_skel
+                .as_deref()
+                .map(estimate_content_tokens)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let refined_source_budget = token_budget.saturating_sub(post_skel_tokens);
+        anyhow::ensure!(
+            refined_source_budget >= 256,
+            "artifact skeleton leaves fewer than 256 source tokens"
+        );
+        let refined = select_sanitized_source_window(
+            &artifact.path,
+            &artifact.content,
+            artifact.focus_symbol.as_deref(),
+            artifact.path.ends_with(".rs"),
+            refined_source_budget,
+            skeleton_raw.as_deref(),
+        )?;
+        content = refined.0;
+        skeleton = refined.1;
+        start = refined.2;
+        end = refined.3;
+        sanitized = refined.4;
+        content_tokens = estimate_content_tokens(&content)
+            + skeleton
+                .as_deref()
+                .map(estimate_content_tokens)
+                .unwrap_or(0);
+    }
+    let evidence_lines = crate::agent::review_shards::numbered_lines(&content);
     anyhow::ensure!(
         !evidence_lines.is_empty(),
         "artifact source window contains no citable lines"
@@ -836,21 +917,19 @@ fn prepare_artifact_context(
     let source_block = crate::cognitive::memory_system::frame_untrusted_file(
         "artifact_source",
         &artifact.path,
-        content,
+        &content,
     );
-    let skeleton_block = skeleton.map(|text| {
+    let skeleton_block = skeleton.as_deref().map(|text| {
         crate::cognitive::memory_system::frame_untrusted_file(
             "artifact_skeleton",
             &artifact.path,
             text,
         )
     });
-    let content_tokens =
-        estimate_content_tokens(content) + skeleton.map(estimate_content_tokens).unwrap_or(0);
     // A prefix, or a trust-gate replacement of a full window, is not the
     // whole snapshot. Line numbers stay those of the delivered text.
     let covers_every_line = total > 0 && start == 1 && end == total;
-    let whole_file = covers_every_line && gate.sanitized == 0;
+    let whole_file = covers_every_line && sanitized == 0;
     Ok(DeliveredArtifact {
         key: artifact.key.clone(),
         path: artifact.path.clone(),
@@ -864,26 +943,19 @@ fn prepare_artifact_context(
             total_lines: total,
             content_tokens,
             whole_file,
-            trust_gate_neutralized: gate.sanitized,
+            trust_gate_neutralized: sanitized,
         },
     })
 }
 
-fn select_source_window(
+fn resolve_focus_line(
     content: &str,
+    lines: &[String],
     focus_symbol: Option<&str>,
     rust_source: bool,
-    token_budget: usize,
-) -> Result<(String, usize, usize, usize, bool)> {
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
-    anyhow::ensure!(!lines.is_empty(), "artifact is empty");
+) -> usize {
     let total = lines.len();
-    let whole = crate::tools::line_numbers::number_line_list(&lines, 1);
-    if estimate_content_tokens(&whole) <= token_budget {
-        return Ok((whole, 1, total, total, true));
-    }
-
-    let focus_line = focus_symbol
+    focus_symbol
         .and_then(|symbol| {
             if rust_source {
                 crate::evolve::skeleton::extract_symbol_source(content, symbol)
@@ -902,7 +974,65 @@ fn select_source_window(
             })
         })
         .unwrap_or(1)
-        .clamp(1, total);
+        .clamp(1, total)
+}
+
+fn select_sanitized_source_window(
+    path: &str,
+    content: &str,
+    focus_symbol: Option<&str>,
+    rust_source: bool,
+    source_budget: usize,
+    skeleton_raw: Option<&str>,
+) -> Result<(String, Option<String>, usize, usize, usize)> {
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    anyhow::ensure!(!lines.is_empty(), "artifact is empty");
+    let total = lines.len();
+    let focus_line = resolve_focus_line(content, &lines, focus_symbol, rust_source);
+    let render_sanitized =
+        |radius: usize| -> Result<(String, Option<String>, usize, usize, usize)> {
+            let start = focus_line.saturating_sub(radius).max(1);
+            let end = focus_line.saturating_add(radius).min(total);
+            let numbered =
+                crate::tools::line_numbers::number_line_list(&lines[start - 1..end], start);
+            let (san_content, san_skeleton, sanitized) =
+                sanitize_artifact_payload(path, start, end, &numbered, skeleton_raw)?;
+            Ok((san_content, san_skeleton, start, end, sanitized))
+        };
+    let single = render_sanitized(0)?;
+    anyhow::ensure!(
+        estimate_content_tokens(&single.0) <= source_budget,
+        "focused source line exceeds the artifact token budget"
+    );
+    let mut low = 0usize;
+    let mut high = total;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let candidate = render_sanitized(mid)?;
+        if estimate_content_tokens(&candidate.0) <= source_budget {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    render_sanitized(low)
+}
+
+fn select_source_window(
+    content: &str,
+    focus_symbol: Option<&str>,
+    rust_source: bool,
+    token_budget: usize,
+) -> Result<(String, usize, usize, usize, bool)> {
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    anyhow::ensure!(!lines.is_empty(), "artifact is empty");
+    let total = lines.len();
+    let whole = crate::tools::line_numbers::number_line_list(&lines, 1);
+    if estimate_content_tokens(&whole) <= token_budget {
+        return Ok((whole, 1, total, total, true));
+    }
+
+    let focus_line = resolve_focus_line(content, &lines, focus_symbol, rust_source);
 
     let render_radius = |radius: usize| {
         let start = focus_line.saturating_sub(radius).max(1);

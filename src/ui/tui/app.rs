@@ -485,12 +485,12 @@ impl App {
     }
 
     /// Render command palette overlay
-    fn render_palette(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_palette(&self, frame: &mut Frame, area: Rect) {
         // Center the palette
-        let palette_width = 60.min(area.width - 4);
-        let palette_height = 15.min(area.height - 4);
-        let x = (area.width - palette_width) / 2;
-        let y = (area.height - palette_height) / 3;
+        let palette_width = 60.min(area.width.saturating_sub(4));
+        let palette_height = 15.min(area.height.saturating_sub(4));
+        let x = area.width.saturating_sub(palette_width) / 2;
+        let y = area.height.saturating_sub(palette_height) / 3;
 
         let palette_area = Rect::new(x, y, palette_width, palette_height);
 

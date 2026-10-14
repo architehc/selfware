@@ -65,11 +65,43 @@ impl GuardrailEngine {
         expr: &str,
         context: &GuardrailContext,
     ) -> EvaluationResult {
-        let expr = expr.trim();
+        let mut expr = expr.trim();
+
+        // Strip outer balanced parentheses
+        while expr.starts_with('(') && expr.ends_with(')') && Self::has_outer_parens(expr) {
+            expr = expr[1..expr.len() - 1].trim();
+        }
+
+        // Top-level logical OR (`||`) has lowest precedence
+        if let Some(parts) = Self::split_top_level_logical(expr, "||") {
+            let mut fail_reasons = Vec::new();
+            for part in parts {
+                match self.evaluate_inline_expression(part, context) {
+                    EvaluationResult::Pass => return EvaluationResult::Pass,
+                    EvaluationResult::Fail { reason } => fail_reasons.push(reason),
+                    error @ EvaluationResult::Error { .. } => return error,
+                }
+            }
+            return EvaluationResult::Fail {
+                reason: format!("All OR conditions failed: {}", fail_reasons.join("; ")),
+            };
+        }
+
+        // Top-level logical AND (`&&`)
+        if let Some(parts) = Self::split_top_level_logical(expr, "&&") {
+            for part in parts {
+                match self.evaluate_inline_expression(part, context) {
+                    EvaluationResult::Pass => continue,
+                    fail @ EvaluationResult::Fail { .. } => return fail,
+                    error @ EvaluationResult::Error { .. } => return error,
+                }
+            }
+            return EvaluationResult::Pass;
+        }
 
         // Handle negation
         if let Some(stripped) = expr.strip_prefix('!') {
-            let inner = &stripped.trim();
+            let inner = stripped.trim();
             match self.evaluate_inline_expression(inner, context) {
                 EvaluationResult::Pass => EvaluationResult::Fail {
                     reason: format!("Negated condition '{inner}' was true"),
@@ -83,6 +115,12 @@ impl GuardrailEngine {
             let source = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let pattern = caps.get(3).map(|m| m.as_str()).unwrap_or("");
             self.evaluate_contains(source, pattern, context)
+        }
+        // Handle starts_with check: "output.starts_with('prefix')"
+        else if let Some(caps) = get_starts_with_pattern().captures(expr) {
+            let source = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let pattern = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+            self.evaluate_starts_with(source, pattern, context)
         }
         // Handle regex match: "output.matches('regex')"
         else if let Some(caps) = get_matches_pattern().captures(expr) {
@@ -132,6 +170,99 @@ impl GuardrailEngine {
                 None => EvaluationResult::Error {
                     message: format!("Could not resolve expression: '{expr}'"),
                 },
+            }
+        }
+    }
+
+    /// Check if `expr` is wrapped in a single pair of outer parentheses.
+    fn has_outer_parens(expr: &str) -> bool {
+        let mut depth = 0i32;
+        let mut in_single = false;
+        let mut in_double = false;
+        let chars: Vec<char> = expr.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            match c {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '(' if !in_single && !in_double => depth += 1,
+                ')' if !in_single && !in_double => {
+                    depth -= 1;
+                    if depth == 0 && i + 1 < chars.len() {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth == 0
+    }
+
+    /// Split `expr` on a top-level binary logical operator (`&&` or `||`),
+    /// ignoring occurrences inside quotes or parentheses.
+    fn split_top_level_logical<'a>(expr: &'a str, op: &str) -> Option<Vec<&'a str>> {
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut last_idx = 0;
+        let bytes = expr.as_bytes();
+        let op_bytes = op.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            match b {
+                b'\'' if !in_double => in_single = !in_single,
+                b'"' if !in_single => in_double = !in_double,
+                b'(' if !in_single && !in_double => depth += 1,
+                b')' if !in_single && !in_double => depth -= 1,
+                _ => {}
+            }
+            if !in_single
+                && !in_double
+                && depth == 0
+                && i + op_bytes.len() <= bytes.len()
+                && &bytes[i..i + op_bytes.len()] == op_bytes
+            {
+                parts.push(expr[last_idx..i].trim());
+                i += op_bytes.len();
+                last_idx = i;
+                continue;
+            }
+            i += 1;
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            parts.push(expr[last_idx..].trim());
+            Some(parts)
+        }
+    }
+
+    /// Evaluate starts_with check
+    fn evaluate_starts_with(
+        &self,
+        source: &str,
+        pattern: &str,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let source_value = match self.resolve_value(source, context) {
+            Some(v) => v,
+            None => {
+                return EvaluationResult::Error {
+                    message: format!("Could not resolve source: '{source}'"),
+                }
+            }
+        };
+
+        let source_string = source_value.to_string();
+        let source_str = source_value.as_str().unwrap_or(&source_string);
+        let pattern_str = pattern.trim_matches('\'').trim_matches('"');
+
+        if source_str.starts_with(pattern_str) {
+            EvaluationResult::Pass
+        } else {
+            EvaluationResult::Fail {
+                reason: format!("'{source}' does not start with '{pattern}'"),
             }
         }
     }
@@ -877,6 +1008,21 @@ impl GuardrailEngine {
 
     /// Resolve a value from the context using dot notation (e.g., "state.count")
     fn resolve_value(&self, path: &str, context: &GuardrailContext) -> Option<serde_json::Value> {
+        let mut path = path.trim();
+        let mut transforms: Vec<&str> = Vec::new();
+        loop {
+            if let Some(stripped) = path.strip_suffix(".len()") {
+                transforms.push("len");
+                path = stripped.trim();
+            } else if let Some(stripped) = path.strip_suffix(".to_lowercase()") {
+                transforms.push("to_lowercase");
+                path = stripped.trim();
+            } else {
+                break;
+            }
+        }
+        transforms.reverse();
+
         let parts: Vec<&str> = path.split('.').collect();
         if parts.is_empty() {
             return None;
@@ -919,15 +1065,39 @@ impl GuardrailEngine {
         };
 
         // Handle nested access for remaining parts
-        if parts.len() > 2 && parts[0] != "args" {
+        let mut resolved = if parts.len() > 2 && parts[0] != "args" {
             let mut current = root?;
             for part in &parts[2..] {
                 current = current.get(part)?.clone();
             }
-            Some(current)
+            current
         } else {
-            root
+            root?
+        };
+
+        for transform in transforms {
+            match transform {
+                "len" => {
+                    let len = match &resolved {
+                        serde_json::Value::String(s) => s.len(),
+                        serde_json::Value::Array(a) => a.len(),
+                        serde_json::Value::Object(o) => o.len(),
+                        _ => return None,
+                    };
+                    resolved = serde_json::Value::Number((len as u64).into());
+                }
+                "to_lowercase" => {
+                    let s = match &resolved {
+                        serde_json::Value::String(s) => s.to_lowercase(),
+                        other => other.to_string().to_lowercase(),
+                    };
+                    resolved = serde_json::Value::String(s);
+                }
+                _ => return None,
+            }
         }
+
+        Some(resolved)
     }
 
     /// Check if a JSON value is truthy
@@ -945,30 +1115,37 @@ impl GuardrailEngine {
 
 // Static regex patterns (compiled once)
 static CONTAINS_PATTERN: OnceLock<Regex> = OnceLock::new();
+static STARTS_WITH_PATTERN: OnceLock<Regex> = OnceLock::new();
 static MATCHES_PATTERN: OnceLock<Regex> = OnceLock::new();
 static COMPARISON_PATTERN: OnceLock<Regex> = OnceLock::new();
 static EQUALITY_PATTERN: OnceLock<Regex> = OnceLock::new();
 
 fn get_contains_pattern() -> &'static Regex {
     CONTAINS_PATTERN.get_or_init(|| {
-        Regex::new(r#"([\w.]+)\.contains\((["'])(.+?)["']\)"#).expect("Invalid regex")
+        Regex::new(r#"^([\w.()]+)\.contains\((["'])(.+?)["']\)$"#).expect("Invalid regex")
+    })
+}
+
+fn get_starts_with_pattern() -> &'static Regex {
+    STARTS_WITH_PATTERN.get_or_init(|| {
+        Regex::new(r#"^([\w.()]+)\.starts_with\((["'])(.+?)["']\)$"#).expect("Invalid regex")
     })
 }
 
 fn get_matches_pattern() -> &'static Regex {
     MATCHES_PATTERN.get_or_init(|| {
-        Regex::new(r#"([\w.]+)\.matches\((["'])(.+?)["']\)"#).expect("Invalid regex")
+        Regex::new(r#"^([\w.()]+)\.matches\((["'])(.+?)["']\)$"#).expect("Invalid regex")
     })
 }
 
 fn get_comparison_pattern() -> &'static Regex {
     COMPARISON_PATTERN
-        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([><]=?)\s*(.+)$").expect("Invalid regex"))
+        .get_or_init(|| Regex::new(r"^([\w.()]+)\s*([><]=?)\s*(.+)$").expect("Invalid regex"))
 }
 
 fn get_equality_pattern() -> &'static Regex {
     EQUALITY_PATTERN
-        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+)$").expect("Invalid regex"))
+        .get_or_init(|| Regex::new(r"^([\w.()]+)\s*([!=]=)\s*(.+)$").expect("Invalid regex"))
 }
 
 #[cfg(test)]

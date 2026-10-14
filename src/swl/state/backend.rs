@@ -104,7 +104,24 @@ impl FileBackend {
 
     /// Get the file path for a workflow
     fn state_file_path(&self, workflow_name: &str) -> PathBuf {
-        self.base_dir.join(format!("{}.json", workflow_name))
+        let safe_name: String = workflow_name
+            .replace("..", "_")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe_name = safe_name.trim_matches('.').to_string();
+        let safe_name = if safe_name.is_empty() {
+            "workflow".to_string()
+        } else {
+            safe_name
+        };
+        self.base_dir.join(format!("{}.json", safe_name))
     }
 }
 

@@ -51,6 +51,23 @@ fn test_protected_paths() {
     assert!(!is_protected(std::path::Path::new("src/memory.rs")));
 }
 
+/// Regression (H-12 / H-13): `is_protected` must cover the unified evolve
+/// workspace, tool_dispatch directory, `.selfware/` directory, `.admitted_ledger.json`,
+/// and unconditionally reject any path containing `"` (git C-quoted paths).
+#[test]
+fn test_protected_paths_h12_h13_regressions() {
+    assert!(is_protected(std::path::Path::new("src/evolve/server.rs")));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/tool_dispatch/mod.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(".selfware/config.toml")));
+    assert!(is_protected(std::path::Path::new(".admitted_ledger.json")));
+    assert!(is_protected(std::path::Path::new("\"src/lib.rs\"")));
+    assert!(is_protected(std::path::Path::new(
+        "a/\"src/tools/file_edit.rs\""
+    )));
+}
+
 /// Repository instruction files are part of the shared protected-path policy:
 /// the root AGENTS.md and any NESTED AGENTS.md (src/, docs/, any depth) must
 /// be immutable from self-modification, and lookalike names must not match.

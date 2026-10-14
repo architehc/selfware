@@ -321,7 +321,8 @@ impl SelfEditOrchestrator {
         }
 
         let recent_recovery = avg(recent, |s| s.error_recovery_rate);
-        if recent_recovery <= 0.65 && latest.task_success_rate < 0.9 {
+        let recent_success = avg(recent, |s| s.task_success_rate);
+        if recent_recovery <= 0.65 && (latest.task_success_rate < 0.9 || recent_success < 0.9) {
             targets.push(
                 ImprovementTarget::new(
                     ImprovementCategory::ErrorHandling,
@@ -329,7 +330,7 @@ impl SelfEditOrchestrator {
                     format!(
                         "Recovery rate {:.0}% is below target and success rate is {:.0}%.",
                         recent_recovery * 100.0,
-                        latest.task_success_rate * 100.0
+                        recent_success.min(latest.task_success_rate) * 100.0
                     ),
                     ImprovementSource::MetricsRegression,
                 )

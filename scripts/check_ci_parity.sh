@@ -87,6 +87,14 @@ echo "5. red-team corpus gate (cargo test --test redteam_gate_test) </dev/null..
 (cd "${WORKTREE_DIR}" && cargo test --no-default-features --test redteam_gate_test </dev/null)
 echo "   red-team corpus gate OK"
 
+echo "6. formal verification & escape-hatch check (bash scripts/check_formal.sh)..."
+(cd "${WORKTREE_DIR}" && bash scripts/check_formal.sh)
+echo "   formal check OK"
+
+echo "7. minimal feature matrix check (cargo check --no-default-features --features tui)..."
+(cd "${WORKTREE_DIR}" && cargo check --no-default-features --features tui)
+echo "   minimal feature matrix check OK"
+
 echo ""
 echo "============================================================"
 echo " PASS: Revision ${SHA} passes the CI-parity checks"

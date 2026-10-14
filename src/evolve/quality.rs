@@ -170,16 +170,9 @@ pub fn cyclomatic_complexity(path: &Path) -> Result<f64> {
     let mut total = 0.0;
     for content in read_rs_files(path)? {
         let mut score = 1.0;
-        for token in [
-            " if ",
-            " else if ",
-            " match ",
-            " for ",
-            " while ",
-            " loop ",
-            "&&",
-            "||",
-        ] {
+        // Note: `" if "` already matches `" else if "`, so `" else if "` is not
+        // listed separately to avoid double-counting.
+        for token in [" if ", " match ", " for ", " while ", " loop ", "&&", "||"] {
             score += content.matches(token).count() as f64;
         }
         total += score;

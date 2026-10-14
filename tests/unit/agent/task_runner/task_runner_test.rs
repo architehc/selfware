@@ -1488,6 +1488,7 @@ async fn test_run_task_cancellation() {
 
 #[tokio::test]
 async fn test_shutdown_request_latches_agent_cancellation() {
+    let _state = crate::test_support::ExecGuard::hold();
     let server = MockLlmServer::builder().with_response("ok").build().await;
     let config = mock_agent_config(format!("{}/v1", server.url()), false);
     let agent = Agent::new(config).await.unwrap();

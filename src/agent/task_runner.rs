@@ -239,6 +239,7 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
     }
     let msg = error.to_string();
     msg.contains("READ_LOOP_NO_EDIT")
+        || msg.contains("WORKSPACE_STAGNATION")
         || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
         || msg.contains("VERIFICATION_LOOP_AFTER_EDIT")
         // Repeated fake-complete on a mutation task: the model has demonstrated it

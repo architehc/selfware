@@ -63,7 +63,7 @@ static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 /// Check if a termination signal (SIGINT/SIGTERM) has been received.
 pub fn signal_received() -> bool {
-    SIGNAL_RECEIVED.load(Ordering::Relaxed)
+    SIGNAL_RECEIVED.load(Ordering::Relaxed) || crate::is_shutdown_requested()
 }
 
 /// Restore terminal to its normal state.
@@ -77,50 +77,15 @@ pub fn restore_terminal_state() {
         DisableMouseCapture,
         ShowCursor
     );
+    crate::output::set_tui_active(false);
 }
 
-/// Install signal handlers that cleanly restore the terminal before exit.
-///
-/// On Unix, this handles SIGTERM via nix in addition to SIGINT via ctrlc.
-/// The ctrlc crate handles SIGINT (Ctrl+C) on all platforms.
-pub fn install_signal_handlers() {
-    let _ = ctrlc::set_handler(move || {
-        SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
-        restore_terminal_state();
-        // Do NOT call std::process::exit here — that would bypass
-        // main.rs graceful shutdown and skip checkpoint saves.
-        // The main event loop checks signal_received() and exits cleanly.
-    });
-
-    // On Unix, also handle SIGTERM for graceful shutdown (e.g., from `kill`)
-    #[cfg(unix)]
-    install_unix_signal_handlers();
-}
-
-/// Unix-specific signal handler for SIGTERM.
-#[cfg(unix)]
-fn install_unix_signal_handlers() {
-    use std::thread;
-
-    thread::spawn(|| {
-        // Use nix to wait for SIGTERM
-        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
-
-        // Install a handler that sets our flag and restores terminal
-        extern "C" fn handle_sigterm(_: std::os::raw::c_int) {
-            SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
-            // Cannot call restore_terminal_state here (not async-signal-safe),
-            // but the flag will be checked by the event loop.
-        }
-
-        let action = SigAction::new(
-            SigHandler::Handler(handle_sigterm),
-            SaFlags::empty(),
-            SigSet::empty(),
-        );
-        let _ = unsafe { sigaction(Signal::SIGTERM, &action) };
-    });
-}
+/// Signal handlers are installed centrally in `main.rs` (`ctrlc` + Unix
+/// `SIGTERM`/`SIGHUP`), which sets the process-wide shutdown flag and calls
+/// `crate::output::restore_terminal_before_exit()`. This function is retained
+/// as a no-op for API compatibility so TUI initialization never overwrites
+/// the process-wide SIGTERM handler or fails a second `ctrlc::set_handler`.
+pub fn install_signal_handlers() {}
 
 /// The Selfware color palette for TUI
 ///
@@ -259,27 +224,34 @@ impl TuiTerminal {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            return Err(e.into());
+        }
+        crate::output::set_tui_active(true);
 
-        // Install signal handlers (SIGINT, SIGTERM) that restore terminal state
-        // before exit. This prevents the terminal from being left in raw mode
-        // if the process is killed.
-        install_signal_handlers();
-
-        // Install a panic hook that restores the terminal to normal state
-        // BEFORE printing the panic message. Without this, a panic leaves the
-        // terminal in raw mode with the alternate screen active, making the
-        // error invisible and the shell unusable. The Drop impl may not run
-        // reliably during a panic unwind.
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |panic_info| {
-            // Best-effort restore — ignore errors since we're already panicking
-            restore_terminal_state();
-            original_hook(panic_info);
-        }));
+        // Install a panic hook (once per process) that restores the terminal
+        // to normal state BEFORE printing the panic message. Without this, a
+        // panic leaves the terminal in raw mode with the alternate screen
+        // active, making the error invisible and the shell unusable.
+        static PANIC_HOOK_ONCE: std::sync::Once = std::sync::Once::new();
+        PANIC_HOOK_ONCE.call_once(|| {
+            let original_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                // Best-effort restore — ignore errors since we're already panicking
+                restore_terminal_state();
+                original_hook(panic_info);
+            }));
+        });
 
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+        let terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(e) => {
+                restore_terminal_state();
+                return Err(e.into());
+            }
+        };
 
         Ok(Self { terminal })
     }
@@ -296,6 +268,7 @@ impl TuiTerminal {
 
     /// Restore terminal to normal state
     pub fn restore(&mut self) -> Result<()> {
+        crate::output::set_tui_active(false);
         disable_raw_mode()?;
         execute!(
             self.terminal.backend_mut(),
@@ -782,6 +755,10 @@ pub fn run_tui_dashboard_with_events(
                     }
                 }
 
+                if app.state == AppState::Palette {
+                    app.render_palette(frame, area);
+                }
+
                 if show_help {
                     render_help_overlay(frame, area);
                 }
@@ -886,8 +863,10 @@ pub fn run_tui_dashboard_with_events(
                 }
             }
 
-            let in_input_mode = app.state == AppState::Chatting && !show_help;
-            let allow_q_quit = !in_input_mode || app.input.is_empty();
+            let in_input_mode =
+                matches!(app.state, AppState::Chatting | AppState::Palette) && !show_help;
+            let allow_q_quit =
+                !in_input_mode || (app.state != AppState::Palette && app.input.is_empty());
 
             match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
                 QuitDecision::Quit => {
@@ -914,7 +893,10 @@ pub fn run_tui_dashboard_with_events(
             }
 
             match key.code {
-                KeyCode::Char('?') if !in_input_mode || app.input.is_empty() => {
+                KeyCode::Char('?')
+                    if !in_input_mode
+                        || (app.state != AppState::Palette && app.input.is_empty()) =>
+                {
                     show_help = !show_help;
                 }
                 KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
@@ -961,7 +943,7 @@ pub fn run_tui_dashboard_with_events(
                 // Display pause: incoming display events are held (see the
                 // drain loop) and replayed here on resume. The agent itself
                 // keeps running — the log line says exactly that.
-                KeyCode::Char(' ') if app.input.is_empty() => {
+                KeyCode::Char(' ') if app.state != AppState::Palette && app.input.is_empty() => {
                     paused = !paused;
                     if paused {
                         with_dashboard_state(&shared_state, |state| {

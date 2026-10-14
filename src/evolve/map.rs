@@ -57,6 +57,21 @@ pub struct ContextMap {
     pub components: usize,
 }
 
+/// Validate that a node path is a safe repository-relative source path and read
+/// it through the hardened broad-discovery reader.
+fn read_safe_node_source(root: &Path, rel: &str) -> Option<String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || !rel_path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        || !crate::evolve::graph::repository_relative_path_supported(rel_path)
+    {
+        return None;
+    }
+    crate::evolve::graph::read_broad_discovery_utf8(&root.join(rel_path)).ok()
+}
+
 /// Build the component map from the graph, reading each component's source.
 pub fn build_map(graph: &Graph, root: &Path) -> ContextMap {
     let mut cards = Vec::new();
@@ -65,7 +80,7 @@ pub fn build_map(graph: &Graph, root: &Path) -> ContextMap {
         let Some(rel) = node.path.as_deref() else {
             continue;
         };
-        let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+        let Some(src) = read_safe_node_source(root, rel) else {
             continue;
         };
         full_tokens += node.tokens;
@@ -114,7 +129,7 @@ pub fn component_cards(
         let Some(rel) = node.path.as_deref() else {
             continue;
         };
-        let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+        let Some(src) = read_safe_node_source(root, rel) else {
             continue;
         };
         cards.push(build_card(&node.id, rel, &src, node.tokens, node.lines));
@@ -159,8 +174,14 @@ pub fn expand(
     // modules are excluded from bulk tiers but must stay expandable
     // (Bulk-vs-OnDemand separation; review round 11 #1).
     let node = graph.nodes.iter().find(|n| n.id == component)?;
+    if matches!(
+        node.layer,
+        NodeLayer::Concept | NodeLayer::Preset | NodeLayer::Symbol
+    ) {
+        return None;
+    }
     let rel = node.path.as_deref()?;
-    let src = std::fs::read_to_string(root.join(rel)).ok()?;
+    let src = read_safe_node_source(root, rel)?;
     if let Some(symbol) = symbol {
         let (start, end) = crate::evolve::skeleton::extract_symbol_source(&src, symbol)?;
         let excerpt = src

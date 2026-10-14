@@ -1213,71 +1213,6 @@ impl Agent {
         // streak — progress happened even if the next turn is empty again.
         self.consecutive_empty_responses = 0;
 
-        // Check if the response contains code alongside tool calls.
-        // Models often output file_read tool calls AND code text in the same
-        // response. The tool calls get executed, but the code gets ignored.
-        // If we detect code in the residual text, auto-write it.
-        //
-        // SAFETY GATE: when verification is required before completion, defer
-        // the auto-write until the completion gate has passed. Writing
-        // unverified code to disk before the gate runs means edits can persist
-        // even when the task should be rejected. If the gate has not yet
-        // passed, we nudge the model to use file_write/file_edit explicitly
-        // instead, so the normal tool path (with verification) applies.
-        // Never on a read-only task: quoted code in a review's narration is
-        // not a file to write (same rule as the code-in-text nudge below).
-        if !tool_calls.is_empty()
-            && self.current_task_requires_mutation()
-            && contains_unwritten_code(&content)
-        {
-            if let Some((path, code)) = extract_code_and_path(&content).await {
-                let gate_ok = if self.config.agent.require_verification_before_completion {
-                    self.check_completion_gate().await.is_none()
-                } else {
-                    true
-                };
-                if gate_ok {
-                    info!(
-                        "Response contains tool calls AND code text — auto-writing {} lines to {}",
-                        code.lines().count(),
-                        path
-                    );
-                    let write_call: Vec<super::execution::CollectedToolCall> = vec![(
-                        "file_write".to_string(),
-                        serde_json::json!({"path": path, "content": code}).to_string(),
-                        None,
-                    )];
-                    // Prepend the file_write to the tool calls list would be ideal,
-                    // but we'll execute it after the original tool calls
-                    self.execute_tool_batch(write_call).await?;
-                    self.consecutive_read_only_steps = 0;
-                    self.seen_read_targets.clear();
-                    self.has_written_any_file = true;
-                    self.terminal_guard_hits = 0;
-                    self.messages.push(crate::api::types::Message::user(
-                        "<selfware_system_directive>\n\
-                         Code from your response was automatically written to a file. \
-                         Now verify with cargo check or cargo test.\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
-                } else {
-                    info!(
-                        "Response contains code text for {} but completion gate not yet passed — deferring auto-write, nudging to use tools",
-                        path
-                    );
-                    self.messages.push(crate::api::types::Message::user(
-                        "<selfware_system_directive>\n\
-                         Your response contains code that should be written to a file. \\\n\
-                         Use the file_write or file_edit tool to write it, then verify with \\\n\
-                         cargo check or cargo test. Do NOT output code as plain text.\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-
         // Every tool call in the response was malformed (no parser accepted
         // it): the turn is neither a final answer nor a no-action turn. Answer
         // each rejected call with a refusal so the model learns it did not run
@@ -2059,6 +1994,72 @@ impl Agent {
             .await;
         self.write_post_execution_evidence().await;
         batch_result?;
+
+        // Check if the response contains code alongside tool calls.
+        // Models often output file_read tool calls AND code text in the same
+        // response. The tool calls get executed, but the code gets ignored.
+        // If we detect code in the residual text, auto-write it.
+        //
+        // Deferred until AFTER `dispatch_model_batch` has pushed all `role="tool"`
+        // result messages for the assistant's `tool_calls`: inserting a user
+        // message between `assistant(tool_calls)` and `role="tool"` causes
+        // `sanitize_api_messages` to strip `tool_calls` and drop all tool results.
+        //
+        // SAFETY GATE: when verification is required before completion, defer
+        // the auto-write until the completion gate has passed. Writing
+        // unverified code to disk before the gate runs means edits can persist
+        // even when the task should be rejected. If the gate has not yet
+        // passed, we nudge the model to use file_write/file_edit explicitly
+        // instead, so the normal tool path (with verification) applies.
+        // Never on a read-only task: quoted code in a review's narration is
+        // not a file to write (same rule as the code-in-text nudge above).
+        if self.current_task_requires_mutation() && contains_unwritten_code(&content) {
+            if let Some((path, code)) = extract_code_and_path(&content).await {
+                let gate_ok = if self.config.agent.require_verification_before_completion {
+                    self.check_completion_gate().await.is_none()
+                } else {
+                    true
+                };
+                if gate_ok {
+                    info!(
+                        "Response contains tool calls AND code text — auto-writing {} lines to {}",
+                        code.lines().count(),
+                        path
+                    );
+                    let write_call: Vec<super::execution::CollectedToolCall> = vec![(
+                        "file_write".to_string(),
+                        serde_json::json!({"path": path, "content": code}).to_string(),
+                        None,
+                    )];
+                    self.execute_tool_batch(write_call).await?;
+                    self.write_post_execution_evidence().await;
+                    self.consecutive_read_only_steps = 0;
+                    self.seen_read_targets.clear();
+                    self.has_written_any_file = true;
+                    self.terminal_guard_hits = 0;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         Code from your response was automatically written to a file. \
+                         Now verify with cargo check or cargo test.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                } else {
+                    info!(
+                        "Response contains code text for {} but completion gate not yet passed — deferring auto-write, nudging to use tools",
+                        path
+                    );
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         Your response contains code that should be written to a file. \\\n\
+                         Use the file_write or file_edit tool to write it, then verify with \\\n\
+                         cargo check or cargo test. Do NOT output code as plain text.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
 
         // After tool batch execution, check if all tool calls were suppressed.
         // When the model keeps emitting identical tool calls that are all

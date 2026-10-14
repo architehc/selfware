@@ -73,6 +73,12 @@ impl ToolCache {
         format!("{tool_name}:{root}:{args_str}")
     }
 
+    fn extract_file_arg(args: &Value) -> Option<&str> {
+        ["path", "file_path", "file", "filepath"]
+            .into_iter()
+            .find_map(|key| args.get(key).and_then(|v| v.as_str()))
+    }
+
     /// Get a cached result if available and not expired
     pub async fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
         let workspace_root = crate::tools::workspace_root::current_path();
@@ -83,7 +89,7 @@ impl ToolCache {
         if entry.is_expired() || entry.workspace_root != workspace_root {
             return None;
         }
-        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+        if let Some(path) = Self::extract_file_arg(args) {
             let path = resolve_cache_path(&workspace_root, path);
             let current_mtime = tokio::fs::metadata(path)
                 .await
@@ -108,7 +114,7 @@ impl ToolCache {
         let workspace_root = crate::tools::workspace_root::current_path();
         let key = Self::cache_key_at_root(tool_name, args, &workspace_root);
 
-        let file_mtime = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+        let file_mtime = if let Some(path) = Self::extract_file_arg(args) {
             tokio::fs::metadata(resolve_cache_path(&workspace_root, path))
                 .await
                 .ok()

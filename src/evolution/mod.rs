@@ -67,38 +67,7 @@ use std::path::PathBuf;
 /// how it behaves (P2 finding, 2026-09-21 review). The bare file entry matches
 /// at ANY depth via `is_protected`'s `/AGENTS.md` suffix check, so nested
 /// instruction files under `src/` or `docs/` are protected too.
-pub const PROTECTED_PATHS: &[&str] = &[
-    "AGENTS.md",
-    "src/evolution/",
-    "src/safety/",
-    "src/evolve/",
-    "src/agent/verification.rs",
-    "src/agent/verification_scope.rs",
-    "src/agent/checkpointing.rs",
-    "src/agent/tool_dispatch/",
-    "src/cognitive/rsi_orchestrator.rs",
-    "src/cognitive/self_edit.rs",
-    "src/cognitive/compilation_manager.rs",
-    "src/testing/",
-    "system_tests/",
-    "tests/",
-    "benches/",
-    "Cargo.toml",
-    "Cargo.lock",
-    ".github/",
-    "src/main.rs",
-    ".selfware/KILLSWITCH",
-    ".selfware/skills/",
-    ".selfware/commands/",
-    ".selfware/skill-candidates/",
-    ".selfware/attempts/",
-    ".selfware/runs/",
-    ".selfware/snapshots/",
-    ".selfware/active_policy.json",
-    ".selfware/active_evolution.lock",
-    ".selfware/investigation_report_latest.md",
-    ".admitted_ledger.json",
-];
+pub use crate::evolve::PROTECTED_PATHS;
 
 /// LLM endpoint configuration for hypothesis generation
 #[derive(Clone)]
@@ -226,7 +195,12 @@ impl FitnessWeights {
     pub fn composite(&self, metrics: &FitnessMetrics) -> f64 {
         let normalized_latency = 1.0 - (metrics.wall_clock_secs / metrics.timeout_secs).min(1.0);
         let normalized_pass_rate = metrics.test_pass_pct / 100.0;
-        let normalized_size = 1.0 - (metrics.binary_size_mb / metrics.max_binary_size_mb).min(1.0);
+        let size_ratio = if metrics.max_binary_size_mb > 0.0 {
+            (metrics.binary_size_mb / metrics.max_binary_size_mb).min(1.0)
+        } else {
+            0.0
+        };
+        let normalized_size = 1.0 - size_ratio;
         let normalized_visual = metrics.visual_score / 100.0;
 
         let mut score = self.sab_score * (metrics.sab_score / 100.0)
@@ -372,32 +346,7 @@ impl std::fmt::Display for GenerationRating {
 /// is refused by every gate at once. Existing call sites must never be
 /// weakened around it.
 pub fn is_protected(path: &std::path::Path) -> bool {
-    // Canonicalize the path to resolve symlinks and normalize separators.
-    // We use the safety-checker normalize_path so the Windows `\\?\` UNC
-    // prefix is stripped — without that, `path_str.contains("src/evolution/")`
-    // would never match an extended-length canonicalized path.
-    let canonical_path = crate::safety::checker::normalize_path(path);
-
-    // PROTECTED_PATHS uses forward slashes; convert any `\` to `/` so the
-    // contains/starts_with checks work on Windows too.
-    let path_str = canonical_path.to_string_lossy().replace('\\', "/");
-
-    PROTECTED_PATHS.iter().any(|protected| {
-        let protected_norm = protected.trim_end_matches('/');
-        let is_dir = protected.ends_with('/');
-
-        if is_dir {
-            path_str == protected_norm
-                || path_str.starts_with(protected)
-                || path_str.contains(&format!("/{protected}"))
-                || path_str.ends_with(&format!("/{protected_norm}"))
-        } else {
-            path_str == *protected
-                || path_str.starts_with(&format!("{protected}/"))
-                || path_str.ends_with(&format!("/{protected}"))
-                || path_str.contains(&format!("/{protected}/"))
-        }
-    })
+    crate::evolve::is_protected_path(path)
 }
 
 #[cfg(test)]

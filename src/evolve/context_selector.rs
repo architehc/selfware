@@ -71,7 +71,9 @@ pub fn select(
     project_root: &Path,
 ) -> Result<ContextSelection> {
     let files = match kind {
-        TaskKind::Extend | TaskKind::Refactor | TaskKind::Understand => neighborhood(graph, target),
+        TaskKind::Extend | TaskKind::Refactor | TaskKind::Understand => {
+            neighborhood(graph, target, project_root)
+        }
         TaskKind::Consolidate => consolidate_files(project_root)?,
         TaskKind::Cleanup => cleanup_files(project_root)?,
     };
@@ -94,7 +96,7 @@ pub fn select(
 
 /// The graph neighborhood of a target node: seed(s), inbound dependents, and
 /// outbound dependencies. Node ids/paths are matched by substring.
-fn neighborhood(graph: &Graph, target: &str) -> Vec<SelectedFile> {
+fn neighborhood(graph: &Graph, target: &str, project_root: &Path) -> Vec<SelectedFile> {
     let t = target.to_lowercase();
     let mut seeds: HashSet<&str> = graph
         .nodes
@@ -121,7 +123,18 @@ fn neighborhood(graph: &Graph, target: &str) -> Vec<SelectedFile> {
         ];
         for node in &graph.nodes {
             if let Some(path) = node.path.as_deref() {
-                if let Ok(content) = std::fs::read_to_string(path) {
+                let rel_path = Path::new(path);
+                if rel_path.is_absolute()
+                    || !rel_path
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                {
+                    continue;
+                }
+                let resolved = project_root.join(rel_path);
+                if let Ok(content) = super::graph::read_broad_discovery_utf8(&resolved)
+                    .or_else(|_| super::graph::read_broad_discovery_utf8(rel_path))
+                {
                     if needles.iter().any(|n| content.contains(n.as_str())) {
                         seeds.insert(node.id.as_str());
                     }

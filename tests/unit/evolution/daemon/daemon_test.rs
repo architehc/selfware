@@ -360,6 +360,49 @@ fn test_winner_base_revision_gate_mismatch_fails_closed() {
     assert!(winner_base_revision_gate(None, Some("bbbb222")).is_ok());
 }
 
+/// Regression (C-6): when the repository `HEAD` advances during hypothesis
+/// evaluation (or across generations via `expected_head_commit`), `expected_head`
+/// differs from the current `HEAD` and `winner_base_revision_gate` must return `Err`.
+#[test]
+fn test_winner_base_revision_gate_rejects_when_repo_head_advances() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(tmp.path()).unwrap();
+    let sig = git2::Signature::now("Selfware Test", "test@example.com").unwrap();
+
+    // Commit 1: initial expected_head when hypothesis evaluation starts.
+    std::fs::write(tmp.path().join("file.txt"), "v1\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("file.txt")).unwrap();
+    index.write().unwrap();
+    let tree1_id = index.write_tree().unwrap();
+    let tree1 = repo.find_tree(tree1_id).unwrap();
+    let commit1_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "commit 1", &tree1, &[])
+        .unwrap();
+    let expected_head = ast_tools::get_git_head_commit(tmp.path()).expect("resolvable HEAD");
+    assert_eq!(expected_head, commit1_oid.to_string());
+
+    // Commit 2: repository HEAD advances while hypothesis is being evaluated.
+    let parent1 = repo.find_commit(commit1_oid).unwrap();
+    std::fs::write(tmp.path().join("file.txt"), "v2\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("file.txt")).unwrap();
+    index.write().unwrap();
+    let tree2_id = index.write_tree().unwrap();
+    let tree2 = repo.find_tree(tree2_id).unwrap();
+    let commit2_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "commit 2", &tree2, &[&parent1])
+        .unwrap();
+    let current_head = ast_tools::get_git_head_commit(tmp.path()).expect("resolvable HEAD");
+    assert_eq!(current_head, commit2_oid.to_string());
+    assert_ne!(expected_head, current_head);
+
+    let err = winner_base_revision_gate(Some(&expected_head), Some(&current_head))
+        .expect_err("advanced repository HEAD must fail the base-revision gate");
+    assert!(err.contains(&expected_head), "got: {err}");
+    assert!(err.contains(&current_head), "got: {err}");
+}
+
 #[test]
 fn test_apply_patch_to_worktree_nonexistent_dir() {
     let result = apply_patch_to_worktree(Path::new("/nonexistent/dir/12345"), "some patch");

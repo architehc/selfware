@@ -229,7 +229,7 @@ fn build_full_graph(options: &WorkspaceGraphOptions) -> Result<CodeGraph> {
         let linker = SemanticLinker::new();
 
         for file in &rust_files {
-            let content = std::fs::read_to_string(file)
+            let content = crate::evolve::graph::read_broad_discovery_utf8(file)
                 .with_context(|| format!("failed to read Rust source '{}'", file.display()))?;
 
             if options.include_imports {

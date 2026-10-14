@@ -1544,8 +1544,9 @@ impl WorkflowExecutor {
                 None,
             );
         }
-        let mut completed_steps: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
+        let mut completed_steps: std::collections::BTreeMap<String, String> = resumed
+            .map(|cp| cp.completed_steps.clone())
+            .unwrap_or_default();
 
         // Set defaults for missing inputs
         for input in &workflow.inputs {
@@ -1673,13 +1674,53 @@ impl WorkflowExecutor {
                     ));
                 }
 
-                // For required steps, dependency failures are hard failures
-                if step.required {
-                    context.status = WorkflowStatus::Failed;
+                // In the TDD template, `implement` (required) depends on `run_test_red` (optional,
+                // expected to fail in the Red phase). Allow `implement` to proceed when its
+                // optional `run_test_red` dependency ran and failed as expected.
+                let is_expected_tdd_red_failure = step.id == "implement"
+                    && step.depends_on.iter().all(|dep_id| {
+                        match context.step_results.get(dep_id).map(|r| &r.status) {
+                            Some(StepStatus::Completed) => true,
+                            Some(StepStatus::Failed) => workflow
+                                .steps
+                                .iter()
+                                .find(|s| &s.id == dep_id)
+                                .is_some_and(|s| !s.required && s.id == "run_test_red"),
+                            _ => false,
+                        }
+                    });
+
+                if !is_expected_tdd_red_failure {
+                    // For required steps, dependency failures are hard failures
+                    if step.required {
+                        context.status = WorkflowStatus::Failed;
+                        context.log(
+                            LogLevel::Error,
+                            format!(
+                                "Required step '{}' cannot run due to unsatisfied dependency: {}",
+                                step.id, dep_err
+                            ),
+                            Some(step.id.clone()),
+                        );
+                        context.step_results.insert(
+                            step.id.clone(),
+                            StepResult {
+                                step_id: step.id.clone(),
+                                status: StepStatus::Failed,
+                                output: None,
+                                error: Some(dep_err.to_string()),
+                                duration_ms: 0,
+                                retry_count: 0,
+                            },
+                        );
+                        break 'step_loop;
+                    }
+
+                    // Optional step with runtime dep failure - skip
                     context.log(
-                        LogLevel::Error,
+                        LogLevel::Warn,
                         format!(
-                            "Required step '{}' cannot run due to unsatisfied dependency: {}",
+                            "Skipping optional step {} due to dependency: {}",
                             step.id, dep_err
                         ),
                         Some(step.id.clone()),
@@ -1688,37 +1729,15 @@ impl WorkflowExecutor {
                         step.id.clone(),
                         StepResult {
                             step_id: step.id.clone(),
-                            status: StepStatus::Failed,
+                            status: StepStatus::Skipped,
                             output: None,
                             error: Some(dep_err.to_string()),
                             duration_ms: 0,
                             retry_count: 0,
                         },
                     );
-                    break 'step_loop;
+                    continue 'step_loop;
                 }
-
-                // Optional step with runtime dep failure - skip
-                context.log(
-                    LogLevel::Warn,
-                    format!(
-                        "Skipping optional step {} due to dependency: {}",
-                        step.id, dep_err
-                    ),
-                    Some(step.id.clone()),
-                );
-                context.step_results.insert(
-                    step.id.clone(),
-                    StepResult {
-                        step_id: step.id.clone(),
-                        status: StepStatus::Skipped,
-                        output: None,
-                        error: Some(dep_err.to_string()),
-                        duration_ms: 0,
-                        retry_count: 0,
-                    },
-                );
-                continue 'step_loop;
             }
 
             // Execute step with retries (pass all workflow steps for nested execution)
@@ -1732,8 +1751,14 @@ impl WorkflowExecutor {
                 if let Some(output) = result.output.clone() {
                     context.set_var(&step.id, output);
                 }
+                if step.id == "run_test_green" {
+                    context.set_var("tests_passed", VarValue::Boolean(true));
+                }
                 completed_steps.insert(step.id.clone(), step_fingerprint(step));
             } else {
+                if step.id == "run_test_green" {
+                    context.set_var("tests_passed", VarValue::Boolean(false));
+                }
                 completed_steps.remove(&step.id);
             }
             if let Some(run) = &run {
@@ -2178,11 +2203,26 @@ impl WorkflowExecutor {
 
                 // Validate working_dir is within the project scope
                 let dir_path = std::path::Path::new(&dir);
+                if dir_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    anyhow::bail!(
+                        "Workflow working_dir '{}' is outside project scope '{}'",
+                        dir,
+                        context.working_dir.display()
+                    );
+                }
+                let resolved_dir = if dir_path.is_absolute() {
+                    dir_path.to_path_buf()
+                } else {
+                    context.working_dir.join(dir_path)
+                };
                 let canonical_scope = context
                     .working_dir
                     .canonicalize()
                     .unwrap_or_else(|_| context.working_dir.clone());
-                if let Ok(canonical_dir) = dir_path.canonicalize() {
+                if let Ok(canonical_dir) = resolved_dir.canonicalize() {
                     if !canonical_dir.starts_with(&canonical_scope) {
                         anyhow::bail!(
                             "Workflow working_dir '{}' is outside project scope '{}'",
@@ -2190,7 +2230,9 @@ impl WorkflowExecutor {
                             context.working_dir.display()
                         );
                     }
-                } else if dir_path.is_absolute() && !dir_path.starts_with(&canonical_scope) {
+                } else if !resolved_dir.starts_with(&canonical_scope)
+                    && !resolved_dir.starts_with(&context.working_dir)
+                {
                     // If we can't canonicalize (dir doesn't exist yet), at least check prefix
                     anyhow::bail!(
                         "Workflow working_dir '{}' is outside project scope '{}'",
@@ -2225,14 +2267,11 @@ impl WorkflowExecutor {
                 // can spawn arbitrary children (review round 6 #5).
                 crate::safety::process_env::sanitize_command_env(&mut shell_cmd);
                 // …nor run what an untrusted repository configured for git.
-                crate::safety::git_exec::apply_shell_git_env(
-                    &mut shell_cmd,
-                    std::path::Path::new(&dir),
-                );
+                crate::safety::git_exec::apply_shell_git_env(&mut shell_cmd, &resolved_dir);
                 let shell_future = shell_cmd
                     .arg(flag)
                     .arg(&resolved_cmd)
-                    .current_dir(&dir)
+                    .current_dir(&resolved_dir)
                     .kill_on_drop(true)
                     .output_grouped();
 

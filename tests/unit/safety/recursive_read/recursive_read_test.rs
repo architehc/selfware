@@ -317,3 +317,64 @@ fn wrappers_and_assignments_are_seen_through() {
         "grep"
     );
 }
+
+#[test]
+fn pattern_and_flag_values_matching_existing_files_still_vet_dot() {
+    let tmp = fixture();
+    let d = tmp.path();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(d.join(".env"), d.join("leak.txt")).unwrap();
+
+    for cmd in [
+        "rg Cargo.toml",
+        "grep -r Cargo.toml",
+        "rg -e Cargo.toml",
+        "grep -r -f Cargo.toml pat",
+        "git grep Cargo.toml",
+        "git grep -e Cargo.toml",
+    ] {
+        assert!(
+            violation(cmd, d).is_some(),
+            "`{cmd}` must vet `.` even when `Cargo.toml` exists on disk"
+        );
+        assert!(
+            strict_violation(cmd, d).is_some(),
+            "`{cmd}` (strict) must vet `.` even when `Cargo.toml` exists on disk"
+        );
+    }
+}
+
+#[test]
+fn ripgrep_ignore_files_and_overrides_disable_gitignore_pruning() {
+    let tmp = fixture();
+    let d = tmp.path();
+    std::fs::create_dir(d.join(".git")).unwrap();
+    std::fs::write(d.join(".gitignore"), "/secrets/\n").unwrap();
+    assert_eq!(violation("rg KEY", d), None);
+
+    for cmd in [
+        "rg --ignore-file custom.ignore KEY",
+        "rg --ignore-file-case-insensitive KEY",
+        "rg --pre cat KEY",
+        "rg --pre-glob '*.txt' KEY",
+    ] {
+        assert!(
+            violation(cmd, d).is_some(),
+            "`{cmd}` must widen ripgrep walk"
+        );
+    }
+
+    std::fs::write(d.join(".ignore"), "!secrets/\n").unwrap();
+    assert!(
+        violation("rg KEY", d).is_some(),
+        ".ignore negation must disable .gitignore directory pruning"
+    );
+    std::fs::remove_file(d.join(".ignore")).unwrap();
+
+    std::fs::write(d.join(".rgignore"), "!secrets/\n").unwrap();
+    assert!(
+        violation("rg KEY", d).is_some(),
+        ".rgignore negation must disable .gitignore directory pruning"
+    );
+}

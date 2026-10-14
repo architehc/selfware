@@ -132,6 +132,8 @@ fn build_double_click_args() -> Vec<String> {
 /// Repeats `amount` times for the given direction.
 #[allow(dead_code)]
 fn build_scroll_args(delta_x: i32, delta_y: i32) -> Vec<Vec<String>> {
+    let delta_x = delta_x.clamp(-100, 100);
+    let delta_y = delta_y.clamp(-100, 100);
     let mut commands = Vec::new();
 
     // Vertical scroll: negative delta_y = scroll up (button 4), positive = scroll down (button 5)
@@ -476,6 +478,8 @@ impl MouseController {
         if !self.rate_limiter.check() {
             bail!("Mouse action rate limit exceeded");
         }
+        let delta_x = delta_x.clamp(-100, 100);
+        let delta_y = delta_y.clamp(-100, 100);
         debug!("Mouse scroll: dx={}, dy={}", delta_x, delta_y);
 
         #[cfg(target_os = "linux")]

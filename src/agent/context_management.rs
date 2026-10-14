@@ -1798,21 +1798,7 @@ impl Agent {
 
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
     pub(super) fn estimate_messages_tokens(&self) -> usize {
-        self.messages
-            .iter()
-            .map(|m| {
-                let text_tokens =
-                    crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4);
-                let reasoning_tokens = m
-                    .reasoning_content
-                    .as_deref()
-                    .map(crate::token_count::estimate_content_tokens)
-                    .unwrap_or(0);
-                let image_tokens =
-                    m.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
-                text_tokens + reasoning_tokens + image_tokens
-            })
-            .sum()
+        crate::token_count::estimate_messages_tokens(&self.messages)
     }
 
     /// Best estimate of the CURRENT context size (tokens in the next request).

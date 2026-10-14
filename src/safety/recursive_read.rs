@@ -156,6 +156,136 @@ fn operands(args: &[String]) -> Vec<String> {
     out
 }
 
+fn is_two_token_long_flag(opt: &str) -> bool {
+    matches!(
+        opt,
+        "--regexp"
+            | "--file"
+            | "--glob"
+            | "--iglob"
+            | "--type"
+            | "--type-not"
+            | "--type-add"
+            | "--ignore-file"
+            | "--ignore-file-case-insensitive"
+            | "--max-count"
+            | "--after-context"
+            | "--before-context"
+            | "--context"
+            | "--threads"
+            | "--pre"
+            | "--pre-glob"
+            | "--include"
+            | "--exclude"
+            | "--exclude-dir"
+            | "--label"
+            | "--max-depth"
+            | "--max-filesize"
+            | "--directories"
+    )
+}
+
+fn is_two_token_short_flag(c: char) -> bool {
+    matches!(
+        c,
+        'e' | 'f' | 'g' | 't' | 'T' | 'm' | 'A' | 'B' | 'C' | 'j' | 'd'
+    )
+}
+
+fn scan_grep_tokens(args: &[String], is_rg: bool) -> (bool, Vec<String>, Option<Vec<String>>) {
+    let mut has_pattern_flag = false;
+    let mut before_dd = Vec::new();
+    let mut after_dd: Option<Vec<String>> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if let Some(ref mut after) = after_dd {
+            after.push(a.clone());
+            i += 1;
+            continue;
+        }
+        if a == "--" {
+            after_dd = Some(Vec::new());
+            i += 1;
+            continue;
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            let (opt_name, has_eq) = match long.split_once('=') {
+                Some((n, _)) => (n, true),
+                None => (long, false),
+            };
+            let full_opt = &a[..2 + opt_name.len()];
+            if matches!(full_opt, "--regexp" | "--file") || (is_rg && full_opt == "--files") {
+                has_pattern_flag = true;
+            }
+            if !has_eq && is_two_token_long_flag(full_opt) {
+                if full_opt == "--ignore-file-case-insensitive"
+                    && args.get(i + 1).is_some_and(|next| next.starts_with('-'))
+                {
+                    i += 1;
+                } else {
+                    i += 2;
+                }
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if a.starts_with('-') && a != "-" {
+            let short = &a[1..];
+            let mut consumes_next = false;
+            for (idx, c) in short.char_indices() {
+                if c == 'e' || c == 'f' {
+                    has_pattern_flag = true;
+                }
+                if is_two_token_short_flag(c) {
+                    if idx + c.len_utf8() == short.len() {
+                        consumes_next = true;
+                    }
+                    break;
+                }
+            }
+            i += if consumes_next { 2 } else { 1 };
+            continue;
+        }
+        before_dd.push(a.clone());
+        i += 1;
+    }
+    (has_pattern_flag, before_dd, after_dd)
+}
+
+fn grep_operands(args: &[String], is_rg: bool) -> Vec<String> {
+    let (has_pattern_flag, mut positionals, after_dd) = scan_grep_tokens(args, is_rg);
+    if let Some(after) = after_dd {
+        positionals.extend(after);
+    }
+    if !has_pattern_flag && !positionals.is_empty() {
+        positionals.remove(0);
+    }
+    positionals
+}
+
+fn git_grep_operands(args: &[String]) -> Vec<String> {
+    let (has_pattern_flag, mut before_dd, after_dd) = scan_grep_tokens(args, false);
+    match after_dd {
+        Some(mut after) => {
+            if !has_pattern_flag && before_dd.is_empty() && !after.is_empty() {
+                after.remove(0);
+            }
+            after
+        }
+        None => {
+            if !has_pattern_flag && !before_dd.is_empty() {
+                before_dd.remove(0);
+            }
+            if !before_dd.is_empty() && !before_dd.iter().any(|r| r == ".") {
+                before_dd.push(".".to_string());
+            }
+            before_dd
+        }
+    }
+}
+
 /// The walk plan for one simple command, `None` when it reads no directory
 /// recursively. `piped_xargs`: some segment of the command runs `xargs`.
 fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Option<Plan> {
@@ -188,17 +318,27 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
             let follow = has_short(args, 'R')
                 || has_long(args, "dereference-recursive")
                 || has_short(args, 'S');
-            plan(Walk::All, follow, operands(args), true)
+            plan(Walk::All, follow, grep_operands(args, false), true)
         }
         "rg" => {
             let u = short_flags(args).filter(|c| *c == 'u').count()
                 + long_opts(args).filter(|o| *o == "unrestricted").count();
             let overrides = has_short(args, 'g')
                 || has_short(args, 't')
+                || has_short(args, 'T')
                 || long_opts(args).any(|o| {
                     matches!(
                         o,
-                        "glob" | "iglob" | "type" | "type-add" | "glob-case-insensitive"
+                        "glob"
+                            | "iglob"
+                            | "type"
+                            | "type-not"
+                            | "type-add"
+                            | "glob-case-insensitive"
+                            | "ignore-file"
+                            | "ignore-file-case-insensitive"
+                            | "pre"
+                            | "pre-glob"
                     )
                 })
                 || assignments
@@ -214,7 +354,7 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
                 Walk::RgDefault
             };
             let follow = has_short(args, 'L') || has_long(args, "follow");
-            plan(walk, follow, operands(args), true)
+            plan(walk, follow, grep_operands(args, true), true)
         }
         "ag" | "ack" | "pt" | "ugrep" | "ug" => {
             let follow = has_short(args, 'f') || has_long(args, "follow");
@@ -269,7 +409,7 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
                 return None;
             }
             let rest = &args[i + 1..];
-            let mut roots = operands(rest);
+            let mut roots = git_grep_operands(rest);
             if let Some(dir) = chdir {
                 roots = roots.into_iter().map(|r| format!("{dir}/{r}")).collect();
                 roots.push(dir);
@@ -308,16 +448,30 @@ struct DirPattern {
 }
 
 /// Directory patterns ripgrep's default walk certainly skips below
-/// `repo`, or nothing when the file re-includes anything (`!`) or is
-/// missing.
+/// `repo`, or nothing when `.gitignore`, `.ignore`, or `.rgignore`
+/// re-includes anything (`!`) or `.gitignore` is missing.
 fn gitignored_dirs(repo: &Path) -> Vec<DirPattern> {
+    for extra in [".ignore", ".rgignore"] {
+        match std::fs::read_to_string(repo.join(extra)) {
+            Ok(extra_text) => {
+                if extra_text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with('!'))
+                {
+                    return Vec::new();
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Vec::new(),
+        }
+    }
     let Ok(text) = std::fs::read_to_string(repo.join(".gitignore")) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim_end();
-        if line.starts_with('!') {
+        if line.starts_with('!') || line.trim_start().starts_with('!') {
             return Vec::new();
         }
         if line.is_empty() || line.starts_with('#') {

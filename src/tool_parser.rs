@@ -336,11 +336,16 @@ fn normalize_malformed_xml(content: &str) -> String {
         })
         .to_string();
 
-    let normalized = re.replace_all(&protected_content, "$1</$2>$3").to_string();
+    let normalized = re.replace_all(&protected_content, "$1</$2>$3");
 
-    let mut result = normalized;
-    for s in protected {
-        result = result.replacen(PLACEHOLDER, &s, 1);
+    let mut result = String::with_capacity(content.len() + 16);
+    let mut parts = normalized.split(PLACEHOLDER);
+    if let Some(first) = parts.next() {
+        result.push_str(first);
+    }
+    for (part, orig) in parts.zip(protected.iter()) {
+        result.push_str(orig);
+        result.push_str(part);
     }
     result
 }

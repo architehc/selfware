@@ -31,7 +31,6 @@ pub(crate) const SESSION_ENV_VARS: &[&str] = &[
     "WAYLAND_DISPLAY",
     "XDG_RUNTIME_DIR",
     "XAUTHORITY",
-    "SSH_AUTH_SOCK",
 ];
 
 use serde::{Deserialize, Serialize};
@@ -120,22 +119,50 @@ pub struct TypingProfile {
     pub variation_ms: u64,
 }
 
-/// Blocked key combinations (dangerous system keys).
+/// Blocked key combinations (dangerous system keys, with modifiers sorted alphabetically).
 const BLOCKED_COMBOS: &[&str] = &[
-    "ctrl+alt+delete",
+    "alt+ctrl+delete",
     "cmd+q",       // Force quit on macOS
     "alt+f4",      // Close window on Windows/Linux
-    "ctrl+alt+f1", // Switch to TTY on Linux
-    "ctrl+alt+f2",
-    "ctrl+alt+f3",
+    "alt+ctrl+f1", // Switch to TTY on Linux
+    "alt+ctrl+f2",
+    "alt+ctrl+f3",
+    "alt+ctrl+f4",
+    "alt+ctrl+f5",
+    "alt+ctrl+f6",
+    "alt+ctrl+f7",
+    "alt+ctrl+f8",
+    "alt+ctrl+f9",
+    "alt+ctrl+f10",
+    "alt+ctrl+f11",
+    "alt+ctrl+f12",
 ];
+
+fn normalize_key_token(token: &str) -> String {
+    match token.trim().to_lowercase().as_str() {
+        "control" | "ctl" => "ctrl".to_string(),
+        "del" => "delete".to_string(),
+        "command" | "super" | "meta" | "win" => "cmd".to_string(),
+        "option" | "opt" => "alt".to_string(),
+        "return" => "enter".to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// Check if a key combination is blocked for safety.
 pub fn is_blocked_combo(combo: &str) -> bool {
-    let normalized = combo.to_lowercase().replace(' ', "");
-    BLOCKED_COMBOS
-        .iter()
-        .any(|blocked| normalized == blocked.replace(' ', ""))
+    let mut parts: Vec<String> = combo
+        .split('+')
+        .map(normalize_key_token)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let last_idx = parts.len() - 1;
+    parts[..last_idx].sort();
+    let normalized = parts.join("+");
+    BLOCKED_COMBOS.contains(&normalized.as_str())
 }
 
 #[cfg(test)]

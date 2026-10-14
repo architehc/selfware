@@ -532,7 +532,7 @@ fn test_greet() {{
 
         // src/<module>/__init__.py
         let init_py = format!(
-            r#""""{} - {}""""
+            r#""""{} - {}"""
 
 __version__ = "0.1.0"
 
@@ -547,7 +547,7 @@ def main() -> None:
 
         // src/<module>/cli.py
         let cli_py = format!(
-            r#"""Command-line interface for {}.""
+            r#""""Command-line interface for {}."""
 
 import argparse
 
@@ -573,7 +573,7 @@ if __name__ == "__main__":
             files.push(("tests/__init__.py".into(), String::new()));
 
             let test_py = format!(
-                r#"""Tests for {}.""
+                r#""""Tests for {}."""
 
 from {} import main
 

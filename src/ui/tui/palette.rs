@@ -323,8 +323,14 @@ impl CommandPalette {
         frame.render_widget(query_text, query_area);
 
         // Show cursor in palette input
-        let cursor_x = inner.x + 2 + self.query.len() as u16;
-        frame.set_cursor_position((cursor_x.min(inner.x + inner.width - 1), inner.y));
+        let cursor_x = inner
+            .x
+            .saturating_add(2)
+            .saturating_add(self.query.chars().count() as u16);
+        frame.set_cursor_position((
+            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+            inner.y,
+        ));
 
         // Render filtered commands
         let list_area = Rect::new(
@@ -372,7 +378,7 @@ impl CommandPalette {
 
         // Render help footer if there's room
         if inner.height > 5 {
-            let footer_y = inner.y + inner.height - 1;
+            let footer_y = inner.y + inner.height.saturating_sub(1);
             let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
             let footer = Paragraph::new(
                 Line::from(vec![

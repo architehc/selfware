@@ -694,12 +694,10 @@ async fn test_short_term_memory_check_demotion() {
         ..Default::default()
     };
 
-    // Create entry
-    let entry = MemoryEntry::new(1, "test", MemoryTier::ShortTerm);
+    // Create entry with accessed_at 2s (2000ms) in the past to avoid boundary jitter
+    let mut entry = MemoryEntry::new(1, "test", MemoryTier::ShortTerm);
+    entry.accessed_at = entry.accessed_at.saturating_sub(2_000);
     stm.store(entry).await.unwrap();
-
-    // Wait enough time for demotion to trigger
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let result = stm.check_promotion(1, &config).await;
     assert!(matches!(result, TierTransition::Demote));

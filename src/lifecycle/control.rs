@@ -277,6 +277,7 @@ impl TaskControl {
         edit.validate(&live).map_err(ControlError::InvalidEdit)?;
         inner.edit = Some(edit);
         inner.pause = true;
+        inner.resume = true;
         Ok(())
     }
 

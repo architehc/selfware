@@ -277,28 +277,41 @@ pub fn verify_staged_diff(
     // which the evolution protection list forbids an autonomous writer from
     // touching; apply must honor the same boundary.
     for delta in diff.deltas() {
-        let path = delta
-            .new_file()
-            .path()
-            .or_else(|| delta.old_file().path())
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if is_scaffold_artifact(&path) {
-            return Ok(Err(RejectReason::OutOfScope(path)));
+        let mut candidate_paths = Vec::new();
+        if let Some(old_path) = delta.old_file().path() {
+            candidate_paths.push((
+                old_path.to_string_lossy().into_owned(),
+                delta.old_file().mode(),
+            ));
         }
-        if delta.new_file().mode() == git2::FileMode::Link {
-            return Ok(Err(RejectReason::OutOfScope(format!("{path} (symlink)"))));
+        if let Some(new_path) = delta.new_file().path() {
+            let new_str = new_path.to_string_lossy().into_owned();
+            if !candidate_paths.iter().any(|(p, _)| p == &new_str) {
+                candidate_paths.push((new_str, delta.new_file().mode()));
+            }
         }
-        if !(path.starts_with("src/") || path.starts_with("docs/")) {
-            return Ok(Err(RejectReason::OutOfScope(path)));
+        if candidate_paths.is_empty() {
+            return Ok(Err(RejectReason::OutOfScope(String::new())));
         }
-        if crate::evolution::PROTECTED_PATHS
-            .iter()
-            .any(|protected| path.starts_with(protected))
-        {
-            return Ok(Err(RejectReason::OutOfScope(format!(
-                "{path} (protected path)"
-            ))));
+        for (path, mode) in candidate_paths {
+            if is_scaffold_artifact(&path) {
+                return Ok(Err(RejectReason::OutOfScope(path)));
+            }
+            if mode == git2::FileMode::Link || delta.new_file().mode() == git2::FileMode::Link {
+                return Ok(Err(RejectReason::OutOfScope(format!("{path} (symlink)"))));
+            }
+            if !(path.starts_with("src/") || path.starts_with("docs/")) {
+                return Ok(Err(RejectReason::OutOfScope(path)));
+            }
+            if crate::evolution::is_protected(Path::new(&path))
+                || crate::evolution::PROTECTED_PATHS
+                    .iter()
+                    .any(|protected| path.starts_with(protected))
+            {
+                return Ok(Err(RejectReason::OutOfScope(format!(
+                    "{path} (protected path)"
+                ))));
+            }
         }
     }
 
@@ -715,6 +728,8 @@ pub async fn spawn(
     let id = staged.id;
 
     let mut command = Command::new(exe);
+    crate::safety::process_env::sanitize_command_env(&mut command);
+    command.env_remove("SELFWARE_CONFIG");
     command
         .arg("run")
         .arg(&prompt)
@@ -736,17 +751,8 @@ pub async fn spawn(
     // not be laundered into the child (it then loads the shadow's own
     // — absent — config and fails honestly).
     let (config_env, config_withheld) = shadow_config_env(&project_root);
-    match &config_env {
-        Some(path) => {
-            command.env("SELFWARE_CONFIG", path);
-        }
-        None => {
-            if config_withheld.is_some() {
-                // Make sure a parent-process SELFWARE_CONFIG can't smuggle
-                // the same untrusted file into the child either.
-                command.env_remove("SELFWARE_CONFIG");
-            }
-        }
+    if let Some(path) = &config_env {
+        command.env("SELFWARE_CONFIG", path);
     }
     if let Some(line) = config_withheld {
         tracing::warn!("{line}");

@@ -100,9 +100,6 @@ impl GuardedSwlRuntime {
             *wf = Some(workflow_name.to_string());
         }
 
-        // Register guardrails from document
-        self.register_guardrails(doc).await;
-
         let workflow_start = std::time::Instant::now();
         record_state_transition("idle", "executing_workflow");
 
@@ -162,14 +159,14 @@ impl GuardedSwlRuntime {
         }
 
         // Record telemetry
-        let duration_ms = workflow_start.elapsed().as_millis() as u64;
+        let _duration_ms = workflow_start.elapsed().as_millis() as u64;
 
         match &result {
-            Ok(_) => {
+            Ok(res) if res.status == super::ExecutionStatus::Completed => {
                 record_state_transition("executing_workflow", "completed");
                 record_success();
             }
-            Err(_) => {
+            _ => {
                 record_state_transition("executing_workflow", "failed");
                 record_failure("workflow execution failed");
             }
@@ -575,6 +572,12 @@ impl GuardedRuntimeBuilder {
             enforcer: GuardrailEnforcer::new(),
             dry_run: false,
         }
+    }
+
+    /// Set the API client
+    pub fn with_client(mut self, client: impl Into<Arc<ApiClient>>) -> Self {
+        self.client = Some(client.into());
+        self
     }
 
     /// Set the tool registry

@@ -48,6 +48,24 @@ impl VisualScore {
             + self.consistency * 0.15
             + self.accessibility * 0.20;
     }
+
+    /// Return `overall` normalized to the `0.0..=1.0` scale.
+    pub fn normalized_overall(&self) -> f64 {
+        (self.overall / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Check whether this score meets the given threshold.
+    ///
+    /// Accepts thresholds on either the normalized `0.0..=1.0` scale (e.g. `0.8`)
+    /// or the raw `0.0..=100.0` scale (e.g. `80.0`).
+    pub fn meets_threshold(&self, threshold: f64) -> bool {
+        let effective_threshold = if threshold <= 1.0 {
+            threshold * 100.0
+        } else {
+            threshold
+        };
+        self.overall >= effective_threshold
+    }
 }
 
 /// Configuration for an autonomous visual feedback loop.
@@ -55,12 +73,21 @@ impl VisualScore {
 pub struct VisualFeedbackLoop {
     /// Maximum iterations before giving up.
     pub max_iterations: usize,
-    /// Overall score (0.0–1.0) that terminates the loop as "good enough".
+    /// Overall score threshold (0.0–1.0 normalized, or 0–100 raw) that terminates
+    /// the loop as "good enough".
     pub quality_threshold: f64,
     /// Key into `Config.models` pointing to a vision-capable model.
     pub vision_model_id: String,
     /// How to capture the visual output each iteration.
     pub capture_method: CaptureMethod,
+}
+
+impl VisualFeedbackLoop {
+    /// Return whether `score` meets `self.quality_threshold`, normalizing between
+    /// the `0.0..=1.0` threshold scale and `0.0..=100.0` `VisualScore` scale.
+    pub fn meets_quality_threshold(&self, score: &VisualScore) -> bool {
+        score.meets_threshold(self.quality_threshold)
+    }
 }
 
 impl Default for VisualFeedbackLoop {

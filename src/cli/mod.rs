@@ -1164,12 +1164,13 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
         return false;
     }
 
-    // Diagnostic / read-only commands should never trigger port scans or
+    // Diagnostic / read-only / setup commands should never trigger port scans or
     // backend auto-starts.
     let is_diagnostic = matches!(
         cli.command,
         Some(
-            Commands::Config { .. }
+            Commands::Init { .. }
+                | Commands::Config { .. }
                 | Commands::Bench { .. }
                 | Commands::Doctor { .. }
                 | Commands::LlmDoctor
@@ -1177,6 +1178,24 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
                 | Commands::Test { .. }
                 | Commands::Status
                 | Commands::ArtifactHarness { .. }
+                | Commands::Review { .. }
+                | Commands::Analyze { .. }
+                | Commands::Garden { .. }
+                | Commands::Graph { .. }
+                | Commands::Journal
+                | Commands::JournalEntry { .. }
+                | Commands::JournalDelete { .. }
+                | Commands::Skill { .. }
+                | Commands::Mcp { .. }
+                | Commands::State { .. }
+                | Commands::Workflow { .. }
+                | Commands::Runs { .. }
+                | Commands::Resources { .. }
+                | Commands::Killswitch { .. }
+                | Commands::Tasks { .. }
+                | Commands::Agents { .. }
+                | Commands::Task { .. }
+                | Commands::Trust { .. }
         )
     );
     if is_diagnostic {
@@ -1321,6 +1340,15 @@ fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
         let pm = crate::profiles::ProfileManager::new();
         match pm.apply_profile(config, profile_name) {
             Ok(()) => {
+                config.sources.set(
+                    "max_tokens",
+                    crate::config::ConfigSource::CliArg("--profile".into()),
+                );
+                config.sources.set(
+                    "temperature",
+                    crate::config::ConfigSource::CliArg("--profile".into()),
+                );
+                config.sync_default_model_profile();
                 tracing::info!(
                     "Applied configuration profile '{}' (max_tokens={}, \
                      temperature={})",
@@ -1347,7 +1375,11 @@ fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
             !model.is_empty(),
             "--model must not be empty — it overrides the `model` key in the configuration"
         );
-        config.model = model.to_string();
+        config.apply_cli_model_override(model.to_string());
+    }
+
+    if cli.profile.is_some() || cli.model.is_some() {
+        config.validate()?;
     }
 
     Ok(())

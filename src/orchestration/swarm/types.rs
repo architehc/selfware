@@ -432,6 +432,22 @@ impl Decision {
 
         // With zero total score there is nothing to resolve.
         if total_score <= 0.0 {
+            if !self.votes.is_empty()
+                && self
+                    .votes
+                    .iter()
+                    .all(|v| v.choice.eq_ignore_ascii_case("abstain"))
+            {
+                self.outcome = Some("Abstain".to_string());
+                self.status = DecisionStatus::Resolved;
+                self.resolved_at = Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+                return self.outcome.clone();
+            }
             // A single vote with zero trust would land here — don't mark as
             // Conflict, just pick the top option (all are zero).
             self.outcome = Some(scores[0].0.clone());

@@ -195,9 +195,9 @@ impl CodeExplainer {
         let explanation = if line.starts_with("fn ") || line.starts_with("pub fn ") {
             concepts.push("function".to_string());
             self.explain_function(line)
-        } else if line.starts_with("let ") || line.starts_with("let mut ") {
+        } else if line.starts_with("let ") {
             concepts.push("variable_binding".to_string());
-            if line.contains("mut ") {
+            if line.starts_with("let mut ") {
                 concepts.push("mutability".to_string());
             }
             self.explain_variable(line)
@@ -248,7 +248,7 @@ impl CodeExplainer {
     }
 
     fn explain_variable(&self, line: &str) -> String {
-        if line.contains("mut ") {
+        if line.starts_with("let mut ") {
             "Declares a mutable variable. Its value can be changed after initialization."
                 .to_string()
         } else {

@@ -7,16 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.8] - 2026-10-12
+## [0.9.8] - 2026-10-14
 
-0.9.8 ships the read-only artifact harness and closes the holes found in its
-review. Cargo package versions are semantic, so this patch is 0.9.8.
+0.9.8 ships the read-only artifact harness and closes the security, isolation,
+and reliability findings from its end-to-end codebase review. Cargo package
+versions are semantic, so this patch is 0.9.8.
 
 ### Added
 - **Read-only artifact harness.** `selfware artifact-harness` activates a
   bounded set of source artifacts, gives each a narrow tool-free model context,
   checks reported evidence against the delivered snapshot, and supports up to
   three rounds of metadata-only coordination.
+- **Unified message token estimator.** `token_count::estimate_message_tokens`
+  measures full `Message` token costs (content, reasoning content, and tool call
+  arguments) across context management, compression, context map, and memory
+  buffers (`AGENTS.md` rule 4).
 
 ### Security
 - Activation plans bind the eligible-source census, selected file bytes, Git
@@ -38,25 +43,53 @@ review. Cargo package versions are semantic, so this patch is 0.9.8.
 - CLI cost caps now reject zero, negative, NaN, and infinite values before a
   run can begin.
 - Broad repository discovery rejects private coding-agent and VCS directories
-  even when one is supplied as the explicit scan root. Exact checked file reads
+  even when one is supplied as the explicit scan root, and verifies opened
+  descriptors via `fd_real_path` so intermediate directory symlinks cannot
+  bridge a public path into private discovery state. Exact checked file reads
   remain available for deliberate access.
+- Recursive shell-read classification (`find`, `rg`, `grep`) now parses option
+  value arguments before classifying search roots or patterns, and refuses
+  un-isolated `rg` when `.ignore`/`.rgignore` files exist in the target tree or
+  when `--ignore-file`/`--no-ignore-*` flags are supplied.
+- `hot_reload` is classified as a protected high-risk tool requiring explicit
+  confirmation in all execution modes (`ALWAYS_CONFIRM_TOOLS`) and refuses
+  paths outside the workspace or inside `PROTECTED_PATHS`.
+- `McpServer` and `SwlRuntime` now thread `SafetyConfig` into
+  `ToolRegistry::with_safety_config` rather than falling back to permissive
+  defaults; MCP and LSP stdio transports reject `Content-Length` headers
+  exceeding 64 MiB prior to allocation.
+- `patch_apply` validates extended git diff headers (`rename from/to`,
+  `copy from/to`), strips tab-delimited header timestamps, and rejects C-quoted
+  octal/hex header paths.
+- `vision_analyze` and `vision_compare` enforce `validate_tool_path`,
+  descriptor-checked reads (`open_checked_regular`), `image::Limits` decode
+  bounds, and outbound credential-shape checks on prompt strings.
+- Desktop automation (`src/computer/`) strips `SSH_AUTH_SOCK` from subprocess
+  environments, normalizes modifier key names before blocked-combo checks,
+  clamps mouse scroll ticks, escapes AppleScript window titles, and persists
+  rate-limiter state across tool calls.
+- Shared `PROTECTED_PATHS` enforcement now covers `src/evolve/`,
+  `src/agent/tool_dispatch/`, `.selfware/`, and `.admitted_ledger.json`, and
+  refuses C-quoted diff header paths across `evolution::daemon`,
+  `evolve::apply`, and `evolve::compiler_repair`.
 
 ### Review notes (AGENTS.md rule 2)
-The user authorized the security architecture implemented here. As part of
-that boundary, broad discovery of an explicitly selected `.claude`, `.codex`,
-`.agents`, `.qwen`, `.superpowers`, `.git`, or `.selfware` root is intentionally
-removed; tests now require these roots to remain unscanned. This prevents an
-explicit-root bypass of the same private-state pruning already applied to
-nested directories.
+The user authorized the security architecture and end-to-end review remediation
+implemented here. As part of that boundary, broad discovery of an explicitly
+selected `.claude`, `.codex`, `.agents`, `.qwen`, `.superpowers`, `.git`, or
+`.selfware` root is intentionally removed; tests now require these roots to
+remain unscanned. This prevents an explicit-root bypass of the same
+private-state pruning already applied to nested directories.
 Broad repository discovery also intentionally omits multiply linked files so
 an innocuous in-tree hard-link name cannot re-admit bytes from private or
 out-of-root state. Exact checked file reads remain available when a caller
 deliberately names one file.
 Checkpoint replay withholds persisted output from broad repository readers
 when the recorded call selected a private root or a structured path field
-names one. A prose mention of those names is not treated as a path. Replay
-therefore enforces the current discovery policy instead of restoring content
-that a new run would no longer discover.
+names one, and enforces `repo_path`, `scope`, and `codebase_root` path policies
+for restored graph and localization tools. A prose mention of those names is
+not treated as a path. Replay therefore enforces the current discovery policy
+instead of restoring content that a new run would no longer discover.
 Model API POST redirects are also intentionally refused process-wide so prompts
 and credentials cannot be replayed to a different authority. The artifact
 transport additionally ignores environment proxies; operators that require a
@@ -90,6 +123,31 @@ walk contains a private discovery directory, including a repository `.git`;
   HTTP/2 stream reset. Ordinary agent clients keep protocol-nack retries.
 - `discovery_root_is_private` is fail-closed when an existing path cannot be
   canonicalized. A missing path stays not-private so callers can probe it.
+- Deferred unwritten-code auto-write and `unwritten_code_directive` injection
+  until after `dispatch_model_batch` completes so native `tool_call_id`
+  sequencing is preserved.
+- `WORKSPACE_STAGNATION` errors now terminate the task loop cleanly as a fatal
+  loop condition instead of retrying indefinitely.
+- `EvolveServer` endpoints (`/api/context/map`, `/api/context/dedup`,
+  `/api/evolve/graphrag`, `/api/assistant/task`, and composer measurements)
+  bind to `server.project_root` rather than the process working directory.
+- `winner_base_revision_gate` compares the current repository `HEAD` against
+  the `expected_head_commit` captured before hypothesis evaluation.
+- `normalize_shell_command_impl` and `dequote_and_lowercase` iterate by Unicode
+  `char` rather than raw bytes and collapse `${IFS}` and tab separators.
+- `SWL` guardrails fail closed when an expression evaluation errors under a
+  blocking guardrail (`GuardrailSummary::should_block`) and support compound
+  `&&`/`||` and string/length transforms in inline guardrail expressions.
+- `ToolCallAccumulator` keys streaming deltas by `delta.index` so interleaved
+  multi-tool chunks accumulate into the right call.
+- `ReasoningBudgetExhausted` only triggers when `finish_reason == "length"`
+  produces neither content nor tool calls.
+- `LspClientHandle::drop` and `LspServerConnection::drop` avoid blocking
+  async worker threads on shutdown and kill the language-server child on drop.
+- `DiagnosticsEngine::run` spawns `cargo` in a managed process group
+  (`output_grouped`) so compiler and test descendants are reaped on timeout.
+- `selfware doctor` reaps timed-out subprocesses cleanly, passes `--no-install`
+  to `npx`, and exits non-zero when required checks fail in scoped runs.
 
 ## [0.9.7] - 2026-10-03
 

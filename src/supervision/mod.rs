@@ -282,7 +282,10 @@ impl Supervisor {
                                 warn!(child_id = %child_id, backoff_ms = backoff.as_millis(), "Restarting child");
 
                                 tokio::time::sleep(backoff).await;
-                                if let Err(e) = self.restart_child(&child_id, &child_states).await {
+                                if let Err(e) = self
+                                    .restart_according_to_strategy(&child_id, &child_states)
+                                    .await
+                                {
                                     error!(child_id = %child_id, error = %e, "Failed to restart child, escalating");
                                     self.escalate(
                                         &supervisor_id,
@@ -305,6 +308,7 @@ impl Supervisor {
                         if reason != ExitReason::Normal {
                             warn!(child_id = %child_id, reason = ?reason, "Child exited abnormally");
                             self.handle_abnormal_exit(
+                                &supervisor_id,
                                 &child_id,
                                 reason,
                                 &child_states,
@@ -534,15 +538,58 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Restart children according to the configured SupervisionStrategy
+    async fn restart_according_to_strategy(
+        &self,
+        child_id: &str,
+        child_states: &Arc<RwLock<HashMap<String, ChildRuntime>>>,
+    ) -> Result<(), SelfwareError> {
+        match self.strategy {
+            SupervisionStrategy::OneForAll => {
+                info!("OneForAll strategy: restarting all children");
+                for child in &self.children {
+                    self.restart_child(&child.id, child_states).await?;
+                }
+                Ok(())
+            }
+            SupervisionStrategy::RestForOne => {
+                info!("RestForOne strategy: restarting failed child and subsequent children");
+                let mut restart = false;
+                for child in &self.children {
+                    if child.id == child_id {
+                        restart = true;
+                    }
+                    if restart {
+                        self.restart_child(&child.id, child_states).await?;
+                    }
+                }
+                Ok(())
+            }
+            SupervisionStrategy::OneForOne => {
+                info!("OneForOne strategy: restarting failed child only");
+                self.restart_child(child_id, child_states).await
+            }
+        }
+    }
+
     /// Handle abnormal exit
     async fn handle_abnormal_exit(
         &self,
+        supervisor_id: &str,
         child_id: &str,
         reason: ExitReason,
         child_states: &Arc<RwLock<HashMap<String, ChildRuntime>>>,
-        _restart_counts: &Arc<RwLock<HashMap<String, Vec<Instant>>>>,
+        restart_counts: &Arc<RwLock<HashMap<String, Vec<Instant>>>>,
     ) {
         warn!(child_id = %child_id, reason = ?reason, "Handling abnormal exit");
+
+        // Update child state to failed
+        {
+            let mut states = child_states.write().await;
+            if let Some(runtime) = states.get_mut(child_id) {
+                runtime.state = ChildState::Failed;
+            }
+        }
 
         // Find the child spec to check restart type
         let child_spec = match self.children.iter().find(|c| c.id == child_id) {
@@ -565,38 +612,31 @@ impl Supervisor {
             return;
         }
 
-        match self.strategy {
-            SupervisionStrategy::OneForAll => {
-                // Restart all children
-                info!("OneForAll strategy: restarting all children");
-                for child in &self.children {
-                    if let Err(e) = self.restart_child(&child.id, child_states).await {
-                        error!(child_id = %child.id, error = %e, "Failed to restart child in OneForAll");
-                    }
-                }
+        let error_str = format!("{:?}", reason);
+
+        if self.should_restart(child_id, restart_counts).await {
+            {
+                let mut counts = restart_counts.write().await;
+                counts
+                    .entry(child_id.to_string())
+                    .or_default()
+                    .push(Instant::now());
             }
-            SupervisionStrategy::RestForOne => {
-                // Restart failed child and all children started after it
-                info!("RestForOne strategy: restarting failed child and subsequent children");
-                let mut restart = false;
-                for child in &self.children {
-                    if child.id == child_id {
-                        restart = true;
-                    }
-                    if restart {
-                        if let Err(e) = self.restart_child(&child.id, child_states).await {
-                            error!(child_id = %child.id, error = %e, "Failed to restart child in RestForOne");
-                        }
-                    }
-                }
+            let backoff = self.calculate_backoff(child_id, restart_counts).await;
+            warn!(child_id = %child_id, backoff_ms = backoff.as_millis(), "Restarting child after abnormal exit");
+            tokio::time::sleep(backoff).await;
+            if let Err(e) = self
+                .restart_according_to_strategy(child_id, child_states)
+                .await
+            {
+                error!(child_id = %child_id, error = %e, "Failed to restart child, escalating");
+                self.escalate(supervisor_id, child_id, &error_str, restart_counts)
+                    .await;
             }
-            SupervisionStrategy::OneForOne => {
-                // Only restart the failed child
-                info!("OneForOne strategy: restarting failed child only");
-                if let Err(e) = self.restart_child(child_id, child_states).await {
-                    error!(child_id = %child_id, error = %e, "Failed to restart child in OneForOne");
-                }
-            }
+        } else {
+            error!(child_id = %child_id, "Max restarts exceeded on abnormal exit, escalating");
+            self.escalate(supervisor_id, child_id, &error_str, restart_counts)
+                .await;
         }
     }
 

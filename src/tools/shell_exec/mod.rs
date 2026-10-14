@@ -191,7 +191,7 @@ async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Re
         );
     }
 
-    let content = tokio::fs::read_to_string(file).await?;
+    let (content, _) = crate::tools::file::read_file_checked(file, &safety, None).await?;
 
     let (new_content, replacements) = if sub.global {
         let count = content.matches(&sub.old_str).count();
@@ -201,11 +201,40 @@ async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Re
     };
 
     if replacements > 0 {
+        let checker = crate::safety::SafetyChecker::with_working_dir(
+            &safety,
+            crate::tools::workspace_root::current_path(),
+        );
+        let check_write = |target: &str, body: &str| -> anyhow::Result<()> {
+            let call = crate::api::types::ToolCall {
+                id: "sed-intercept".to_string(),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: "file_write".to_string(),
+                    arguments: serde_json::json!({
+                        "path": target,
+                        "content": body,
+                    })
+                    .to_string(),
+                },
+            };
+            checker.check_tool_call(&call)?;
+            Ok(())
+        };
+        check_write(file, &new_content)?;
+
         // Honor `-i<suffix>`: keep a backup of the original, like real sed.
         if let Some(suffix) = &sub.backup_suffix {
-            tokio::fs::copy(file, format!("{}{}", file, suffix)).await?;
+            if !suffix.is_empty() {
+                let backup_path = format!("{}{}", file, suffix);
+                crate::tools::file::validate_tool_path(&backup_path, &safety)
+                    .map_err(|e| anyhow::anyhow!("sed backup path validation failed: {}", e))?;
+                check_write(&backup_path, &content)?;
+                write_atomic(Path::new(&backup_path), &content).await?;
+            }
         }
         write_atomic(Path::new(file), &new_content).await?;
+        crate::tools::file::clear_file_snapshot(file);
     }
     // A no-match substitution is NOT an error: real sed exits 0 and leaves the
     // file untouched. Report the zero replacements honestly instead of either

@@ -269,7 +269,8 @@ fn load_swl_safety_config() -> crate::config::SafetyConfig {
 impl SwlRuntime {
     /// Create a new runtime with API client
     pub fn new(client: Arc<ApiClient>) -> Self {
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let safety_config = load_swl_safety_config();
+        let tool_registry = Arc::new(ToolRegistry::with_safety_config(Some(&safety_config)));
         Self {
             client,
             tool_registry,
@@ -278,7 +279,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: None,
-            safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
+            safety: crate::safety::SafetyChecker::new(&safety_config),
         }
     }
 
@@ -301,7 +302,7 @@ impl SwlRuntime {
         // For dry-run, we create a minimal config
         let config = crate::config::Config::default();
         let client = Arc::new(ApiClient::new(&config).expect("Failed to create API client"));
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let tool_registry = Arc::new(ToolRegistry::with_safety_config(Some(&config.safety)));
         Self {
             client,
             tool_registry,
@@ -319,7 +320,8 @@ impl SwlRuntime {
         client: Arc<ApiClient>,
         workflow_name: &str,
     ) -> Result<Self> {
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let safety_config = load_swl_safety_config();
+        let tool_registry = Arc::new(ToolRegistry::with_safety_config(Some(&safety_config)));
         let context = ExecutionContext::with_file_persistence(workflow_name).await?;
 
         Ok(Self {
@@ -330,7 +332,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: Some(workflow_name.to_string()),
-            safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
+            safety: crate::safety::SafetyChecker::new(&safety_config),
         })
     }
 
@@ -403,11 +405,11 @@ impl SwlRuntime {
             .store(duration_ms, Ordering::Relaxed);
 
         match &result {
-            Ok(_) => {
+            Ok(res) if res.status == ExecutionStatus::Completed => {
                 record_state_transition("executing_workflow", "completed");
                 record_success();
             }
-            Err(_) => {
+            _ => {
                 record_state_transition("executing_workflow", "failed");
                 record_failure("workflow execution failed");
             }

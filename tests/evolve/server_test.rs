@@ -1265,3 +1265,76 @@ async fn test_graceful_shutdown_returns_ok_instead_of_running_until_forced_exit(
         "graceful shutdown must return Ok (clean exit): {served:?}"
     );
 }
+
+#[tokio::test]
+async fn test_for_project_uses_project_root_for_map_and_dedup_endpoints() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+
+    let shared_dup_body = r#"pub fn duplicated_tempdir_pipeline(input: &[usize]) -> usize {
+    let mut acc = 0usize;
+    for &value in input {
+        let step = value.saturating_mul(3).saturating_add(7);
+        let folded = step ^ (step >> 2);
+        acc = acc.wrapping_add(folded);
+    }
+    let normalized = acc.saturating_sub(input.len());
+    normalized.max(1)
+}
+"#;
+    let file_a = format!(
+        "//! Isolated alpha component.\n\npub fn unique_tempdir_anchor() -> usize {{\n    42\n}}\n\n{shared_dup_body}"
+    );
+    let file_b = format!(
+        "//! Isolated beta component.\n\npub fn call_anchor() -> usize {{\n    1\n}}\n\n{shared_dup_body}"
+    );
+    std::fs::write(project.path().join("src/isolated_alpha.rs"), &file_a).unwrap();
+    std::fs::write(project.path().join("src/isolated_beta.rs"), &file_b).unwrap();
+
+    let mut node_a = Node::code("crate::isolated_alpha", "src/isolated_alpha.rs");
+    node_a.tokens = 80;
+    node_a.lines = file_a.lines().count();
+    node_a.files = 1;
+    let mut node_b = Node::code("crate::isolated_beta", "src/isolated_beta.rs");
+    node_b.tokens = 80;
+    node_b.lines = file_b.lines().count();
+    node_b.files = 1;
+
+    let graph = Graph {
+        nodes: vec![node_a, node_b],
+        edges: vec![edge("crate::isolated_beta", "crate::isolated_alpha")],
+    };
+    let server = EvolveServer::for_project(graph, project.path()).unwrap();
+
+    // 1. /api/context/map must read from server.project_root, not process CWD.
+    let (status, map_json) = get_json(&server, "/api/context/map").await;
+    assert_eq!(status, StatusCode::OK, "{map_json}");
+    assert_eq!(map_json["components"], 2);
+    assert!(map_json["map_tokens"].as_u64().unwrap() > 0);
+    let rendered = map_json["rendered"].as_str().unwrap();
+    assert!(
+        rendered.contains("unique_tempdir_anchor"),
+        "map must render symbols from tempdir project_root, got: {rendered}"
+    );
+
+    // 2. /api/context/dedup by symbol target (exercises neighborhood fallback
+    //    reading source from server.project_root rather than process CWD) and
+    //    by consolidate (exercises FnDedupAnalyzer under server.project_root).
+    let (status, dedup_symbol) = get_json(
+        &server,
+        "/api/context/dedup?kind=understand&target=unique_tempdir_anchor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dedup_symbol}");
+    assert_eq!(dedup_symbol["files"], 2);
+    assert!(dedup_symbol["original_tokens"].as_u64().unwrap() > 0);
+    assert_eq!(dedup_symbol["functions_deduped"], 1);
+    assert!(dedup_symbol["dedup_saved"].as_u64().unwrap() > 0);
+
+    let (status, dedup_consolidate) =
+        get_json(&server, "/api/context/dedup?kind=consolidate").await;
+    assert_eq!(status, StatusCode::OK, "{dedup_consolidate}");
+    assert_eq!(dedup_consolidate["files"], 2);
+    assert_eq!(dedup_consolidate["functions_deduped"], 1);
+    assert!(dedup_consolidate["dedup_saved"].as_u64().unwrap() > 0);
+}

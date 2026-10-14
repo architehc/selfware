@@ -103,10 +103,29 @@ fn record_to_collected_item(record: &TemporalRecord) -> CollectedItem {
         RecordImportance::High => 3,
         RecordImportance::Critical => 4,
     };
+    let mut content_sections = vec![record.content.summary.clone()];
+    if !record.content.key_facts.is_empty() {
+        content_sections.push(format!(
+            "Key facts: {}",
+            record.content.key_facts.join("; ")
+        ));
+    }
+    if !record.content.entities.is_empty() {
+        content_sections.push(format!("Entities: {}", record.content.entities.join(", ")));
+    }
+    if !record.content.actions.is_empty() {
+        content_sections.push(format!("Actions: {}", record.content.actions.join("; ")));
+    }
+    if !record.content.outcomes.is_empty() {
+        content_sections.push(format!("Outcomes: {}", record.content.outcomes.join("; ")));
+    }
+    if !record.content.insights.is_empty() {
+        content_sections.push(format!("Insights: {}", record.content.insights.join("; ")));
+    }
     CollectedItem {
         source_id: record.id.clone(),
         source_type: SourceType::Episode,
-        content: record.content.summary.clone(),
+        content: content_sections.join("\n"),
         timestamp: record.created_at,
         importance,
         tags: record.tags.clone(),
@@ -252,6 +271,9 @@ impl ConsolidationEngine {
         tokio::spawn(async move {
             let engine = self;
             let mut tick = tokio::time::interval(interval);
+            // Advance past tokio::time::interval's immediate first tick so
+            // periodic consolidation waits `interval` before running.
+            tick.tick().await;
 
             loop {
                 tick.tick().await;
@@ -284,8 +306,22 @@ impl ConsolidationEngine {
                                     new_records.len(),
                                     report.errors.len(),
                                 );
-                                if let Err(e) = engine.store.store(&new_records).await {
-                                    tracing::error!("Periodic consolidation store error: {e}");
+                                match engine.store.store(&new_records).await {
+                                    Ok(store_res) => {
+                                        if !new_records.is_empty() && store_res.errors.is_empty() {
+                                            let new_ids: std::collections::HashSet<&str> =
+                                                new_records.iter().map(|r| r.id.as_str()).collect();
+                                            let superseded: Vec<String> = records
+                                                .iter()
+                                                .filter(|r| !new_ids.contains(r.id.as_str()))
+                                                .map(|r| r.id.clone())
+                                                .collect();
+                                            engine.store.remove_records(&superseded);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Periodic consolidation store error: {e}");
+                                    }
                                 }
                             }
                             Err(e) => {

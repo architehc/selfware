@@ -1268,6 +1268,211 @@ impl Config {
         self.models.get(key).or_else(|| self.models.get("default"))
     }
 
+    /// Re-synchronize the synthesized `"default"` model profile with top-level
+    /// fields when `"default"` was not explicitly defined in the config file.
+    pub(crate) fn sync_default_model_profile(&mut self) {
+        if self.sources.get("models.default").is_none() {
+            self.models.insert(
+                "default".to_string(),
+                ModelProfile {
+                    endpoint: self.endpoint.clone(),
+                    model: self.model.clone(),
+                    api_key: self.api_key.clone(),
+                    max_tokens: self.max_tokens,
+                    temperature: self.temperature,
+                    modalities: default_modalities(),
+                    context_length: self.context_length,
+                    extra_body: self.extra_body.clone(),
+                    native_function_calling: None,
+                    max_retries: None,
+                    response_timeout_floor_secs: None,
+                },
+            );
+        }
+        self.normalize_agent_limits();
+    }
+
+    /// Apply a CLI `--model` override: record provenance, re-run built-in
+    /// model-defaults profile matching for any field not explicitly set by the
+    /// user, update the synthesized `"default"` model profile, and normalize
+    /// agent token limits.
+    pub(crate) fn apply_cli_model_override(&mut self, model: String) {
+        let is_user_explicit = |sources: &ConfigSources, key: &str| {
+            matches!(
+                sources.get(key),
+                Some(
+                    ConfigSource::ConfigFile(_) | ConfigSource::EnvVar(_) | ConfigSource::CliArg(_)
+                )
+            )
+        };
+
+        let defaults = Config::default();
+        if !is_user_explicit(&self.sources, "agent.native_function_calling") {
+            self.agent.native_function_calling = defaults.agent.native_function_calling;
+            self.sources.remove("agent.native_function_calling");
+        }
+        if !is_user_explicit(&self.sources, "agent.streaming") {
+            self.agent.streaming = defaults.agent.streaming;
+            self.sources.remove("agent.streaming");
+        }
+        if !is_user_explicit(&self.sources, "temperature") {
+            self.temperature = defaults.temperature;
+            self.sources.remove("temperature");
+        }
+        if !is_user_explicit(&self.sources, "max_tokens") {
+            self.max_tokens = defaults.max_tokens;
+            self.sources.remove("max_tokens");
+        }
+        if !is_user_explicit(&self.sources, "context_length") {
+            self.context_length = defaults.context_length;
+            self.sources.remove("context_length");
+        }
+        if !is_user_explicit(&self.sources, "concurrency.max_streams") {
+            self.concurrency.max_streams = defaults.concurrency.max_streams;
+            self.sources.remove("concurrency.max_streams");
+        }
+        if !is_user_explicit(&self.sources, "concurrency.max_global") {
+            self.concurrency.max_global = defaults.concurrency.max_global;
+            self.sources.remove("concurrency.max_global");
+        }
+        if !is_user_explicit(&self.sources, "agent.max_call_secs") {
+            self.agent.max_call_secs = defaults.agent.max_call_secs;
+            self.sources.remove("agent.max_call_secs");
+        }
+        if !is_user_explicit(&self.sources, "agent.context_content_ratio") {
+            self.agent.context_content_ratio = defaults.agent.context_content_ratio;
+            self.agent.context_growth_p99_tokens = defaults.agent.context_growth_p99_tokens;
+            self.sources.remove("agent.context_content_ratio");
+        }
+
+        // Remove profile-injected extra_body keys while preserving user-explicit ones.
+        let mut explicit_extra_keys = Vec::new();
+        if let Some(ref mut map) = self.extra_body {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let dotted = format!("extra_body.{k}");
+                if is_user_explicit(&self.sources, &dotted) {
+                    explicit_extra_keys.push(k);
+                } else {
+                    map.remove(&k);
+                    self.sources.remove(&dotted);
+                }
+            }
+            if map.is_empty() {
+                self.extra_body = None;
+            }
+        }
+
+        // Reset profile-injected workload quotas while preserving user-explicit ones.
+        let mut workload_max_tokens: Option<usize> = None;
+        for kind in super::model_profiles::TurnWorkload::ALL {
+            let thinking_key = format!("workloads.{kind}.enable_thinking");
+            if !is_user_explicit(&self.sources, &thinking_key) {
+                self.workloads.get_mut(kind).enable_thinking = None;
+                self.sources.remove(&thinking_key);
+            }
+            let max_tokens_key = format!("workloads.{kind}.max_tokens");
+            if is_user_explicit(&self.sources, &max_tokens_key) {
+                if let Some(n) = self.workloads.get(kind).max_tokens {
+                    workload_max_tokens = Some(workload_max_tokens.map_or(n, |cur| cur.max(n)));
+                }
+            } else {
+                self.workloads.get_mut(kind).max_tokens = None;
+                self.sources.remove(&max_tokens_key);
+            }
+        }
+
+        let user_explicit = UserExplicitFields {
+            native_function_calling: is_user_explicit(
+                &self.sources,
+                "agent.native_function_calling",
+            ),
+            streaming: is_user_explicit(&self.sources, "agent.streaming"),
+            temperature: is_user_explicit(&self.sources, "temperature"),
+            max_tokens: is_user_explicit(&self.sources, "max_tokens"),
+            context_length: is_user_explicit(&self.sources, "context_length"),
+            max_streams: is_user_explicit(&self.sources, "concurrency.max_streams"),
+            max_global: is_user_explicit(&self.sources, "concurrency.max_global"),
+            max_call_secs: is_user_explicit(&self.sources, "agent.max_call_secs"),
+            context_content_ratio: is_user_explicit(&self.sources, "agent.context_content_ratio"),
+            extra_body_keys: explicit_extra_keys,
+            workload_max_tokens,
+        };
+        let token_budget_was_explicit = is_user_explicit(&self.sources, "agent.token_budget");
+
+        self.model = model;
+        self.sources
+            .set("model", ConfigSource::CliArg("--model".into()));
+        self.matched_profile = None;
+        self.matched_profile_applied.clear();
+        self.workload_overrides.clear();
+
+        self.apply_unknown_model_context_fallback(user_explicit.context_length);
+        if !token_budget_was_explicit {
+            self.agent.token_budget = self.context_length * 3 / 5;
+        }
+
+        if let Some(profile) = match_profile(&self.model) {
+            let profile_name = profile.name.to_string();
+            let applied = apply_profile(self, &profile, &user_explicit);
+            self.matched_profile = Some(profile_name.clone());
+            self.workload_overrides = applied.workload_overrides.clone();
+            if !applied.is_empty() {
+                let mut fields: Vec<String> = Vec::new();
+                if applied.native_function_calling {
+                    fields.push("native_function_calling".to_string());
+                }
+                if applied.streaming {
+                    fields.push("streaming".to_string());
+                }
+                if applied.temperature {
+                    fields.push("temperature".to_string());
+                }
+                if applied.max_tokens {
+                    fields.push("max_tokens".to_string());
+                }
+                if applied.context_length {
+                    fields.push("context_length".to_string());
+                }
+                if applied.max_streams {
+                    fields.push("concurrency.max_streams".to_string());
+                }
+                if applied.max_global {
+                    fields.push("concurrency.max_global".to_string());
+                }
+                if applied.max_call_secs {
+                    fields.push("agent.max_call_secs".to_string());
+                }
+                if applied.context_content_ratio {
+                    fields.push("agent.context_content_ratio".to_string());
+                }
+                for k in &applied.extra_body_keys {
+                    fields.push(format!("extra_body.{}", k));
+                }
+                fields.extend(applied.workload_fields.iter().cloned());
+                if applied.context_length && !token_budget_was_explicit {
+                    self.agent.token_budget = self.context_length * 3 / 5;
+                }
+                for f in &fields {
+                    let dotted = match f.as_str() {
+                        "native_function_calling" => "agent.native_function_calling".to_string(),
+                        "streaming" => "agent.streaming".to_string(),
+                        other => other.to_string(),
+                    };
+                    let label = if dotted == "agent.max_call_secs" {
+                        applied.max_call_secs_provenance(&profile_name)
+                    } else {
+                        profile_name.clone()
+                    };
+                    self.sources.set(dotted, ConfigSource::Profile(label));
+                }
+                self.matched_profile_applied = fields;
+            }
+        }
+
+        self.sync_default_model_profile();
+    }
+
     /// Normalize agent token limits so load-time defaults always satisfy the
     /// validation invariant `token_safety_margin < token_budget`.
     fn normalize_agent_limits(&mut self) {

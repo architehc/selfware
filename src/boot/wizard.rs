@@ -349,16 +349,23 @@ async fn doctor_for_path(path: &Path) -> Result<DoctorOutcome> {
         .context("loading the config boot just wrote")?;
     match crate::llm_doctor::run_llm_doctor_report(&config).await {
         Ok(report) => {
+            let connection_failed = matches!(
+                report.connection_test.as_ref().map(|c| &c.status),
+                Some(crate::llm_doctor::CheckOutcome::Fail)
+            );
             let failing_checks = report
                 .config_checks
                 .iter()
                 .chain(report.endpoint_reachable.iter())
                 .chain(report.model_available.iter())
+                .chain(report.connection_test.iter())
+                .chain(report.capabilities.iter())
+                .chain(report.server_capacity_checks.iter())
                 .filter(|c| matches!(c.status, crate::llm_doctor::CheckOutcome::Fail))
                 .map(|c| format!("{}: {}", c.name, c.detail))
                 .collect();
             Ok(DoctorOutcome {
-                ok: !report.had_failures,
+                ok: !report.had_failures && !connection_failed,
                 failing_checks,
             })
         }

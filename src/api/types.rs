@@ -148,7 +148,13 @@ impl Default for MessageContent {
 
 impl PartialEq for MessageContent {
     fn eq(&self, other: &Self) -> bool {
-        self.text() == other.text()
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Text(s), Self::Blocks(blocks)) | (Self::Blocks(blocks), Self::Text(s)) => {
+                matches!(blocks.as_slice(), [ContentBlock::Text { text }] if text == s)
+            }
+            (Self::Blocks(a), Self::Blocks(b)) => a == b,
+        }
     }
 }
 
@@ -212,7 +218,7 @@ impl PartialEq<String> for MessageContent {
 ///     },
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     /// Plain text block.
@@ -245,7 +251,7 @@ pub enum ContentBlock {
 ///     detail: Some("high".to_string()),
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageUrl {
     /// `"data:image/png;base64,..."` or a remote URL.
     pub url: String,

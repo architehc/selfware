@@ -260,20 +260,11 @@ impl FileAccessTracker {
     }
 }
 
-/// Token count of a message for compression sizing. Content and reasoning
-/// are MEASURED (AGENTS.md rule 4: `estimate_content_tokens`, never
-/// byte-fraction heuristics); tool calls keep a fixed structural overhead
-/// estimate — they are call envelopes, not content.
+/// Token count of a message for compression sizing. Content, reasoning,
+/// images, and tool calls are MEASURED (AGENTS.md rule 4:
+/// `crate::token_count::estimate_message_tokens`, never heuristics).
 fn estimate_tokens(msg: &Message) -> usize {
-    let content_tokens = crate::token_count::estimate_content_tokens(msg.content.text());
-    let reasoning_tokens = msg
-        .reasoning_content
-        .as_deref()
-        .map(crate::token_count::estimate_content_tokens)
-        .unwrap_or(0);
-    let tool_call_tokens = msg.tool_calls.as_ref().map(|tc| tc.len() * 50).unwrap_or(0);
-
-    content_tokens + reasoning_tokens + tool_call_tokens + 4 // overhead
+    crate::token_count::estimate_message_tokens(msg)
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {

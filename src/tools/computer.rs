@@ -9,8 +9,52 @@ use serde_json::{json, Value};
 
 use super::Tool;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn shared_mouse_controller() -> Arc<crate::computer::MouseController> {
+    static CONTROLLERS: OnceLock<Mutex<HashMap<String, Arc<crate::computer::MouseController>>>> =
+        OnceLock::new();
+    let key = std::thread::current()
+        .name()
+        .unwrap_or("default")
+        .to_string();
+    let mut map = CONTROLLERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        map.entry(key)
+            .or_insert_with(|| Arc::new(crate::computer::MouseController::new())),
+    )
+}
+
+fn shared_keyboard_controller() -> Arc<crate::computer::KeyboardController> {
+    static CONTROLLERS: OnceLock<Mutex<HashMap<String, Arc<crate::computer::KeyboardController>>>> =
+        OnceLock::new();
+    let key = std::thread::current()
+        .name()
+        .unwrap_or("default")
+        .to_string();
+    let mut map = CONTROLLERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        map.entry(key)
+            .or_insert_with(|| Arc::new(crate::computer::KeyboardController::new())),
+    )
+}
+
 /// Mouse control tool — move, click, scroll, drag.
+#[derive(Default, Clone, Copy)]
 pub struct ComputerMouseTool;
+
+impl ComputerMouseTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 #[async_trait]
 impl Tool for ComputerMouseTool {
@@ -53,7 +97,7 @@ impl Tool for ComputerMouseTool {
         let x = args["x"].as_i64().unwrap_or(0) as i32;
         let y = args["y"].as_i64().unwrap_or(0) as i32;
 
-        let controller = crate::computer::MouseController::new();
+        let controller = shared_mouse_controller();
 
         match action {
             "move_to" => {
@@ -101,7 +145,14 @@ impl Tool for ComputerMouseTool {
 }
 
 /// Keyboard control tool — type text, press keys, key combos.
+#[derive(Default, Clone, Copy)]
 pub struct ComputerKeyboardTool;
+
+impl ComputerKeyboardTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 #[async_trait]
 impl Tool for ComputerKeyboardTool {
@@ -139,7 +190,7 @@ impl Tool for ComputerKeyboardTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'action' field"))?;
 
-        let controller = crate::computer::KeyboardController::new();
+        let controller = shared_keyboard_controller();
 
         match action {
             "type" => {

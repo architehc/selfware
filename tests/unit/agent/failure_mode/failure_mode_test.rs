@@ -1028,3 +1028,32 @@ fn preexisting_failures_on_a_no_change_run_are_informational_not_green() {
     assert!(banner.contains("informational"), "{banner}");
     assert!(!mode.is_clean_success());
 }
+
+#[tokio::test]
+async fn workspace_stagnation_is_fatal_and_classified_as_read_loop() {
+    let reason = "WORKSPACE_STAGNATION: 5 consecutive steps".to_string();
+    let err = anyhow::anyhow!("{reason}");
+    assert!(
+        crate::agent::task_runner::is_fatal_loop_error(&err),
+        "WORKSPACE_STAGNATION error must be classified as fatal"
+    );
+
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(1);
+    agent.test_set_total_tool_calls(10);
+
+    let mode = FailureMode::classify(&agent, RunOutcome::Failed { reason });
+    assert_eq!(mode.kind, FailureKind::ReadLoop);
+    assert!(!mode.kind.is_nonfailure());
+    assert!(
+        mode.evidence
+            .contains("WORKSPACE_STAGNATION: 5 consecutive steps"),
+        "{}",
+        mode.evidence
+    );
+    assert!(
+        mode.advice.contains("do NOT raise max_iterations"),
+        "{}",
+        mode.advice
+    );
+}

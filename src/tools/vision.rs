@@ -125,7 +125,30 @@ impl Tool for VisionAnalyze {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.2);
 
-        let data_uri = resolve_image_data_uri(&args)?;
+        if crate::safety::checker::validation::contains_outbound_credential_shape(prompt) {
+            anyhow::bail!("Vision request rejected: prompt contains credential-shaped value");
+        }
+        if crate::safety::checker::validation::contains_outbound_credential_shape(model) {
+            anyhow::bail!("Vision request rejected: model contains credential-shaped value");
+        }
+        if let Some(extra) = args.get("extra_body") {
+            let serialized = serde_json::to_string(extra).unwrap_or_default();
+            if crate::safety::checker::validation::contains_outbound_credential_shape(&serialized) {
+                anyhow::bail!(
+                    "Vision request rejected: extra_body contains credential-shaped value"
+                );
+            }
+        }
+
+        let safety = crate::tools::file::resolve_safety_config(None);
+        let data_uri = if let Some(path) = args.get("image_path").and_then(|v| v.as_str()) {
+            let bytes = read_image_bytes_checked(path, &safety)?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let mime = guess_mime(path);
+            format!("data:{};base64,{}", mime, b64)
+        } else {
+            resolve_image_data_uri(&args)?
+        };
 
         // Build the multimodal message array (OpenAI vision format)
         let mut body = json!({
@@ -271,13 +294,25 @@ impl Tool for VisionCompare {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.2);
 
-        // Load both images
-        let img_a = image::open(path_a)
-            .with_context(|| format!("Failed to open image_a: {}", path_a))?
-            .to_rgba8();
-        let img_b = image::open(path_b)
-            .with_context(|| format!("Failed to open image_b: {}", path_b))?
-            .to_rgba8();
+        // Validate and read both images via O_NONBLOCK | O_NOFOLLOW descriptor check
+        let safety = crate::tools::file::resolve_safety_config(None);
+        let bytes_a = read_image_bytes_checked(path_a, &safety)
+            .with_context(|| format!("Failed to open image_a: {}", path_a))?;
+        let bytes_b = read_image_bytes_checked(path_b, &safety)
+            .with_context(|| format!("Failed to open image_b: {}", path_b))?;
+
+        let decode_img = |bytes: &[u8], label: &str, path: &str| -> Result<image::RgbaImage> {
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .with_context(|| format!("Failed to read {label}: {path}"))?;
+            reader.limits(image::Limits::default());
+            Ok(reader
+                .decode()
+                .with_context(|| format!("Failed to decode {label}: {path}"))?
+                .to_rgba8())
+        };
+        let img_a = decode_img(&bytes_a, "image_a", path_a)?;
+        let img_b = decode_img(&bytes_b, "image_b", path_b)?;
 
         let (w_a, h_a) = img_a.dimensions();
         let (w_b, h_b) = img_b.dimensions();
@@ -307,10 +342,23 @@ impl Tool for VisionCompare {
         let endpoint = args.get("endpoint").and_then(|v| v.as_str());
         let model = args.get("model").and_then(|v| v.as_str());
         if let (Some(endpoint), Some(model)) = (endpoint, model) {
-            let b64_a = encode_image_file(path_a)?;
-            let b64_b = encode_image_file(path_b)?;
-            let uri_a = format!("data:image/png;base64,{}", b64_a);
-            let uri_b = format!("data:image/png;base64,{}", b64_b);
+            if crate::safety::checker::validation::contains_outbound_credential_shape(model) {
+                anyhow::bail!("Vision request rejected: model contains credential-shaped value");
+            }
+            if let Some(extra) = args.get("extra_body") {
+                let serialized = serde_json::to_string(extra).unwrap_or_default();
+                if crate::safety::checker::validation::contains_outbound_credential_shape(
+                    &serialized,
+                ) {
+                    anyhow::bail!(
+                        "Vision request rejected: extra_body contains credential-shaped value"
+                    );
+                }
+            }
+            let b64_a = base64::engine::general_purpose::STANDARD.encode(&bytes_a);
+            let b64_b = base64::engine::general_purpose::STANDARD.encode(&bytes_b);
+            let uri_a = format!("data:{};base64,{}", guess_mime(path_a), b64_a);
+            let uri_b = format!("data:{};base64,{}", guess_mime(path_b), b64_b);
 
             let mut body = json!({
                 "model": model,
@@ -356,8 +404,8 @@ impl Tool for VisionCompare {
 // Shared helpers
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Maximum image file size (50 MB).
-const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
+/// Maximum image file size (20 MB).
+const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
 
 fn merge_extra_body(
     body: &mut Value,
@@ -391,11 +439,22 @@ fn resolve_image_data_uri(args: &Value) -> Result<String> {
     }
 }
 
-/// Read an image file, validate it, and return base64-encoded data.
-pub fn encode_image_file(path: &str) -> Result<String> {
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("Image file not found: {}", path))?;
+/// Validate a file path with tool path policy, open via `O_NONBLOCK | O_NOFOLLOW`
+/// descriptor check, enforce the 20MB size cap, and verify image magic bytes.
+fn read_image_bytes_checked(path: &str, safety: &crate::config::SafetyConfig) -> Result<Vec<u8>> {
+    crate::tools::file::validate_tool_path(path, safety)?;
+    let file = crate::tools::file::open_checked_regular(path, safety)?;
+    read_checked_image_handle(file, path)
+}
 
+fn read_checked_image_handle(mut file: std::fs::File, path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Image file not found: {}", path))?;
+    if !metadata.is_file() {
+        anyhow::bail!("Image path is not a regular file: {}", path);
+    }
     if metadata.len() > MAX_IMAGE_SIZE {
         anyhow::bail!(
             "Image file too large: {} bytes (max {} MB)",
@@ -403,13 +462,38 @@ pub fn encode_image_file(path: &str) -> Result<String> {
             MAX_IMAGE_SIZE / (1024 * 1024)
         );
     }
-
-    let bytes =
-        std::fs::read(path).with_context(|| format!("Failed to read image file: {}", path))?;
-
-    // Validate it's actually an image by checking magic bytes
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(MAX_IMAGE_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Failed to read image file: {}", path))?;
+    if bytes.len() as u64 > MAX_IMAGE_SIZE {
+        anyhow::bail!(
+            "Image file too large: {} bytes (max {} MB)",
+            bytes.len(),
+            MAX_IMAGE_SIZE / (1024 * 1024)
+        );
+    }
     validate_image_magic(&bytes, path)?;
+    Ok(bytes)
+}
 
+/// Read an image file, validate it, and return base64-encoded data.
+pub fn encode_image_file(path: &str) -> Result<String> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("Image file not found: {}", path))?
+    };
+    #[cfg(not(unix))]
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Image file not found: {}", path))?;
+
+    let bytes = read_checked_image_handle(file, path)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 

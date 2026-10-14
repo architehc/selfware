@@ -245,6 +245,17 @@ impl IdeEngine {
         expected_hash: &str,
     ) -> Result<WriteResult> {
         let resolved = self.resolve_path(path)?;
+        let logical_norm = resolved.logical.replace('\\', "/");
+        if logical_norm == "AGENTS.md"
+            || logical_norm.ends_with("/AGENTS.md")
+            || logical_norm == ".admitted_ledger.json"
+            || logical_norm == ".pre-commit-config.yaml"
+            || logical_norm == "deny.toml"
+            || logical_norm.starts_with(".selfware/")
+            || logical_norm == ".selfware"
+        {
+            anyhow::bail!("write rejected: {} is a protected path", resolved.logical);
+        }
         self.ensure_root_exists(resolved.root)?;
         self.reject_symlink_components(&resolved)?;
 

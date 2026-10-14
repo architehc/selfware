@@ -258,6 +258,7 @@ fn mcp_tool_call_is_write(tool: &dyn crate::tools::Tool, args: &serde_json::Valu
                 _ => false,
             }
         }
+        "knowledge_auto_extract" => args.get("dry_run").and_then(|v| v.as_bool()) != Some(true),
         _ => false,
     }
 }
@@ -286,7 +287,9 @@ impl McpServer {
         let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let safety_config = load_mcp_safety_config(None);
         Self {
-            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            registry: Arc::new(RwLock::new(ToolRegistry::with_safety_config(Some(
+                &safety_config,
+            )))),
             project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::with_working_dir(&safety_config, project_root),
@@ -304,7 +307,9 @@ impl McpServer {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let safety_config = load_mcp_safety_config(config_path.as_deref());
         Self {
-            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            registry: Arc::new(RwLock::new(ToolRegistry::with_safety_config(Some(
+                &safety_config,
+            )))),
             project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::with_working_dir(&safety_config, project_root),
@@ -320,7 +325,7 @@ impl McpServer {
     pub fn with_explicit_safety_config(safety: crate::config::SafetyConfig) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            registry: Arc::new(RwLock::new(ToolRegistry::with_safety_config(Some(&safety)))),
             project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::with_working_dir(&safety, project_root),
@@ -336,7 +341,7 @@ impl McpServer {
     ) -> Self {
         let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            registry: Arc::new(RwLock::new(ToolRegistry::with_safety_config(Some(&safety)))),
             project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::with_working_dir(&safety, project_root),

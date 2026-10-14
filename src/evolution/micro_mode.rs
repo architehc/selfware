@@ -87,11 +87,22 @@ pub fn select_micro_targets(all_targets: &[PathBuf], repo_root: &Path) -> Vec<(P
     let files_with_content: Vec<(PathBuf, usize, String)> = all_targets
         .iter()
         .filter_map(|p| {
-            let full_path = repo_root.join(p);
-            let size = std::fs::metadata(&full_path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(usize::MAX);
-            let content = std::fs::read_to_string(&full_path).ok()?;
+            let rel = if p.is_absolute() {
+                p.strip_prefix(repo_root).ok()?
+            } else {
+                p.as_path()
+            };
+            if rel.as_os_str().is_empty()
+                || !rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                || crate::evolution::is_protected(rel)
+            {
+                return None;
+            }
+            let full_path = repo_root.join(rel);
+            let content = crate::evolve::graph::read_broad_discovery_utf8(&full_path).ok()?;
+            let size = content.len();
             Some((p.clone(), size, content))
         })
         .collect();

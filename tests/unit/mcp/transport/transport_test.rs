@@ -159,6 +159,25 @@ async fn test_framing_missing_content_length_errors() {
     assert!(result.is_err(), "missing Content-Length must error");
 }
 
+/// Content-Length exceeding 64 MiB must be immediately rejected before
+/// allocating a buffer or attempting to read the body (H-21).
+#[tokio::test]
+async fn test_framing_oversized_content_length_rejected_before_allocation() {
+    // Only the header is present (no body bytes). If the reader attempted to
+    // allocate and read_exact 100 MB, it would fail with UnexpectedEof instead
+    // of the size-cap error.
+    let bytes: &[u8] = b"Content-Length: 100000000\r\n\r\n";
+    let mut reader = BufReader::new(bytes);
+    let err = read_message(&mut reader)
+        .await
+        .expect_err("oversized Content-Length must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MCP message too large: 100000000 bytes"),
+        "expected oversized-message error, got: {msg}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Send-framing selection (newline-delimited default, Content-Length opt-in)
 // -----------------------------------------------------------------------

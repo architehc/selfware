@@ -14,9 +14,19 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::safety::dry_run::truncate_str;
-
 use super::TuiPalette;
+
+/// Truncate a string at a valid UTF-8 character boundary and append `...` when truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len <= 3 {
+        "...".to_string()
+    } else {
+        let end = s.floor_char_boundary(max_len - 3);
+        format!("{}...", &s[..end])
+    }
+}
 
 /// Convert HeadingLevel to usize for repeat operations
 fn heading_level_to_usize(level: HeadingLevel) -> usize {

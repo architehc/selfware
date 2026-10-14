@@ -277,3 +277,69 @@ impl Node {
         node
     }
 }
+
+/// Files and directories that must NEVER be modified by any self-improvement or evolution loop.
+pub const PROTECTED_PATHS: &[&str] = &[
+    "AGENTS.md",
+    "src/evolution/",
+    "src/safety/",
+    "src/evolve/",
+    "src/agent/verification.rs",
+    "src/agent/verification_scope.rs",
+    "src/agent/checkpointing.rs",
+    "src/agent/tool_dispatch/",
+    "src/cognitive/rsi_orchestrator.rs",
+    "src/cognitive/self_edit.rs",
+    "src/cognitive/compilation_manager.rs",
+    "src/testing/",
+    "system_tests/",
+    "tests/",
+    "benches/",
+    "formal/",
+    "scripts/",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "deny.toml",
+    ".pre-commit-config.yaml",
+    ".github/",
+    "src/main.rs",
+    ".selfware/",
+    ".selfware/KILLSWITCH",
+    ".selfware/skills/",
+    ".selfware/commands/",
+    ".selfware/skill-candidates/",
+    ".selfware/attempts/",
+    ".selfware/runs/",
+    ".selfware/snapshots/",
+    ".selfware/active_policy.json",
+    ".selfware/active_evolution.lock",
+    ".selfware/investigation_report_latest.md",
+    ".admitted_ledger.json",
+];
+
+/// Shared protected-path check used by both `evolve` and `evolution` gates.
+pub fn is_protected_path(path: &std::path::Path) -> bool {
+    if path.to_string_lossy().contains('"') {
+        return true;
+    }
+    let canonical_path = crate::safety::checker::normalize_path(path);
+    let path_str = canonical_path.to_string_lossy().replace('\\', "/");
+
+    PROTECTED_PATHS.iter().any(|protected| {
+        let protected_norm = protected.trim_end_matches('/');
+        let is_dir = protected.ends_with('/');
+
+        if is_dir {
+            path_str == protected_norm
+                || path_str.starts_with(protected)
+                || path_str.contains(&format!("/{protected}"))
+                || path_str.ends_with(&format!("/{protected_norm}"))
+        } else {
+            path_str == *protected
+                || path_str.starts_with(&format!("{protected}/"))
+                || path_str.ends_with(&format!("/{protected}"))
+                || path_str.contains(&format!("/{protected}/"))
+        }
+    })
+}

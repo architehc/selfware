@@ -1011,6 +1011,9 @@ fn validate_file_url(parsed: &url::Url) -> Result<()> {
         );
     }
 
+    let safety = crate::tools::file::resolve_safety_config(None);
+    crate::tools::file::validate_tool_path(&target.to_string_lossy(), &safety)?;
+
     Ok(())
 }
 

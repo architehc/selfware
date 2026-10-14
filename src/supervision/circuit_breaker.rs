@@ -10,6 +10,7 @@ pub struct CircuitBreaker {
     state: AtomicU32, // 0=Closed, 1=Open, 2=HalfOpen
     failure_count: AtomicU32,
     success_count: AtomicU32,
+    half_open_requests: AtomicU32,
     config: CircuitBreakerConfig,
     last_failure_time: RwLock<Option<Instant>>,
     last_failure_reason: std::sync::RwLock<Option<String>>,
@@ -75,6 +76,7 @@ impl CircuitBreaker {
             state: AtomicU32::new(0),
             failure_count: AtomicU32::new(0),
             success_count: AtomicU32::new(0),
+            half_open_requests: AtomicU32::new(0),
             config,
             last_failure_time: RwLock::new(None),
             last_failure_reason: std::sync::RwLock::new(None),
@@ -140,16 +142,40 @@ impl CircuitBreaker {
         match self.current_state() {
             CircuitState::Open => {
                 if self.should_attempt_reset().await {
-                    self.transition_to(CircuitState::HalfOpen).await;
+                    if self
+                        .state
+                        .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        *self.last_state_change.write().await = Instant::now();
+                        self.failure_count.store(0, Ordering::SeqCst);
+                        self.success_count.store(0, Ordering::SeqCst);
+                        self.half_open_requests.store(0, Ordering::SeqCst);
+                        info!(
+                            old_state = ?CircuitState::Open,
+                            new_state = ?CircuitState::HalfOpen,
+                            "Circuit breaker state changed"
+                        );
+                    }
+                    if self.current_state() != CircuitState::HalfOpen {
+                        warn!("Circuit breaker open, rejecting request");
+                        return Err(CircuitBreakerError::CircuitOpen);
+                    }
+                    let slot = self.half_open_requests.fetch_add(1, Ordering::SeqCst);
+                    if slot >= self.config.half_open_max_requests {
+                        self.half_open_requests.fetch_sub(1, Ordering::SeqCst);
+                        warn!("Half-open max requests reached");
+                        return Err(CircuitBreakerError::CircuitOpen);
+                    }
                 } else {
                     warn!("Circuit breaker open, rejecting request");
                     return Err(CircuitBreakerError::CircuitOpen);
                 }
             }
             CircuitState::HalfOpen => {
-                let requests = self.success_count.load(Ordering::Relaxed)
-                    + self.failure_count.load(Ordering::Relaxed);
-                if requests >= self.config.half_open_max_requests {
+                let slot = self.half_open_requests.fetch_add(1, Ordering::SeqCst);
+                if slot >= self.config.half_open_max_requests {
+                    self.half_open_requests.fetch_sub(1, Ordering::SeqCst);
                     warn!("Half-open max requests reached");
                     return Err(CircuitBreakerError::CircuitOpen);
                 }
@@ -231,6 +257,7 @@ impl CircuitBreaker {
         // Reset counters on state change
         self.failure_count.store(0, Ordering::SeqCst);
         self.success_count.store(0, Ordering::SeqCst);
+        self.half_open_requests.store(0, Ordering::SeqCst);
 
         info!(
             old_state = ?match old_state {

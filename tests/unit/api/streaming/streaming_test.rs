@@ -620,3 +620,82 @@ fn mid_stream_error_message_is_scrubbed_of_echoed_keys() {
     assert!(msg.contains("[REDACTED]"), "{msg}");
     assert!(msg.contains("invalid key"), "non-secret text kept: {msg}");
 }
+
+#[test]
+fn tool_call_accumulator_interleaved_deltas_accumulate_by_index() {
+    let mut acc = ToolCallAccumulator::new();
+
+    // Initial deltas for index 0 and index 1 with partial arguments.
+    let d0_start = serde_json::json!({
+        "index": 0,
+        "id": "call_0",
+        "type": "function",
+        "function": {
+            "name": "file_read",
+            "arguments": "{\"path\":\""
+        }
+    });
+    let d1_start = serde_json::json!({
+        "index": 1,
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "grep_search",
+            "arguments": "{\"pattern\":\""
+        }
+    });
+
+    assert!(acc.process_delta(&d0_start).is_none());
+    assert!(acc.process_delta(&d1_start).is_none());
+
+    // Interleaved follow-up chunks with `id: null` (or omitted) must route by `index`,
+    // never appending index 0's chunk onto index 1.
+    let d0_mid = serde_json::json!({
+        "index": 0,
+        "id": null,
+        "function": {
+            "arguments": "src/lib.rs\""
+        }
+    });
+    let d1_mid = serde_json::json!({
+        "index": 1,
+        "id": null,
+        "function": {
+            "arguments": "ToolCallAccumulator\""
+        }
+    });
+
+    assert!(acc.process_delta(&d0_mid).is_none());
+    assert!(acc.process_delta(&d1_mid).is_none());
+
+    let d0_end = serde_json::json!({
+        "index": 0,
+        "function": {
+            "arguments": "}"
+        }
+    });
+    let d1_end = serde_json::json!({
+        "index": 1,
+        "function": {
+            "arguments": "}"
+        }
+    });
+
+    let call0 = acc
+        .process_delta(&d0_end)
+        .expect("index 0 should complete with valid JSON");
+    let call1 = acc
+        .process_delta(&d1_end)
+        .expect("index 1 should complete with valid JSON");
+
+    assert_eq!(call0.id, "call_0");
+    assert_eq!(call0.function.name, "file_read");
+    assert_eq!(call0.function.arguments, "{\"path\":\"src/lib.rs\"}");
+
+    assert_eq!(call1.id, "call_1");
+    assert_eq!(call1.function.name, "grep_search");
+    assert_eq!(
+        call1.function.arguments,
+        "{\"pattern\":\"ToolCallAccumulator\"}"
+    );
+}

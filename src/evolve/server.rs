@@ -135,7 +135,7 @@ impl EvolveServer {
             config.max_tokens,
             config.context_fit_ratio,
         );
-        let mut composer = ContextComposer::new(graph.clone());
+        let mut composer = ContextComposer::with_root(graph.clone(), &project_root);
         let (initial_mode, initial_fit) = fit_mode(&requested, &graph, &project_root, &fit_budget);
         composer.set_mode(initial_mode);
         let endpoint_host = url::Url::parse(&config.endpoint)
@@ -420,7 +420,15 @@ impl EvolveServer {
         let read_root = root.clone();
         let envelope =
             build_envelope_with_root(&graph, &mode, &included, &revision, &root, move |rel| {
-                super::graph::read_broad_discovery_utf8(&read_root.join(rel)).ok()
+                let rel_path = Path::new(rel);
+                if rel_path.is_absolute()
+                    || !rel_path
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                {
+                    return None;
+                }
+                super::graph::read_broad_discovery_utf8(&read_root.join(rel_path)).ok()
             });
         *self
             .envelope
@@ -452,7 +460,8 @@ impl EvolveServer {
         } else {
             None
         };
-        let mut composer = ContextComposer::new(refreshed.clone());
+        let mut composer =
+            ContextComposer::with_root(refreshed.clone(), self.project_root.as_ref());
         let (mode, outcome) =
             fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget);
         if let Some(ids) = custom_selection {
@@ -513,7 +522,7 @@ fn reject_over_budget(
 ) -> ApiResult<()> {
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let revision = graph_revision(&graph).map_err(internal_error)?;
-    let mut composer = ContextComposer::new(graph.clone());
+    let mut composer = ContextComposer::with_root(graph.clone(), server.project_root.as_ref());
     apply(&mut composer);
     let root = server.project_root.as_ref().clone();
     let read_root = root.clone();
@@ -523,7 +532,17 @@ fn reject_over_budget(
         &composer.included_nodes(),
         &revision,
         &root,
-        move |rel| super::graph::read_broad_discovery_utf8(&read_root.join(rel)).ok(),
+        move |rel| {
+            let rel_path = Path::new(rel);
+            if rel_path.is_absolute()
+                || !rel_path
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return None;
+            }
+            super::graph::read_broad_discovery_utf8(&read_root.join(rel_path)).ok()
+        },
     );
     let budget = server.fit_budget.usable();
     if candidate.total_tokens > budget {
@@ -1063,10 +1082,16 @@ fn symbol_selection_json(
     let mut exact: Vec<Value> = Vec::new();
     let mut substring: Vec<Value> = Vec::new();
     for file in &selection.files {
-        if !file.path.ends_with(".rs") {
+        let rel_path = Path::new(&file.path);
+        if !file.path.ends_with(".rs")
+            || rel_path.is_absolute()
+            || !rel_path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
             continue;
         }
-        let Ok(src) = super::graph::read_broad_discovery_utf8(&root.join(&file.path)) else {
+        let Ok(src) = super::graph::read_broad_discovery_utf8(&root.join(rel_path)) else {
             continue;
         };
         files_scanned += 1;
@@ -2561,7 +2586,7 @@ async fn evolve_pair_suggest_handler(
         )));
     };
 
-    let context = {
+    let raw_context = {
         let graph = graph.clone();
         let root = root.clone();
         let pair = pair.clone();
@@ -2569,6 +2594,7 @@ async fn evolve_pair_suggest_handler(
             .await
             .map_err(join_error)?
     };
+    let context = super::assistant::redact_secrets(&raw_context);
     let context_tokens = crate::token_count::estimate_content_tokens(&context);
 
     if body.dry_run {
@@ -2587,7 +2613,7 @@ async fn evolve_pair_suggest_handler(
         .assistant
         .freeform(super::SUGGEST_SYSTEM, &prompt)
         .await
-        .map_err(internal_error)?;
+        .map_err(review_error)?;
     // Best-effort structured extraction — surface the parsed suggestions when the
     // model returned valid JSON, always keep the raw text.
     let suggestions = extract_json_object(&text);
@@ -3116,11 +3142,15 @@ fn merge_derived_with_ontology(mut derived: Graph, persisted: Graph) -> Graph {
         .filter(|node| matches!(node.layer, NodeLayer::Concept | NodeLayer::Preset))
         .map(|node| node.id.clone())
         .collect();
-    for node in persisted
+    for mut node in persisted
         .nodes
         .into_iter()
         .filter(|node| matches!(node.layer, NodeLayer::Concept | NodeLayer::Preset))
     {
+        // Concept and Preset nodes are abstract ontology entries, never backed
+        // by files on disk. Clearing `path` prevents persisted ontology files
+        // from smuggling arbitrary host paths into file-reading graph walks.
+        node.path = None;
         if ids.insert(node.id.clone()) {
             derived.nodes.push(node);
         }

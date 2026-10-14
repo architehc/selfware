@@ -1201,6 +1201,7 @@ impl Agent {
             .and_then(|m| m.finish_reason.as_deref())
             == Some("length")
             && content.trim().is_empty()
+            && native_tool_calls.is_none()
             && reasoning.as_ref().is_some_and(|r| !r.trim().is_empty())
         {
             let reasoning_chars = reasoning.as_ref().map(|r| r.trim().len()).unwrap_or(0);

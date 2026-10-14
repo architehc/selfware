@@ -610,10 +610,10 @@ pub fn render_logs(frame: &mut Frame, area: Rect, state: &DashboardState) {
 /// Render keyboard help overlay
 pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     // Center the help box
-    let width = 50.min(area.width - 4);
-    let height = 15.min(area.height - 4);
-    let x = (area.width - width) / 2;
-    let y = (area.height - height) / 2;
+    let width = 50.min(area.width.saturating_sub(4));
+    let height = 15.min(area.height.saturating_sub(4));
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(height) / 2;
 
     let help_area = Rect::new(x, y, width, height);
 

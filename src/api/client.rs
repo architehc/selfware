@@ -3159,6 +3159,14 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
     if choice.finish_reason.as_deref() != Some("length") {
         return None;
     }
+    if choice
+        .message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|tc| !tc.is_empty())
+    {
+        return None;
+    }
     if !choice.message.content.text().trim().is_empty() {
         return None;
     }

@@ -164,3 +164,97 @@ fn test_json_logic_and_operator() {
         result
     );
 }
+
+#[test]
+fn test_summary_should_block_for_fail_and_error_outcomes() {
+    let fail_outcome = GuardrailOutcome {
+        guardrail_name: "block_on_fail".to_string(),
+        guardrail_type: GuardrailType::PreTool,
+        result: EvaluationResult::Fail {
+            reason: "blocked by policy".to_string(),
+        },
+        action: ViolationAction::Block,
+        timestamp: std::time::Instant::now(),
+        evaluation_duration_ms: 1,
+    };
+    let summary_fail = GuardrailSummary {
+        total_checked: 1,
+        failed: 1,
+        blocked: 1,
+        outcomes: vec![fail_outcome],
+        ..Default::default()
+    };
+    assert!(
+        summary_fail.should_block(),
+        "Blocking Fail outcome must cause should_block() to return true"
+    );
+    assert_eq!(summary_fail.blocking_violations().len(), 1);
+
+    let error_outcome = GuardrailOutcome {
+        guardrail_name: "abort_on_eval_error".to_string(),
+        guardrail_type: GuardrailType::PreTool,
+        result: EvaluationResult::Error {
+            message: "evaluation aborted with error".to_string(),
+        },
+        action: ViolationAction::Block,
+        timestamp: std::time::Instant::now(),
+        evaluation_duration_ms: 1,
+    };
+    let summary_error = GuardrailSummary {
+        total_checked: 1,
+        errors: 1,
+        blocked: 1,
+        outcomes: vec![error_outcome],
+        ..Default::default()
+    };
+    assert!(
+        summary_error.should_block(),
+        "Blocking Error outcome must fail closed and cause should_block() to return true"
+    );
+    assert_eq!(summary_error.blocking_violations().len(), 1);
+}
+
+#[test]
+fn test_evaluate_inline_compound_and_method_transforms() {
+    let engine = GuardrailEngine::new();
+    let ctx = GuardrailContext::new()
+        .with_agent_output("agent1", "Found [CRITICAL] issue in module")
+        .with_state("count", 3)
+        .with_state("items", serde_json::json!(["a", "b"]));
+
+    // .len() > 0 on string and array
+    assert!(engine
+        .evaluate_inline_expression("agent_output.len() > 0", &ctx)
+        .is_pass());
+    assert!(engine
+        .evaluate_inline_expression("state.items.len() > 0", &ctx)
+        .is_pass());
+
+    // .to_lowercase().contains(...)
+    assert!(engine
+        .evaluate_inline_expression("agent_output.to_lowercase().contains('critical')", &ctx)
+        .is_pass());
+    assert!(engine
+        .evaluate_inline_expression("agent_output.to_lowercase().contains('nonexistent')", &ctx)
+        .is_fail());
+
+    // Compound && and || expressions
+    assert!(engine
+        .evaluate_inline_expression(
+            "agent_output.len() > 0 && agent_output.to_lowercase().contains('critical')",
+            &ctx
+        )
+        .is_pass());
+    assert!(engine
+        .evaluate_inline_expression("state.count > 10 || state.items.len() > 0", &ctx)
+        .is_pass());
+    assert!(engine
+        .evaluate_inline_expression(
+            "state.count > 10 && agent_output.to_lowercase().contains('critical')",
+            &ctx
+        )
+        .is_fail());
+    assert!(engine
+        .evaluate_inline_expression("state.count > 10 || state.count < 0", &ctx)
+        .is_fail());
+}

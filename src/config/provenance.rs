@@ -63,6 +63,11 @@ impl ConfigSources {
         self.inner.get(key)
     }
 
+    /// Remove the recorded source for a dotted field name.
+    pub fn remove(&mut self, key: &str) -> Option<ConfigSource> {
+        self.inner.remove(key)
+    }
+
     /// Iterator over (key, source) pairs in insertion-stable sorted order.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &ConfigSource)> {
         let mut keys: Vec<&String> = self.inner.keys().collect();

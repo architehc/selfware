@@ -104,12 +104,8 @@ struct SourceSnapshot {
 
 impl SourceSnapshot {
     fn read(path: &str) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        if !std::fs::metadata(path).ok()?.is_file() {
-            return None;
-        }
-        let content_hash = hex::encode(Sha256::digest(&bytes));
-        let content = String::from_utf8(bytes).ok()?;
+        let content = super::graph::read_broad_discovery_utf8(std::path::Path::new(path)).ok()?;
+        let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
         Some(Self {
             content,
             content_hash,

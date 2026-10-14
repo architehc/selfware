@@ -1,6 +1,6 @@
 use super::file::{
     clear_file_snapshot, detect_line_ending, is_file_stale, preserve_line_endings,
-    read_file_with_encoding, resolve_safety_config, validate_tool_path,
+    read_file_checked, resolve_safety_config, validate_tool_path, write_atomic_checked,
 };
 use super::Tool;
 use crate::api::ApiClient;
@@ -12,7 +12,6 @@ use regex::Regex;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::fs;
 
 /// Maximum allowed length for a FIM instruction (in characters).
 const FIM_INSTRUCTION_MAX_LEN: usize = 500;
@@ -196,7 +195,7 @@ impl Tool for FileFimEdit {
             ));
         }
 
-        let (content, _) = read_file_with_encoding(Path::new(path)).await?;
+        let (content, _) = read_file_checked(path, &safety, None).await?;
         let line_ending = detect_line_ending(&content);
         let lines: Vec<&str> = content.lines().collect();
 
@@ -260,7 +259,7 @@ impl Tool for FileFimEdit {
                 },
             },
         )?;
-        let new_content = format!("{}{}{}", prefix, middle, suffix);
+        let new_content = join_fim_parts(&prefix, &middle, &suffix);
 
         // For Rust files, run a quick syntax check before writing
         if path.ends_with(".rs") {
@@ -269,7 +268,7 @@ impl Tool for FileFimEdit {
             // stdin input carries no path, so rustfmt cannot infer the crate's
             // edition; resolve it from the file's own Cargo.toml/rustfmt.toml
             // (a hard-coded 2021 misparsed 2015/2024 crates).
-            let file_path = std::path::Path::new(path);
+            let file_path = Path::new(path);
             let file_path = if file_path.is_absolute() {
                 file_path.to_path_buf()
             } else {
@@ -324,7 +323,8 @@ impl Tool for FileFimEdit {
 
         // Create backup before overwriting
         let backup_path = format!("{}.fim-backup", path);
-        if let Err(e) = fs::copy(path, &backup_path).await {
+        validate_tool_path(&backup_path, &safety)?;
+        if let Err(e) = write_atomic_checked(Path::new(&backup_path), &content, &safety).await {
             // Non-fatal: warn but proceed (file might be new)
             tracing::debug!("Could not create FIM backup: {}", e);
         }
@@ -332,12 +332,7 @@ impl Tool for FileFimEdit {
         let final_content = preserve_line_endings(&new_content, line_ending);
         // Atomic temp+rename with the parent re-validated, like the other
         // file tools: a cancel/timeout mid-write must not leave a torn file.
-        crate::tools::file::write_atomic_checked(
-            std::path::Path::new(path),
-            &final_content,
-            &safety,
-        )
-        .await?;
+        write_atomic_checked(Path::new(path), &final_content, &safety).await?;
         clear_file_snapshot(path);
 
         Ok(serde_json::json!({
@@ -346,6 +341,20 @@ impl Tool for FileFimEdit {
             "backup": backup_path
         }))
     }
+}
+
+fn join_fim_parts(prefix: &str, middle: &str, suffix: &str) -> String {
+    let mut out = String::with_capacity(prefix.len() + middle.len() + suffix.len() + 2);
+    out.push_str(prefix);
+    if !prefix.is_empty() && !prefix.ends_with('\n') && !middle.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(middle);
+    if !suffix.is_empty() && !middle.ends_with('\n') && !suffix.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(suffix);
+    out
 }
 
 /// Whether a `rustfmt --check` run over FIM output must block the write:

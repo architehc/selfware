@@ -165,7 +165,7 @@ fn is_repository_wide_reader(
     workspace_root: &crate::tools::workspace_root::WorkspaceRoot,
 ) -> bool {
     if tool_name == "grep_search" {
-        let exact_regular_file = serde_json::from_str::<serde_json::Value>(arguments)
+        let Some(path) = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
             .and_then(|arguments| {
                 arguments
@@ -173,9 +173,10 @@ fn is_repository_wide_reader(
                     .and_then(serde_json::Value::as_str)
                     .map(|path| workspace_root.resolve(std::path::Path::new(path)))
             })
-            .and_then(|path| std::fs::symlink_metadata(path).ok())
-            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
-        return !exact_regular_file;
+        else {
+            return true;
+        };
+        return !matches!(std::fs::symlink_metadata(path), Ok(m) if m.file_type().is_file());
     }
 
     tool_name.starts_with("lsp_")
@@ -395,6 +396,16 @@ impl Agent {
                         | "code_introspect"
                         | "code_query"
                         | "code_plan"
+                        | "localize_issue"
+                        | "code_map"
+                        | "code_metrics"
+                        | "graph_summary"
+                        | "hotspots"
+                        | "impact"
+                        | "neighbors"
+                        | "test_map"
+                        | "cycles"
+                        | "dups"
                         | "vision_analyze"
                         | "vision_compare"
                 );
@@ -408,6 +419,12 @@ impl Agent {
                             "file",
                             "filename",
                             "target",
+                            "repo_path",
+                            "scope",
+                            "codebase_root",
+                            "root",
+                            "directory",
+                            "dir",
                             "image_path",
                             "image_a",
                             "image_b",

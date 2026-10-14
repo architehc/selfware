@@ -38,24 +38,13 @@ case "${1:-}" in
     *) echo "usage: $0 [--write]" >&2; exit 2 ;;
 esac
 
-if ! command -v lean >/dev/null 2>&1; then
-    if [ "${CHECK_FORMAL_REQUIRE_LEAN:-0}" = "1" ]; then
-        echo "check_formal: FAILED — 'lean' is not on PATH and CHECK_FORMAL_REQUIRE_LEAN=1." >&2
-        exit 1
-    fi
-    echo "check_formal: SKIPPED — 'lean' is not on PATH (install Lean 4, e.g. via elan)."
-    echo "check_formal: the committed formal/*_table.json files are still enforced by the Rust conformance test."
-    exit 0
-fi
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "check_formal: python3 is required to decode the exported table." >&2
+    echo "check_formal: python3 is required to scan formal models and decode exported tables." >&2
     exit 1
 fi
 
-echo "check_formal: $(lean --version)"
-
 # Proof escape hatches, in code only: strip `--` line comments and `/- … -/`
-# block comments first.
+# block comments first. Runs unconditionally even when `lean` is not installed.
 escapes="$(python3 - "${FORMAL}" <<'PY'
 import pathlib, re, sys
 bad = []
@@ -74,6 +63,18 @@ if [ -n "${escapes}" ]; then
     exit 1
 fi
 echo "check_formal: no sorry/admit/axiom/native_decide/unsafe in formal/*.lean"
+
+if ! command -v lean >/dev/null 2>&1; then
+    if [ "${CHECK_FORMAL_REQUIRE_LEAN:-0}" = "1" ]; then
+        echo "check_formal: FAILED — 'lean' is not on PATH and CHECK_FORMAL_REQUIRE_LEAN=1." >&2
+        exit 1
+    fi
+    echo "check_formal: SKIPPED — 'lean' is not on PATH (install Lean 4, e.g. via elan)."
+    echo "check_formal: the committed formal/*_table.json files are still enforced by the Rust conformance test."
+    exit 0
+fi
+
+echo "check_formal: $(lean --version)"
 
 # Models without an exported table: every theorem must re-prove.
 for model in WorkflowBounds.lean SafetyBounds.lean EvolutionBounds.lean; do

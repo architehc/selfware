@@ -449,6 +449,21 @@ impl RecoveryStrategy {
             "restart" => Self::restart(),
             "fallback" => Self::fallback(),
             "restore" => Self::restore(),
+            "network_retry" => ErrorClass::Network.default_strategy(),
+            "timeout_retry" => ErrorClass::Timeout.default_strategy(),
+            "rate_limit_backoff" => ErrorClass::RateLimit.default_strategy(),
+            "resource_recovery" => ErrorClass::ResourceExhaustion.default_strategy(),
+            "parse_restart" => ErrorClass::ParseError.default_strategy(),
+            "auth_fallback" => ErrorClass::AuthError.default_strategy(),
+            "escalate_restart" => ErrorClass::Network
+                .escalation_strategy()
+                .unwrap_or_else(Self::restore),
+            "escalate_reset" => ErrorClass::ResourceExhaustion
+                .escalation_strategy()
+                .unwrap_or_else(Self::restart),
+            "escalate_compress" => ErrorClass::ParseError
+                .escalation_strategy()
+                .unwrap_or_else(Self::restore),
             _ => Self::retry(),
         }
     }
@@ -1287,9 +1302,18 @@ impl SelfHealingEngine {
             // Record healthy recovery in predictor
             self.predictor.record("self_healing", true, None, 0);
 
-            // Reset backoff state so the next failure starts with fresh retry
-            // counters instead of inheriting the elevated delay from this cycle.
-            self.executor.reset_retry_state(&pattern_key);
+            // Only reset retry backoff state when a non-Retry recovery action
+            // (e.g. RestoreCheckpoint, Restart, Fallback, ResetState) succeeded.
+            // Resetting on `Retry` itself wipes the attempt counter after every
+            // retry step, preventing retry exhaustion from ever reaching
+            // `max_attempts` and triggering escalation.
+            let has_retry_action = strategy
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::Retry { .. }));
+            if !has_retry_action {
+                self.executor.reset_retry_state(&pattern_key);
+            }
 
             return Some(execution);
         }

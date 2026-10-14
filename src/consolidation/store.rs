@@ -194,6 +194,29 @@ impl LongTermStore {
             .collect())
     }
 
+    /// Remove superseded records by ID from disk and in-memory caches.
+    pub fn remove_records(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        {
+            let mut emb_map = self.embeddings.write().unwrap_or_else(|e| e.into_inner());
+            let mut rec_map = self.records.write().unwrap_or_else(|e| e.into_inner());
+            for id in ids {
+                emb_map.remove(id);
+                rec_map.remove(id);
+            }
+        }
+        for id in ids {
+            let path = self.storage_dir.join(format!("{id}.json"));
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove superseded record {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
     /// Index all persisted records from disk into the in-memory vector index.
     ///
     /// Call this after creating a new `LongTermStore` (e.g. after a restart)

@@ -227,7 +227,7 @@ impl LayoutEngine {
         // Create initial chat pane
         let chat_id = engine.create_pane(PaneType::Chat);
         engine.root = Some(LayoutNode::Pane(chat_id));
-        engine.focused_pane = Some(chat_id);
+        engine.set_focus(chat_id);
 
         engine
     }
@@ -290,13 +290,14 @@ impl LayoutEngine {
     pub fn apply_preset(&mut self, preset: LayoutPreset) {
         self.current_preset = preset;
         self.panes.clear();
+        self.focused_pane = None;
         self.zoomed_pane = None;
 
         match preset {
             LayoutPreset::Focus => {
                 let chat_id = self.create_pane(PaneType::Chat);
                 self.root = Some(LayoutNode::Pane(chat_id));
-                self.focused_pane = Some(chat_id);
+                self.set_focus(chat_id);
             }
             LayoutPreset::Coding => {
                 let chat_id = self.create_pane(PaneType::Chat);
@@ -308,7 +309,7 @@ impl LayoutEngine {
                     first: Box::new(LayoutNode::Pane(chat_id)),
                     second: Box::new(LayoutNode::Pane(editor_id)),
                 });
-                self.focused_pane = Some(editor_id);
+                self.set_focus(editor_id);
             }
             LayoutPreset::Debugging => {
                 let chat_id = self.create_pane(PaneType::Chat);
@@ -328,12 +329,12 @@ impl LayoutEngine {
                     first: Box::new(LayoutNode::Pane(chat_id)),
                     second: Box::new(right_split),
                 });
-                self.focused_pane = Some(editor_id);
+                self.set_focus(editor_id);
             }
             LayoutPreset::Review => {
                 let diff_id = self.create_pane(PaneType::Diff);
                 self.root = Some(LayoutNode::Pane(diff_id));
-                self.focused_pane = Some(diff_id);
+                self.set_focus(diff_id);
             }
             LayoutPreset::Explore => {
                 let explorer_id = self.create_pane(PaneType::Explorer);
@@ -345,7 +346,7 @@ impl LayoutEngine {
                     first: Box::new(LayoutNode::Pane(explorer_id)),
                     second: Box::new(LayoutNode::Pane(chat_id)),
                 });
-                self.focused_pane = Some(chat_id);
+                self.set_focus(chat_id);
             }
             LayoutPreset::FullWorkspace => {
                 let explorer_id = self.create_pane(PaneType::Explorer);
@@ -365,7 +366,7 @@ impl LayoutEngine {
                     first: Box::new(LayoutNode::Pane(explorer_id)),
                     second: Box::new(right_split),
                 });
-                self.focused_pane = Some(editor_id);
+                self.set_focus(editor_id);
             }
             LayoutPreset::Dashboard => {
                 // Dashboard layout:
@@ -418,7 +419,7 @@ impl LayoutEngine {
                     first: Box::new(LayoutNode::Pane(status_id)),
                     second: Box::new(main_body),
                 });
-                self.focused_pane = Some(chat_id);
+                self.set_focus(chat_id);
             }
         }
     }
@@ -489,14 +490,16 @@ impl LayoutEngine {
         }
     }
 
-    /// Get all pane IDs
+    /// Get all pane IDs in deterministic creation order
     pub fn pane_ids(&self) -> Vec<PaneId> {
-        self.panes.keys().copied().collect()
+        let mut ids: Vec<_> = self.panes.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     /// Focus next pane
     pub fn focus_next(&mut self) {
-        let ids: Vec<_> = self.panes.keys().copied().collect();
+        let ids = self.pane_ids();
         if ids.is_empty() {
             return;
         }
@@ -512,7 +515,7 @@ impl LayoutEngine {
 
     /// Focus previous pane
     pub fn focus_prev(&mut self) {
-        let ids: Vec<_> = self.panes.keys().copied().collect();
+        let ids = self.pane_ids();
         if ids.is_empty() {
             return;
         }

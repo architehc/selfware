@@ -340,10 +340,13 @@ impl Pattern {
 
     /// Add episode
     pub fn add_episode(&mut self, episode_id: impl Into<String>) {
-        self.episode_ids.push(episode_id.into());
-        self.frequency = self.episode_ids.len();
-        // Increase confidence with more occurrences
-        self.confidence = (self.confidence + 0.1).min(1.0);
+        let id = episode_id.into();
+        if !self.episode_ids.contains(&id) {
+            self.episode_ids.push(id);
+            self.frequency = self.episode_ids.len();
+            // Increase confidence with more occurrences
+            self.confidence = (self.confidence + 0.1).min(1.0);
+        }
     }
 
     /// Set suggestion

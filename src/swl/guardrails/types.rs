@@ -371,16 +371,20 @@ pub struct GuardrailSummary {
 impl GuardrailSummary {
     /// Check if any violations should block execution
     pub fn should_block(&self) -> bool {
-        self.outcomes
-            .iter()
-            .any(|o| matches!(o.action, ViolationAction::Block) && o.result.is_fail())
+        self.outcomes.iter().any(|o| {
+            matches!(o.action, ViolationAction::Block)
+                && (o.result.is_fail() || o.result.is_error())
+        })
     }
 
     /// Get all blocking violations
     pub fn blocking_violations(&self) -> Vec<&GuardrailOutcome> {
         self.outcomes
             .iter()
-            .filter(|o| matches!(o.action, ViolationAction::Block) && o.result.is_fail())
+            .filter(|o| {
+                matches!(o.action, ViolationAction::Block)
+                    && (o.result.is_fail() || o.result.is_error())
+            })
             .collect()
     }
 

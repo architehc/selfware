@@ -206,6 +206,14 @@ pub(crate) fn open_broad_discovery_regular(path: &Path) -> std::io::Result<std::
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
         let file = options.open(path)?;
         validate_broad_discovery_file_handle(&file)?;
+        if !path_contains_private_discovery_state(path) {
+            let real_path = crate::safety::path_validator::fd_real_path(&file, path)?;
+            if path_contains_private_discovery_state(&real_path) {
+                return Err(broad_discovery_refusal(
+                    "broad discovery refuses private discovery state",
+                ));
+            }
+        }
         Ok(file)
     }
 
@@ -217,6 +225,14 @@ pub(crate) fn open_broad_discovery_regular(path: &Path) -> std::io::Result<std::
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         let file = options.open(path)?;
         validate_broad_discovery_file_handle(&file)?;
+        if !path_contains_private_discovery_state(path) {
+            let real_path = crate::safety::path_validator::fd_real_path(&file, path)?;
+            if path_contains_private_discovery_state(&real_path) {
+                return Err(broad_discovery_refusal(
+                    "broad discovery refuses private discovery state",
+                ));
+            }
+        }
         Ok(file)
     }
 
@@ -233,7 +249,21 @@ pub(crate) fn open_broad_discovery_regular(path: &Path) -> std::io::Result<std::
 /// Whether a path is safe to admit through implicit repository discovery.
 /// Any open, type, reparse/symlink, or link-count failure is fail-closed.
 pub(crate) fn broad_discovery_file_is_safe(path: &Path) -> bool {
-    open_broad_discovery_regular(path).is_ok()
+    !path_contains_private_discovery_state(path) && open_broad_discovery_regular(path).is_ok()
+}
+
+/// Read one implicitly discovered corpus file as UTF-8 from a single
+/// descriptor checked by [`open_broad_discovery_regular`].
+pub(crate) fn read_broad_discovery_utf8(path: &Path) -> std::io::Result<String> {
+    if path_contains_private_discovery_state(path) {
+        return Err(broad_discovery_refusal(
+            "broad discovery refuses private discovery state",
+        ));
+    }
+    let mut file = open_broad_discovery_regular(path)?;
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut file, &mut buf)?;
+    Ok(buf)
 }
 
 /// Encode an untrusted display label (most commonly a filesystem path) for
@@ -982,5 +1012,28 @@ mod private_discovery_root_tests {
         let mut content = String::new();
         file.read_to_string(&mut content).expect("read exact file");
         assert!(content.contains("hard_link_fixture"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broad_discovery_refuses_intermediate_symlink_into_private_state() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let private_dir = temp.path().join(".claude");
+        std::fs::create_dir_all(&private_dir).expect("create .claude");
+        let secret = private_dir.join("secret.rs");
+        std::fs::write(&secret, "pub fn private_fixture() {}\n").expect("write secret");
+
+        let public_dir = temp.path().join("src");
+        std::fs::create_dir_all(&public_dir).expect("create src");
+        let bridge = public_dir.join("linked_dir");
+        symlink(&private_dir, &bridge).expect("symlink .claude into src/linked_dir");
+
+        let bridged_file = bridge.join("secret.rs");
+        assert!(!path_contains_private_discovery_state(&bridged_file));
+        assert!(!broad_discovery_file_is_safe(&bridged_file));
+        assert!(open_broad_discovery_regular(&bridged_file).is_err());
+        assert!(read_broad_discovery_utf8(&bridged_file).is_err());
     }
 }

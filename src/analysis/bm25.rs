@@ -107,6 +107,7 @@ impl BM25Index {
     /// Add multiple documents at once (more efficient than individual adds)
     pub fn add_batch(&mut self, docs: impl IntoIterator<Item = (String, String)>) {
         for (id, text) in docs {
+            self.remove_all(&id);
             let tokens = Self::tokenize(&text);
             let length = tokens.len() as u32;
 

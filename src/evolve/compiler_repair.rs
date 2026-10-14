@@ -391,10 +391,22 @@ fn resolve_inside(root_canon: &Path, file: &str) -> std::result::Result<PathBuf,
             "`{file}` is not a project-relative path (dependency or std source)"
         ));
     }
+    let is_selfware_repo =
+        root_canon.join("src/evolve").exists() || root_canon.join("src/evolution").exists();
+    if is_selfware_repo && crate::evolve::is_protected_path(rel) {
+        return Err(format!("`{file}` is a protected path"));
+    }
     let joined = root_canon.join(rel);
     let canon = fs::canonicalize(&joined).map_err(|_| format!("`{file}` does not exist"))?;
     if !canon.starts_with(root_canon) {
         return Err(format!("`{file}` resolves outside the project root"));
+    }
+    if is_selfware_repo {
+        if let Ok(canon_rel) = canon.strip_prefix(root_canon) {
+            if crate::evolve::is_protected_path(canon_rel) {
+                return Err(format!("`{file}` is a protected path"));
+            }
+        }
     }
     if !canon.is_file() {
         return Err(format!("`{file}` is not a regular file"));

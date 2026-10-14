@@ -213,17 +213,19 @@ async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
         .ok()?
         .ok()?;
 
-    let out = if result.status.success() {
-        String::from_utf8_lossy(&result.stdout).to_string()
+    if !result.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let trimmed_stdout = stdout.trim();
+    if !trimmed_stdout.is_empty() {
+        Some(trimmed_stdout.to_string())
     } else {
-        // Some tools print version to stderr (e.g. rustfmt)
-        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
-        if stderr.is_empty() {
-            return None;
-        }
-        stderr
-    };
-    Some(out.trim().to_string())
+        // Some tools print version to stderr even on exit 0 (e.g. java -version)
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        Some(stderr.trim().to_string())
+    }
 }
 
 /// Extract a version-like string from output (first token matching semver-ish).
@@ -364,9 +366,9 @@ async fn check_tool(
     }
 }
 
-/// Check a tool that uses `npx <tool> --version`.
+/// Check a tool that uses `npx --no-install <tool> --version`.
 async fn check_npx_tool(name: &str, category: Category, tool: &str) -> DoctorCheck {
-    if let Some(output) = run_cmd("npx", &[tool, "--version"]).await {
+    if let Some(output) = run_cmd("npx", &["--no-install", tool, "--version"]).await {
         let version = extract_version(&output);
         return DoctorCheck {
             name: name.to_string(),
@@ -1257,7 +1259,7 @@ pub async fn run_doctor_scoped(config_path: Option<&str>, all: bool) -> DoctorRe
         Err(e) => checks.push(DoctorCheck {
             name: "config load".to_string(),
             category: Category::Configuration,
-            status: CheckStatus::Warning,
+            status: CheckStatus::Missing,
             version: None,
             message: format!("could not load selfware.toml: {}", e),
             fix_hint: Some(

@@ -85,6 +85,9 @@ pub struct DreamState {
     /// Whether consolidation is currently running (lock)
     #[serde(skip)]
     pub consolidation_lock: bool,
+    /// Whether this `DreamState` instance acquired the lock file and should delete it on drop
+    #[serde(skip)]
+    owns_lock: bool,
     /// Total number of dreams run
     #[serde(default)]
     pub dream_count: usize,
@@ -104,28 +107,24 @@ impl DreamState {
         base_dir.join("dream_state.json")
     }
 
-    /// Load dream state from disk
+    /// Load dream state from disk without deleting an active lock file
     pub fn load(base_dir: &Path) -> Result<Self> {
         let path = Self::state_file_path(base_dir);
+        let lock_path = base_dir.join("dream.lock");
         if !path.exists() {
-            return Ok(Self::new());
+            return Ok(Self {
+                consolidation_lock: lock_path.exists(),
+                owns_lock: false,
+                lock_file_path: Some(lock_path),
+                ..Self::default()
+            });
         }
 
         let content = std::fs::read_to_string(&path)?;
         let mut state: DreamState = serde_json::from_str(&content)?;
-        state.lock_file_path = Some(base_dir.join("dream.lock"));
-
-        // Check if a lock file exists from a previous run
-        if state
-            .lock_file_path
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-        {
-            warn!("Found existing dream lock file - previous dream may have crashed");
-            // Clear the stale lock
-            let _ = std::fs::remove_file(state.lock_file_path.as_ref().unwrap());
-        }
+        state.consolidation_lock = lock_path.exists();
+        state.owns_lock = false;
+        state.lock_file_path = Some(lock_path);
 
         Ok(state)
     }
@@ -154,6 +153,9 @@ impl DreamState {
             if lock_path.exists() {
                 return false;
             }
+            if let Some(parent) = lock_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             if let Err(e) = std::fs::write(lock_path, std::process::id().to_string()) {
                 warn!("Failed to create dream lock file: {}", e);
                 return false;
@@ -161,12 +163,20 @@ impl DreamState {
         }
 
         self.consolidation_lock = true;
+        self.owns_lock = true;
         true
+    }
+
+    /// Transfer ownership of the consolidation lock to a background task so
+    /// dropping this `DreamState` does not delete `dream.lock` prematurely.
+    pub fn detach_consolidation_lock(&mut self) {
+        self.owns_lock = false;
     }
 
     /// Release the consolidation lock
     pub fn release_consolidation_lock(&mut self) {
         self.consolidation_lock = false;
+        self.owns_lock = false;
 
         // Remove lock file
         if let Some(ref lock_path) = self.lock_file_path {
@@ -181,25 +191,30 @@ impl DreamState {
 
     /// Check if the state indicates a dream should run (without checking lock)
     pub fn should_run_dream_check_gates(&self, trigger: &DreamTrigger) -> bool {
-        // Gate 1: Check minimum hours since last dream
-        // If never run (timestamp is 0), we don't pass this gate
+        // Gate 1: Check minimum hours since last dream.
+        // If loaded from disk (`lock_file_path.is_some()`) and never run before
+        // (`last_dream_timestamp == 0`), allow the first autoDream once enough
+        // sessions have accumulated. For in-memory `DreamState::new()` (where
+        // `lock_file_path.is_none()`), require `last_dream_timestamp > 0`.
         if self.last_dream_timestamp == 0 {
-            debug!("Dream gate 1 failed: no previous dream recorded");
-            return false;
-        }
+            if self.lock_file_path.is_none() {
+                debug!("Dream gate 1 failed: no previous dream recorded");
+                return false;
+            }
+        } else {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let hours_since_last = now.saturating_sub(self.last_dream_timestamp) / 3600;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let hours_since_last = (now - self.last_dream_timestamp) / 3600;
-
-        if hours_since_last < trigger.min_hours_since_last {
-            debug!(
-                "Dream gate 1 failed: only {} hours since last dream (need {})",
-                hours_since_last, trigger.min_hours_since_last
-            );
-            return false;
+            if hours_since_last < trigger.min_hours_since_last {
+                debug!(
+                    "Dream gate 1 failed: only {} hours since last dream (need {})",
+                    hours_since_last, trigger.min_hours_since_last
+                );
+                return false;
+            }
         }
 
         // Gate 2: Check minimum sessions since last dream
@@ -216,11 +231,14 @@ impl DreamState {
 
     /// Get hours until next dream based on trigger
     pub fn hours_until_next(&self, trigger: &DreamTrigger) -> u64 {
+        if self.last_dream_timestamp == 0 {
+            return 0;
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let hours_since_last = (now - self.last_dream_timestamp) / 3600;
+        let hours_since_last = now.saturating_sub(self.last_dream_timestamp) / 3600;
 
         trigger
             .min_hours_since_last
@@ -237,8 +255,8 @@ impl DreamState {
 
 impl Drop for DreamState {
     fn drop(&mut self) {
-        // Clean up lock on drop if we still hold it
-        if self.consolidation_lock {
+        // Clean up lock on drop only if this instance still owns it
+        if self.consolidation_lock && self.owns_lock {
             self.release_consolidation_lock();
         }
     }
@@ -516,9 +534,17 @@ impl MemoryStore {
                     .cloned()
                     .collect();
 
+                let mut test_sections: HashMap<MemorySection, Vec<usize>> = HashMap::new();
+                for (entry_idx, entry) in test_entries.iter().enumerate() {
+                    test_sections
+                        .entry(entry.section.clone())
+                        .or_default()
+                        .push(entry_idx);
+                }
+
                 let test_store = MemoryStore {
                     entries: test_entries,
-                    sections: HashMap::new(), // Simplified check
+                    sections: test_sections,
                 };
                 let test_content = test_store.format();
 

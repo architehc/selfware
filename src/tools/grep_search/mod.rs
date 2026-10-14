@@ -194,7 +194,8 @@ fn run_ripgrep(
     exclude_pattern: Option<&str>,
     safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
-    let broad_discovery = Path::new(path).is_dir();
+    let exact_file = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
+    let broad_discovery = !exact_file;
     if broad_discovery && crate::safety::source_context::discovery_root_is_private(Path::new(path))
     {
         return Ok(GrepSearchResult {
@@ -347,21 +348,40 @@ fn run_ripgrep(
     for raw in window {
         if !files_read.contains_key(&raw.file) {
             let content = if broad_discovery {
-                let mut file = match crate::safety::source_context::open_broad_discovery_regular(
-                    Path::new(&raw.file),
-                ) {
-                    Ok(file) => file,
-                    Err(_) => continue,
-                };
-                let mut content = String::new();
-                if file.read_to_string(&mut content).is_err() {
-                    continue;
-                }
-                content
-            } else {
-                match std::fs::read_to_string(&raw.file) {
+                match crate::safety::source_context::read_broad_discovery_utf8(Path::new(&raw.file))
+                {
                     Ok(content) => content,
                     Err(_) => continue,
+                }
+            } else {
+                match safety {
+                    Some(s) => {
+                        let mut validated = match crate::tools::file::open_checked_regular_with_path(
+                            &raw.file, s,
+                        ) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let mut content = String::new();
+                        if validated.file.read_to_string(&mut content).is_err() {
+                            continue;
+                        }
+                        content
+                    }
+                    None => {
+                        let mut file =
+                            match crate::safety::source_context::open_broad_discovery_regular(
+                                Path::new(&raw.file),
+                            ) {
+                                Ok(f) => f,
+                                Err(_) => continue,
+                            };
+                        let mut content = String::new();
+                        if file.read_to_string(&mut content).is_err() {
+                            continue;
+                        }
+                        content
+                    }
                 }
             };
             files_read.insert(
@@ -667,7 +687,7 @@ fn run_builtin_grep(
         .context("Invalid exclude pattern")?;
 
     let path = Path::new(path_str);
-    let exact_file = path.is_file();
+    let exact_file = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
     if !exact_file && crate::safety::source_context::discovery_root_is_private(path) {
         return Ok(GrepSearchResult {
             matches: Vec::new(),
@@ -733,15 +753,31 @@ fn run_builtin_grep(
         .collect();
 
     for file_path in files {
-        let content = match tokio::task::block_in_place(|| {
+        let content = match tokio::task::block_in_place(|| -> Result<String> {
             if exact_file {
-                std::fs::read_to_string(&file_path)
+                match safety {
+                    Some(s) => {
+                        let mut validated = crate::tools::file::open_checked_regular_with_path(
+                            &file_path.to_string_lossy(),
+                            s,
+                        )?;
+                        let mut content = String::new();
+                        validated.file.read_to_string(&mut content)?;
+                        Ok(content)
+                    }
+                    None => {
+                        let mut file = crate::safety::source_context::open_broad_discovery_regular(
+                            &file_path,
+                        )?;
+                        let mut content = String::new();
+                        file.read_to_string(&mut content)?;
+                        Ok(content)
+                    }
+                }
             } else {
-                let mut file =
-                    crate::safety::source_context::open_broad_discovery_regular(&file_path)?;
-                let mut content = String::new();
-                file.read_to_string(&mut content)?;
-                Ok(content)
+                Ok(crate::safety::source_context::read_broad_discovery_utf8(
+                    &file_path,
+                )?)
             }
         }) {
             Ok(c) => c,
@@ -1033,17 +1069,30 @@ mod private_state_walk_tests {
         let file = temp.path().join(".claude").join("notes.txt");
         write(&file, &format!("{marker}\n"));
         let file_str = file.to_str().expect("utf8 file");
+        let safety = permissive_safety();
 
         if rg_available() {
-            let external = run_ripgrep(marker, file_str, false, 0, 20, 0, None, None, None)
-                .expect("external exact grep");
+            let external =
+                run_ripgrep(marker, file_str, false, 0, 20, 0, None, None, Some(&safety))
+                    .expect("external exact grep");
             assert_eq!(external.matches.len(), 1, "{:?}", external.matches);
             assert_eq!(external.total_matches, 1);
             assert!(external.matches[0].content.contains(marker));
         }
 
-        let builtin = run_builtin_grep(marker, file_str, true, false, 0, 20, 0, None, None, None)
-            .expect("builtin exact grep");
+        let builtin = run_builtin_grep(
+            marker,
+            file_str,
+            true,
+            false,
+            0,
+            20,
+            0,
+            None,
+            None,
+            Some(&safety),
+        )
+        .expect("builtin exact grep");
         assert_eq!(builtin.matches.len(), 1, "{:?}", builtin.matches);
         assert!(builtin.matches[0].content.contains(marker));
     }
@@ -1085,6 +1134,7 @@ mod private_state_walk_tests {
         write(&secret, "hard_link_marker secret\n");
         let linked = root.path().join("linked.txt");
         std::fs::hard_link(&secret, &linked).expect("hard link");
+        let safety = permissive_safety();
 
         let builtin = run_builtin_grep(
             "hard_link_marker",
@@ -1112,7 +1162,7 @@ mod private_state_walk_tests {
             0,
             None,
             None,
-            None,
+            Some(&safety),
         )
         .expect("builtin exact grep");
         assert_eq!(exact.matches.len(), 1);
@@ -1142,10 +1192,55 @@ mod private_state_walk_tests {
                 0,
                 None,
                 None,
-                None,
+                Some(&safety),
             )
             .expect("external exact grep");
             assert_eq!(exact.matches.len(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_level_symlink_to_file_is_not_treated_as_exact_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join(".claude").join("secret.txt");
+        write(&target, "symlink_target_marker\n");
+        let link = temp.path().join("public_link.txt");
+        symlink(&target, &link).expect("create symlink");
+        let link_str = link.to_str().expect("utf8 link");
+        let safety = permissive_safety();
+
+        let builtin = run_builtin_grep(
+            "symlink_target_marker",
+            link_str,
+            true,
+            false,
+            0,
+            20,
+            0,
+            None,
+            None,
+            Some(&safety),
+        )
+        .expect("builtin symlink grep");
+        assert!(builtin.matches.is_empty(), "{:?}", builtin.matches);
+
+        if rg_available() {
+            let external = run_ripgrep(
+                "symlink_target_marker",
+                link_str,
+                false,
+                0,
+                20,
+                0,
+                None,
+                None,
+                Some(&safety),
+            )
+            .expect("external symlink grep");
+            assert!(external.matches.is_empty(), "{:?}", external.matches);
         }
     }
 }

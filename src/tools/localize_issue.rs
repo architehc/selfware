@@ -277,6 +277,7 @@ fn recent_git_files(repo_path: &str) -> HashSet<String> {
         .args([
             "log",
             "-z",
+            "--relative",
             "--pretty=format:",
             "--name-only",
             "--since=30 days ago",
@@ -468,7 +469,6 @@ fn localize_issue_with_limits(
         ..SafetyConfig::default()
     };
     let read_policy = policy.unwrap_or(&fallback_policy);
-    let repo_root = Path::new(repo_path);
 
     // ------------------------------------------------------------------
     // Walk the repository and collect file stats.
@@ -487,7 +487,7 @@ fn localize_issue_with_limits(
     let mut ranking_tokens_seen = 0usize;
     let mut source_candidates = BTreeMap::<String, PathBuf>::new();
 
-    let walk = WalkDir::new(repo_path)
+    let walk = WalkDir::new(&canonical_repo_root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
@@ -530,7 +530,7 @@ fn localize_issue_with_limits(
             continue;
         }
 
-        let Some(relative_path) = normalized_relative_path(repo_root, path) else {
+        let Some(relative_path) = normalized_relative_path(&canonical_repo_root, path) else {
             continue;
         };
 
@@ -684,7 +684,8 @@ fn localize_issue_with_limits(
 
         // Recent git change boost.
         let rel_path = path
-            .strip_prefix(repo_path)
+            .strip_prefix(&canonical_repo_root)
+            .or_else(|_| path.strip_prefix(repo_path))
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();

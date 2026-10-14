@@ -74,6 +74,12 @@ impl PermissionGrant {
             return false;
         }
 
+        if let Some(path) = resource_path {
+            if path.split(['/', '\\']).any(|seg| seg == "..") {
+                return false;
+            }
+        }
+
         // If the grant has a resource pattern, the path must match
         if let Some(ref res_pattern) = self.resource_pattern {
             if let Some(path) = resource_path {
@@ -86,17 +92,19 @@ impl PermissionGrant {
     }
 }
 
-/// Simple glob-like pattern matching (supports `*` wildcard).
+/// Simple glob-like pattern matching (supports `*` and `**` wildcards).
 fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
+    if pattern == "*" || pattern == "**" {
         return true;
     }
 
-    if let Some(prefix) = pattern.strip_suffix('*') {
+    if pattern.ends_with('*') {
+        let prefix = pattern.trim_end_matches('*');
         return value.starts_with(prefix);
     }
 
-    if let Some(suffix) = pattern.strip_prefix('*') {
+    if pattern.starts_with('*') {
+        let suffix = pattern.trim_start_matches('*');
         return value.ends_with(suffix);
     }
 

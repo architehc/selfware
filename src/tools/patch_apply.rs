@@ -35,7 +35,73 @@ fn diff_touches_symlink_mode(diff: &str) -> bool {
 /// File deletions (`+++ /dev/null`) target the OLD file path (`--- a/<path>`):
 /// that is the path the operation actually affects, so it is what must be
 /// validated and checkpointed — never `/dev/null`.
-fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
+fn push_unique_target(targets: &mut Vec<String>, path: &str) {
+    let p = path.trim();
+    if !p.is_empty() && p != "/dev/null" && !targets.iter().any(|t| t == p) {
+        targets.push(p.to_string());
+    }
+}
+
+/// Reject diff header paths that use Git C-quoted syntax (e.g. `"b/\056git/config"`)
+/// or contain control characters.
+pub(crate) fn check_diff_header_safety(diff: &str) -> std::result::Result<(), String> {
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let trimmed = rest.trim();
+            if trimmed.starts_with('"')
+                || trimmed.contains(" \"")
+                || trimmed.contains('"')
+                || rest.chars().any(|c| c.is_control())
+            {
+                return Err(format!(
+                    "patch_apply rejects quoted or control-character diff header: {}",
+                    line
+                ));
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+            .or_else(|| line.strip_prefix("copy from "))
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            if p.starts_with('"')
+                || p.ends_with('"')
+                || p.contains('"')
+                || rest.chars().any(|c| c.is_control() && c != '\t')
+                || p.chars().any(|c| c.is_control())
+            {
+                return Err(format!(
+                    "patch_apply rejects quoted or control-character rename/copy header: {}",
+                    line
+                ));
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
+        {
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            let stripped = p
+                .strip_prefix("a/")
+                .or_else(|| p.strip_prefix("b/"))
+                .unwrap_or(p);
+            if p.starts_with('"')
+                || stripped.starts_with('"')
+                || p.ends_with('"')
+                || rest.chars().any(|c| c.is_control() && c != '\t')
+                || p.chars().any(|c| c.is_control())
+            {
+                return Err(format!(
+                    "patch_apply rejects quoted or control-character file header: {}",
+                    line
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     let mut files = 0;
     let mut insertions = 0;
     let mut deletions = 0;
@@ -43,36 +109,50 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     let mut old_path: Option<String> = None;
 
     for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("--- ") {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let trimmed = rest.trim();
+            if let Some((left, right)) = trimmed.split_once(" b/") {
+                let p1 = left.trim().strip_prefix("a/").unwrap_or(left.trim());
+                let p2 = right.split('\t').next().unwrap_or("").trim();
+                push_unique_target(&mut targets, p1);
+                push_unique_target(&mut targets, p2);
+            } else if let Some((left, right)) = trimmed.split_once(' ') {
+                let p1 = left.trim().strip_prefix("a/").unwrap_or(left.trim());
+                let p2 = right.trim().strip_prefix("b/").unwrap_or(right.trim());
+                push_unique_target(&mut targets, p1);
+                push_unique_target(&mut targets, p2);
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+            .or_else(|| line.strip_prefix("copy from "))
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            push_unique_target(&mut targets, p);
+        } else if let Some(rest) = line.strip_prefix("--- ") {
             // Remember the old-file path; a following `+++ /dev/null` means
-            // this file is being deleted.
+            // this file is being deleted, and a rename/modify also touches the old path.
             let p = rest.split('\t').next().unwrap_or("").trim();
             let p = p.strip_prefix("a/").unwrap_or(p);
             old_path = if p.is_empty() || p == "/dev/null" {
                 None
             } else {
+                push_unique_target(&mut targets, p);
                 Some(p.to_string())
             };
-        } else if line.starts_with("+++ ") {
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
             files += 1;
-            if line.starts_with("+++ /dev/null") {
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            if p == "/dev/null" {
                 // File deletion: the old path is the operation's target.
                 if let Some(old) = old_path.take() {
-                    targets.push(old);
+                    push_unique_target(&mut targets, &old);
                 }
             } else {
-                // Extract path after "+++ b/" or "+++ "
-                let path = line
-                    .strip_prefix("+++ b/")
-                    .or_else(|| line.strip_prefix("+++ "))
-                    .unwrap_or("")
-                    .split('\t')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if !path.is_empty() {
-                    targets.push(path.to_string());
-                }
+                // Extract path after "b/" or raw
+                let path = p.strip_prefix("b/").unwrap_or(p).trim();
+                push_unique_target(&mut targets, path);
             }
             old_path = None;
         } else if line.starts_with('+') && !line.starts_with("+++") && !line.starts_with("@@") {
@@ -82,19 +162,23 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
         }
     }
 
+    if files == 0 && !targets.is_empty() {
+        files = 1;
+    }
+
     (files, insertions, deletions, targets)
 }
 
 /// Parse the old/new line counts of a hunk header `@@ -a[,b] +c[,d] @@`.
 /// Per target file (the `+++ b/<path>` header): the removed/context text
 /// and the added text of its hunks.
-fn diff_sides_by_target(diff: &str) -> Vec<(String, String, String)> {
+pub(crate) fn diff_sides_by_target(diff: &str) -> Vec<(String, String, String)> {
     let mut out: Vec<(String, String, String)> = Vec::new();
     for line in diff.lines() {
         if let Some(target) = line.strip_prefix("+++ ") {
-            let target = target.trim();
-            let target = target.strip_prefix("b/").unwrap_or(target);
-            if target != "/dev/null" {
+            let target = target.split('\t').next().unwrap_or("").trim();
+            let target = target.strip_prefix("b/").unwrap_or(target).trim();
+            if !target.is_empty() && target != "/dev/null" {
                 out.push((target.to_string(), String::new(), String::new()));
             }
             continue;
@@ -256,6 +340,10 @@ impl Tool for PatchApply {
             );
         }
 
+        if let Err(msg) = check_diff_header_safety(diff) {
+            anyhow::bail!("{msg}");
+        }
+
         let (files, insertions, deletions, targets) = parse_diff_stats(diff);
 
         // Validate all target paths through the safety validator
@@ -354,6 +442,10 @@ impl Tool for PatchApply {
                 Err(e) => format!("failed to run git apply --check: {}", e),
             };
             anyhow::bail!("git apply failed: {}", stderr);
+        }
+
+        for path in &targets {
+            crate::tools::file::clear_file_snapshot(path);
         }
 
         let mut result = serde_json::json!({

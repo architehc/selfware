@@ -240,6 +240,7 @@ pub async fn spawn_server(binary: &Path, model: &Path, port: u16) -> Result<Llam
         }
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
+            let _ = child.wait();
             bail!("llama-server did not become healthy within 120s");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

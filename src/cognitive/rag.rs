@@ -76,8 +76,18 @@ fn is_excluded_path(path: &Path, config: &RagConfig) -> bool {
             if path.extension().is_some_and(|candidate| candidate == ext) {
                 return true;
             }
-        } else if path_str.contains(pattern) {
-            return true;
+        } else if pattern.contains('/') {
+            if path_str.contains(pattern) {
+                return true;
+            }
+        } else {
+            let pat_os = std::ffi::OsStr::new(pattern.as_str());
+            if path
+                .components()
+                .any(|component| component.as_os_str() == pat_os)
+            {
+                return true;
+            }
         }
     }
     false

@@ -372,3 +372,60 @@ fn diff_sides_split_per_target_for_the_display_artifact_guard() {
     )
     .is_err());
 }
+
+#[test]
+fn test_extract_patch_paths_timestamps_renames_and_c_quoted_rejection() {
+    // 1. Trailing \t2026-10-14 timestamps are stripped from --- and +++ headers.
+    let timestamped_diff = "\
+--- a/foo.rs\t2026-10-14
++++ b/foo.rs\t2026-10-14 12:00:00.000000000 +0000
+@@ -1 +1 @@
+-old
++new
+";
+    assert!(check_diff_header_safety(timestamped_diff).is_ok());
+    let (files, insertions, deletions, targets) = parse_diff_stats(timestamped_diff);
+    assert_eq!(files, 1);
+    assert_eq!(insertions, 1);
+    assert_eq!(deletions, 1);
+    assert_eq!(targets, vec!["foo.rs"]);
+
+    // 2. rename from / rename to / copy from / copy to paths are extracted.
+    let rename_copy_diff = "\
+diff --git a/src/old_name.rs b/src/new_name.rs
+similarity index 100%
+rename from src/old_name.rs
+rename to src/new_name.rs
+diff --git a/src/orig.rs b/src/copied.rs
+similarity index 100%
+copy from src/orig.rs
+copy to src/copied.rs
+";
+    assert!(check_diff_header_safety(rename_copy_diff).is_ok());
+    let (_, _, _, rename_targets) = parse_diff_stats(rename_copy_diff);
+    assert_eq!(
+        rename_targets,
+        vec![
+            "src/old_name.rs",
+            "src/new_name.rs",
+            "src/orig.rs",
+            "src/copied.rs"
+        ]
+    );
+
+    // 3. C-quoted paths (e.g. --- "a/foo\141.rs") are rejected.
+    for quoted_diff in [
+        "--- \"a/foo\\141.rs\"\n+++ b/fooa.rs\n@@ -1 +1 @@\n-a\n+b\n",
+        "--- a/foo.rs\n+++ \"b/foo\\141.rs\"\n@@ -1 +1 @@\n-a\n+b\n",
+        "diff --git \"a/foo\\141.rs\" \"b/foo\\141.rs\"\n",
+        "rename to \"a/foo\\141.rs\"\n",
+        "copy to \"b/foo\\141.rs\"\n",
+    ] {
+        let err = check_diff_header_safety(quoted_diff)
+            .expect_err("C-quoted diff header path must be rejected");
+        assert!(
+            err.contains("rejects quoted"),
+            "unexpected error for {quoted_diff:?}: {err}"
+        );
+    }
+}

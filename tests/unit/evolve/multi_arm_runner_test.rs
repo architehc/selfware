@@ -172,6 +172,53 @@ fn a_zero_baseline_median_never_divides_by_zero() {
 }
 
 #[test]
+fn uncompiled_baseline_or_errored_arm_measurement_never_passes_consensus_gate() {
+    // 1. Baseline did not compile (`baseline.compiled == false`), even if samples exist.
+    let uncompiled_base = ArmMeasurement {
+        compiled: false,
+        tests_passed: 10,
+        tests_failed: 0,
+        bench_samples_ns: vec![100, 105, 110],
+        ..Default::default()
+    };
+    let report = runner(1).evaluate_arms(
+        &uncompiled_base,
+        &[arm("fast-arm", "Fast candidate", VALID)],
+        |_| Ok(measured(10, 0, &[50, 55, 60])),
+    );
+    let eval = &report.evaluations[0];
+    assert!(!eval.passes_consensus_gate);
+    assert_eq!(eval.verdict, "baseline failed to compile");
+    assert_eq!(report.passing_arms, 0);
+    assert!(!report.consensus_met && report.winning_arm.is_none());
+
+    // 2. Arm compiled and has faster samples, but its ArmMeasurement carries `error: Some(...)`.
+    let report = runner(1).evaluate_arms(
+        &baseline(),
+        &[arm("errored-arm", "Incomplete bench", VALID)],
+        |_| {
+            Ok(ArmMeasurement {
+                compiled: true,
+                tests_passed: 10,
+                tests_failed: 0,
+                bench_samples_ns: vec![50, 55, 60],
+                error: Some("benchmark timed out on replicate 2".into()),
+                ..Default::default()
+            })
+        },
+    );
+    let eval = &report.evaluations[0];
+    assert!(!eval.passes_consensus_gate);
+    assert!(
+        eval.verdict.contains("measurement incomplete"),
+        "unexpected verdict: {}",
+        eval.verdict
+    );
+    assert_eq!(report.passing_arms, 0);
+    assert!(!report.consensus_met && report.winning_arm.is_none());
+}
+
+#[test]
 fn threshold_zero_never_promotes_and_ties_pick_a_winner_without_panicking() {
     let arms = vec![arm("a", "a", VALID), arm("b", "b", VALID)];
     let same = |_: &OptimizationArm| Ok(measured(10, 0, &[50, 50, 50]));

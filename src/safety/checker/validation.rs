@@ -3883,25 +3883,30 @@ pub(crate) fn normalize_shell_command_masked(cmd: &str) -> String {
 fn normalize_shell_command_impl(cmd: &str, restore_quotes: bool) -> String {
     let mut quoted_segments: Vec<String> = Vec::new();
     let mut unquoted = String::with_capacity(cmd.len());
-    let bytes = cmd.as_bytes();
+    let chars: Vec<(usize, char)> = cmd.char_indices().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if (c == b'"' || c == b'\'') && (i == 0 || bytes[i - 1] != b'\\') {
+    while i < chars.len() {
+        let (byte_idx, c) = chars[i];
+        if (c == '"' || c == '\'') && (i == 0 || chars[i - 1].1 != '\\') {
             let quote = c;
-            let seg_start = i;
+            let seg_start = byte_idx;
             i += 1;
-            while i < bytes.len() && !(bytes[i] == quote && bytes[i - 1] != b'\\') {
+            while i < chars.len() && !(chars[i].1 == quote && chars[i - 1].1 != '\\') {
                 i += 1;
             }
-            if i < bytes.len() {
+            if i < chars.len() {
                 i += 1;
             }
+            let seg_end = if i < chars.len() {
+                chars[i].0
+            } else {
+                cmd.len()
+            };
             let placeholder = format!("\x00\x01{}\x00", quoted_segments.len());
-            quoted_segments.push(cmd[seg_start..i].to_string());
+            quoted_segments.push(cmd[seg_start..seg_end].to_string());
             unquoted.push_str(&placeholder);
         } else {
-            unquoted.push(c as char);
+            unquoted.push(c);
             i += 1;
         }
     }
@@ -3915,25 +3920,25 @@ fn normalize_shell_command_impl(cmd: &str, restore_quotes: bool) -> String {
 
     // Remove backslash escapes
     let mut deslashed = String::with_capacity(result.len());
-    let result_bytes = result.as_bytes();
+    let result_chars: Vec<char> = result.chars().collect();
     let mut j = 0;
-    while j < result_bytes.len() {
-        if result_bytes[j] == b'\\' && j + 1 < result_bytes.len() {
-            let next = result_bytes[j + 1];
+    while j < result_chars.len() {
+        if result_chars[j] == '\\' && j + 1 < result_chars.len() {
+            let next = result_chars[j + 1];
             // Backslash before space also drops the backslash (keeping the
             // space): `r\m\ -rf\ /tmp/x` deslashes to `rm -rf /tmp/x`
             // (wave-180), while `r\ m` stays two words `r m` (inert).
             if next.is_ascii_alphanumeric()
-                || next == b'_'
-                || next == b'-'
-                || next == b'/'
-                || next == b' '
+                || next == '_'
+                || next == '-'
+                || next == '/'
+                || next == ' '
             {
                 j += 1;
                 continue;
             }
         }
-        deslashed.push(result_bytes[j] as char);
+        deslashed.push(result_chars[j]);
         j += 1;
     }
     result = deslashed;
@@ -3961,22 +3966,22 @@ fn normalize_shell_command_impl(cmd: &str, restore_quotes: bool) -> String {
 /// Strip quotes and lowercase
 pub(crate) fn dequote_and_lowercase(cmd: &str) -> String {
     let mut out = String::with_capacity(cmd.len());
-    let bytes = cmd.as_bytes();
+    let chars: Vec<char> = cmd.chars().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if (c == b'\'' || c == b'"') && (i == 0 || bytes[i - 1] != b'\\') {
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == '\'' || c == '"') && (i == 0 || chars[i - 1] != '\\') {
             let quote = c;
             i += 1;
-            while i < bytes.len() && !(bytes[i] == quote && (i == 0 || bytes[i - 1] != b'\\')) {
-                out.push(bytes[i] as char);
+            while i < chars.len() && !(chars[i] == quote && (i == 0 || chars[i - 1] != '\\')) {
+                out.push(chars[i]);
                 i += 1;
             }
-            if i < bytes.len() {
+            if i < chars.len() {
                 i += 1;
             }
         } else {
-            out.push(c as char);
+            out.push(c);
             i += 1;
         }
     }
@@ -5615,6 +5620,40 @@ mod outbound_credential_shape_tests {
         assert!(
             checker.check_tool_call(&benign).is_ok(),
             "a shape-less bearer token must stay allowed"
+        );
+    }
+
+    #[test]
+    fn normalize_and_dequote_preserve_utf8_and_collapse_separators() {
+        use super::{
+            dequote_and_lowercase, expand_ifs_for_matching, normalize_shell_command,
+            normalize_shell_command_masked,
+        };
+
+        let cmd = r#"echo "café résumé" 'naïve façade'"#;
+        let normalized = normalize_shell_command(cmd);
+        assert_eq!(normalized, r#"echo "café résumé" 'naïve façade'"#);
+
+        let dequoted = dequote_and_lowercase(&normalized);
+        assert_eq!(dequoted, "echo café résumé naïve façade");
+
+        let unquoted_utf8 = "ECHO   CAFÉ\\tRÉSUMÉ\tÜBER";
+        let norm_unquoted = normalize_shell_command(unquoted_utf8);
+        assert_eq!(norm_unquoted, "echo café résumé über");
+        assert_eq!(
+            dequote_and_lowercase(r#"echo "CAFÉ RÉSUMÉ""#),
+            "echo café résumé"
+        );
+
+        // Collapsing \t (literal and escaped) and ${IFS} separators
+        assert_eq!(normalize_shell_command("rm\t-rf\t//"), "rm -rf /");
+        assert_eq!(normalize_shell_command(r"rm\t-rf\t/"), "rm -rf /");
+        let ifs_cmd = "rm${IFS}-rf${IFS}/";
+        let ifs_expanded = expand_ifs_for_matching(&normalize_shell_command_masked(ifs_cmd));
+        assert_eq!(
+            normalize_shell_command(&ifs_expanded),
+            "rm -rf /",
+            "rm${{IFS}}-rf${{IFS}}/ should normalize to rm -rf /"
         );
     }
 }

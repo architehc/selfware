@@ -39,7 +39,7 @@ pub fn test_on_stop_rust() -> HookConfig {
 pub fn auto_commit() -> HookConfig {
     HookConfig {
         event: HookEvent::PostToolUse,
-        command: "git add {path} && git commit -m \"[selfware] auto-commit: {tool} {path}\" --no-verify 2>/dev/null || true".to_string(),
+        command: "git add -- {path} && git commit -m '[selfware] auto-commit: '{tool}' '{path} --no-verify 2>/dev/null || true".to_string(),
         match_tools: vec!["file_write".to_string(), "file_edit".to_string()],
         timeout_secs: 15,
     }
@@ -49,7 +49,8 @@ pub fn auto_commit() -> HookConfig {
 pub fn format_on_save_python() -> HookConfig {
     HookConfig {
         event: HookEvent::PostToolUse,
-        command: "ruff format {path} 2>/dev/null || black {path} 2>/dev/null || true".to_string(),
+        command: "ruff format -- {path} 2>/dev/null || black -- {path} 2>/dev/null || true"
+            .to_string(),
         match_tools: vec!["file_write".to_string(), "file_edit".to_string()],
         timeout_secs: 15,
     }
@@ -59,7 +60,7 @@ pub fn format_on_save_python() -> HookConfig {
 pub fn format_on_save_node() -> HookConfig {
     HookConfig {
         event: HookEvent::PostToolUse,
-        command: "npx prettier --write {path} 2>/dev/null || true".to_string(),
+        command: "npx prettier --write -- {path} 2>/dev/null || true".to_string(),
         match_tools: vec!["file_write".to_string(), "file_edit".to_string()],
         timeout_secs: 15,
     }
@@ -68,3 +69,89 @@ pub fn format_on_save_node() -> HookConfig {
 #[cfg(test)]
 #[path = "../../tests/unit/hooks/builtin/builtin_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod auto_commit_quoting_regression_tests {
+    use super::*;
+    use crate::hooks::{HookAction, HookContext};
+
+    #[test]
+    fn test_auto_commit_and_format_hooks_include_double_dash_and_safe_quoting() {
+        let hook = auto_commit();
+        assert!(
+            hook.command.contains("git add -- {path}"),
+            "auto_commit must pass `--` before file operands: {}",
+            hook.command
+        );
+        assert!(
+            !hook.command.contains("\"[selfware]"),
+            "auto_commit must not wrap {{tool}}/{{path}} inside double quotes: {}",
+            hook.command
+        );
+        assert!(
+            hook.command
+                .contains("git commit -m '[selfware] auto-commit: '{tool}' '{path}"),
+            "auto_commit should concatenate single-quoted placeholders safely: {}",
+            hook.command
+        );
+
+        assert!(format_on_save_rust().command.contains("-- {path}"));
+        assert!(format_on_save_python()
+            .command
+            .contains("ruff format -- {path}"));
+        assert!(format_on_save_python().command.contains("black -- {path}"));
+        assert!(format_on_save_node().command.contains("-- {path}"));
+    }
+
+    #[tokio::test]
+    async fn test_auto_commit_executes_safely_with_spaces_and_metacharacters_in_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Test User"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let sentinel = dir.path().join("injected_sentinel");
+        let tricky_rel = format!(
+            "dir with spaces/file $(touch {}) `id` 'quote'.rs",
+            sentinel.display()
+        );
+        let tricky_full = repo.join(&tricky_rel);
+        std::fs::create_dir_all(tricky_full.parent().unwrap()).unwrap();
+        std::fs::write(&tricky_full, "fn main() {}\n").unwrap();
+
+        let args_json = serde_json::json!({ "path": tricky_rel }).to_string();
+        let ctx = HookContext::post_tool("file_write", &args_json, true, "ok");
+        let root = crate::tools::workspace_root::WorkspaceRoot::fixed(repo.clone());
+
+        let action =
+            crate::hooks::shell_handler::execute_hook_in_root(&auto_commit(), &ctx, &root).await;
+        assert!(matches!(action, HookAction::Continue));
+        assert!(
+            !sentinel.exists(),
+            "shell metacharacters in path must not be evaluated"
+        );
+
+        let log_out = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let subject = String::from_utf8_lossy(&log_out.stdout);
+        assert!(
+            subject.trim().contains(&tricky_rel),
+            "commit subject should contain literal path, got: {subject}"
+        );
+    }
+}

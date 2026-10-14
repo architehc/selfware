@@ -303,7 +303,13 @@ impl PermissionChecker {
     }
 
     /// YOLO mode: auto-approve everything (with some safety checks)
-    fn check_yolo_mode(&self, _tool_name: &str, metadata: &ToolMetadata) -> PermissionResult {
+    fn check_yolo_mode(&self, tool_name: &str, metadata: &ToolMetadata) -> PermissionResult {
+        if tool_name == "hot_reload" {
+            return PermissionResult::Prompt {
+                reason: "hot_reload loads native code and always requires confirmation".to_string(),
+            };
+        }
+
         // Block network if not allowed
         if metadata.network_access && !self.allow_network {
             return PermissionResult::Prompt {
@@ -336,7 +342,7 @@ impl PermissionChecker {
 fn is_protected_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "file_delete" | "shell_exec" | "container_remove" | "compose_down"
+        "file_delete" | "shell_exec" | "container_remove" | "compose_down" | "hot_reload"
     )
 }
 
@@ -505,8 +511,8 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         | "context_bulk_read"
         | "context_summary" => ToolMetadata::read_only(),
 
-        // Hot reload — state change.
-        "hot_reload" => ToolMetadata::custom(false, false, RiskLevel::Medium, false, false),
+        // Hot reload — native dynamic library execution (high risk).
+        "hot_reload" => ToolMetadata::custom(false, true, RiskLevel::High, false, true),
 
         // Unlisted tool: signal that no explicit classification exists.
         _ => return None,
@@ -678,3 +684,41 @@ pub fn normal_mode_call_needs_confirmation_without_verification(
 #[cfg(test)]
 #[path = "../../tests/unit/safety/tool_metadata/tool_metadata_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hot_reload_and_protected_path_regression_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_hot_reload_always_confirms_and_safety_checker_is_protected() {
+        let meta = classify_tool_metadata("hot_reload").expect("hot_reload must be classified");
+        assert_eq!(meta.risk_level, RiskLevel::High);
+        assert!(meta.destructive);
+        assert!(meta.shell_execution);
+        assert!(!meta.read_only);
+        assert!(is_protected_tool("hot_reload"));
+
+        let grants = crate::safety::permissions::PermissionStore::new();
+        assert!(normal_mode_needs_confirmation("hot_reload", &[], &grants));
+
+        for mode in [
+            ExecutionMode::Normal,
+            ExecutionMode::Auto,
+            ExecutionMode::Yolo,
+        ] {
+            let checker = PermissionChecker::new(mode);
+            assert!(
+                matches!(
+                    checker.check("hot_reload", &meta, &Value::Null),
+                    PermissionResult::Prompt { .. }
+                ),
+                "hot_reload must prompt in {mode:?} mode"
+            );
+        }
+
+        assert!(crate::evolve::is_protected_path(Path::new(
+            "src/safety/checker/mod.rs"
+        )));
+    }
+}

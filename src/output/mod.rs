@@ -1925,7 +1925,15 @@ pub fn restore_terminal_before_exit() {
     use std::io::IsTerminal;
     let _ = crossterm::terminal::disable_raw_mode();
     let mut stdout = std::io::stdout();
-    if stdout.is_terminal() {
+    if is_tui_active() {
+        let _ = crossterm::execute!(
+            stdout,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+        set_tui_active(false);
+    } else if stdout.is_terminal() {
         let _ = crossterm::execute!(stdout, crossterm::cursor::Show);
     }
 }

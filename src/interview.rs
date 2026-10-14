@@ -476,6 +476,14 @@ fn read_line_raw() -> Result<LineInput> {
     loop {
         if event::poll(std::time::Duration::from_millis(5000))? {
             if let Event::Key(key) = event::read()? {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c' | 'C'))
+                {
+                    write!(stdout, "\r\n")?;
+                    stdout.flush()?;
+                    crate::request_shutdown();
+                    return Err(crate::errors::SelfwareError::Interrupted.into());
+                }
                 if let Some(input) = handle_raw_key(key, &mut buf, &mut stdout)? {
                     return Ok(input);
                 }
@@ -512,7 +520,18 @@ fn handle_raw_key(
     // can never be appended to the buffer as literal 'c'/'d'.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(c) = key.code {
-            if matches!(c, 'c' | 'C' | 'd' | 'D') {
+            if matches!(c, 'c' | 'C') {
+                write!(out, "\r\n")?;
+                out.flush()?;
+                #[cfg(not(test))]
+                {
+                    crate::request_shutdown();
+                    return Err(crate::errors::SelfwareError::Interrupted.into());
+                }
+                #[cfg(test)]
+                return Ok(Some(LineInput::Esc));
+            }
+            if matches!(c, 'd' | 'D') {
                 write!(out, "\r\n")?;
                 out.flush()?;
                 return Ok(Some(LineInput::Esc));

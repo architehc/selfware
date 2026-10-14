@@ -119,6 +119,14 @@ pub(crate) async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>
     }
 
     let length = content_length.context("Missing Content-Length header")?;
+    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+    if length > MAX_MESSAGE_BYTES {
+        anyhow::bail!(
+            "MCP message too large: {} bytes (max {})",
+            length,
+            MAX_MESSAGE_BYTES
+        );
+    }
 
     let mut buf = vec![0u8; length];
     reader.read_exact(&mut buf).await?;

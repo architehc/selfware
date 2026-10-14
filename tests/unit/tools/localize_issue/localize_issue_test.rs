@@ -719,3 +719,85 @@ fn test_recent_git_files_with_spaces_and_leading_whitespace() {
         "must preserve spaces"
     );
 }
+
+#[test]
+fn test_recent_git_files_from_subdirectory_returns_relative_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path();
+    let sub = repo.join("crates/subcrate/src");
+    fs::create_dir_all(&sub).unwrap();
+
+    let init_ok = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(repo)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(repo)
+        .status();
+
+    fs::write(sub.join("lib.rs"), "pub fn subcrate_target() {}\n").unwrap();
+
+    let _ = std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo)
+        .status();
+
+    let subcrate_root = repo.join("crates/subcrate");
+    let files = recent_git_files(subcrate_root.to_str().unwrap());
+    assert!(
+        files.contains("src/lib.rs"),
+        "expected subdirectory-relative path src/lib.rs, got: {files:?}"
+    );
+
+    let candidates =
+        localize_issue_sync("subcrate_target", subcrate_root.to_str().unwrap(), None).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(
+        candidates[0].reason.contains("recently modified"),
+        "expected recently modified boost on subdirectory repo_path, got: {}",
+        candidates[0].reason
+    );
+}
+
+#[test]
+fn test_localize_issue_accepts_case_variant_repo_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let real_repo = temp_dir.path().join("MyRepo");
+    fs::create_dir_all(real_repo.join("src")).unwrap();
+    fs::write(
+        real_repo.join("src/lib.rs"),
+        "pub fn case_variant_target() {}\n",
+    )
+    .unwrap();
+
+    let variant_repo = temp_dir.path().join("myrepo");
+    if !variant_repo.exists() {
+        // Case-sensitive filesystem; nothing to test beyond real_repo.
+        return;
+    }
+
+    let census = localize_issue_with_census_sync(
+        "case_variant_target",
+        variant_repo.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(census.read_errors, 0);
+    assert!(census.census_complete());
+    assert!(census.eligible_relative_paths.contains("src/lib.rs"));
+    assert_eq!(census.candidates.len(), 1);
+}

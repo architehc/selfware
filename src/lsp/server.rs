@@ -385,6 +385,14 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     }
 
     let length = content_length.context("missing Content-Length header")?;
+    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+    if length > MAX_MESSAGE_BYTES {
+        anyhow::bail!(
+            "LSP message too large: {} bytes (max {})",
+            length,
+            MAX_MESSAGE_BYTES
+        );
+    }
     let mut buf = vec![0u8; length];
     reader.read_exact(&mut buf).await?;
     Ok(Some(
