@@ -3565,3 +3565,14 @@ fn prompt_flag_conflicts_with_subcommands_other_than_multi_chat() {
     let multi_chat = Cli::try_parse_from(["selfware", "-p", "hello", "multi-chat"]).unwrap();
     assert!(artifact_harness_flag_conflict(&multi_chat).is_none());
 }
+
+#[test]
+fn workflow_requested_tools_parses_swl_agent_tool_allowlist() {
+    let prompt = "SWL agent: code_reviewer\nSystem instruction:\nReview carefully\nRequested tools: file_read, grep_search\nTask:\nInspect src/lib.rs";
+    assert_eq!(
+        workflow_requested_tools(prompt),
+        vec!["file_read".to_string(), "grep_search".to_string()]
+    );
+    assert!(workflow_requested_tools("SWL agent: plain\nTask:\nHello").is_empty());
+    assert!(workflow_requested_tools("Requested tools:   ,  \n").is_empty());
+}
