@@ -14,5 +14,4 @@
 pub mod multiagent;
 pub(crate) mod primitives;
 pub mod swarm;
-pub mod visual_loop;
 pub mod workflows;

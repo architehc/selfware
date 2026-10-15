@@ -2340,3 +2340,47 @@ async fn file_read_line_range_counts_a_trailing_blank_line() {
     assert_eq!(result["lines_returned"], 1);
     assert_eq!(result["content"].as_str().unwrap(), "4\t");
 }
+
+#[tokio::test]
+async fn file_read_line_range_refreshes_snapshot_after_external_modification() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("ranged_stale.rs");
+    fs::write(&file_path, "fn alpha() {}\nfn beta() {}\n").unwrap();
+
+    let read_tool = FileRead::with_safety_config(permissive_safety_config());
+    let edit_tool = FileEdit::with_safety_config(permissive_safety_config());
+
+    // 1. Read the file to record initial snapshot.
+    read_tool
+        .execute(serde_json::json!({"path": file_path.to_str().unwrap()}))
+        .await
+        .unwrap();
+
+    // 2. Modify the file externally on disk.
+    fs::write(&file_path, "fn alpha() {}\nfn beta_ext() {}\n").unwrap();
+    assert_eq!(is_file_stale(file_path.to_str().unwrap()), Some(true));
+
+    // 3. Re-read with `line_range` — this must refresh FILE_SNAPSHOTS.
+    read_tool
+        .execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "line_range": [1, 2],
+        }))
+        .await
+        .unwrap();
+    assert_eq!(is_file_stale(file_path.to_str().unwrap()), Some(false));
+
+    // 4. Subsequent FileEdit must succeed without FileStale.
+    edit_tool
+        .execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "fn beta_ext() {}",
+            "new_str": "fn beta_updated() {}",
+        }))
+        .await
+        .expect("FileEdit after ranged file_read refresh must not fail with FileStale");
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn alpha() {}\nfn beta_updated() {}\n"
+    );
+}

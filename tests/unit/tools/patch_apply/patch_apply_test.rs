@@ -429,3 +429,37 @@ copy to src/copied.rs
         );
     }
 }
+
+#[tokio::test]
+async fn patch_apply_clears_file_snapshot_allowing_subsequent_file_edit() {
+    let (_dir, repo) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+
+    // 1. Read the file via FileRead (which anchors "f.txt" to the absolute repo path).
+    crate::tools::file::FileRead::new()
+        .execute(serde_json::json!({"path": "f.txt"}))
+        .await
+        .expect("initial file_read must succeed");
+
+    // 2. Apply a patch via PatchApply (which clears "f.txt" in FILE_SNAPSHOTS).
+    let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
+    PatchApply
+        .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+        .await
+        .expect("patch_apply must succeed");
+
+    // 3. Edit the file via FileEdit without re-reading — must succeed without FileStale.
+    crate::tools::file::FileEdit::new()
+        .execute(serde_json::json!({
+            "path": "f.txt",
+            "old_str": "BETA",
+            "new_str": "BETA_EDITED"
+        }))
+        .await
+        .expect("FileEdit after PatchApply must not fail with FileStale");
+
+    assert_eq!(
+        std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "alpha\nBETA_EDITED\ngamma\n"
+    );
+}

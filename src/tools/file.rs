@@ -74,9 +74,30 @@ fn get_snapshots() -> &'static Mutex<HashMap<String, FileSnapshot>> {
     FILE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Normalize a path string into a canonical `FILE_SNAPSHOTS` key.
+///
+/// Relative paths are anchored against the active workspace root first so
+/// `"src/lib.rs"` (e.g. from `patch_apply`) and `"/abs/workspace/src/lib.rs"`
+/// (after `anchor_json` in `file_read` / `file_edit`) always map to the same
+/// entry, even on platforms where tempdirs resolve through symlinks (`/var` ->
+/// `/private/var`) or when clearing a snapshot after file deletion.
+fn snapshot_key(path: &str) -> String {
+    let resolved = super::workspace_root::current().resolve(Path::new(path));
+    if let Ok(canon) = std::fs::canonicalize(&resolved) {
+        return canon.to_string_lossy().into_owned();
+    }
+    if let (Some(parent), Some(name)) = (resolved.parent(), resolved.file_name()) {
+        if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+            return canon_parent.join(name).to_string_lossy().into_owned();
+        }
+    }
+    resolved.to_string_lossy().into_owned()
+}
+
 /// Record a snapshot of a file after reading it.
 pub(crate) fn record_file_snapshot(path: &str, content: &str) {
-    let last_modified = std::fs::metadata(path)
+    let key = snapshot_key(path);
+    let last_modified = std::fs::metadata(&key)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -89,7 +110,7 @@ pub(crate) fn record_file_snapshot(path: &str, content: &str) {
 
     if let Ok(mut guard) = get_snapshots().lock() {
         guard.insert(
-            path.to_string(),
+            key,
             FileSnapshot {
                 content_hash,
                 last_modified,
@@ -100,18 +121,25 @@ pub(crate) fn record_file_snapshot(path: &str, content: &str) {
 
 /// Remove a file snapshot (e.g. after deletion).
 pub(crate) fn clear_file_snapshot(path: &str) {
+    let key = snapshot_key(path);
     if let Ok(mut guard) = get_snapshots().lock() {
-        guard.remove(path);
+        guard.remove(&key);
+        if key != path {
+            guard.remove(path);
+        }
     }
 }
 
 /// Check whether a file on disk has changed since the last recorded snapshot.
 /// Returns `Some(true)` if stale, `Some(false)` if unchanged, `None` if no snapshot exists.
 pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
+    let key = snapshot_key(path);
     let guard = get_snapshots().lock().ok()?;
-    let snapshot = guard.get(path)?;
+    let snapshot = guard.get(&key).or_else(|| guard.get(path))?;
 
-    let metadata = std::fs::metadata(path).ok()?;
+    let metadata = std::fs::metadata(&key)
+        .or_else(|_| std::fs::metadata(path))
+        .ok()?;
     if !metadata.is_file() {
         // A FIFO/device swapped in after the read would hang or stream
         // forever below; a changed file type is a change.
@@ -128,7 +156,7 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     }
 
     // Secondary hash check for same-mtime modifications
-    let current_bytes = std::fs::read(path).ok()?;
+    let current_bytes = std::fs::read(&key).or_else(|_| std::fs::read(path)).ok()?;
     let current_text = String::from_utf8_lossy(&current_bytes);
     let mut hasher = DefaultHasher::new();
     current_text.hash(&mut hasher);
@@ -423,6 +451,11 @@ impl Tool for FileRead {
         // A line_range lets us stream ONLY the requested slice, so a large file
         // can be sliced without loading it whole or tripping the size limit.
         if let Some((start, end)) = args.line_range {
+            if let Ok((full_content, _)) =
+                read_file_checked(&args.path, &safety, Some(MAX_READ_SIZE)).await
+            {
+                record_file_snapshot(&args.path, &full_content);
+            }
             let file = {
                 let p = args.path.clone();
                 let cfg = safety.clone();

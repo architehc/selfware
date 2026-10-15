@@ -35,7 +35,15 @@ pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Resul
     // fail-fast guards on the chat/run entry paths.
     ensure_interactive_stdin(std::io::stdin().is_terminal())?;
 
+    let mut overwrite_confirmed = false;
     if scaffold {
+        let config_path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("selfware.toml");
+        if !confirm_overwrite_if_exists(&config_path)? {
+            return Ok(());
+        }
+        overwrite_confirmed = true;
         run_scaffold_interview()?;
     }
 
@@ -179,7 +187,7 @@ pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Resul
     wizard_print!();
 
     // Write config
-    write_config_file(&endpoint, &model, mode, &allowed_paths)
+    write_config_file_with_confirm(&endpoint, &model, mode, &allowed_paths, overwrite_confirmed)
 }
 
 /// Refuse to run the interactive wizard without a terminal on stdin: every
@@ -285,6 +293,32 @@ fn run_scaffold_interview() -> Result<()> {
 
 fn write_template_config(template: &str) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    write_template_config_in_dir(template, &cwd, &mut lock)
+}
+
+fn write_template_config_in_dir(
+    template: &str,
+    cwd: &std::path::Path,
+    reader: &mut dyn std::io::BufRead,
+) -> Result<()> {
+    // Validate template name first before prompting or touching the filesystem
+    match template {
+        "rust" | "python" | "node" | "nodejs" | "typescript" | "minimal" => {}
+        other => {
+            anyhow::bail!(
+                "Unknown template '{}'. Available templates: rust, python, node, nodejs, typescript, minimal",
+                other
+            );
+        }
+    }
+
+    // Confirm overwrite of existing selfware.toml BEFORE scaffolding any template files
+    let config_path = cwd.join("selfware.toml");
+    if !confirm_overwrite_with_reader(&config_path, reader)? {
+        return Ok(());
+    }
 
     // Scaffold project files for known language templates
     match template {
@@ -311,7 +345,7 @@ fn write_template_config(template: &str) -> Result<()> {
                 qa_profile: "standard".into(),
             };
 
-            match engine.scaffold_project(lang_key, &project_name, &cwd, &opts) {
+            match engine.scaffold_project(lang_key, &project_name, cwd, &opts) {
                 Ok(files) => {
                     wizard_print!("  {} Scaffolded {} files:", Glyphs::bloom(), files.len());
                     for f in &files {
@@ -326,12 +360,7 @@ fn write_template_config(template: &str) -> Result<()> {
         "minimal" => {
             wizard_print!("  {} Using 'minimal' template...", Glyphs::gear());
         }
-        other => {
-            anyhow::bail!(
-                "Unknown template '{}'. Available templates: rust, python, node, nodejs, typescript, minimal",
-                other
-            );
-        }
+        _ => unreachable!("template validated above"),
     }
 
     let (endpoint, model, mode, allowed_paths) = match template {
@@ -339,7 +368,7 @@ fn write_template_config(template: &str) -> Result<()> {
             "http://127.0.0.1:1234/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
-            allowed_paths_toml([dir_allow_entry(&cwd)]),
+            allowed_paths_toml([dir_allow_entry(cwd)]),
         ),
         _ => (
             "http://127.0.0.1:1234/v1".to_string(),
@@ -349,7 +378,7 @@ fn write_template_config(template: &str) -> Result<()> {
         ),
     };
 
-    write_config_file(&endpoint, &model, mode, &allowed_paths)
+    write_config_file_in_dir(cwd, &endpoint, &model, mode, &allowed_paths, true, reader)
 }
 
 /// Build the generated `selfware.toml` body. Execution mode is deliberately
@@ -416,32 +445,77 @@ fn probe_endpoint_tcp(endpoint: &str, timeout: std::time::Duration) -> bool {
     addrs.any(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
-fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &str) -> Result<()> {
-    use std::path::PathBuf;
+fn confirm_overwrite_with_reader(
+    config_path: &std::path::Path,
+    reader: &mut dyn std::io::BufRead,
+) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(true);
+    }
+    use std::io::Write;
 
+    wizard_print!(
+        "  {} Configuration already exists at {}",
+        Glyphs::frost(),
+        config_path.display()
+    );
+    print!("  Overwrite? [y/N]: ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    reader.read_line(&mut answer)?;
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        wizard_print!("  Aborted. Existing configuration preserved.");
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn confirm_overwrite_if_exists(config_path: &std::path::Path) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(true);
+    }
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    confirm_overwrite_with_reader(config_path, &mut lock)
+}
+
+fn write_config_file_with_confirm(
+    endpoint: &str,
+    model: &str,
+    mode: &str,
+    allowed_paths: &str,
+    overwrite_confirmed: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    write_config_file_in_dir(
+        &cwd,
+        endpoint,
+        model,
+        mode,
+        allowed_paths,
+        overwrite_confirmed,
+        &mut lock,
+    )
+}
+
+fn write_config_file_in_dir(
+    cwd: &std::path::Path,
+    endpoint: &str,
+    model: &str,
+    mode: &str,
+    allowed_paths: &str,
+    overwrite_confirmed: bool,
+    reader: &mut dyn std::io::BufRead,
+) -> Result<()> {
     // Write the workspace config to `./selfware.toml` so the loader finds it
     // before falling back to the global config directory.
-    let config_path = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("selfware.toml");
+    let config_path = cwd.join("selfware.toml");
 
     // Check if config already exists
-    if config_path.exists() {
-        use std::io::{self, BufRead, Write};
-
-        wizard_print!(
-            "  {} Configuration already exists at {}",
-            Glyphs::frost(),
-            config_path.display()
-        );
-        print!("  Overwrite? [y/N]: ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().lock().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            wizard_print!("  Aborted. Existing configuration preserved.");
-            return Ok(());
-        }
+    if !overwrite_confirmed && !confirm_overwrite_with_reader(&config_path, reader)? {
+        return Ok(());
     }
 
     let content = build_config_content(endpoint, model, allowed_paths);

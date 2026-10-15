@@ -49,7 +49,7 @@ agents:
     tools:
       - file_read
       - file_write
-      - web_search
+      - http_request
     output_key: incident_report
 
   # Reproduction Specialist - Makes bugs reproducible
@@ -93,7 +93,7 @@ agents:
     tools:
       - file_read
       - file_write
-      - shell
+      - shell_exec
       - file_edit
     output_key: reproduction_case
 
@@ -146,9 +146,9 @@ agents:
     tools:
       - file_read
       - file_write
-      - shell
-      - grep
-      - git_log
+      - shell_exec
+      - grep_search
+      - git_diff
     output_key: root_cause_analysis
 
   # Fix Developer - Implements the solution
@@ -194,8 +194,8 @@ agents:
       - file_read
       - file_write
       - file_edit
-      - shell
-      - git
+      - shell_exec
+      - git_diff
     output_key: fix_implementation
 
   # Verification Engineer - Confirms the fix
@@ -235,8 +235,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - shell
-      - browser_navigate
+      - shell_exec
+      - browser_fetch
     output_key: verification_report
 
 workflows:

@@ -362,74 +362,11 @@ async fn test_control_then_analyze_chain() {
         .await
         .unwrap();
 
-    // Step 3: Parse the response as a VisualScore
+    // Step 3: Parse the response JSON
     let analysis = result["analysis"].as_str().unwrap();
-    let score: selfware::visual_loop::VisualScore = serde_json::from_str(analysis).unwrap();
-    assert!(score.overall > 80.0);
-    assert_eq!(score.suggestions.len(), 1);
-
-    handle.abort();
-}
-
-/// Test the full visual feedback loop build_critic_prompt → mock VLM → parse chain.
-#[tokio::test]
-async fn test_visual_feedback_loop_chain() {
-    use selfware::visual_loop::*;
-
-    let (handle, endpoint) = spawn_mock_vision_server(
-        r#"{"composition":92,"hierarchy":88,"readability":95,"consistency":90,"accessibility":85,"overall":90,"suggestions":["Minor: increase button padding"]}"#
-    ).await;
-
-    let config = VisualFeedbackLoop {
-        max_iterations: 3,
-        quality_threshold: 0.85,
-        vision_model_id: "qwen3.5-27b".to_string(),
-        capture_method: CaptureMethod::Screen,
-    };
-
-    // Simulate one iteration of the loop
-    let mut score_history: Vec<VisualScore> = Vec::new();
-
-    for i in 0..2 {
-        let previous = score_history.last();
-        let prompt = build_critic_prompt("Build a dashboard UI", previous, i);
-        assert!(prompt.contains(&format!("iteration {}", i + 1)));
-
-        // Call mock VLM
-        let vision = VisionAnalyze;
-        let result = vision
-            .execute(json!({
-                "prompt": prompt,
-                "endpoint": &endpoint,
-                "model": "mock-model",
-                "image_base64": "iVBORw0KGgo="
-            }))
-            .await
-            .unwrap();
-
-        let response_text = result["analysis"].as_str().unwrap();
-        let mut score = parse_critic_response(response_text).unwrap();
-        score.compute_overall();
-
-        score_history.push(score.clone());
-
-        // Check threshold
-        if score.overall / 100.0 >= config.quality_threshold {
-            break;
-        }
-    }
-
-    assert!(!score_history.is_empty());
-    let final_score = score_history.last().unwrap();
-    assert!(final_score.overall > 80.0);
-
-    let loop_result = VisualLoopResult {
-        iterations: score_history.len(),
-        threshold_met: final_score.overall / 100.0 >= config.quality_threshold,
-        score_history: score_history.clone(),
-        final_score: final_score.clone(),
-    };
-    assert!(loop_result.threshold_met);
+    let score: serde_json::Value = serde_json::from_str(analysis).unwrap();
+    assert!(score["overall"].as_f64().unwrap() > 80.0);
+    assert_eq!(score["suggestions"].as_array().unwrap().len(), 1);
 
     handle.abort();
 }
@@ -698,58 +635,4 @@ async fn test_live_tool_dispatch_uses_models_vision_profile() {
     );
 
     mock_handle.abort();
-}
-
-/// Live visual feedback loop with the real endpoint: build prompt → analyze → score.
-#[tokio::test]
-async fn test_live_visual_feedback_loop() {
-    use selfware::visual_loop::*;
-
-    let endpoint = vision_endpoint();
-    if !require_llm_endpoint_url(&endpoint).await {
-        eprintln!("SKIPPED: test_live_visual_feedback_loop - endpoint not available");
-        return;
-    }
-
-    let png = create_test_png();
-    let b64 = selfware::tools::vision::encode_image_file(png.path().to_str().unwrap()).unwrap();
-
-    let prompt = build_critic_prompt(
-        "Evaluate a minimal red pixel image for visual quality",
-        None,
-        0,
-    );
-
-    let vision = VisionAnalyze;
-    let result = vision.execute(json!({
-        "prompt": format!("{}\n\nRespond with ONLY a JSON object with fields: composition, hierarchy, readability, consistency, accessibility, overall (all 0-100), and suggestions (array of strings).", prompt),
-        "endpoint": endpoint,
-        "model": vision_model(),
-        "image_base64": b64,
-        "max_tokens": 512
-    })).await;
-
-    match result {
-        Ok(val) => {
-            let analysis = val["analysis"].as_str().unwrap_or("");
-            println!("Live VLM critic response: {}", analysis);
-
-            // Try to parse as VisualScore
-            match parse_critic_response(analysis) {
-                Ok(mut score) => {
-                    score.compute_overall();
-                    println!("Parsed score — overall: {:.1}", score.overall);
-                    assert!(score.overall >= 0.0 && score.overall <= 100.0);
-                }
-                Err(e) => {
-                    // Model may not return perfect JSON — that's OK for a live test
-                    eprintln!("Note: Could not parse VLM response as VisualScore: {}", e);
-                    eprintln!("Raw response: {}", analysis);
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("SKIPPED: vision feedback loop error: {}", e);
-        }
-    }
 }

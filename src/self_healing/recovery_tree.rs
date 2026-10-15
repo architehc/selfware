@@ -12,8 +12,6 @@
 //!   LLM endpoint when the remote one is unreachable.
 //! - [`RecoveryTree`] — a registry that maps each [`FailureKind`] to an
 //!   ordered list of resolvers (offline-first).
-//! - [`DeadlockDetector`] — a lightweight heuristic detector for deadlock
-//!   conditions based on repeated no-progress waits.
 //!
 //! **INCREMENT 1**: This module is self-contained and is NOT yet wired into
 //! the agent loop.  Future increments will connect it.
@@ -663,66 +661,6 @@ impl RecoveryTree {
 impl Default for RecoveryTree {
     fn default() -> Self {
         Self::with_defaults()
-    }
-}
-
-// ============================================================================
-// DeadlockDetector
-// ============================================================================
-
-/// A lightweight heuristic detector for deadlock conditions.
-///
-/// The detector counts consecutive observations where the system was
-/// **waiting** (e.g. for a lock or a tool result) but made **no progress**
-/// (no state change, no tokens produced).  When the count reaches the
-/// configured threshold, a [`FailureKind::Deadlock`] is emitted and the
-/// counter resets.
-///
-/// Any observation that reports progress resets the counter to zero.
-pub struct DeadlockDetector {
-    /// Current number of consecutive no-progress waits.
-    no_progress_waits: u32,
-    /// Number of consecutive no-progress waits required to flag a deadlock.
-    threshold: u32,
-}
-
-impl DeadlockDetector {
-    /// Create a detector that flags a deadlock after `threshold` consecutive
-    /// waiting-and-no-progress observations.
-    pub fn new(threshold: u32) -> Self {
-        Self {
-            no_progress_waits: 0,
-            threshold,
-        }
-    }
-
-    /// Observe one step of system behaviour.
-    ///
-    /// - If `made_progress` is `true`, reset the counter and return `None`.
-    /// - If `is_waiting` is `true` and `made_progress` is `false`, increment
-    ///   the counter.  When it reaches `threshold`, return
-    ///   `Some(FailureKind::Deadlock)` and reset the counter.
-    /// - Otherwise return `None`.
-    pub fn observe(&mut self, is_waiting: bool, made_progress: bool) -> Option<FailureKind> {
-        if made_progress {
-            self.no_progress_waits = 0;
-            return None;
-        }
-
-        if is_waiting {
-            self.no_progress_waits += 1;
-            if self.no_progress_waits >= self.threshold {
-                self.no_progress_waits = 0;
-                return Some(FailureKind::Deadlock);
-            }
-        }
-
-        None
-    }
-
-    /// Current number of consecutive no-progress waits (for testing).
-    pub fn current_count(&self) -> u32 {
-        self.no_progress_waits
     }
 }
 

@@ -3536,3 +3536,32 @@ fn evolve_arms_workflow_flags_parse_and_default_workflow_is_unchanged() {
     }
     assert!(Cli::try_parse_from(["selfware", "evolve", "--consensus", "0"]).is_err());
 }
+
+#[test]
+fn unpack_and_autoconfig_skip_startup_calibration() {
+    use clap::Parser;
+    for argv in [
+        &["selfware", "unpack"][..],
+        &["selfware", "unpack", "--scan"][..],
+        &["selfware", "auto-config"][..],
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert!(
+            should_skip_calibration(&cli, &Config::default()),
+            "{argv:?} must skip startup auto_calibrate so handle_command runs it once with the subcommand's flags"
+        );
+    }
+}
+
+#[test]
+fn prompt_flag_conflicts_with_subcommands_other_than_multi_chat() {
+    use clap::Parser;
+    for sub in ["doctor", "status"] {
+        let cli = Cli::try_parse_from(["selfware", "-p", "hello", sub]).unwrap();
+        let err = artifact_harness_flag_conflict(&cli)
+            .unwrap_or_else(|| panic!("-p combined with `{sub}` must report a flag conflict"));
+        assert!(err.contains("cannot be combined"), "{err}");
+    }
+    let multi_chat = Cli::try_parse_from(["selfware", "-p", "hello", "multi-chat"]).unwrap();
+    assert!(artifact_harness_flag_conflict(&multi_chat).is_none());
+}

@@ -84,9 +84,9 @@ pub mod cognitive;
 pub(crate) mod devops;
 pub(crate) mod observability;
 pub(crate) mod orchestration;
-pub mod resource;
-// Task-owned resource registry, teardown and reaper (`selfware resources`)
+// Task-owned resource registry, teardown, reaper, and hardware resource managers (`selfware resources`)
 pub mod resources;
+pub use resources as resource;
 pub(crate) mod session;
 pub mod supervision;
 pub mod testing;
@@ -119,7 +119,6 @@ pub use observability::telemetry;
 // Backward-compatible re-exports for orchestration module
 pub use orchestration::multiagent;
 pub use orchestration::swarm;
-pub use orchestration::visual_loop;
 pub use orchestration::workflows;
 
 // Backward-compatible re-exports for devops module

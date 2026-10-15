@@ -38,7 +38,6 @@ pub mod investigate;
 pub mod micro_mode;
 pub mod policy;
 pub mod replay;
-pub mod sandbox;
 pub mod telemetry;
 pub mod tournament;
 pub mod tree_log;

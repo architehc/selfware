@@ -1166,7 +1166,10 @@ pub fn run_tui_dashboard_with_events(
                                 }
                                 "/compact" => {
                                     app.verbose = false;
-                                    app.add_system_message("Output mode: compact");
+                                    let _ = user_input_tx.send(input.clone());
+                                    app.add_system_message(
+                                        "Output mode: compact (context compaction requested)",
+                                    );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Switched to compact output");
                                     });
@@ -1369,6 +1372,20 @@ pub fn run_tui_dashboard_with_events(
                                         );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Plan mode cancelled");
+                                    });
+                                }
+                                // Agent-bridged slash commands handled in run_live_agent_tui
+                                "/doctor" | "/model" | "/undo" | "/redo" | "/resume"
+                                | "/review" | "/analyze" | "/explain" | "/scan" | "/mcp"
+                                | "/permissions" | "/bug" | "/agents" | "/journal" | "/garden"
+                                | "/memory" | "/tools" => {
+                                    let _ = user_input_tx.send(input.clone());
+                                    app.add_system_message(&format!("{} → log panel", cmd));
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(
+                                            LogLevel::Info,
+                                            &format!("Forwarded command: {}", cmd),
+                                        );
                                     });
                                 }
                                 // CLI-only commands that don't apply in TUI

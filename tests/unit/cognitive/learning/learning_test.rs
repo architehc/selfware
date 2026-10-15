@@ -139,88 +139,6 @@ fn test_curriculum_generation() {
     assert!(!curriculum.lessons.is_empty());
 }
 
-// Quiz tests
-#[test]
-fn test_multiple_choice_question() {
-    let question = QuizQuestion::multiple_choice("What is 2 + 2?")
-        .with_options(
-            vec!["3".to_string(), "4".to_string(), "5".to_string()],
-            vec![1],
-        )
-        .with_explanation("Basic arithmetic");
-
-    assert!(question.is_correct(&[1]));
-    assert!(!question.is_correct(&[0]));
-}
-
-#[test]
-fn test_true_false_question() {
-    let question = QuizQuestion::true_false("Rust has garbage collection", false);
-
-    assert!(question.is_correct(&[1])); // False is index 1
-    assert!(!question.is_correct(&[0]));
-}
-
-#[test]
-fn test_quiz() {
-    let mut quiz = Quiz::new("Test Quiz")
-        .with_description("A test quiz")
-        .with_time_limit(30);
-
-    quiz.add_question(QuizQuestion::true_false("Test", true));
-    quiz.add_question(
-        QuizQuestion::multiple_choice("Test MC")
-            .with_options(vec!["A".to_string(), "B".to_string()], vec![0]),
-    );
-
-    assert_eq!(quiz.question_count(), 2);
-    assert_eq!(quiz.total_points(), 2);
-}
-
-#[test]
-fn test_quiz_result() {
-    let mut quiz = Quiz::new("Test");
-    quiz.add_question(
-        QuizQuestion::multiple_choice("Q1")
-            .with_options(vec!["A".to_string(), "B".to_string()], vec![0]),
-    );
-
-    let q_id = quiz.questions[0].id.clone();
-    let mut answers = HashMap::new();
-    answers.insert(q_id, vec![0]);
-
-    let result = QuizResult::from_attempt(&quiz, answers, 60);
-
-    assert_eq!(result.score, 1);
-    assert!(result.passed);
-    assert!(result.incorrect_questions.is_empty());
-}
-
-#[test]
-fn test_quiz_generator() {
-    let generator = QuizGenerator::new();
-
-    let code = r#"
-let x = 5;
-let mut y = 10;
-y.to_string().unwrap();
-        "#;
-
-    let quiz = generator.generate_from_code(code, 5);
-    assert!(!quiz.questions.is_empty());
-}
-
-#[test]
-fn test_concept_quiz() {
-    let generator = QuizGenerator::new();
-
-    let mut concept = Concept::new("Testing", "basics");
-    concept.add_example("assert!(true);");
-
-    let quiz = generator.generate_concept_quiz(&concept, 3);
-    assert!(!quiz.questions.is_empty());
-}
-
 #[test]
 fn test_exercise() {
     let exercise = Exercise::new("Hello World", "Print hello world")
@@ -371,52 +289,6 @@ fn test_lesson_estimated_minutes_default() {
 }
 
 #[test]
-fn test_question_type_variants() {
-    let types = [
-        QuestionType::MultipleChoice,
-        QuestionType::TrueFalse,
-        QuestionType::FillInBlank,
-        QuestionType::CodeCompletion,
-        QuestionType::BugFix,
-        QuestionType::CodeExplanation,
-    ];
-    for t in types {
-        let _ = format!("{:?}", t);
-    }
-}
-
-#[test]
-fn test_quiz_default_passing_score() {
-    let quiz = Quiz::new("Test Quiz");
-
-    // Default passing score is 70%
-    assert_eq!(quiz.passing_score, 70);
-}
-
-#[test]
-fn test_quiz_result_partial_answers() {
-    let mut quiz = Quiz::new("Test");
-
-    quiz.add_question(
-        QuizQuestion::multiple_choice("Q1")
-            .with_options(vec!["A".to_string(), "B".to_string()], vec![0]),
-    );
-    quiz.add_question(
-        QuizQuestion::multiple_choice("Q2")
-            .with_options(vec!["A".to_string(), "B".to_string()], vec![1]),
-    );
-
-    let q_id = quiz.questions[0].id.clone();
-    let mut answers = HashMap::new();
-    answers.insert(q_id, vec![0]); // Only answer first question
-
-    let result = QuizResult::from_attempt(&quiz, answers, 60);
-
-    // Score should be 1 (only one correct answer)
-    assert_eq!(result.score, 1);
-}
-
-#[test]
 fn test_code_explanation_clone() {
     let explanation = CodeExplanation {
         code: "let x = 1;".to_string(),
@@ -459,18 +331,6 @@ fn test_lesson_clone() {
     let cloned = lesson.clone();
     assert_eq!(lesson.title, cloned.title);
     assert_eq!(lesson.order, cloned.order);
-}
-
-#[test]
-fn test_quiz_question_default_points() {
-    let question = QuizQuestion::true_false("Test?", true);
-    assert_eq!(question.points, 1);
-}
-
-#[test]
-fn test_quiz_question_default_difficulty() {
-    let question = QuizQuestion::true_false("Hard?", false);
-    assert_eq!(question.difficulty, Difficulty::Beginner);
 }
 
 #[test]

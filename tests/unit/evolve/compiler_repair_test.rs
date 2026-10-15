@@ -328,33 +328,3 @@ fn repair_loop_stops_when_the_code_compiles_or_no_fix_exists() {
     assert_eq!(outcome.stop, RepairStop::NoApplicableFix);
     assert_eq!(outcome.rounds, 0);
 }
-
-#[test]
-fn test_synthesize_repair_guidance_for_borrow_and_type_errors() {
-    let diag = CompilerDiagnostic {
-        level: "error".to_string(),
-        code: Some("E0382".to_string()),
-        message: "use of moved value: `buffer`".to_string(),
-        rendered: Some("error[E0382]: use of moved value".into()),
-        spans: vec![DiagnosticSpan {
-            file: "src/buffer.rs".to_string(),
-            line_start: 45,
-            line_end: 45,
-            column_start: 9,
-            column_end: 15,
-            is_primary: true,
-            label: Some("value moved here".into()),
-            ..Default::default()
-        }],
-        children: Vec::new(),
-    };
-
-    let guidance =
-        DiagnosticRepairEngine::new().synthesize_repair_guidance(&report_with(vec![diag]));
-
-    assert_eq!(guidance.len(), 1);
-    assert_eq!(guidance[0].file, "src/buffer.rs");
-    assert_eq!(guidance[0].line, 45);
-    assert_eq!(guidance[0].code.as_deref(), Some("E0382"));
-    assert!(guidance[0].suggested_action.contains(".clone()"));
-}

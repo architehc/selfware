@@ -1586,7 +1586,15 @@ impl Agent {
             if self.current_task_requires_mutation() && contains_unwritten_code(&content) {
                 info!("Rejected text response containing code — nudging to use tools");
                 self.note_mutation_no_tool_stall("code-like text without extractable path")?;
-                self.messages.push(crate::api::types::Message::user(
+                let directive = if self.config.agent.native_function_calling {
+                    "<selfware_system_directive>\n\
+                     You wrote code in your text response instead of using tools. \
+                     DO NOT output code as text. Use file_edit on the existing target file you already read. \
+                     Do NOT create src/lib.rs unless the repository already is a Rust crate.\n\n\
+                     Invoke `file_write` with `{\"path\": \"PATH_YOU_ALREADY_READ\", \"content\": \"FULL UPDATED FILE CONTENT\"}` via native function calling.\n\
+                     </selfware_system_directive>"
+                        .to_string()
+                } else {
                     "<selfware_system_directive>\n\
                      You wrote code in your text response instead of using tools. \
                      DO NOT output code as text. Use file_edit on the existing target file you already read. \
@@ -1595,8 +1603,10 @@ impl Agent {
                      <arguments>{\"path\": \"PATH_YOU_ALREADY_READ\", \"content\": \"FULL UPDATED FILE CONTENT\"}</arguments>\n\
                      </tool>\n\
                      </selfware_system_directive>"
-                        .to_string(),
-                ));
+                        .to_string()
+                };
+                self.messages
+                    .push(crate::api::types::Message::user(directive));
                 return Ok(false);
             }
 

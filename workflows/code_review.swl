@@ -54,8 +54,8 @@ agents:
       ```
     tools:
       - file_read
-      - file_diff
-      - git_log
+      - git_diff
+      - git_status
     output_key: staff_review
 
   # Security Auditor - Security-focused review
@@ -94,7 +94,7 @@ agents:
       If no issues found: "✅ No security issues identified"
     tools:
       - file_read
-      - file_diff
+      - git_diff
     output_key: security_review
 
   # Performance Engineer - Performance analysis
@@ -129,7 +129,7 @@ agents:
       Use Big-O notation for complexity analysis.
     tools:
       - file_read
-      - file_diff
+      - git_diff
     output_key: performance_review
 
   # Test Reviewer - Test quality analysis
@@ -162,8 +162,8 @@ agents:
       - Tests that are too brittle
     tools:
       - file_read
-      - file_diff
-      - shell  # For running coverage
+      - git_diff
+      - shell_exec  # For running coverage
     output_key: test_review
 
 workflows:

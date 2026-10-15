@@ -9308,3 +9308,57 @@ async fn unattended_yolo_recursive_read_of_a_denied_root_is_a_tool_error() {
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn w2_native_fc_includes_context_tools_and_parallel_dispatch_updates_last_read_file() {
+    assert!(
+        !Agent::is_parallel_safe("git_log"),
+        "phantom git_log must not be in PARALLEL_SAFE_TOOLS"
+    );
+    let ctx_defs = crate::tools::context::context_tool_definitions();
+    assert_eq!(ctx_defs.len(), 7);
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    config.execution_mode = crate::config::ExecutionMode::Yolo;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let api_defs = agent.api_tools().expect("native FC must return api_tools");
+    for name in crate::tools::context::CONTEXT_TOOL_NAMES {
+        assert!(
+            api_defs.iter().any(|d| d.function.name == *name),
+            "api_tools must include virtual context tool {name}"
+        );
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("one.rs");
+    let f2 = tmp.path().join("two.rs");
+    std::fs::write(&f1, "fn one() {}\n").unwrap();
+    std::fs::write(&f2, "fn two() {}\n").unwrap();
+
+    agent
+        .execute_parallel_tools(vec![
+            (
+                "file_read".to_string(),
+                serde_json::json!({"path": f1.to_str().unwrap()}).to_string(),
+                Some("call_1".to_string()),
+            ),
+            (
+                "file_read".to_string(),
+                serde_json::json!({"path": f2.to_str().unwrap()}).to_string(),
+                Some("call_2".to_string()),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        agent.last_read_file.as_deref(),
+        Some(f2.to_str().unwrap()),
+        "parallel file_read must update last_read_file"
+    );
+
+    server.stop().await;
+}

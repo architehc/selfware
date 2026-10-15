@@ -201,3 +201,27 @@ fn probe_endpoint_tcp_accepts_bracketed_ipv6_literal() {
         std::time::Duration::from_millis(500)
     ));
 }
+
+#[test]
+fn template_declining_overwrite_does_not_scaffold_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    std::fs::write(
+        &config_path,
+        "# existing user config\nmodel = \"keep-me\"\n",
+    )
+    .unwrap();
+
+    let mut input = std::io::Cursor::new(b"n\n");
+    super::write_template_config_in_dir("rust", dir.path(), &mut input).unwrap();
+
+    let preserved = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        preserved.contains("keep-me"),
+        "declining overwrite must preserve existing selfware.toml: {preserved}"
+    );
+    assert!(
+        !dir.path().join("Cargo.toml").exists(),
+        "declining overwrite must not scaffold template files before checking selfware.toml"
+    );
+}

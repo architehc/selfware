@@ -25,7 +25,12 @@
 //! raises `Effect::LeakAlarm`, which the registry surfaces as a warning.
 
 pub mod context;
+pub mod disk;
 pub mod driver;
+pub mod gpu;
+pub mod hardware;
+pub mod memory;
+pub mod quotas;
 pub mod reaper;
 pub mod registry;
 pub mod teardown;
@@ -36,7 +41,14 @@ use std::path::PathBuf;
 
 pub use crate::lifecycle::{ResourceEvent, ResourceKind, ResourceState};
 pub use context::{session_id, Owner};
+pub use disk::DiskManager;
 pub use driver::{Probe, ResourceDriver, SystemDriver};
+pub use gpu::GpuManager;
+pub use hardware::{
+    ResourceManager, ResourcePressure, ResourceRequest, ResourceReservation, ResourceUsage,
+};
+pub use memory::MemoryManager;
+pub use quotas::AdaptiveQuotas;
 pub use registry::{NewResource, ResourceRegistry, SessionRecord, TransitionError};
 pub use teardown::{DrainReport, TeardownPolicy};
 

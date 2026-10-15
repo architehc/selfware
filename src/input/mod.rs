@@ -16,9 +16,9 @@ pub use submit_menu::SubmitOnExactAcceptMenu;
 
 use anyhow::Result;
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultHinter, DefaultValidator, EditCommand, Emacs,
-    FileBackedHistory, KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Vi,
+    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
+    ColumnarMenu, DefaultHinter, DefaultValidator, EditCommand, Emacs, FileBackedHistory, KeyCode,
+    KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,7 +127,7 @@ impl SelfwareEditor {
         // Build the editor
         let edit_mode: Box<dyn reedline::EditMode> = match config.mode {
             InputMode::Emacs => Box::new(Emacs::new(keybindings)),
-            InputMode::Vi => Box::new(Vi::default()),
+            InputMode::Vi => Box::new(Vi::new(keybindings, default_vi_normal_keybindings())),
         };
 
         // Set up validator
@@ -170,7 +170,7 @@ impl SelfwareEditor {
     fn build_keybindings(mode: InputMode) -> Keybindings {
         let mut keybindings = match mode {
             InputMode::Emacs => default_emacs_keybindings(),
-            InputMode::Vi => Keybindings::default(),
+            InputMode::Vi => default_vi_insert_keybindings(),
         };
 
         // Tab for completion
@@ -310,6 +310,7 @@ impl SelfwareEditor {
         // Rebuild the editor with new mode
         let new_editor = SelfwareEditor::new(self.config.clone())?;
         self.editor = new_editor.editor;
+        self.exact_accept = new_editor.exact_accept;
         Ok(new_mode)
     }
 }

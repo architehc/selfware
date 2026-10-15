@@ -366,8 +366,14 @@ fn has_config_file() -> bool {
 /// Run the full unpack routine: discover local endpoints, auto-start backends,
 /// auto-pull models, and generate a matching Config.
 pub async fn unpack() -> Result<Option<Config>> {
+    unpack_with_options(false).await
+}
+
+/// Run the unpack routine, optionally restricting to read-only scanning (`scan_only = true`
+/// skips starting Ollama, pulling models, or auto-saving `selfware.toml`).
+pub async fn unpack_with_options(scan_only: bool) -> Result<Option<Config>> {
     let mut cfg = Config::default();
-    if auto_calibrate(&mut cfg).await? {
+    if auto_calibrate_with_options(&mut cfg, scan_only).await? {
         Ok(Some(cfg))
     } else {
         Ok(None)
@@ -392,6 +398,12 @@ fn provenance_is_user_set(config: &Config, key: &str) -> bool {
 /// Aggressive auto-calibration: scan, start backends, pull models, detect,
 /// and update `config`. Returns `true` if the config was modified.
 pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
+    auto_calibrate_with_options(config, false).await
+}
+
+/// Auto-calibrate with optional `scan_only` mode (when `scan_only` is `true`,
+/// never starts backends, never pulls models, and never writes `selfware.toml`).
+pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -> Result<bool> {
     // "Unconfigured" is decided by load PROVENANCE first: a value the user
     // set explicitly (config file / env var / CLI arg) is never overwritten,
     // even when it equals a built-in default — the README's OpenRouter setup
@@ -419,12 +431,12 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
     let mut endpoints = scan_local_endpoints().await;
 
     // ── Step 2: if nothing found, try to auto-start Ollama ──────────────────
-    if endpoints.is_empty() && try_start_ollama().await {
+    if !scan_only && endpoints.is_empty() && try_start_ollama().await {
         endpoints = scan_local_endpoints().await;
     }
 
     // ── Step 3: if Ollama is running but empty, auto-pull a model ───────────
-    if endpoints.is_empty() {
+    if !scan_only && endpoints.is_empty() {
         let provider = OllamaProvider::new();
         if provider.is_available() {
             let model = pick_ollama_model_for_hardware();
@@ -531,7 +543,7 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
         );
 
         // Auto-save if no config file exists yet
-        if !has_config_file() {
+        if !scan_only && !has_config_file() {
             match save_unpack_config(config) {
                 Ok(path) => {
                     println!(
@@ -758,6 +770,7 @@ step_timeout_secs = {}
     Config::validate_generated_toml(&content)?;
 
     std::fs::write(&path, content)?;
+    let _ = super::trust::add_trusted_config(&path);
     Ok(path)
 }
 

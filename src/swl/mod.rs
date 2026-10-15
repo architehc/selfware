@@ -19,7 +19,7 @@
 //! - `log`: Silent logging
 //! - `alert`: Notify external systems
 
-#![allow(dead_code, unused_imports, unused_variables)]
+#![allow(unused_imports, unused_variables)]
 
 pub mod codegen;
 pub mod guardrails;

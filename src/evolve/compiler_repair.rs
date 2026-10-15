@@ -6,8 +6,7 @@
 //! their byte offsets, and re-checks — a bounded loop
 //! ([`DiagnosticRepairEngine::run_repair_loop`], at most `max_rounds` repair
 //! passes; formal model: `formal/EvolutionBounds.lean`, E1
-//! `repair_loop_bounded`). Errors without such a suggestion get plain-English
-//! guidance for the model instead ([`DiagnosticRepairEngine::synthesize_repair_guidance`]).
+//! `repair_loop_bounded`).
 //!
 //! What is applied, and what is not:
 //!
@@ -100,17 +99,6 @@ pub struct RepairLoopOutcome {
     pub final_report: AnalysisReport,
     /// Fixes skipped in the rounds, with reasons.
     pub skipped: Vec<SkippedFix>,
-}
-
-/// Actionable, plain-English repair guidance for compiler errors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionableRepairGuidance {
-    pub file: String,
-    pub line: usize,
-    pub code: Option<String>,
-    pub message: String,
-    pub rendered: Option<String>,
-    pub suggested_action: String,
 }
 
 /// Engine for extracting and applying compiler-suggested repairs.
@@ -292,51 +280,6 @@ impl DiagnosticRepairEngine {
             final_report: report,
             skipped,
         })
-    }
-
-    /// Synthesize actionable repair guidance for top-level errors.
-    pub fn synthesize_repair_guidance(
-        &self,
-        report: &AnalysisReport,
-    ) -> Vec<ActionableRepairGuidance> {
-        let mut guidance = Vec::new();
-
-        for diag in &report.diagnostics {
-            if diag.level != "error" {
-                continue;
-            }
-
-            let primary_span = diag
-                .spans
-                .iter()
-                .find(|s| s.is_primary)
-                .or_else(|| diag.spans.first());
-
-            let (file, line) = match primary_span {
-                Some(span) => (span.file.clone(), span.line_start),
-                None => ("unknown".to_string(), 0),
-            };
-
-            let suggested_action = match diag.code.as_deref() {
-                Some("E0382") => "Value moved here. Add `.clone()` at the move site, or update the function signature to take a borrowed reference `&`.",
-                Some("E0308") => "Type mismatch. Verify expected vs actual types, or insert appropriate conversion (e.g. `.into()`, `&`, `as _`).",
-                Some("E0425") => "Cannot find value or function in this scope. Check import declarations or verify identifier spelling.",
-                Some("E0599") => "No method or associated item found for type. Check if required trait is imported (e.g. `use std::io::Write;`).",
-                Some("E0277") => "Trait bound is not satisfied. Add `#[derive(...)]` to the struct, or implement the required trait.",
-                _ => "Review the compiler diagnostic snippet and adjust the syntax or types to satisfy rustc.",
-            };
-
-            guidance.push(ActionableRepairGuidance {
-                file,
-                line,
-                code: diag.code.clone(),
-                message: diag.message.clone(),
-                rendered: diag.rendered.clone(),
-                suggested_action: suggested_action.to_string(),
-            });
-        }
-
-        guidance
     }
 }
 

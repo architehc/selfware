@@ -56,8 +56,8 @@ agents:
       - file_read
       - file_write
       - file_edit
-      - directory_list
-      - web_search
+      - directory_tree
+      - http_request
     output_key: documentation_content
 
   # API Documenter - API reference specialist
@@ -103,7 +103,7 @@ agents:
       - file_read
       - file_write
       - file_edit
-      - grep
+      - grep_search
     output_key: api_documentation
 
   # Changelog Curator - Release notes expert
@@ -148,9 +148,9 @@ agents:
     tools:
       - file_read
       - file_write
-      - shell
-      - git_log
-      - git
+      - shell_exec
+      - git_diff
+      - git_status
     output_key: changelog
 
   # Guide Writer - Tutorial and guide specialist
@@ -195,7 +195,7 @@ agents:
     tools:
       - file_read
       - file_write
-      - directory_list
+      - directory_tree
     output_key: guides
 
   # Doc Reviewer - Documentation QA
@@ -247,8 +247,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - shell
-      - browser_navigate
+      - shell_exec
+      - browser_fetch
     output_key: doc_review
 
 workflows:

@@ -139,15 +139,12 @@ check.json
 # swe-bench sample datasets (kept locally, not in repo)
 system_tests/swe_bench_pro/*.jsonl
 
-# TQEC hands-on lessons
-tqec/
-
-# deep-research run artifacts (reports live in Open WebUI / on disk)
-research/
-
 # autonomous self-improve loop workspace
 scratchpad/
 .worktrees/
+
+# Contained deployment prebuilt binary (built via deploy/contained/Dockerfile)
+deploy/contained/selfware-bullseye
 
 # Phi ledger scenario fixtures (regenerable; see docs/quant_bench)
 target/phi-session-eval/

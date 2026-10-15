@@ -661,6 +661,35 @@ impl Agent {
             .unwrap_or("PATH_YOU_ALREADY_READ");
         let target_json =
             serde_json::to_string(target).unwrap_or_else(|_| "\"PATH_YOU_ALREADY_READ\"".into());
+        let examples = if self.config.agent.native_function_calling {
+            format!(
+                "Invoke ONE of these mutating tools via native function calling on the most relevant existing file you already inspected:\n\n\
+                 - `file_edit` with `{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}`\n\
+                 - `file_multi_edit` with `{{\"path\":{target_json},\"edits\":[{{\"old_str\":\"...\",\"new_str\":\"...\"}}]}}`\n\
+                 - `file_write` with `{{\"path\":{target_json},\"content\":\"FULL NEW FILE CONTENT\"}}`\n\
+                 - `patch_apply` with `{{\"patch\":\"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new\\n\"}}`\n\n"
+            )
+        } else {
+            format!(
+                "Choose ONE of these exact tool shapes on the most relevant existing file you already inspected:\n\n\
+                 <tool>\n\
+                 <name>file_edit</name>\n\
+                 <arguments>{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}</arguments>\n\
+                 </tool>\n\n\
+                 <tool>\n\
+                 <name>file_multi_edit</name>\n\
+                 <arguments>{{\"path\":{target_json},\"edits\":[{{\"old_str\":\"...\",\"new_str\":\"...\"}}]}}</arguments>\n\
+                 </tool>\n\n\
+                 <tool>\n\
+                 <name>file_write</name>\n\
+                 <arguments>{{\"path\":{target_json},\"content\":\"FULL NEW FILE CONTENT\"}}</arguments>\n\
+                 </tool>\n\n\
+                 <tool>\n\
+                 <name>patch_apply</name>\n\
+                 <arguments>{{\"patch\":\"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new\\n\"}}</arguments>\n\
+                 </tool>\n\n"
+            )
+        };
         policy_envelope(
             PolicyKind::ForceMutation,
             true,
@@ -670,23 +699,7 @@ impl Agent {
              READ-LOOP FORCE-MUTATION MODE is active.\n\
              Your previous read-only or verification tool calls were suppressed. \
              The next accepted action must mutate code or project state.\n\n\
-             Choose ONE of these exact tool shapes on the most relevant existing file you already inspected:\n\n\
-             <tool>\n\
-             <name>file_edit</name>\n\
-             <arguments>{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}</arguments>\n\
-             </tool>\n\n\
-             <tool>\n\
-             <name>file_multi_edit</name>\n\
-             <arguments>{{\"path\":{target_json},\"edits\":[{{\"old_str\":\"...\",\"new_str\":\"...\"}}]}}</arguments>\n\
-             </tool>\n\n\
-             <tool>\n\
-             <name>file_write</name>\n\
-             <arguments>{{\"path\":{target_json},\"content\":\"FULL NEW FILE CONTENT\"}}</arguments>\n\
-             </tool>\n\n\
-             <tool>\n\
-             <name>patch_apply</name>\n\
-             <arguments>{{\"patch\":\"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new\\n\"}}</arguments>\n\
-             </tool>\n\n\
+             {examples}\
              If you already know the exact change, you may also output the replacement code as plain text with the target path; Selfware will write it automatically.\n\n\
              Rules:\n\
              - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test BEFORE making an edit.\n\
@@ -2116,16 +2129,27 @@ impl Agent {
                         Err(e) => format!("Could not read {}: {}", path, e),
                     };
 
+                    let write_example = if self.config.agent.native_function_calling {
+                        format!(
+                            "Invoke `file_write` with `{{\"path\": \"{}\", \"content\": \"FULL FILE CONTENT HERE\"}}` via native function calling.",
+                            path
+                        )
+                    } else {
+                        format!(
+                            "<tool>\n<name>file_write</name>\n\
+                             <arguments>{{\"path\": \"{}\", \"content\": \"FULL FILE CONTENT HERE\"}}</arguments>\n\
+                             </tool>",
+                            path
+                        )
+                    };
                     let escalation = format!(
                         "<selfware_system_directive>\n\
                          file_edit FAILED because old_str was not found in the file.\n\
                          {}\n\n\
                          DO NOT retry file_edit. Use file_write to REPLACE THE ENTIRE FILE:\n\n\
-                         <tool>\n<name>file_write</name>\n\
-                         <arguments>{{\"path\": \"{}\", \"content\": \"FULL FILE CONTENT HERE\"}}</arguments>\n\
-                         </tool>\n\
+                         {}\n\
                          </selfware_system_directive>",
-                        read_result, path
+                        read_result, write_example
                     );
                     self.push_tool_result_message(
                         use_native_fc,
@@ -2197,7 +2221,6 @@ impl Agent {
         "symbol_search",
         "git_status",
         "git_diff",
-        "git_log",
         "lsp_document_symbols",
         "lsp_find_references",
         "lsp_goto_definition",
@@ -2449,6 +2472,7 @@ impl Agent {
             call_id: String,
             use_native_fc: bool,
             start_time: std::time::Instant,
+            activation_schema: Option<Value>,
         }
 
         let mut validated: Vec<ValidatedTool> = Vec::with_capacity(tool_calls.len());
@@ -2574,9 +2598,19 @@ impl Agent {
                 continue;
             }
 
+            // Implicitly activate deferred tools called by exact name before
+            // native FC schema validation so `self.tools.definitions()` includes
+            // their schema.
+            let activation_schema = if !crate::tools::context::is_context_tool(&name) {
+                self.implicit_activation_schema(&name)
+            } else {
+                None
+            };
+
             // Schema validation for native function calls
             if use_native_fc {
-                let defs = self.tools.definitions();
+                let mut defs = self.tools.definitions();
+                defs.extend(crate::tools::context::context_tool_definitions());
                 if let Err(e) = crate::agent::tool_validator::validate_tool_call(&fake_call, &defs)
                 {
                     let error_msg = format!("Tool call validation failed: {}", e);
@@ -2677,6 +2711,7 @@ impl Agent {
                 call_id,
                 use_native_fc,
                 start_time,
+                activation_schema,
             });
         }
 
@@ -2709,7 +2744,11 @@ impl Agent {
         let mut activations: std::collections::HashMap<usize, serde_json::Value> =
             std::collections::HashMap::new();
         for (idx, vt) in validated.iter().enumerate() {
-            if let Some(schema) = self.implicit_activation_schema(&vt.name) {
+            if let Some(schema) = vt
+                .activation_schema
+                .clone()
+                .or_else(|| self.implicit_activation_schema(&vt.name))
+            {
                 activations.insert(idx, schema);
             }
         }
@@ -2908,6 +2947,7 @@ impl Agent {
                         {
                             self.file_tracker.context_files.push(path_str.clone());
                         }
+                        self.last_read_file = Some(path_str.clone());
                         self.track_file_read_result_in_context_map(&path_str, &result_str)
                             .await;
                     }

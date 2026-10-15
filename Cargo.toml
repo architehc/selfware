@@ -32,11 +32,10 @@ exclude = [
     # runtime dependency of the page_control tool (src/tools/page_controller.rs).
     "editors/",
     "vscode-selfware/",
-    "selfware-27b-concurrency16.toml",
+    "configs/",
     "deploy/",
     "benchmarks/",
     "tests/",
-    "tqec/",
     "design/",
     "src/evolve/web/vendor/monaco/",
 ]
@@ -279,14 +278,6 @@ name = "quant_recommend"
 path = "examples/quant_recommend.rs"
 
 # VLM Benchmark binaries
-[[bin]]
-name = "codegraph"
-path = "src/bin/codegraph.rs"
-
-[[bin]]
-name = "tqec_lab"
-path = "src/bin/tqec_lab.rs"
-
 [[bin]]
 name = "visual_polish_test"
 path = "system_tests/visual_polish_loop.rs"

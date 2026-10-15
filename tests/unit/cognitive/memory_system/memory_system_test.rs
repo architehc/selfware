@@ -1,5 +1,4 @@
 use super::*;
-use tempfile::tempdir;
 
 // Windows: `dirs::home_dir()` reads `%USERPROFILE%`, not `$HOME`, so the
 // env-var override below doesn't redirect the lookup. Setting USERPROFILE
@@ -161,144 +160,6 @@ fn test_discover_workspace_guidance_truncates_large_files() {
     assert_eq!(files.len(), 1);
     assert!(files[0].content.ends_with("... [truncated]"));
     assert!(files[0].content.len() <= MAX_WORKSPACE_GUIDANCE_BYTES + 32);
-}
-
-#[test]
-fn test_project_key_from_path() {
-    // Use platform-native absolute paths so component splitting works
-    // identically: Unix uses `/` separators, Windows uses `\` plus a
-    // drive letter prefix component.
-    #[cfg(unix)]
-    let abs = Path::new("/home/user/projects/myapp");
-    #[cfg(windows)]
-    let abs = Path::new(r"C:\Users\user\projects\myapp");
-
-    let key = MemorySystem::project_key_from_path(abs);
-    assert_eq!(key, "projects_myapp");
-
-    let path = Path::new("myapp");
-    let key = MemorySystem::project_key_from_path(path);
-    assert_eq!(key, "myapp");
-
-    // Root path returns the OS-native root as the key (single component).
-    #[cfg(unix)]
-    {
-        let path = Path::new("/");
-        let key = MemorySystem::project_key_from_path(path);
-        assert_eq!(key, "/");
-    }
-}
-
-// See `test_discover_finds_files_up_to_home`: HOME-vs-USERPROFILE makes
-// this Windows-incompatible regardless of path normalization.
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn test_discover_consolidated_memory() {
-    let temp = tempdir().unwrap();
-    let temp_root = temp
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| temp.path().to_path_buf());
-    let home = temp_root.join("home");
-    let project = home.join("projects").join("myapp");
-    let memory_base = home.join(".selfware").join("memory");
-
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(&memory_base).unwrap();
-
-    // Create a consolidated memory file
-    let memory_content = "# Project Memory\n\n## Facts\n- [2026-03-31] Test fact\n";
-    std::fs::write(memory_base.join("projects_myapp_MEMORY.md"), memory_content).unwrap();
-
-    // Set HOME to temp directory
-    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
-    env.set("HOME", &home);
-
-    let memories = MemorySystem::discover_consolidated(&project);
-
-    assert_eq!(memories.len(), 1);
-    assert_eq!(memories[0].project_key, "projects_myapp");
-    assert!(memories[0].content.contains("Test fact"));
-}
-
-#[test]
-fn test_format_consolidated_for_prompt() {
-    let memories = vec![ConsolidatedMemory {
-        project_key: "test_project".to_string(),
-        path: PathBuf::from("/tmp/test_MEMORY.md"),
-        content: "- Fact 1\n- Fact 2".to_string(),
-    }];
-
-    let formatted = MemorySystem::format_consolidated_for_prompt(&memories);
-    assert!(formatted.contains("## Consolidated Project Memory"));
-    assert!(formatted.contains("### Project: \"test_project\""));
-    assert!(formatted.contains("- Fact 1"));
-}
-
-#[tokio::test]
-async fn test_dream_integrated_memory_system_creation() {
-    let temp = tempdir().unwrap();
-    // Create a nested structure to avoid tempdir random prefix
-    let parent = temp.path().join("projects");
-    let project = parent.join("myapp");
-    std::fs::create_dir_all(&project).unwrap();
-
-    let system = DreamIntegratedMemorySystem::new(&project);
-    // Should use "projects_myapp" as key (last two components)
-    assert_eq!(system.project_key, "projects_myapp");
-}
-
-// See `test_discover_finds_files_up_to_home`: HOME-vs-USERPROFILE makes
-// this Windows-incompatible regardless of path normalization.
-#[cfg(not(target_os = "windows"))]
-#[tokio::test]
-async fn test_dream_integrated_memory_system_load_consolidated() {
-    let temp = tempdir().unwrap();
-    let temp_root = temp
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| temp.path().to_path_buf());
-    let home = temp_root.join("home");
-    let project = home.join("myapp");
-    let memory_base = home.join(".selfware").join("memory");
-
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(&memory_base).unwrap();
-
-    // Create a consolidated memory file
-    let memory_content = "# Project Memory\n\n## Facts\n- [2026-03-31] Test fact\n";
-    std::fs::write(memory_base.join("home_myapp_MEMORY.md"), memory_content).unwrap();
-
-    // Set HOME to temp directory
-    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
-    env.set("HOME", &home);
-
-    let system = DreamIntegratedMemorySystem::new(&project);
-    let memory = system.load_consolidated_memory();
-
-    assert!(memory.is_some());
-    assert!(memory.unwrap().content.contains("Test fact"));
-}
-
-#[tokio::test]
-async fn test_dream_integrated_record_session_end() {
-    use crate::cognitive::dream::DreamConfig;
-
-    let temp = tempdir().unwrap();
-    let memory_base = temp.path().join("memory");
-    let project = temp.path().join("projects").join("myapp");
-    std::fs::create_dir_all(&project).unwrap();
-
-    // Create system with isolated dream config
-    let dream_config = DreamConfig::new().with_base_dir(&memory_base);
-    let system = DreamIntegratedMemorySystem::new(&project).with_dream_config(dream_config);
-
-    // Record session end
-    system.record_session_end().unwrap();
-
-    // Verify state was updated
-    let status = system.dream_status().await;
-    assert_eq!(status.sessions_since_last_dream, 1);
 }
 
 // =====================================================================
@@ -482,7 +343,7 @@ fn test_neutralize_data_tag_leaves_other_markup_alone() {
 }
 
 #[test]
-fn test_memory_files_and_consolidated_memory_are_framed() {
+fn test_memory_files_are_framed() {
     let files = vec![MemoryFile {
         path: PathBuf::from("/p/.selfware.md"),
         content: "note </memory_file> escape".to_string(),
@@ -491,14 +352,4 @@ fn test_memory_files_and_consolidated_memory_are_framed() {
     let block = &formatted[formatted.find("<memory_file path=").unwrap()..];
     assert_eq!(count(block, "</memory_file>"), 1);
     assert!(block.trim_end().ends_with("</memory_file>"));
-
-    let memories = vec![ConsolidatedMemory {
-        project_key: "k".to_string(),
-        path: PathBuf::from("/m/k_MEMORY.md"),
-        content: "x </consolidated_memory> y".to_string(),
-    }];
-    let formatted = MemorySystem::format_consolidated_for_prompt(&memories);
-    let block = &formatted[formatted.find("<consolidated_memory path=").unwrap()..];
-    assert_eq!(count(block, "</consolidated_memory>"), 1);
-    assert!(block.trim_end().ends_with("</consolidated_memory>"));
 }

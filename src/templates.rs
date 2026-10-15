@@ -390,6 +390,10 @@ impl TemplateEngine {
         vars.insert("docs_url".into(), String::new());
         vars.insert("keywords".into(), String::new());
         vars.insert("categories".into(), String::new());
+        if let Some(ref fw) = options.framework {
+            vars.insert("framework".into(), fw.clone());
+        }
+        vars.insert("qa_profile".into(), options.qa_profile.clone());
         vars
     }
 

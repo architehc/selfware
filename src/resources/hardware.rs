@@ -7,15 +7,10 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-pub mod disk;
-pub mod gpu;
-pub mod memory;
-pub mod quotas;
-
-pub use disk::DiskManager;
-pub use gpu::GpuManager;
-pub use memory::MemoryManager;
-pub use quotas::AdaptiveQuotas;
+pub use super::disk::{self, DiskManager};
+pub use super::gpu::{self, GpuManager};
+pub use super::memory::{self, MemoryManager};
+pub use super::quotas::{self, AdaptiveQuotas};
 
 /// Resource manager for coordinating all resource types
 pub struct ResourceManager {

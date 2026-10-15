@@ -10,7 +10,47 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::multimodal::MultimodalRef;
+/// Type of memory source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceType {
+    /// Episodic memory event.
+    Episode,
+    /// Conversation turn from a checkpoint.
+    CheckpointMessage,
+    /// Tool execution result.
+    ToolResult,
+    /// System observation or note.
+    SystemNote,
+}
+
+/// A raw memory item collected from one of the memory tiers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectedItem {
+    /// Unique identifier from the source system.
+    pub id: String,
+    /// When the item was originally created.
+    pub timestamp: DateTime<Utc>,
+    /// Text content of the item.
+    pub content: String,
+    /// Source type (episode, checkpoint, tool_result, etc.).
+    pub source_type: SourceType,
+    /// Session ID where this originated.
+    pub session_id: Option<String>,
+    /// Role (user, assistant, system, tool).
+    pub role: Option<String>,
+    /// Tool name if this was a tool execution.
+    pub tool_name: Option<String>,
+    /// File paths referenced.
+    pub file_refs: Vec<String>,
+    /// Screenshot paths if any were captured.
+    pub screenshot_refs: Vec<String>,
+    /// Success/failure outcome if known.
+    pub outcome: Option<bool>,
+    /// Token count estimate.
+    pub token_estimate: usize,
+    /// Raw metadata from source.
+    pub metadata: HashMap<String, String>,
+}
 
 /// Compacted content produced by LLM summarization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +120,7 @@ pub struct TemporalRecord {
     /// The compacted content.
     pub content: CompactedContent,
     /// References to non-text features (screenshots, traces, spatial layouts).
-    pub multimodal_refs: Vec<MultimodalRef>,
+    pub multimodal_refs: Vec<String>,
     /// IDs of source episodes that were compacted into this record.
     pub source_ids: Vec<String>,
     /// Tags for categorization and retrieval.

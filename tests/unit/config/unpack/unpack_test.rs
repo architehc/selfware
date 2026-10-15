@@ -1008,3 +1008,12 @@ fn test_unpack_preserves_profile_pinned_context_length_over_advertised() {
     assert_eq!(config.agent.token_budget, 98_304);
     assert_ne!(config.context_length, best.context_length);
 }
+
+#[tokio::test]
+async fn test_unpack_with_options_scan_only_returns_ok() {
+    let result = unpack_with_options(true).await;
+    assert!(
+        result.is_ok(),
+        "unpack_with_options(true) should succeed without side effects"
+    );
+}

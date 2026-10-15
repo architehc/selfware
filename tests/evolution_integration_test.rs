@@ -7,8 +7,7 @@
 
 use selfware::evolution::daemon;
 use selfware::evolution::fitness::{self, SabConfig, SabResult};
-use selfware::evolution::sandbox::SandboxConfig;
-use selfware::evolution::tournament::{Hypothesis, TournamentConfig};
+use selfware::evolution::tournament::Hypothesis;
 use selfware::evolution::{
     is_protected, AttemptNode, AttemptStatus, AttemptTree, BreadthFirstPolicy, EvolutionConfig,
     FailureClass, FitnessWeights, GenerationRating, LlmConfig, MutationTargets,
@@ -195,16 +194,6 @@ fn test_rating_lifecycle() {
     }
 }
 
-// ── Tournament integration tests ──
-
-#[test]
-fn test_tournament_empty_hypotheses_returns_empty() {
-    let config = TournamentConfig::default();
-    let tmp = std::env::temp_dir();
-    let results = selfware::evolution::tournament::run_tournament(vec![], &config, &tmp);
-    assert!(results.is_empty());
-}
-
 #[test]
 fn test_hypothesis_safety_filter() {
     // Simulate the safety filter from daemon.rs:
@@ -259,16 +248,6 @@ fn test_all_configs_have_sane_defaults() {
     let sab_config = SabConfig::default();
     assert_eq!(sab_config.max_parallel, 6);
     assert_eq!(sab_config.scenario_timeout, Duration::from_secs(3600));
-
-    let sandbox_config = SandboxConfig::default();
-    assert!(
-        !sandbox_config.network,
-        "Network should be disabled by default"
-    );
-    assert_eq!(sandbox_config.timeout, Duration::from_secs(3600));
-
-    let tournament_config = TournamentConfig::default();
-    assert_eq!(tournament_config.max_parallel, 4);
 
     // Fitness weights should all be non-negative
     let w = FitnessWeights::default();

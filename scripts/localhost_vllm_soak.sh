@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELFWARE_BIN="${SELFWARE_BIN:-$ROOT_DIR/target/release/selfware}"
-SELFWARE_CONFIG_FILE="${SELFWARE_CONFIG_FILE:-$ROOT_DIR/selfware-27b-concurrency16.toml}"
+SELFWARE_CONFIG_FILE="${SELFWARE_CONFIG_FILE:-$ROOT_DIR/configs/selfware-27b-concurrency16.toml}"
 ENDPOINT="${SELFWARE_ENDPOINT:-http://localhost:8000/v1}"
 SOAK_HOURS="${SOAK_HOURS:-8}"
 HEALTH_INTERVAL_SECS="${HEALTH_INTERVAL_SECS:-900}"

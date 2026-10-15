@@ -856,3 +856,107 @@ async fn test_guardrail_telemetry_collection() {
     assert_eq!(telemetry[0].result, "fail");
     assert_eq!(telemetry[0].action, "warn");
 }
+
+#[test]
+fn test_shipped_swl_workflows_guardrails_and_tools() {
+    use selfware::swl::guardrails::GuardrailEngine;
+    use selfware::swl::lowering::lower_document;
+    use selfware::swl::parser::ast::GuardCondition;
+    use selfware::swl::parser::{parse_document, validate_document};
+    use selfware::tools::ToolRegistry;
+
+    let engine = GuardrailEngine::new();
+    let registry = ToolRegistry::new();
+    let files = [
+        "workflows/code_review.swl",
+        "workflows/bug_investigation.swl",
+        "workflows/documentation_update.swl",
+        "workflows/security_audit.swl",
+        "workflows/product_sprint.swl",
+    ];
+
+    let empty_ctx = GuardrailContext::new();
+    let populated_ctx = GuardrailContext::new()
+        .with_agent_output(
+            "security_review",
+            "No issues found; complete analysis exceeding one hundred characters for coverage verification in security audit.",
+        )
+        .with_agent_output(
+            "root_cause_analyzer",
+            format!("Root Cause: {}", "detailed analysis ".repeat(15)),
+        )
+        .with_agent_output("fix_generator", "#[test] fn test_fix() {}")
+        .with_agent_output(
+            "recon_data",
+            "recon data exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "dependency_audit",
+            "dependency audit exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "code_security_review",
+            "code security review exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "owasp_findings",
+            "owasp findings exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output("secret_scan", "clean")
+        .with_agent_output("architecture_guardian", "ok")
+        .with_agent_output("qa_adversary", "ok")
+        .with_agent_output("security_auditor", "ok")
+        .with_agent_output("devops_lead", "ok")
+        .with_state("severity", "medium")
+        .with_state("tests_passed", true)
+        .with_state("critical_issues_found", 0);
+
+    for path in files {
+        let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let source = std::fs::read_to_string(&full_path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {e}", full_path.display()));
+        let doc = parse_document(&source).unwrap_or_else(|e| panic!("Failed to parse {path}: {e}"));
+        let issues = validate_document(&doc);
+        assert!(
+            issues.is_empty(),
+            "{path} had validation issues: {issues:?}"
+        );
+
+        for (agent_name, agent) in &doc.agents {
+            for tool in &agent.tools {
+                assert!(
+                    registry.get(tool).is_some(),
+                    "{path}: agent '{agent_name}' references unknown tool '{tool}'"
+                );
+            }
+        }
+
+        let _lowered =
+            lower_document(&doc).unwrap_or_else(|e| panic!("Failed to lower {path}: {e}"));
+
+        for g in &doc.guardrails {
+            let g_name = g.name.as_deref().unwrap_or("<unnamed>");
+            let cond = match &g.condition {
+                GuardCondition::Inline(expr) => Condition::Inline(expr.clone()),
+                GuardCondition::Code(block) => Condition::Code {
+                    language: block.language.as_str().to_string(),
+                    content: block.code.clone(),
+                },
+            };
+
+            let res_empty = engine.evaluate_condition(&cond, &empty_ctx);
+            assert!(
+                !res_empty.is_error(),
+                "{path} guardrail '{g_name}' returned Error on empty context: {:?}",
+                res_empty
+            );
+
+            let res_pop = engine.evaluate_condition(&cond, &populated_ctx);
+            assert!(
+                !res_pop.is_error(),
+                "{path} guardrail '{g_name}' returned Error on populated context: {:?}",
+                res_pop
+            );
+        }
+    }
+}

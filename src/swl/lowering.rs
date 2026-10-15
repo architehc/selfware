@@ -602,19 +602,6 @@ impl<'a> LoweringContext<'a> {
         vec![step_id]
     }
 
-    /// Legacy alias for backward compatibility during transition
-    #[deprecated(note = "Use lower_guard_enforcement instead")]
-    fn lower_guard_warning(
-        &mut self,
-        name: &str,
-        condition: &GuardCondition,
-        on_violation: &str,
-        incoming: Vec<String>,
-        steps: &mut Vec<WorkflowStep>,
-    ) -> Vec<String> {
-        self.lower_guard_enforcement(name, condition, on_violation, incoming, steps)
-    }
-
     fn next_step_id(&mut self, hint: &str) -> String {
         self.step_counter += 1;
         format!("{:03}_{}", self.step_counter, slugify(hint))
@@ -935,7 +922,7 @@ fn is_simple_identifier(expr: &str) -> bool {
 }
 
 impl crate::swl::parser::ast::CodeLanguage {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::Python => "python",

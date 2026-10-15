@@ -348,6 +348,22 @@ impl WorkflowTemplates {
             tags: vec!["refactor".to_string(), "development".to_string()],
         }
     }
+
+    /// Look up a built-in workflow template by name (`"tdd"`, `"debug"`, `"review"`, `"refactor"`).
+    pub fn by_name(name: &str) -> Option<Workflow> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "tdd" => Some(Self::tdd()),
+            "debug" => Some(Self::debug()),
+            "review" => Some(Self::review()),
+            "refactor" => Some(Self::refactor()),
+            _ => None,
+        }
+    }
+
+    /// Return all built-in workflow templates.
+    pub fn all() -> Vec<Workflow> {
+        vec![Self::tdd(), Self::debug(), Self::review(), Self::refactor()]
+    }
 }
 
 #[cfg(test)]

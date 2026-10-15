@@ -3,7 +3,7 @@
 //! Provides deep structural auditing of autonomous mutations generated during
 //! Recursive Self-Improvement (RSI). Identifies opaque or under-specified code
 //! modifications, establishes 6 degrees of grounded connection, attaches
-//! maximum-power cryptographic citations, and models 10,000:1 reviewer governance.
+//! maximum-power cryptographic citations, and evaluates 4 deterministic static governance checks.
 
 use super::tree_log::{compute_sha256, AttemptNode, AttemptStatus, FailureClass};
 use anyhow::Result;
@@ -707,35 +707,46 @@ pub fn scan_patch_for_opaque_structures(
                 }
             }
 
-            // Finding 3: Undocumented public API
-            if replace_text.contains("pub fn ") && !replace_text.contains("///") {
-                let pub_lines: Vec<&str> = replace_text
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| l.contains("pub fn "))
-                    .collect();
-                let offending = if pub_lines.is_empty() {
-                    replace_text.to_string()
-                } else {
-                    pub_lines.join("\n")
-                };
-                let cite = make_citation(
-                    file_path,
-                    &offending,
-                    search_text,
-                    search_text.map(str::to_string),
-                    Some(replace_text.to_string()),
-                    None,
-                );
-                findings.push(OpaqueStructureFinding {
-                    category: OpaqueCategory::UndocumentedPublicApi,
-                    severity: FindingSeverity::Warning,
-                    title: "Public function declared without rustdoc contract".to_string(),
-                    explanation: "Exported `pub fn` missing `///` documentation specifying invariants, arguments, and error conditions.".to_string(),
-                    citation: cite.clone(),
-                    remediation: "Add comprehensive `///` docstrings detailing pre-conditions, error variants, and examples.".to_string(),
-                });
-                citations.push(cite);
+            // Finding 3: Undocumented public API (track preceding `///` or `#[doc` across lines)
+            if replace_text.contains("pub fn ") {
+                let mut undocumented_pub_lines = Vec::new();
+                let mut has_preceding_doc = false;
+                for line in replace_text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("///") || trimmed.starts_with("#[doc") {
+                        has_preceding_doc = true;
+                    } else if trimmed.starts_with("#[") || trimmed.is_empty() {
+                        // Attributes or blank lines between doc comments and `pub fn` preserve doc state
+                    } else if trimmed.contains("pub fn ") {
+                        if !has_preceding_doc && !trimmed.contains("///") {
+                            undocumented_pub_lines.push(trimmed);
+                        }
+                        has_preceding_doc = false;
+                    } else {
+                        has_preceding_doc = false;
+                    }
+                }
+
+                if !undocumented_pub_lines.is_empty() {
+                    let offending = undocumented_pub_lines.join("\n");
+                    let cite = make_citation(
+                        file_path,
+                        &offending,
+                        search_text,
+                        search_text.map(str::to_string),
+                        Some(replace_text.to_string()),
+                        None,
+                    );
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::UndocumentedPublicApi,
+                        severity: FindingSeverity::Warning,
+                        title: "Public function declared without rustdoc contract".to_string(),
+                        explanation: "Exported `pub fn` missing `///` documentation specifying invariants, arguments, and error conditions.".to_string(),
+                        citation: cite.clone(),
+                        remediation: "Add comprehensive `///` docstrings detailing pre-conditions, error variants, and examples.".to_string(),
+                    });
+                    citations.push(cite);
+                }
             }
 
             // Finding 4: Silent fallback pattern
@@ -793,12 +804,23 @@ pub fn scan_patch_for_opaque_structures(
             }
         }
         let mut current_file = "unknown_file".to_string();
+        let mut has_preceding_doc = false;
         for line in patch_str.lines() {
             if let Some(stripped) = line.strip_prefix("+++ ") {
                 let without_ts = stripped.split('\t').next().unwrap_or("").trim();
                 let p = without_ts.strip_prefix("b/").unwrap_or(without_ts).trim();
                 if !p.is_empty() && p != "/dev/null" {
                     current_file = p.to_string();
+                }
+                has_preceding_doc = false;
+            } else if line.starts_with("@@ ") {
+                has_preceding_doc = false;
+            } else if let Some(ctx) = line.strip_prefix(' ') {
+                let trimmed_ctx = ctx.trim();
+                if trimmed_ctx.starts_with("///") || trimmed_ctx.starts_with("#[doc") {
+                    has_preceding_doc = true;
+                } else if !trimmed_ctx.starts_with("#[") && !trimmed_ctx.is_empty() {
+                    has_preceding_doc = false;
                 }
             } else if let Some(removed) = line.strip_prefix('-') {
                 if !removed.starts_with('-') {
@@ -889,7 +911,7 @@ pub fn scan_patch_for_opaque_structures(
                 }
 
                 // Undocumented public API
-                if trimmed.contains("pub fn ") && !trimmed.contains("///") {
+                if trimmed.contains("pub fn ") && !trimmed.contains("///") && !has_preceding_doc {
                     let cite = make_citation(
                         &current_file,
                         trimmed,
@@ -908,6 +930,12 @@ pub fn scan_patch_for_opaque_structures(
                         remediation: "Add comprehensive `///` docstrings.".to_string(),
                     });
                     citations.push(cite);
+                }
+
+                if trimmed.starts_with("///") || trimmed.starts_with("#[doc") {
+                    has_preceding_doc = true;
+                } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
+                    has_preceding_doc = false;
                 }
 
                 // Silent fallback
@@ -1048,11 +1076,8 @@ pub fn validate_benchmark_report(path: &Path, node: &AttemptNode) -> Result<(), 
     validate_benchmark_report_resolved(path, None, node)
 }
 
-/// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
-/// across 4 specialized evaluator perspectives.
-///
-/// NOTE: Governance scores and vote distributions are synthetic heuristic projections
-/// derived from automated policy rules and verification gates, not independent human peer review.
+/// Evaluates 4 deterministic static and empirical governance checks
+/// (Safety, Systems, Architecture, Provenance).
 pub fn simulate_10000_reviewer_governance(
     node: &AttemptNode,
     findings: &[OpaqueStructureFinding],
@@ -1061,8 +1086,8 @@ pub fn simulate_10000_reviewer_governance(
     simulate_10000_reviewer_governance_resolved(node, findings, safety, None)
 }
 
-/// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
-/// across 4 specialized evaluator perspectives, resolving benchmark paths against repo_root.
+/// Evaluates 4 deterministic static and empirical governance checks
+/// across 4 check categories, resolving benchmark paths against `repo_root`.
 pub fn simulate_10000_reviewer_governance_resolved(
     node: &AttemptNode,
     findings: &[OpaqueStructureFinding],
@@ -1079,26 +1104,22 @@ pub fn simulate_10000_reviewer_governance_resolved(
     let is_verified_success =
         node.is_successful_evaluation() || node.status == AttemptStatus::Baseline;
 
-    // 1. Frontier Safety & Boundary Compliance (3,500 reviewers / 35% weight)
+    // 1. Frontier Safety & Boundary Compliance (1 static check)
     let safety_veto = !safety.protected_paths_clean
         || safety.has_killswitch_bypass
         || safety.merkle_tree_equality == Some(false)
         || node.status == AttemptStatus::SafetyRejected;
 
-    let (s_app, s_cla, s_qua, s_vet) = if safety_veto {
-        (0, 0, 0, 3500)
-    } else if !is_verified_success {
+    let (s_app, s_cla, s_qua, s_vet) = if safety_veto || !is_verified_success {
         // AGENTS.md Rule 1: CI red means stop. Unverified or failing code cannot be approved by Safety.
-        (0, 500, 1000, 2000)
+        (0, 0, 0, 1)
     } else if has_critical {
-        (500, 1000, 1500, 500)
-    } else if has_warning {
-        (2800, 700, 0, 0)
+        (0, 0, 1, 0)
     } else {
-        (3500, 0, 0, 0)
+        (1, 0, 0, 0)
     };
 
-    let safety_score = s_app as f64 / 3500.0;
+    let safety_score = s_app as f64;
     let safety_assessment = if safety_veto {
         "CRITICAL VETO: Protected path or Merkle tree invariant breach detected.".to_string()
     } else if !is_verified_success {
@@ -1114,7 +1135,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
 
     let p_safety = ReviewerPerspective {
         name: "Frontier Safety & Boundary Compliance".to_string(),
-        total_reviewers: 3500,
+        total_reviewers: 1,
         votes_approve: s_app,
         votes_clarification: s_cla,
         votes_quarantine: s_qua,
@@ -1123,25 +1144,19 @@ pub fn simulate_10000_reviewer_governance_resolved(
         assessment: safety_assessment,
     };
 
-    // 2. Systems & Performance Robustness (2,500 reviewers / 25% weight)
-    let (sys_app, sys_cla, sys_qua, sys_vet) = if node.status == AttemptStatus::Timeout {
-        (0, 0, 500, 2000)
-    } else if node.status == AttemptStatus::Cancelled
+    // 2. Systems & Performance Robustness (1 static check)
+    let (sys_app, sys_cla, sys_qua, sys_vet) = if node.status == AttemptStatus::Timeout
         || node.status == AttemptStatus::BuildFailed
         || node.status == AttemptStatus::InternalError
     {
-        (0, 0, 1000, 1500)
-    } else if !is_verified_success {
-        (0, 500, 1500, 500)
-    } else if has_critical {
-        (1000, 800, 700, 0)
-    } else if has_warning {
-        (2100, 400, 0, 0)
+        (0, 0, 0, 1)
+    } else if node.status == AttemptStatus::Cancelled || !is_verified_success || has_critical {
+        (0, 0, 1, 0)
     } else {
-        (2500, 0, 0, 0)
+        (1, 0, 0, 0)
     };
 
-    let sys_score = sys_app as f64 / 2500.0;
+    let sys_score = sys_app as f64;
     let sys_assessment = if node.status == AttemptStatus::Timeout {
         "VETO: Mutation exceeded latency threshold or timed out.".to_string()
     } else if node.status == AttemptStatus::Cancelled {
@@ -1156,7 +1171,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
 
     let p_systems = ReviewerPerspective {
         name: "Systems & Performance Robustness".to_string(),
-        total_reviewers: 2500,
+        total_reviewers: 1,
         votes_approve: sys_app,
         votes_clarification: sys_cla,
         votes_quarantine: sys_qua,
@@ -1165,7 +1180,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
         assessment: sys_assessment,
     };
 
-    // 3. Software Architecture & Code Quality (2,000 reviewers / 20% weight)
+    // 3. Software Architecture & Code Quality (1 static check)
     let swe_failed = matches!(
         node.status,
         AttemptStatus::CompileFailed
@@ -1177,18 +1192,16 @@ pub fn simulate_10000_reviewer_governance_resolved(
     );
 
     let (swe_app, swe_cla, swe_qua, swe_vet) = if swe_failed {
-        (0, 0, 200, 1800)
-    } else if !is_verified_success {
-        (0, 500, 500, 1000)
-    } else if has_critical {
-        (600, 1000, 400, 0)
+        (0, 0, 0, 1)
+    } else if !is_verified_success || has_critical {
+        (0, 0, 1, 0)
     } else if has_warning {
-        (1600, 400, 0, 0)
+        (0, 1, 0, 0)
     } else {
-        (2000, 0, 0, 0)
+        (1, 0, 0, 0)
     };
 
-    let swe_score = swe_app as f64 / 2000.0;
+    let swe_score = swe_app as f64;
     let swe_assessment = if swe_failed {
         format!(
             "VETO: Regression detected in compilation, lint, or tests ({:?}).",
@@ -1204,7 +1217,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
 
     let p_swe = ReviewerPerspective {
         name: "Software Architecture & Code Quality".to_string(),
-        total_reviewers: 2000,
+        total_reviewers: 1,
         votes_approve: swe_app,
         votes_clarification: swe_cla,
         votes_quarantine: swe_qua,
@@ -1213,7 +1226,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
         assessment: swe_assessment,
     };
 
-    // 4. Empirical Provenance & Reproducibility (2,000 reviewers / 20% weight)
+    // 4. Empirical Provenance & Reproducibility (1 static check)
     let (prov_app, prov_cla, prov_qua, prov_vet, prov_assessment, integrity_veto) = if node
         .diff_sha256
         .len()
@@ -1223,15 +1236,15 @@ pub fn simulate_10000_reviewer_governance_resolved(
             0,
             0,
             0,
-            2000,
+            1,
             "VETO: Cryptographic diff hash corrupt or invalid format.".to_string(),
             true,
         )
     } else if node.status == AttemptStatus::InternalError {
         (
             0,
-            500,
-            1500,
+            0,
+            1,
             0,
             "NOTICE: Internal error during evaluation execution trace.".to_string(),
             false,
@@ -1239,9 +1252,9 @@ pub fn simulate_10000_reviewer_governance_resolved(
     } else if !is_verified_success {
         (
             0,
-            500,
-            1000,
-            500,
+            0,
+            1,
+            0,
             "NOTICE: Incomplete execution trace or unverified metrics.".to_string(),
             false,
         )
@@ -1285,7 +1298,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
                 0,
                 0,
                 0,
-                2000,
+                1,
                 format!("VETO: Integrity failure — {err}."),
                 true,
             ),
@@ -1293,12 +1306,12 @@ pub fn simulate_10000_reviewer_governance_resolved(
                 0,
                 0,
                 0,
-                2000,
+                1,
                 format!("VETO: Integrity failure — {err}."),
                 true,
             ),
             (Ok(()), Ok(())) => (
-                2000,
+                1,
                 0,
                 0,
                 0,
@@ -1316,8 +1329,8 @@ pub fn simulate_10000_reviewer_governance_resolved(
                 }
                 (
                     0,
-                    1000,
-                    1000,
+                    1,
+                    0,
                     0,
                     format!(
                         "UNVERIFIED: Provenance incomplete ({}) — full approval blocked.",
@@ -1329,11 +1342,11 @@ pub fn simulate_10000_reviewer_governance_resolved(
         }
     };
 
-    let prov_score = prov_app as f64 / 2000.0;
+    let prov_score = prov_app as f64;
 
     let p_prov = ReviewerPerspective {
         name: "Empirical Provenance & Reproducibility".to_string(),
-        total_reviewers: 2000,
+        total_reviewers: 1,
         votes_approve: prov_app,
         votes_clarification: prov_cla,
         votes_quarantine: prov_qua,
@@ -1346,9 +1359,9 @@ pub fn simulate_10000_reviewer_governance_resolved(
     let tot_cla = s_cla + sys_cla + swe_cla + prov_cla;
     let tot_qua = s_qua + sys_qua + swe_qua + prov_qua;
     let tot_vet = s_vet + sys_vet + swe_vet + prov_vet;
-    let consensus_score = tot_app as f64 / 10000.0;
+    let consensus_score = tot_app as f64 / 4.0;
 
-    let decision = if safety_veto || integrity_veto || tot_vet >= 2500 || !is_verified_success {
+    let decision = if safety_veto || integrity_veto || tot_vet >= 1 || !is_verified_success {
         GovernanceDecision::HardRejectVeto
     } else if consensus_score >= 0.85 {
         GovernanceDecision::ApproveForPromotion
@@ -1360,22 +1373,22 @@ pub fn simulate_10000_reviewer_governance_resolved(
 
     let deliberation_summary = if !is_verified_success {
         format!(
-            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — Candidate failed validation (status: {:?}); promotion blocked without verified successful benchmark.",
+            "Deterministic Static Governance (4-Check Panel): Verdict 'HARD REJECT & VETO' — Candidate failed validation (status: {:?}); promotion blocked without verified successful benchmark.",
             node.status
         )
     } else if integrity_veto {
         format!(
-            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — {} [Automated heuristic scoring projection, not independent human peer review]",
+            "Deterministic Static Governance (4-Check Panel): Verdict 'HARD REJECT & VETO' — {}",
             p_prov.assessment
         )
     } else if safety_veto {
         format!(
-            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — {} [Automated heuristic scoring projection, not independent human peer review]",
+            "Deterministic Static Governance (4-Check Panel): Verdict 'HARD REJECT & VETO' — {}",
             p_safety.assessment
         )
     } else {
         format!(
-            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict '{}' with {:.1}% approval ({}/10000 approve, {} clarify, {} quarantine, {} veto). [Automated heuristic scoring projection, not independent human peer review]",
+            "Deterministic Static Governance (4-Check Panel): Verdict '{}' with {:.1}% approval ({}/4 approve, {} clarify, {} quarantine, {} veto).",
             decision,
             consensus_score * 100.0,
             tot_app,
@@ -1386,7 +1399,7 @@ pub fn simulate_10000_reviewer_governance_resolved(
     };
 
     ReviewerConsensus {
-        total_reviewers: 10000,
+        total_reviewers: 4,
         votes_approve: tot_app,
         votes_clarification: tot_cla,
         votes_quarantine: tot_qua,
@@ -1791,11 +1804,9 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         out.push('\n');
     }
 
-    out.push_str("## 4. Synthetic Heuristic Scoring (10,000-Reviewer Projection Model)\n\n");
-    out.push_str("> [!NOTE]\n> Governance scores and vote distributions are synthetic heuristic projections derived from automated policy rules, static analysis, and benchmark telemetry, not independent human peer review.\n\n");
-    out.push_str(
-        "| Reviewer Perspective | Reviewers | Approve | Clarify | Quarantine | Veto | Score |\n",
-    );
+    out.push_str("## 4. Deterministic Static Governance (4-Check Panel)\n\n");
+    out.push_str("> [!NOTE]\n> Governance scores reflect 4 deterministic static and empirical checks (Safety, Systems, Architecture, Provenance), not independent human peer review.\n\n");
+    out.push_str("| Check Category | Checks | Approve | Clarify | Quarantine | Veto | Score |\n");
     out.push_str("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n");
     for p in &dossier.consensus.perspectives {
         out.push_str(&format!(
@@ -1810,7 +1821,8 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         ));
     }
     out.push_str(&format!(
-        "| **TOTAL CONSENSUS** | **10,000** | **{}** | **{}** | **{}** | **{}** | **{:.1}%** |\n\n",
+        "| **TOTAL CONSENSUS** | **{}** | **{}** | **{}** | **{}** | **{}** | **{:.1}%** |\n\n",
+        dossier.consensus.total_reviewers,
         dossier.consensus.votes_approve,
         dossier.consensus.votes_clarification,
         dossier.consensus.votes_quarantine,

@@ -485,60 +485,6 @@ fn test_recovery_tree_with_defaults_resolves_rate_limited() {
 }
 
 // ------------------------------------------------------------------
-// DeadlockDetector
-// ------------------------------------------------------------------
-
-#[test]
-fn test_deadlock_detector_triggers_after_threshold() {
-    let mut detector = DeadlockDetector::new(3);
-
-    // First two no-progress waits → None
-    assert_eq!(detector.observe(true, false), None);
-    assert_eq!(detector.observe(true, false), None);
-    assert_eq!(detector.current_count(), 2);
-
-    // Third → Deadlock, counter resets
-    let result = detector.observe(true, false);
-    assert_eq!(result, Some(FailureKind::Deadlock));
-    assert_eq!(detector.current_count(), 0);
-}
-
-#[test]
-fn test_deadlock_detector_progress_resets() {
-    let mut detector = DeadlockDetector::new(3);
-
-    detector.observe(true, false);
-    detector.observe(true, false);
-    assert_eq!(detector.current_count(), 2);
-
-    // Progress resets
-    assert_eq!(detector.observe(true, true), None);
-    assert_eq!(detector.current_count(), 0);
-
-    // Need 3 more to trigger
-    assert_eq!(detector.observe(true, false), None);
-    assert_eq!(detector.observe(true, false), None);
-    assert_eq!(detector.observe(true, false), Some(FailureKind::Deadlock));
-}
-
-#[test]
-fn test_deadlock_detector_not_waiting_does_not_increment() {
-    let mut detector = DeadlockDetector::new(2);
-    // Not waiting, no progress → counter stays 0
-    assert_eq!(detector.observe(false, false), None);
-    assert_eq!(detector.current_count(), 0);
-    assert_eq!(detector.observe(false, false), None);
-    assert_eq!(detector.current_count(), 0);
-}
-
-#[test]
-fn test_deadlock_detector_threshold_one() {
-    let mut detector = DeadlockDetector::new(1);
-    assert_eq!(detector.observe(true, false), Some(FailureKind::Deadlock));
-    assert_eq!(detector.current_count(), 0);
-}
-
-// ------------------------------------------------------------------
 // ContextOverflowCompress
 // ------------------------------------------------------------------
 

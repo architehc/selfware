@@ -144,74 +144,18 @@ fn test_self_improvement_engine_tool_ranking() {
 // knowledge_graph module smoke tests
 // ---------------------------------------------------------------------------
 
-use selfware::cognitive::knowledge_graph::{
-    Entity, EntityType, KnowledgeGraph, Relation, RelationType,
-};
+use selfware::cognitive::knowledge_graph::SemanticLinker;
 
-/// Verify that a KnowledgeGraph can be created, populated with entities and
-/// relations, and queried back correctly.
+/// Verify that SemanticLinker extracts imports across supported languages.
 #[test]
-fn test_knowledge_graph_add_and_query_entities() {
-    let mut graph = KnowledgeGraph::new();
-
-    let e1 = Entity::new("Config", EntityType::Struct);
-    let e2 = Entity::new("load_config", EntityType::Function);
-
-    let id1 = graph.add_entity(e1);
-    let id2 = graph.add_entity(e2);
-
-    // Both entities should be retrievable
-    assert!(graph.get_entity(&id1).is_some());
-    assert!(graph.get_entity(&id2).is_some());
-    assert_eq!(graph.get_entity(&id1).unwrap().name, "Config");
-    assert_eq!(graph.get_entity(&id2).unwrap().name, "load_config");
-
-    // Entity count should match
-    assert_eq!(graph.entity_count(), 2);
-}
-
-/// Verify that relations between entities are bidirectionally queryable.
-#[test]
-fn test_knowledge_graph_relations() {
-    let mut graph = KnowledgeGraph::new();
-
-    let struct_entity = Entity::new("Agent", EntityType::Struct);
-    let fn_entity = Entity::new("run_task", EntityType::Function);
-    let id1 = graph.add_entity(struct_entity);
-    let id2 = graph.add_entity(fn_entity);
-
-    let rel = Relation::new(&id1, &id2, RelationType::Contains);
-    let rel_id = graph.add_relation(rel);
-    assert!(!rel_id.is_empty());
-
-    // The relation should be findable via the graph
-    assert!(graph.get_relation(&rel_id).is_some());
-}
-
-/// Verify that searching entities by type returns the correct results.
-#[test]
-fn test_knowledge_graph_search_by_type() {
-    let mut graph = KnowledgeGraph::new();
-
-    graph.add_entity(Entity::new("MyStruct", EntityType::Struct));
-    graph.add_entity(Entity::new("OtherStruct", EntityType::Struct));
-    graph.add_entity(Entity::new("some_fn", EntityType::Function));
-
-    let structs = graph.find_by_type(EntityType::Struct);
-    assert_eq!(
-        structs.len(),
-        2,
-        "Expected 2 struct entities, got {}",
-        structs.len()
+fn test_semantic_linker_extracts_imports() {
+    let linker = SemanticLinker::new();
+    let imports = linker.extract_imports(
+        "use std::collections::HashMap;\nuse crate::config::Config;\n",
+        "rust",
     );
-
-    let functions = graph.find_by_type(EntityType::Function);
-    assert_eq!(
-        functions.len(),
-        1,
-        "Expected 1 function entity, got {}",
-        functions.len()
-    );
+    assert!(imports.contains(&"std::collections::HashMap".to_string()));
+    assert!(imports.contains(&"crate::config::Config".to_string()));
 }
 
 // ---------------------------------------------------------------------------

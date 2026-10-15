@@ -26,7 +26,6 @@ pub mod diagnostics;
 pub mod envelope;
 pub mod expansion;
 pub mod fn_dedup;
-pub mod gate;
 pub mod git;
 pub mod graph;
 pub mod graph_cache;
@@ -34,7 +33,6 @@ pub mod graph_index;
 pub mod graphrag;
 pub mod ide;
 pub mod logical;
-pub mod r#loop;
 pub mod map;
 pub mod module_graph;
 // Scores arms with the evolution protected-path policy and the daemon's
@@ -42,7 +40,6 @@ pub mod module_graph;
 #[cfg(feature = "self-improvement")]
 pub mod multi_arm_runner;
 pub mod ontology;
-pub mod ontology_evolver;
 pub mod pair_suggest;
 pub mod persona;
 pub mod presets;
@@ -53,7 +50,6 @@ pub mod skeleton;
 pub mod structure;
 pub mod summary;
 pub mod symbols;
-pub mod theseus_scaffold;
 pub mod xray;
 
 pub use actions::{Action, ActionEngine, ActionResult};
@@ -76,7 +72,6 @@ pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
-pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
 pub use graph_cache::shared_graph_index;
 pub use graph_index::{GraphIndex, Metric};
@@ -91,19 +86,16 @@ pub use module_graph::{
     from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
-pub use ontology_evolver::{OntologyEvolver, OntologyOperation, OntologyProposal, OntologyVersion};
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
 };
 pub use persona::ComponentPersona;
 pub use presets::{preset, presets, render_prompt as render_preset_prompt, Preset};
 pub use quality::QualityAnalyzer;
-pub use r#loop::{EvolutionLoop, LoopResult};
 pub use readiness::{GateState, ReadinessGate, ReadinessReport};
 pub use server::EvolveServer;
 pub use skeleton::{extract_rust_skeleton, FileSkeleton, SkeletonItem};
 pub use structure::{ClassEntry, FileStructure, Method, StructureAnalyzer};
-pub use theseus_scaffold::{CollectionMap, EventLog, ScaffoldReport, TheseusScaffold};
 pub use xray::{ConceptIndex, ConceptRef, ConceptXray, DefinitionSite, RelatedConcept};
 
 use anyhow::Result;

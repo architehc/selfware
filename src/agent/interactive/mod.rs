@@ -600,6 +600,21 @@ impl Agent {
                 continue;
             }
 
+            if let Some(name) = input.strip_prefix("/model ") {
+                let name = name.trim();
+                if name.is_empty() {
+                    println!("{}", crate::cli::model_status_text(self));
+                } else {
+                    match self.switch_model(name) {
+                        Ok(previous) => println!(
+                            "/model: session model switched {previous} → {name} (config file unchanged)"
+                        ),
+                        Err(e) => println!("/model failed: {e}"),
+                    }
+                }
+                continue;
+            }
+
             // Three-Layer Context Compression commands
             if input == "/compact" {
                 // Default: AutoCompact
@@ -817,11 +832,12 @@ impl Agent {
                 continue;
             }
 
-            if input.starts_with("/review ") {
-                let Some(file_path) = input.strip_prefix("/review ").map(str::trim) else {
-                    println!("{} Usage: /review <file>", "ℹ".bright_yellow());
-                    continue;
-                };
+            if input == "/review" || input.starts_with("/review ") {
+                let file_path = input
+                    .strip_prefix("/review")
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(".");
                 match self.review(file_path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
@@ -829,14 +845,107 @@ impl Agent {
                 continue;
             }
 
-            if input.starts_with("/analyze ") {
-                let Some(path) = input.strip_prefix("/analyze ").map(str::trim) else {
-                    println!("{} Usage: /analyze <path>", "ℹ".bright_yellow());
-                    continue;
-                };
+            if input == "/analyze" || input.starts_with("/analyze ") {
+                let path = input
+                    .strip_prefix("/analyze")
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(".");
                 match self.analyze(path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/doctor" {
+                let report = crate::doctor::run_doctor(None).await;
+                let issues: Vec<&str> = report
+                    .checks
+                    .iter()
+                    .filter(|check| !matches!(check.status, crate::doctor::CheckStatus::Ok))
+                    .map(|check| check.name.as_str())
+                    .collect();
+                if issues.is_empty() {
+                    println!("/doctor: all {} checks passed", report.checks.len());
+                } else {
+                    println!("/doctor: {} issue(s) — {}", issues.len(), issues.join(", "));
+                }
+                continue;
+            }
+
+            if input == "/mcp" {
+                println!("{}", crate::cli::mcp_servers_text(self.config()));
+                continue;
+            }
+
+            if input == "/agents" {
+                println!("{}", crate::cli::agents_status_text());
+                continue;
+            }
+
+            if input == "/resume" {
+                println!("{}", crate::cli::journal_entries_text(10));
+                println!("resume one with: /resume <task-id-prefix>");
+                continue;
+            }
+
+            if let Some(prefix) = input.strip_prefix("/resume ").map(str::trim) {
+                let tasks = crate::agent::Agent::list_tasks().unwrap_or_default();
+                let entry = tasks.iter().find(|t| t.task_id.starts_with(prefix));
+                match entry {
+                    Some(entry) => {
+                        let task_id = entry.task_id.clone();
+                        let title = format!(
+                            "{}{}",
+                            crate::cli::journal_title(&entry.task_description, 48),
+                            entry.edited_suffix()
+                        );
+                        match Agent::resume(self.config.clone(), &task_id).await {
+                            Ok(resumed) => {
+                                let count = resumed.message_count();
+                                let resume_task = resumed.current_checkpoint.is_some();
+                                self.restore_resumed_state(resumed);
+                                if resume_task {
+                                    println!(
+                                        "resumed '{title}' ({count} messages) — continuing task"
+                                    );
+                                    match self.continue_execution().await {
+                                        Ok(()) => println!(
+                                            "  task finished — continue chatting, or /resume to pick another"
+                                        ),
+                                        Err(e) => {
+                                            println!("/resume: task continuation failed: {e}")
+                                        }
+                                    }
+                                } else {
+                                    println!(
+                                        "resumed '{title}' ({count} messages) — continue chatting"
+                                    );
+                                }
+                            }
+                            Err(e) => println!("/resume failed: {e}"),
+                        }
+                    }
+                    None => println!("no journal entry matching '{prefix}'"),
+                }
+                continue;
+            }
+
+            if input == "/journal" {
+                println!("{}", crate::cli::journal_entries_text(10));
+                continue;
+            }
+
+            if input == "/garden" {
+                match crate::ui::garden::build_garden_from_path(".") {
+                    Ok(garden) => {
+                        let rendered = garden.render();
+                        for line in rendered.lines().take(24) {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => println!("/garden failed: {e}"),
                 }
                 continue;
             }
@@ -1501,7 +1610,10 @@ impl Agent {
             }
 
             if input == "/dream force" {
-                use crate::cognitive::memory_system::DreamIntegratedMemorySystem;
+                use crate::cognitive::dream::DreamConfig;
+                use crate::cognitive::dream_subprocess::{
+                    run_dream_consolidation, AutoDreamConfig,
+                };
 
                 println!(
                     "  {} Force-triggering dream consolidation...",
@@ -1509,9 +1621,15 @@ impl Agent {
                 );
 
                 let cwd = crate::tools::workspace_root::current_path();
-                let dream_system = DreamIntegratedMemorySystem::new(&cwd);
+                let project_key = cwd
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("default");
+                let auto_config = AutoDreamConfig::from_user_config();
+                let dream_config = DreamConfig::new();
 
-                match dream_system.force_dream(&cwd).await {
+                match run_dream_consolidation(&cwd, project_key, &auto_config, &dream_config).await
+                {
                     Ok(result) => {
                         if result.success {
                             println!();
@@ -1856,7 +1974,7 @@ impl Agent {
     }
 
     // ── /explain implementation ──────────────────────────────────────
-    async fn handle_explain_command(&mut self, args: &str) {
+    pub(crate) async fn handle_explain_command(&mut self, args: &str) {
         use crate::cognitive::learning::{CodeExplainer, ConceptExtractor, ExplainModeConfig};
 
         // /explain --level <level>
@@ -2907,11 +3025,12 @@ impl Agent {
                 continue;
             }
 
-            if input.starts_with("/review ") {
-                let Some(file_path) = input.strip_prefix("/review ").map(str::trim) else {
-                    println!("{} Usage: /review <file>", "ℹ".bright_yellow());
-                    continue;
-                };
+            if input == "/review" || input.starts_with("/review ") {
+                let file_path = input
+                    .strip_prefix("/review")
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(".");
                 match self.review(file_path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
@@ -2919,11 +3038,12 @@ impl Agent {
                 continue;
             }
 
-            if input.starts_with("/analyze ") {
-                let Some(path) = input.strip_prefix("/analyze ").map(str::trim) else {
-                    println!("{} Usage: /analyze <path>", "ℹ".bright_yellow());
-                    continue;
-                };
+            if input == "/analyze" || input.starts_with("/analyze ") {
+                let path = input
+                    .strip_prefix("/analyze")
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(".");
                 match self.analyze(path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
@@ -3392,7 +3512,7 @@ impl Agent {
     }
 
     /// Handle the `/scan <path>` command: build a RAG index for the given path.
-    async fn handle_scan_command(&mut self, path_arg: &str) {
+    pub(crate) async fn handle_scan_command(&mut self, path_arg: &str) {
         use crate::analysis::vector_store::{EmbeddingBackend, TfIdfEmbeddingProvider};
         use crate::cognitive::rag::{RagConfig, RagEngine};
 

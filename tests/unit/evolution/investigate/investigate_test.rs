@@ -167,7 +167,7 @@ fn test_simulate_10000_reviewer_governance_rejects_unverified_build_failed() {
     let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
     assert_eq!(consensus.decision, GovernanceDecision::HardRejectVeto);
     assert_eq!(consensus.votes_approve, 0);
-    assert!(consensus.votes_veto >= 2500);
+    assert!(consensus.votes_veto >= 1);
 }
 
 #[test]
@@ -190,6 +190,27 @@ fn test_scan_patch_detects_undocumented_public_api() {
     assert!(findings
         .iter()
         .any(|f| f.category == OpaqueCategory::UndocumentedPublicApi));
+
+    // Documented `pub fn` in JSON search-replace must NOT trigger UndocumentedPublicApi
+    let doc_patch = r#"[{"file": "src/tools/api.rs", "search": "// empty", "replace": "/// Executes the action.\n#[inline]\npub fn execute_action() -> bool { true }"}]"#;
+    let (doc_findings, _) = scan_patch_for_opaque_structures(doc_patch, repo_root, "att-doc", None);
+    assert!(
+        !doc_findings
+            .iter()
+            .any(|f| f.category == OpaqueCategory::UndocumentedPublicApi),
+        "Documented pub fn in JSON patch must not be flagged as UndocumentedPublicApi"
+    );
+
+    // Documented `pub fn` in unified diff must NOT trigger UndocumentedPublicApi
+    let doc_diff = "--- a/src/tools/api.rs\n+++ b/src/tools/api.rs\n@@ -1,1 +1,3 @@\n+/// Executes the action.\n+#[must_use]\n+pub fn execute_action() -> bool { true }\n";
+    let (diff_findings, _) =
+        scan_patch_for_opaque_structures(doc_diff, repo_root, "att-doc-diff", None);
+    assert!(
+        !diff_findings
+            .iter()
+            .any(|f| f.category == OpaqueCategory::UndocumentedPublicApi),
+        "Documented pub fn in unified diff must not be flagged as UndocumentedPublicApi"
+    );
 }
 
 #[test]
@@ -215,10 +236,10 @@ fn test_simulate_10000_reviewer_governance_veto_on_safety() {
     };
 
     let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
-    assert_eq!(consensus.total_reviewers, 10000);
+    assert_eq!(consensus.total_reviewers, 4);
     assert!(consensus.has_safety_veto);
     assert_eq!(consensus.decision, GovernanceDecision::HardRejectVeto);
-    assert!(consensus.votes_veto >= 3500);
+    assert!(consensus.votes_veto >= 1);
 }
 
 #[test]
@@ -233,10 +254,10 @@ fn test_simulate_10000_reviewer_governance_approve_on_clean_mutation() {
     };
 
     let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
-    assert_eq!(consensus.total_reviewers, 10000);
+    assert_eq!(consensus.total_reviewers, 4);
     assert!(!consensus.has_safety_veto);
     assert_eq!(consensus.decision, GovernanceDecision::ApproveForPromotion);
-    assert_eq!(consensus.votes_approve, 10000);
+    assert_eq!(consensus.votes_approve, 4);
     assert_eq!(consensus.consensus_score, 1.0);
 }
 
@@ -281,7 +302,7 @@ fn test_export_markdown_renders_table_and_consensus() {
     assert!(md.contains("## 1. The 6 Degrees of Grounded Connection"));
     assert!(md.contains("## 2. Opaque Structure Findings"));
     assert!(md.contains("## 3. Maximum-Power Grounded Citations"));
-    assert!(md.contains("## 4. Synthetic Heuristic Scoring (10,000-Reviewer Projection Model)"));
+    assert!(md.contains("## 4. Deterministic Static Governance (4-Check Panel)"));
     assert!(md.contains("Frontier Safety & Boundary Compliance"));
     assert!(md.contains("Merkle Tree: `Unmeasured / Not recorded in attempt node`"));
 }
@@ -696,12 +717,12 @@ fn test_simulate_10000_reviewer_governance_blocks_approval_when_benchmark_missin
         GovernanceDecision::ConditionalClarification,
         "Approval must be blocked when benchmark report is missing"
     );
-    assert!(consensus.votes_approve < 10000);
+    assert!(consensus.votes_approve < 4);
     assert!(
         consensus
             .deliberation_summary
             .contains("ConditionalClarification")
-            || consensus.deliberation_summary.contains("80.0%")
+            || consensus.deliberation_summary.contains("75.0%")
     );
 }
 
@@ -725,7 +746,7 @@ fn test_simulate_10000_reviewer_governance_vetoes_on_diff_hash_mismatch() {
         GovernanceDecision::HardRejectVeto,
         "Cryptographic patch mismatch must trigger hard reject veto"
     );
-    assert!(consensus.has_safety_veto || consensus.votes_veto >= 1800);
+    assert!(consensus.has_safety_veto && consensus.votes_veto >= 1);
 }
 
 #[test]

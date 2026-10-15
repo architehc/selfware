@@ -2746,6 +2746,9 @@ impl WorkflowExecutor {
                 }
 
                 for (key, value) in &context.variables {
+                    if let Some(s) = value.as_string() {
+                        guard_ctx.agent_outputs.insert(key.clone(), s);
+                    }
                     guard_ctx
                         .state
                         .insert(key.clone(), var_value_to_json(value));

@@ -135,6 +135,21 @@ pub fn context_tool_descriptions() -> Vec<ToolDesc> {
     ]
 }
 
+/// Build API-compatible tool definitions for all virtual context management tools.
+pub fn context_tool_definitions() -> Vec<crate::api::types::ToolDefinition> {
+    context_tool_descriptions()
+        .into_iter()
+        .map(|desc| crate::api::types::ToolDefinition {
+            def_type: "function".to_string(),
+            function: crate::api::types::FunctionDefinition {
+                name: desc.name.to_string(),
+                description: desc.description.to_string(),
+                parameters: desc.schema,
+            },
+        })
+        .collect()
+}
+
 /// Lightweight descriptor for context tools (not the full Tool trait).
 pub struct ToolDesc {
     pub name: &'static str,

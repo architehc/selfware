@@ -40,8 +40,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - directory_list
-      - web_search
+      - directory_tree
+      - http_request
     output_key: design_doc
 
   # Engineering Manager - locks architecture, diagrams, tests
@@ -70,7 +70,7 @@ agents:
     tools:
       - file_read
       - file_write
-      - directory_list
+      - directory_tree
     output_key: architecture_doc
     sub_agents:
       - security_auditor
@@ -102,9 +102,9 @@ agents:
       - file_read
       - file_write
       - file_edit
-      - shell
-      - cargo
-      - npm
+      - shell_exec
+      - cargo_test
+      - npm_run
     output_key: implementation_complete
 
   # Staff Engineer - finds bugs that pass CI but blow up in prod
@@ -140,9 +140,9 @@ agents:
       If 3+ [ASK] items, reject and request changes.
     tools:
       - file_read
-      - file_diff
+      - git_diff
       - file_edit
-      - shell
+      - shell_exec
     output_key: review_complete
 
   # QA Engineer - tests with real browser
@@ -174,8 +174,8 @@ agents:
       - Check console for JS errors
       - Verify responsive design
     tools:
-      - browser_navigate
-      - browser_click
+      - browser_fetch
+      - page_control
       - browser_screenshot
       - file_read
       - file_write
@@ -254,8 +254,8 @@ agents:
       - Screenshots (if UI)
       - Breaking changes (if any)
     tools:
-      - shell
-      - git
+      - shell_exec
+      - git_status
       - file_read
       - file_write
     output_key: pr_opened

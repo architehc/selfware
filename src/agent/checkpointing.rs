@@ -1570,18 +1570,22 @@ impl Agent {
                 if let Some(dur) = tc.duration_ms {
                     metadata.insert("duration_ms".to_string(), dur.to_string());
                 }
+                let content = tool_call_content_preview(&tc.tool_name, &tc.arguments, tc.success);
+                let token_estimate = crate::token_count::estimate_content_tokens(&content);
 
                 CollectedItem {
-                    source_id: format!("tc-{}-{}", checkpoint.task_id, tc.timestamp.timestamp()),
-                    source_type: SourceType::ToolResult,
-                    content: tool_call_content_preview(&tc.tool_name, &tc.arguments, tc.success),
+                    id: format!("tc-{}-{}", checkpoint.task_id, tc.timestamp.timestamp()),
                     timestamp: tc.timestamp,
-                    importance: if tc.success { 2 } else { 3 }, // Normal / High
-                    tags: vec![tc.tool_name.clone(), checkpoint.task_id.clone()],
-                    metadata,
-                    related_ids: Vec::new(),
+                    content,
+                    source_type: SourceType::ToolResult,
                     session_id: Some(checkpoint.task_id.clone()),
+                    role: Some("tool".to_string()),
+                    tool_name: Some(tc.tool_name.clone()),
                     file_refs: Vec::new(),
+                    screenshot_refs: Vec::new(),
+                    outcome: Some(tc.success),
+                    token_estimate,
+                    metadata,
                 }
             })
             .collect();
@@ -1616,15 +1620,11 @@ impl Agent {
                 last_accessed: now,
                 content: crate::consolidation::CompactedContent {
                     summary: format!("Session {} with {} tool calls", task_id, item_count),
-                    key_facts: items
-                        .iter()
-                        .filter(|i| !i.tags.is_empty())
-                        .take(5)
-                        .map(|i| i.content.clone())
-                        .collect(),
+                    key_facts: items.iter().take(5).map(|i| i.content.clone()).collect(),
                     entities: items
                         .iter()
-                        .flat_map(|i| i.tags.clone())
+                        .filter_map(|i| i.tool_name.clone())
+                        .chain(std::iter::once(task_id.clone()))
                         .collect::<std::collections::HashSet<_>>()
                         .into_iter()
                         .collect(),
@@ -1633,7 +1633,7 @@ impl Agent {
                     insights: Vec::new(),
                 },
                 multimodal_refs: Vec::new(),
-                source_ids: items.iter().map(|i| i.source_id.clone()).collect(),
+                source_ids: items.iter().map(|i| i.id.clone()).collect(),
                 tags: vec!["session".to_string(), task_id.clone()],
                 importance: crate::consolidation::RecordImportance::Normal,
                 session_id: Some(task_id),
@@ -1755,7 +1755,7 @@ impl Agent {
             return false;
         }
 
-        let restored = self.restore_from_self_healing_checkpoint();
+        let restored = self.messages.is_empty() && self.restore_from_self_healing_checkpoint();
         if restored {
             info!(
                 "Self-healing recovery '{}' restored agent state (actions: {:?})",
@@ -1779,6 +1779,8 @@ impl Agent {
             .reset_retry("agent_execution_error", "run_task");
         self.self_healing
             .reset_retry("agent_execution_error", "continue_execution");
+        self.self_healing
+            .reset_retry("agent_execution_error", "run_execution_loop");
     }
 }
 

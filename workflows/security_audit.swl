@@ -48,8 +48,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - directory_list
-      - web_search
+      - directory_tree
+      - http_request
     output_key: security_strategy
 
   # Threat Modeler - STRIDE analysis expert
@@ -177,8 +177,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - file_diff
-      - grep
+      - git_diff
+      - grep_search
     output_key: owasp_findings
 
   # Code Security Reviewer - Implementation-level analysis
@@ -232,8 +232,8 @@ agents:
     tools:
       - file_read
       - file_write
-      - file_diff
-      - grep
+      - git_diff
+      - grep_search
     output_key: code_security_review
 
   # Security Validator - Verifies fixes and signs off
@@ -264,8 +264,8 @@ agents:
       Output: SECURITY_SIGNOFF.md with final verdict
     tools:
       - file_read
-      - file_diff
-      - shell
+      - git_diff
+      - shell_exec
     output_key: security_signoff
 
 workflows:

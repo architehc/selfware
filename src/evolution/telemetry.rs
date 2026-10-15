@@ -435,25 +435,10 @@ fn capture_allocation_profile(
     repo_root: &Path,
     _bench_name: &str,
 ) -> Result<Vec<AllocationHotspot>, TelemetryError> {
-    // Strategy 1: Look for DHAT output produced by running the benchmark
+    // Look for DHAT output produced by running the benchmark
     // under `dhat` (e.g. `cargo bench --features dhat`).
     if let Some(hotspots) = try_parse_dhat_output(repo_root)? {
         return Ok(hotspots);
-    }
-
-    // Strategy 2: Fall back to the lightweight tracking allocator that
-    // is always available (no external tool required).
-    let stats = global_alloc_stats();
-    if stats.total_allocs() > 0 {
-        let live = stats.current_live_bytes();
-        // Update peak if current exceeds it.
-        stats.update_peak(live);
-        return Ok(vec![AllocationHotspot {
-            function: "<global>".to_string(),
-            allocs_per_call: stats.total_allocs(),
-            total_bytes: stats.total_bytes_allocated(),
-            peak_live_bytes: stats.peak_live_bytes(),
-        }]);
     }
 
     // No allocation data available — nothing was profiled.
@@ -554,151 +539,6 @@ fn extract_json_uint_field(line: &str, field: &str) -> Option<u64> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after.len());
     after[..end].parse::<u64>().ok()
-}
-
-// ---------------------------------------------------------------------------
-// Lightweight tracking allocator (no external dependencies)
-// ---------------------------------------------------------------------------
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Global allocation statistics tracked by `TrackingAllocator`.
-/// A single static instance is shared so that any code path can read
-/// cumulative allocation data without coordination.
-static GLOBAL_ALLOC_STATS: AllocStats = AllocStats::new();
-
-/// A wrapper around the system allocator that counts allocations,
-/// deallocations, and tracks live/peak bytes.
-///
-/// To enable tracking, set this as the global allocator:
-/// ```ignore
-/// #[global_allocator]
-/// static GLOBAL: TrackingAllocator = TrackingAllocator::system();
-/// ```
-pub struct TrackingAllocator<A: GlobalAlloc = System> {
-    inner: A,
-}
-
-impl TrackingAllocator<System> {
-    pub const fn system() -> Self {
-        TrackingAllocator { inner: System }
-    }
-}
-
-unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAllocator<A> {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = self.inner.alloc(layout);
-        if !ptr.is_null() {
-            GLOBAL_ALLOC_STATS.record_alloc(layout.size());
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        GLOBAL_ALLOC_STATS.record_dealloc(layout.size());
-        self.inner.dealloc(ptr, layout);
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = self.inner.alloc_zeroed(layout);
-        if !ptr.is_null() {
-            GLOBAL_ALLOC_STATS.record_alloc(layout.size());
-        }
-        ptr
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // Treat realloc as dealloc + alloc for accounting simplicity
-        GLOBAL_ALLOC_STATS.record_dealloc(layout.size());
-        let new_ptr = self.inner.realloc(ptr, layout, new_size);
-        if !new_ptr.is_null() {
-            GLOBAL_ALLOC_STATS.record_alloc(new_size);
-        }
-        new_ptr
-    }
-}
-
-/// Cumulative allocation statistics, updated atomically.
-pub struct AllocStats {
-    total_allocs: AtomicU64,
-    total_deallocs: AtomicU64,
-    total_bytes_allocated: AtomicU64,
-    total_bytes_deallocated: AtomicU64,
-    current_live_bytes: AtomicU64,
-    peak_live_bytes: AtomicU64,
-}
-
-impl AllocStats {
-    const fn new() -> Self {
-        AllocStats {
-            total_allocs: AtomicU64::new(0),
-            total_deallocs: AtomicU64::new(0),
-            total_bytes_allocated: AtomicU64::new(0),
-            total_bytes_deallocated: AtomicU64::new(0),
-            current_live_bytes: AtomicU64::new(0),
-            peak_live_bytes: AtomicU64::new(0),
-        }
-    }
-
-    fn record_alloc(&self, size: usize) {
-        self.total_allocs.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_allocated
-            .fetch_add(size as u64, Ordering::Relaxed);
-        let live = self
-            .current_live_bytes
-            .fetch_add(size as u64, Ordering::Relaxed)
-            + size as u64;
-        self.update_peak(live);
-    }
-
-    fn record_dealloc(&self, size: usize) {
-        self.total_deallocs.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_deallocated
-            .fetch_add(size as u64, Ordering::Relaxed);
-        self.current_live_bytes
-            .fetch_sub(size as u64, Ordering::Relaxed);
-    }
-
-    fn update_peak(&self, live: u64) {
-        let mut current_peak = self.peak_live_bytes.load(Ordering::Relaxed);
-        while live > current_peak {
-            match self.peak_live_bytes.compare_exchange_weak(
-                current_peak,
-                live,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current_peak = actual,
-            }
-        }
-    }
-
-    /// Access the global allocation statistics.
-    pub fn total_allocs(&self) -> u64 {
-        self.total_allocs.load(Ordering::Relaxed)
-    }
-    pub fn total_deallocs(&self) -> u64 {
-        self.total_deallocs.load(Ordering::Relaxed)
-    }
-    pub fn total_bytes_allocated(&self) -> u64 {
-        self.total_bytes_allocated.load(Ordering::Relaxed)
-    }
-    pub fn total_bytes_deallocated(&self) -> u64 {
-        self.total_bytes_deallocated.load(Ordering::Relaxed)
-    }
-    pub fn current_live_bytes(&self) -> u64 {
-        self.current_live_bytes.load(Ordering::Relaxed)
-    }
-    pub fn peak_live_bytes(&self) -> u64 {
-        self.peak_live_bytes.load(Ordering::Relaxed)
-    }
-}
-
-/// Retrieve a reference to the global allocation statistics.
-pub fn global_alloc_stats() -> &'static AllocStats {
-    &GLOBAL_ALLOC_STATS
 }
 
 fn capture_benchmark_deltas(repo_root: &Path) -> Result<Vec<BenchmarkDelta>, TelemetryError> {

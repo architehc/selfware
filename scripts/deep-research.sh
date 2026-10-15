@@ -22,8 +22,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-RESEARCH_CONFIG="fara-research.toml"
-[ "${FAST:-0}" = "1" ] && RESEARCH_CONFIG="fara-research-fast.toml"
+RESEARCH_CONFIG="configs/fara-research.toml"
+[ "${FAST:-0}" = "1" ] && RESEARCH_CONFIG="configs/fara-research-fast.toml"
 
 QUESTION="${1:?usage: deep-research.sh \"question\"}"
 # Fara's llama-server (systemd fara15-server.service) requires an API key;

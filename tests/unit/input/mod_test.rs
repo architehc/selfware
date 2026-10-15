@@ -127,3 +127,54 @@ fn test_input_config_new_commands() {
     assert!(config.commands.contains(&"/chat".into()));
     assert!(config.commands.contains(&"/theme".into()));
 }
+
+#[test]
+fn test_vi_keybindings_preserve_custom_bindings() {
+    let vi_kb = SelfwareEditor::build_keybindings(InputMode::Vi);
+    let emacs_kb = SelfwareEditor::build_keybindings(InputMode::Emacs);
+
+    for (mods, code) in [
+        (KeyModifiers::NONE, KeyCode::Tab),
+        (KeyModifiers::NONE, KeyCode::Char('/')),
+        (KeyModifiers::NONE, KeyCode::Enter),
+        (KeyModifiers::SHIFT, KeyCode::BackTab),
+        (KeyModifiers::CONTROL, KeyCode::Char('y')),
+        (KeyModifiers::CONTROL, KeyCode::Char('j')),
+        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+    ] {
+        assert_eq!(
+            vi_kb.find_binding(mods, code),
+            emacs_kb.find_binding(mods, code),
+            "Vi mode must preserve custom binding for ({mods:?}, {code:?})"
+        );
+        assert!(
+            vi_kb.find_binding(mods, code).is_some(),
+            "Custom binding ({mods:?}, {code:?}) must be present in Vi mode"
+        );
+    }
+}
+
+#[test]
+fn test_toggle_vim_mode_updates_exact_accept() {
+    let config = InputConfig {
+        history_path: None,
+        ..Default::default()
+    };
+    let mut editor = SelfwareEditor::new(config).expect("create editor");
+    let initial_arc = editor.exact_accept.clone();
+    initial_arc.store(true, Ordering::SeqCst);
+
+    let mode = editor.toggle_vim_mode().expect("toggle to Vi");
+    assert_eq!(mode, InputMode::Vi);
+    assert!(
+        !Arc::ptr_eq(&initial_arc, &editor.exact_accept),
+        "toggle_vim_mode must rebind exact_accept to the new editor's completion menu flag"
+    );
+    assert!(
+        !editor.exact_accept.load(Ordering::SeqCst),
+        "new editor exact_accept starts false"
+    );
+
+    let mode_back = editor.toggle_vim_mode().expect("toggle back to Emacs");
+    assert_eq!(mode_back, InputMode::Emacs);
+}

@@ -258,3 +258,160 @@ fn test_evaluate_inline_compound_and_method_transforms() {
         .evaluate_inline_expression("state.count > 10 || state.count < 0", &ctx)
         .is_fail());
 }
+
+#[test]
+fn test_evaluate_rust_let_bindings_map_or_and_if_else() {
+    let engine = GuardrailEngine::new();
+
+    // Test let bindings + .map_or + .unwrap_or from code_review.swl
+    let code = r#"
+        // Fail if critical issues found without override
+        let has_critical = args.agent_outputs.security_review
+          .map_or(false, |r| r.contains("[CRITICAL]"));
+        let allow_critical = args.state.allow_critical.unwrap_or(false);
+        !has_critical || allow_critical
+    "#;
+
+    let ctx_clean =
+        GuardrailContext::new().with_agent_output("security_review", "All checks passed");
+    assert!(engine.evaluate_rust_code(code, &ctx_clean).is_pass());
+
+    let ctx_critical =
+        GuardrailContext::new().with_agent_output("security_review", "[CRITICAL] RCE found");
+    assert!(engine.evaluate_rust_code(code, &ctx_critical).is_fail());
+
+    let ctx_override = GuardrailContext::new()
+        .with_agent_output("security_review", "[CRITICAL] RCE found")
+        .with_state("allow_critical", true);
+    assert!(engine.evaluate_rust_code(code, &ctx_override).is_pass());
+
+    // Test if / else from bug_investigation.swl
+    let if_else_code = r#"
+        if args.state.severity == "critical" {
+          args.state.reproduction_Confirmed == true
+        } else {
+          true
+        }
+    "#;
+    let ctx_non_crit = GuardrailContext::new().with_state("severity", "low");
+    assert!(engine
+        .evaluate_rust_code(if_else_code, &ctx_non_crit)
+        .is_pass());
+
+    let ctx_crit_unconfirmed = GuardrailContext::new().with_state("severity", "critical");
+    assert!(engine
+        .evaluate_rust_code(if_else_code, &ctx_crit_unconfirmed)
+        .is_fail());
+
+    let ctx_crit_confirmed = GuardrailContext::new()
+        .with_state("severity", "critical")
+        .with_state("reproduction_Confirmed", true);
+    assert!(engine
+        .evaluate_rust_code(if_else_code, &ctx_crit_confirmed)
+        .is_pass());
+}
+
+#[test]
+fn test_shipped_swl_workflows_guardrails_and_tools() {
+    use crate::swl::lowering::lower_document;
+    use crate::swl::parser::{parse_document, validate_document, GuardCondition};
+    use crate::tools::ToolRegistry;
+
+    let engine = GuardrailEngine::new();
+    let registry = ToolRegistry::new();
+    let files = [
+        "workflows/code_review.swl",
+        "workflows/bug_investigation.swl",
+        "workflows/documentation_update.swl",
+        "workflows/security_audit.swl",
+        "workflows/product_sprint.swl",
+    ];
+
+    let empty_ctx = GuardrailContext::new();
+    let populated_ctx = GuardrailContext::new()
+        .with_agent_output(
+            "security_review",
+            "No issues found; complete analysis exceeding one hundred characters for coverage verification in security audit.",
+        )
+        .with_agent_output(
+            "root_cause_analyzer",
+            format!("Root Cause: {}", "detailed analysis ".repeat(15)),
+        )
+        .with_agent_output("fix_generator", "#[test] fn test_fix() {}")
+        .with_agent_output(
+            "recon_data",
+            "recon data exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "dependency_audit",
+            "dependency audit exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "code_security_review",
+            "code security review exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output(
+            "owasp_findings",
+            "owasp findings exceeding one hundred characters ".repeat(4),
+        )
+        .with_agent_output("secret_scan", "clean")
+        .with_agent_output("architecture_guardian", "ok")
+        .with_agent_output("qa_adversary", "ok")
+        .with_agent_output("security_auditor", "ok")
+        .with_agent_output("devops_lead", "ok")
+        .with_state("severity", "medium")
+        .with_state("tests_passed", true)
+        .with_state("critical_issues_found", 0);
+
+    for path in files {
+        let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let source = std::fs::read_to_string(&full_path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {e}", full_path.display()));
+        let doc = parse_document(&source).unwrap_or_else(|e| panic!("Failed to parse {path}: {e}"));
+        let issues = validate_document(&doc);
+        assert!(
+            issues.is_empty(),
+            "{path} had validation issues: {issues:?}"
+        );
+
+        // Verify all agent tools exist in ToolRegistry
+        for (agent_name, agent) in &doc.agents {
+            for tool in &agent.tools {
+                assert!(
+                    registry.get(tool).is_some(),
+                    "{path}: agent '{agent_name}' references unknown tool '{tool}'"
+                );
+            }
+        }
+
+        // Verify lowering succeeds
+        let _lowered =
+            lower_document(&doc).unwrap_or_else(|e| panic!("Failed to lower {path}: {e}"));
+
+        // Verify every guardrail evaluates without EvaluationResult::Error
+        for g in &doc.guardrails {
+            let g_name = g.name.as_deref().unwrap_or("<unnamed>");
+            let cond = match &g.condition {
+                GuardCondition::Inline(expr) => Condition::Inline(expr.clone()),
+                GuardCondition::Code(block) => Condition::Code {
+                    language: block.language.as_str().to_string(),
+                    content: block.code.clone(),
+                },
+            };
+
+            let res_empty = engine.evaluate_condition(&cond, &empty_ctx);
+            assert!(
+                !res_empty.is_error(),
+                "{path} guardrail '{g_name}' returned Error on empty context: {:?}",
+                res_empty
+            );
+
+            let res_pop = engine.evaluate_condition(&cond, &populated_ctx);
+            assert!(
+                !res_pop.is_error(),
+                "{path} guardrail '{g_name}' returned Error on populated context: {:?}",
+                res_pop
+            );
+        }
+    }
+}

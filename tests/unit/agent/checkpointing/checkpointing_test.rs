@@ -380,3 +380,50 @@ fn endpoint_identity_never_stores_userinfo_or_query() {
     assert_eq!(id, "https://api.example.com:8443/v1");
     assert!(!id.contains("s3cret") && !id.contains("abc"), "{id}");
 }
+
+#[cfg(feature = "resilience")]
+#[tokio::test]
+async fn self_healing_recovery_preserves_in_progress_messages_and_resets_loop_retry() {
+    let mut config = crate::test_support::mock_agent_config("http://127.0.0.1:1");
+    config.continuous_work.auto_recovery = true;
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+
+    // Record task-start checkpoint with only initial messages.
+    agent.record_self_healing_checkpoint("Task start");
+    let initial_len = agent.messages.len();
+
+    // Append in-progress multi-step conversation messages.
+    agent
+        .messages
+        .push(crate::api::types::Message::user("step 1 progress"));
+    agent
+        .messages
+        .push(crate::api::types::Message::assistant("step 2 tool result"));
+    assert_eq!(agent.messages.len(), initial_len + 2);
+
+    // Recovering from a transient error must NOT wipe in-progress messages.
+    let recovered = agent
+        .try_self_healing_recovery("connection reset by peer", "run_execution_loop")
+        .await;
+    assert!(recovered);
+    assert_eq!(
+        agent.messages.len(),
+        initial_len + 2,
+        "in-progress messages must not be wiped by try_self_healing_recovery"
+    );
+
+    // Resetting retry state clears run_execution_loop attempts too.
+    agent.reset_self_healing_retry();
+
+    // If messages were empty, restore_from_self_healing_checkpoint is used.
+    agent.messages.clear();
+    let recovered_empty = agent
+        .try_self_healing_recovery("connection reset by peer", "run_execution_loop")
+        .await;
+    assert!(recovered_empty);
+    assert_eq!(
+        agent.messages.len(),
+        initial_len,
+        "empty messages should be restored from the self-healing checkpoint"
+    );
+}

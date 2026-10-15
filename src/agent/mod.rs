@@ -1615,12 +1615,21 @@ impl Agent {
         let mut prompt_builder = prompt_builder::SystemPromptBuilder::new();
 
         // Tool discovery message - explains deferred tool loading
-        let tool_discovery_note = r#"## TOOL DISCOVERY
+        let tool_discovery_note = if config.agent.native_function_calling {
+            r#"## TOOL DISCOVERY
+You have access to a focused set of critical tools (files, shell, search, routine git/cargo). Additional specialized tools (containers, browser, package managers, etc.) can be discovered using the `tool_search` tool.
+
+To find more tools: invoke `tool_search` with `{"query": "container"}` via native function calling.
+
+Found tools become available immediately for the rest of the session."#
+        } else {
+            r#"## TOOL DISCOVERY
 You have access to a focused set of critical tools (files, shell, search, routine git/cargo). Additional specialized tools (containers, browser, package managers, etc.) can be discovered using the `tool_search` tool.
 
 To find more tools: <tool><name>tool_search</name><arguments>{"query": "container"}</arguments></tool>
 
-Found tools become available immediately for the rest of the session."#;
+Found tools become available immediately for the rest of the session."#
+        };
 
         // === STATIC SECTIONS (cached across conversations) ===
         // Core identity and workflow - doesn't change between sessions
@@ -1820,29 +1829,7 @@ To call a tool, use this EXACT XML structure:
             prompt_builder.dynamic_section_count()
         );
 
-        // Apply evolved prompt if available (this modifies the full prompt)
-        let mut final_prompt = system_prompt;
-        if let Some(tournament) = self_improvement.evolve_prompt(&final_prompt, "system_prompt") {
-            if !tournament.extends_baseline(&final_prompt) {
-                // Defense in depth: a winner that does not keep the full
-                // baseline as its prefix would erase tool schemas, safety
-                // rules and workspace info from the system prompt.
-                warn!(
-                    "Rejected evolved system prompt variant '{}': it does not extend the baseline prompt ({} vs {} bytes); keeping baseline",
-                    tournament.winner_strategy,
-                    tournament.winner_prompt.len(),
-                    final_prompt.len()
-                );
-            } else if tournament.winner_prompt != final_prompt {
-                info!(
-                    "Applied evolved system prompt variant '{}' (predicted quality {:.2})",
-                    tournament.winner_strategy, tournament.winner_score
-                );
-                final_prompt = tournament.winner_prompt;
-            }
-        }
-
-        let messages = vec![Message::system(final_prompt)];
+        let messages = vec![Message::system(system_prompt)];
 
         // Initialize checkpoint manager if configured.
         // Wrapping in spawn_blocking avoids stalling the async runtime with
@@ -2916,7 +2903,9 @@ To call a tool, use this EXACT XML structure:
     fn api_tools(&self) -> Option<Vec<crate::api::types::ToolDefinition>> {
         if self.client.effective_native_fc() || !self.tool_schema_in_prompt {
             // Retain schemas after fallback so every outgoing XML turn can describe tools.
-            Some(self.tools.definitions())
+            let mut defs = self.tools.definitions();
+            defs.extend(crate::tools::context::context_tool_definitions());
+            Some(defs)
         } else {
             None
         }

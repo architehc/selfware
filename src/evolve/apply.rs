@@ -174,20 +174,15 @@ impl std::fmt::Display for RejectReason {
 /// untracked files in a raw tree→workdir diff; tree→index covers new files,
 /// modifications, and deletions.
 ///
-/// Workspace grounding artifacts (Theseus scaffold / internal state) that must
-/// not be staged into the apply diff or committed to the target branch.
+/// Workspace grounding artifacts (internal state) that must not be staged into
+/// the apply diff or committed to the target branch.
 pub fn is_scaffold_artifact(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized == ".theseus.md"
-        || normalized.starts_with(".theseus/")
-        || normalized == ".selfware/theseus"
-        || normalized.starts_with(".selfware/theseus/")
-        || normalized == ".selfware/phi/activity"
-        || normalized.starts_with(".selfware/phi/activity/")
+    normalized == ".selfware/phi/activity" || normalized.starts_with(".selfware/phi/activity/")
 }
 
 /// Stage all working directory changes into the index, pruning any workspace
-/// grounding scaffolding artifacts (.theseus.md, .selfware/theseus/*, .selfware/phi/activity/*).
+/// grounding scaffolding artifacts (.selfware/phi/activity/*).
 /// If a scaffolding path was already tracked in `base_tree`, its exact base tree entry is
 /// restored in the index rather than staging a modification or deletion.
 pub fn stage_workdir_without_scaffolding(
@@ -585,10 +580,10 @@ pub async fn stage_run(
         }
     };
 
-    /// Exclude workspace scaffolding artifacts (.theseus.md and .selfware/) in git info/exclude
+    /// Exclude workspace scaffolding artifacts (.selfware/) in git info/exclude
     /// for the shadow worktree only (preserving the main repository untouched).
     fn exclude_scaffold_artifacts(shadow_path: &Path) {
-        let entries = "\n.theseus.md\n.selfware/\n";
+        let entries = "\n.selfware/\n";
         let shadow_git = shadow_path.join(".git");
         let mut target = None;
         if shadow_git.is_file() {
@@ -612,7 +607,7 @@ pub async fn stage_run(
                 let _ = std::fs::create_dir_all(parent);
             }
             let existing = std::fs::read_to_string(&target).unwrap_or_default();
-            if !existing.contains(".theseus.md") {
+            if !existing.contains(".selfware/") {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
@@ -626,14 +621,6 @@ pub async fn stage_run(
     }
 
     exclude_scaffold_artifacts(&shadow_path);
-
-    // Ground shadow worktree with Theseus workspace scaffolding (Collection Map & Event Log)
-    if let Err(e) = crate::evolve::theseus_scaffold::TheseusScaffold::scaffold_shadow_worktree(
-        &shadow_path,
-        &project_root,
-    ) {
-        tracing::warn!("Theseus scaffolding in shadow worktree failed: {e}");
-    }
 
     registry.lock().await.insert(
         id.clone(),
@@ -1202,9 +1189,9 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
 
-        std::fs::create_dir_all(dir.path().join(".selfware/theseus")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".selfware/phi/activity")).unwrap();
         std::fs::write(
-            dir.path().join(".selfware/theseus/plan.md"),
+            dir.path().join(".selfware/phi/activity/plan.json"),
             b"# tracked scaffold",
         )
         .unwrap();
@@ -1213,7 +1200,7 @@ mod tests {
 
         let mut index = repo.index().unwrap();
         index
-            .add_path(Path::new(".selfware/theseus/plan.md"))
+            .add_path(Path::new(".selfware/phi/activity/plan.json"))
             .unwrap();
         index.add_path(Path::new("src/main.rs")).unwrap();
         index.write().unwrap();
@@ -1228,7 +1215,11 @@ mod tests {
             b"fn main() { println!(); }\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join(".theseus.md"), b"# scaffold").unwrap();
+        std::fs::write(
+            dir.path().join(".selfware/phi/activity/receipt.json"),
+            b"# scaffold",
+        )
+        .unwrap();
 
         let staged_index = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
         let diff = repo
@@ -1250,12 +1241,19 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
 
-        std::fs::write(dir.path().join(".theseus.md"), b"# base guide\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".selfware/phi/activity")).unwrap();
+        std::fs::write(
+            dir.path().join(".selfware/phi/activity/receipt.json"),
+            b"# base guide\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), b"pub fn f() {}\n").unwrap();
 
         let mut index = repo.index().unwrap();
-        index.add_path(Path::new(".theseus.md")).unwrap();
+        index
+            .add_path(Path::new(".selfware/phi/activity/receipt.json"))
+            .unwrap();
         index.add_path(Path::new("src/lib.rs")).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
@@ -1265,7 +1263,11 @@ mod tests {
             .unwrap();
 
         // 1. Modify tracked scaffold in worktree
-        std::fs::write(dir.path().join(".theseus.md"), b"# modified guide\n").unwrap();
+        std::fs::write(
+            dir.path().join(".selfware/phi/activity/receipt.json"),
+            b"# modified guide\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), b"pub fn f() { 1; }\n").unwrap();
 
         let staged = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
@@ -1284,7 +1286,7 @@ mod tests {
         assert_eq!(verified.files_changed, 1);
 
         // 2. Delete tracked scaffold in worktree
-        std::fs::remove_file(dir.path().join(".theseus.md")).unwrap();
+        std::fs::remove_file(dir.path().join(".selfware/phi/activity/receipt.json")).unwrap();
         let staged2 = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
         let diff2 = repo
             .diff_tree_to_index(Some(&tree), Some(&staged2), None)
