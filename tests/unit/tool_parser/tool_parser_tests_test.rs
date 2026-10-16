@@ -2108,3 +2108,26 @@ fn xml_element_argument_values_are_delivered_byte_for_byte() {
     assert_eq!(args["old_str"], "LITERAL = \"a &amp; b\"");
     assert_eq!(args["new_str"], "if x < y && z: s = \"&lt;\"");
 }
+
+#[test]
+fn deepseek_native_delimiter_and_dsml_tool_calls_parse() {
+    let delimiter_call = "Let me read the file.\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>file_read\n```json\n{\"path\": \"src/main.rs\", \"line_range\": [1, 50]}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+    let res1 = parse_tool_calls(delimiter_call);
+    assert_eq!(res1.tool_calls.len(), 1, "{res1:?}");
+    assert_eq!(res1.tool_calls[0].tool_name, "file_read");
+    assert_eq!(res1.tool_calls[0].arguments["path"], "src/main.rs");
+    assert_eq!(res1.text_content, "Let me read the file.");
+    assert!(res1.rejections.is_empty(), "{:?}", res1.rejections);
+
+    let dsml_call = "Checking now.\n<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"file_read\">\n<｜DSML｜parameter name=\"path\" string=\"true\">src/lib.rs</｜DSML｜parameter>\n<｜DSML｜parameter name=\"line_range\" string=\"false\">[10, 20]</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>";
+    let res2 = parse_tool_calls(dsml_call);
+    assert_eq!(res2.tool_calls.len(), 1, "{res2:?}");
+    assert_eq!(res2.tool_calls[0].tool_name, "file_read");
+    assert_eq!(res2.tool_calls[0].arguments["path"], "src/lib.rs");
+    assert_eq!(
+        res2.tool_calls[0].arguments["line_range"],
+        serde_json::json!([10, 20])
+    );
+    assert_eq!(res2.text_content, "Checking now.");
+    assert!(res2.rejections.is_empty(), "{:?}", res2.rejections);
+}

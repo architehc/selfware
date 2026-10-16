@@ -619,8 +619,20 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
         let end = num("e").or_else(|| num("he")).unwrap_or(start);
         let path = m.as_str().trim_start_matches("./").to_string();
         let symbol = symbol_before(before);
-        let quote = quote_after(&text[whole.end()..], before.ends_with('`'))
-            .or_else(|| fenced_quote_after(text, whole.start(), whole.end()));
+        let same_line_quote = quote_after(&text[whole.end()..], before.ends_with('`'));
+        let same_line_is_bare = same_line_quote
+            .as_deref()
+            .and_then(QuotePattern::new)
+            .is_some_and(|q| q.bare_name);
+        let quote = match &same_line_quote {
+            Some(_) if !same_line_is_bare => same_line_quote,
+            Some(_) => bold_header_quote_after(text, whole.start(), whole.end())
+                .or_else(|| next_line_inline_quote_after(text, whole.start(), whole.end()))
+                .or(same_line_quote),
+            None => bold_header_quote_after(text, whole.start(), whole.end())
+                .or_else(|| fenced_quote_after(text, whole.start(), whole.end()))
+                .or_else(|| next_line_inline_quote_after(text, whole.start(), whole.end())),
+        };
         let key = (path.clone(), start, end, symbol.clone(), quote.clone());
         if !seen.insert(key) {
             continue;
@@ -980,6 +992,91 @@ fn fenced_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<
         })
         .collect();
     Some(lines.join("\n"))
+}
+
+/// The inline code span at the start of the line immediately below a
+/// single-citation heading/title line (e.g.
+/// `**FINDING: shopkeep/auth.py:25 — \`token_is_valid\` returns ...**\n\`return token.expires_at < now\` is true ...`
+/// observed on `deepseek-v4.1-flash`).
+fn next_line_inline_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<String> {
+    let line_start = text[..cite_start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[cite_end..]
+        .find('\n')
+        .map_or(text.len(), |i| cite_end + i);
+    if citation_regex()
+        .find_iter(&text[line_start..line_end])
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let mut rest = text.get(line_end + 1..)?.lines();
+    let mut blank = 0;
+    let next_line = loop {
+        let l = rest.next()?;
+        if !l.trim().is_empty() {
+            break l.trim();
+        }
+        blank += 1;
+        if blank > 1 {
+            return None;
+        }
+    };
+    if next_line.starts_with(['#', '-', '*', '>']) || citation_regex().is_match(next_line) {
+        return None;
+    }
+    let inner = next_line.strip_prefix('`')?;
+    if inner.starts_with('`') {
+        return None;
+    }
+    let close = inner.find('`')?;
+    let quote = inner[..close].trim();
+    let pat = QuotePattern::new(quote)?;
+    if !pat.code_shaped || pat.bare_name {
+        return None;
+    }
+    Some(quote.to_string())
+}
+
+/// The inline code span immediately after the closing `**` of a bold finding
+/// header on the same line (e.g.
+/// `**FINDING: shopkeep/tags.py:10 — mutable default argument.** \`def tags_for(sku: str, extra: List[str] = [])\` binds ...`
+/// observed on `deepseek-v4.1-flash`).
+fn bold_header_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<String> {
+    let line_start = text[..cite_start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[cite_end..]
+        .find('\n')
+        .map_or(text.len(), |i| cite_end + i);
+    if !text[line_start..cite_start].contains("**") {
+        return None;
+    }
+    if citation_regex()
+        .find_iter(&text[line_start..line_end])
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let after_cite = &text[cite_end..line_end];
+    let close_bold = after_cite.find("**")?;
+    let mut rest = after_cite[close_bold + 2..].trim_start();
+    for sep in [":", "—", "–", "-", "→", "=>"] {
+        if let Some(r) = rest.strip_prefix(sep) {
+            rest = r.trim_start();
+            break;
+        }
+    }
+    let inner = rest.strip_prefix('`')?;
+    if inner.starts_with('`') {
+        return None;
+    }
+    let close = inner.find('`')?;
+    let quote = inner[..close].trim();
+    let pat = QuotePattern::new(quote)?;
+    if !pat.code_shaped || pat.bare_name {
+        return None;
+    }
+    Some(quote.to_string())
 }
 
 /// Byte length of a copied line-number prefix (`12\t`, `12:`, `12|`,

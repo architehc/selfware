@@ -16,7 +16,7 @@
       \|     |/
 ```
 
-An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or use a hosted endpoint when you don't have the GPU: out of the box it talks to `https://llm.selfware.design/v1` (`qwen38-flash-next`, no API key needed), and OpenRouter (e.g. Nemotron 3 Ultra, free tier) is one config file away. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
+An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware (vLLM, SGLang, Ollama, llama.cpp, LM Studio), or point it at any OpenAI-compatible cloud endpoint (e.g. OpenRouter's Nemotron 3 Ultra free tier) with a single config file. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
 
 > **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it work a tool-use (ReAct) loop — reading, editing, running tests, and committing. A lightweight Plan→Execute phase structures each run; it is not a full task decomposer, so scope large goals into concrete tasks. Then let the evolution engine iterate.
 
@@ -121,11 +121,10 @@ a coding task verified. Secure artifact traversal is currently Unix-only. See
 
 ## Quick Start
 
-> ### ⚡ Fastest path — zero config: the built-in endpoint
+> ### ⚡ Fastest path — local backend or setup wizard
 >
-> Since 0.8.0 the built-in default endpoint is `https://llm.selfware.design/v1`
-> with model `qwen38-flash-next`, and it works **without an API key**. With no
-> config file at all, [install Selfware](#1-install-selfware) and run:
+> [Install Selfware](#1-install-selfware), point it at your OpenAI-compatible
+> backend (`selfware init` or `selfware unpack`), and run:
 >
 > ```bash
 > cd ~/my-project
@@ -140,9 +139,9 @@ a coding task verified. Secure artifact traversal is currently Unix-only. See
 > the first call that would need a confirmation (a write, a build or test run,
 > network or git change) stops the run before it executes, with exit code `6`
 > and the tool named.
-> `selfware llm-doctor` checks the endpoint if something looks wrong, and
-> [Running against llm.selfware.design / SGLang](#running-against-llmselfwaredesign--sglang)
-> lists the settings we measured for long tasks on this model.
+> `selfware llm-doctor` checks your endpoint configuration and capabilities, and
+> [Built-in Model Profiles](#built-in-model-profiles) lists the tuned defaults
+> for supported model families.
 
 > ### ☁️ Hosted alternative — OpenRouter + Nemotron 3 Ultra (free tier)
 >
@@ -376,9 +375,7 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 
 ### 5. Configure
 
-Without any config file, Selfware uses the built-in endpoint
-(`https://llm.selfware.design/v1`, model `qwen38-flash-next`, no key). To use
-your own backend, create `selfware.toml` in your project directory:
+To configure your backend, create `selfware.toml` in your project directory (or `~/.config/selfware/config.toml`):
 
 ```toml
 # Your local workshop
@@ -538,7 +535,7 @@ you do not fully trust.** The full list is in [CHANGELOG.md](CHANGELOG.md):
 
 ## What's New in 0.9.4
 
-0.9.4 makes repository review honest and complete on llm.selfware.design.
+0.9.4 makes repository review honest and complete across long-context coding models.
 The full list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 
 - **`selfware review [PATH]`.** A deterministic inventory with no model
@@ -552,7 +549,7 @@ The full list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 - **Exact file content.** What the model reads is now byte-for-byte the
   file. Ordinary code was being redacted as a secret, and `&` / `<` were
   escaped.
-- **Measured per-turn quotas** for llm.selfware.design: planning without
+- **Measured per-turn quotas**: planning without
   thinking, synthesis with a 16k cap, per-endpoint compaction. See them in
   `llm-doctor`.
 - **Headless read-only reviews.** `selfware -p "review …"` runs in normal
@@ -616,7 +613,7 @@ You can open any task, pause it, edit it and go back. The full list is in
 
 0.9.2 makes every number and badge match what actually happened, makes
 confirmations readable, and closes a set of argument-injection holes. It
-was re-tested live on real projects against llm.selfware.design. The full
+was re-tested live on real projects. The full
 list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 
 - **Truthful status.** No invented spinner activity or dollar amounts. One
@@ -649,7 +646,7 @@ list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 ## What's New in 0.9.1
 
 0.9.1 is a user-experience and honesty release. It follows a hands-on UX field
-test against llm.selfware.design and three rounds of external review. The full
+test and three rounds of external review. The full
 list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 
 - **Unattended runs never hang.** In `-p`/`run`/batch mode a tool confirmation
@@ -688,8 +685,8 @@ list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 ## What's New in 0.9
 
 0.9 makes long tasks on slow or small-context models finish, and makes the
-agent's own reports trustworthy. Most fixes come from measured runs against
-llm.selfware.design. The full list is in [CHANGELOG.md](CHANGELOG.md); the
+agent's own reports trustworthy. Most fixes come from measured live agent
+validation runs. The full list is in [CHANGELOG.md](CHANGELOG.md); the
 highlights:
 
 - **Deadline and budget wrap-up.** Before the wall clock or the token/cost
@@ -729,7 +726,7 @@ highlights:
 
 ### Behaviour changes to know when upgrading
 
-- **`selfware-llm-selfware-design.toml` no longer pins limits.** The measured
+- **Profile-backed limits apply automatically.** The measured
   qwen38 profile applies: 163,840 context, 24,576 max tokens, a 1,628 s
   per-call cap and the default 400 iterations.
 - **Missing or unconfigured QA tools no longer block completion.** They are
@@ -747,8 +744,7 @@ highlights:
 0.8 is about long-task reliability, honest status, and safety hardening. The
 full list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 
-- **Zero-config default endpoint** — `https://llm.selfware.design/v1`
-  (`qwen38-flash-next`), no API key required.
+- **Built-in model profiles** (`qwen38-flash-next`, `deepseek-v4.1-flash`, `nemotron-3-ultra`, `glm-5.2`) with measured context, token, and concurrency defaults.
 - **Checkpoint on every mutation**, with a resume note listing the files already
   written; `--autocontinue` also resumes runs that stopped at the iteration cap.
 - **Per-agent workspace root** — entering a git worktree no longer changes the
@@ -823,14 +819,14 @@ Logs stay on stderr, so stdout is pure JSON.
 
 ---
 
-## Running against llm.selfware.design / SGLang
+## Built-in Model Profiles
 
-The built-in `qwen38` profile already applies these settings (measured
-against the endpoint on 2026-09-24) to any field you do not set yourself;
-explicit values in your config always win. Spelled out, they are:
+The built-in `qwen38` and `deepseek-v4` profiles already apply measured settings
+to any field you do not set yourself; explicit values in your config always win.
+Spelled out for `qwen38-flash-next`, they are:
 
 ```toml
-endpoint       = "https://llm.selfware.design/v1"
+endpoint       = "http://localhost:8000/v1"
 model          = "qwen38-flash-next"
 max_tokens     = 24576    # bounds a runaway reasoning stream
 context_length = 163840   # 160k; the largest real prompt we saw was 127k
@@ -850,16 +846,16 @@ max_global  = 16   # 8 streams + 8 tool permits
   `reasoning_effort` has no measurable effect on this model.
 - **`agent.max_call_secs` 1628.** Fails a stuck call with a typed error instead
   of hanging, without killing a call `max_tokens` allows: a full 24,576-token
-  call at the slowest whole-call rate measured on this endpoint (15.1 tok/s,
-  prefill included) takes 1,628 s. Under load the endpoint decodes at
-  17–20 tok/s; the former 600 s cap killed a legitimate 701 s turn.
-  `max_tokens` still bounds a runaway stream. Keep streaming on (the
-  default): an ngrok-style gateway cuts non-streaming requests at 300 s.
+  call at the slowest whole-call rate measured (15.1 tok/s, prefill included)
+  takes 1,628 s. Under load the backend decodes at 17–20 tok/s; the former
+  600 s cap killed a legitimate 701 s turn. `max_tokens` still bounds a runaway
+  stream. Keep streaming on (the default): reverse proxies often cut
+  non-streaming requests at 300 s.
 - **`context_length` 163840.** Bigger windows cost more than they give: time
   to first token was 13 s at 99k tokens vs 40 s at 257k, and decode dropped to
   17 tok/s.
-- **`concurrency.max_streams` 8.** The endpoint serves at most 8 requests at
-  once; more streams only queue server-side.
+- **`concurrency.max_streams` 8.** Caps concurrent requests at 8 so excess
+  streams do not queue server-side.
 - **`native_function_calling = false`** unless the server's tool parser is
   `qwen3_coder`; with that parser, native tool calling works.
 
@@ -1530,7 +1526,7 @@ bash system_tests/projecte2e/run_full_sab.sh
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SELFWARE_ENDPOINT` | LLM API endpoint | `https://llm.selfware.design/v1` |
+| `SELFWARE_ENDPOINT` | LLM API endpoint | `http://localhost:8000/v1` (or configured endpoint) |
 | `SELFWARE_MODEL` | Model name | `qwen38-flash-next` |
 | `SELFWARE_API_KEY` | API key (if required) | None |
 | `SELFWARE_MAX_TOKENS` | Max tokens per response | `65536` |

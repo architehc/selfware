@@ -1,12 +1,13 @@
-//! Integration tests for the `llm.selfware.design` SGLang endpoint.
+//! Integration tests for the custom `colibri` endpoint (`llm.selfware.design`).
 //!
-//! Exercises `https://llm.selfware.design/v1` serving `qwen38-flash-next` across:
-//! 1. Endpoint Discovery & SGLang Runtime Metadata
+//! Exercises `https://llm.selfware.design/v1` serving `qwen38-flash-next` or
+//! `deepseek-v4.1-flash` (`SELFWARE_MODEL`) across:
+//! 1. Endpoint Discovery & Runtime Metadata
 //! 2. Basic Chat Completion & Token Usage
 //! 3. Streaming SSE Contract & Chunk Accumulation
 //! 4. Reasoning Channel Separation (Thinking Mode)
 //! 5. Fast Path with Thinking Disabled
-//! 6. Qwen XML Tool-Calling Extraction via Unified Extractor
+//! 6. Tool-Calling Extraction via Unified Extractor
 //! 7. Multi-Turn Tool Execution Round-Trip
 //! 8. Agent File Tool Calling Contract
 //! 9. Concurrent Stream Throughput & Stability
@@ -28,7 +29,7 @@ use selfware::config::{AgentConfig, Config, RedactedString};
 
 const DEFAULT_ENDPOINT: &str = "https://llm.selfware.design/v1";
 const DEFAULT_MODEL: &str = "qwen38-flash-next";
-const PER_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+const PER_TEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn endpoint() -> String {
     std::env::var("SELFWARE_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
@@ -39,12 +40,17 @@ fn model() -> String {
 }
 
 fn api_key() -> Option<String> {
-    std::env::var("SELFWARE_API_KEY").ok()
+    std::env::var("SELFWARE_API_KEY").ok().or_else(|| {
+        Config::load(None)
+            .ok()
+            .and_then(|c| c.api_key)
+            .map(|k| k.expose().to_string())
+    })
 }
 
 async fn is_endpoint_reachable() -> bool {
     let client = match HttpClient::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
     {
         Ok(c) => c,
@@ -95,7 +101,7 @@ fn build_test_config(
         temperature: 0.0,
         agent: AgentConfig {
             native_function_calling,
-            step_timeout_secs: 45,
+            step_timeout_secs: 180,
             ..AgentConfig::default()
         },
         extra_body,
@@ -206,7 +212,11 @@ async fn test_selfware_design_models_discovery() {
         .get("owned_by")
         .and_then(|v| v.as_str())
         .expect("model catalog entry must contain owned_by");
-    assert_eq!(owned_by, "sglang", "expected SGLang backend");
+    assert!(
+        matches!(owned_by, "selfware" | "colibri" | "sglang"),
+        "expected selfware/colibri/sglang backend, got: {}",
+        owned_by
+    );
 
     let max_len = model_entry
         .get("max_model_len")
@@ -618,9 +628,17 @@ async fn test_selfware_design_thinking_disabled_budget() {
             "expected 0 reasoning tokens when enable_thinking=false, got: {}",
             tokens
         );
-    } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
-        panic!(
-            "endpoint usage did not report reasoning_tokens: {:?}",
+    } else {
+        let raw_reasoning = raw_json
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let comp_tokens = raw_json
+            .pointer("/usage/completion_tokens")
+            .and_then(|v| v.as_u64());
+        assert!(
+            raw_reasoning.is_empty() && comp_tokens.is_some(),
+            "endpoint usage omitted reasoning_tokens, expected empty reasoning_content and valid completion_tokens, got: {:?}",
             raw_json.get("usage")
         );
     }

@@ -90,7 +90,6 @@ over the fallback.
 
 ```toml
 # API endpoint URL (must start with http:// or https://)
-# Default: "https://llm.selfware.design/v1" (works without an API key)
 endpoint = "http://localhost:8000/v1"
 
 # Model identifier sent to the API
@@ -190,8 +189,8 @@ require_verification_before_completion = true
 
 # Fail any single LLM call that runs longer than this many wall-clock seconds
 # with a typed error (terminal for that call, not retried). Unset or 0 means
-# uncapped, so slow local endpoints keep working. ~600 is a good value for
-# llm.selfware.design (see README, "Running against llm.selfware.design").
+# uncapped, so slow local endpoints keep working. See README "Built-in Model
+# Profiles" for profile-backed values.
 # Default: unset
 max_call_secs = 600
 ```

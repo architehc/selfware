@@ -76,12 +76,10 @@ Selfware looks for configuration in this order:
 3. `selfware.toml` in the current directory
 4. `~/.config/selfware/config.toml`
 
-If no config file is found, built-in defaults are used: the hosted endpoint
-`https://llm.selfware.design/v1` with model `qwen38-flash-next`, which works
-without an API key, so `selfware -m auto-edit run "..."` runs out of the box.
-For OpenRouter or a local backend, write a config file pointing at it. For
-recommended settings on the default model, see
-[Running against llm.selfware.design / SGLang](../README.md#running-against-llmselfwaredesign--sglang).
+If no config file is found, built-in model profile defaults are used. For
+OpenRouter or a local backend, write a config file pointing at it. For
+recommended settings on supported models, see
+[Built-in Model Profiles](../README.md#built-in-model-profiles).
 
 ### Create your config
 
@@ -91,9 +89,7 @@ Run the setup wizard:
 selfware init
 ```
 
-Or create the file manually. Do not leave it empty — an empty file is valid
-TOML, so selfware would silently start with the built-in hosted defaults
-above. Put real values in (see the backend examples below), then restrict
+Or create the file manually (see the backend examples below), then restrict
 permissions:
 
 ```bash

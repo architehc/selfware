@@ -145,13 +145,13 @@ def with_config_set(spec, sets):
 
 
 def parse_config_set(items):
-    """`KEY=VALUE` strings (`agent.done_check=true`) to a dict; VALUE is
-    TOML-ish: true/false, integers, floats, else a string."""
+    """`KEY=VALUE` strings (`agent.done_check=true` or `model=deepseek-v4.1-flash`)
+    to a dict; VALUE is TOML-ish: true/false, integers, floats, else a string."""
     out = {}
     for item in items or []:
         key, sep, value = item.partition("=")
-        if not sep or "." not in key:
-            raise SystemExit(f"--config-set wants SECTION.KEY=VALUE, got {item!r}")
+        if not sep or not key.strip():
+            raise SystemExit(f"--config-set wants [SECTION.]KEY=VALUE, got {item!r}")
         low = value.strip().lower()
         if low in ("true", "false"):
             out[key.strip()] = low == "true"
@@ -175,13 +175,23 @@ def _toml_value(value):
 
 
 def apply_config_set(text, sets):
-    """Set `section.key = value` in a TOML config text: replace the key inside
-    its `[section]` table when present, else add it at the top of that table,
-    else append the table. Only one level (`agent.done_check`)."""
+    """Set `[section.]key = value` in a TOML config text: replace the key inside
+    its `[section]` table (or top-level preamble when no section is given) when
+    present, else add it at the top of that table, else append the table."""
     for dotted, value in sorted((sets or {}).items()):
         section, _, key = dotted.rpartition(".")
         line = f"{key} = {_toml_value(value)}"
         lines = text.split("\n")
+        if not section:
+            end = next((i for i, l in enumerate(lines) if l.lstrip().startswith("[")), len(lines))
+            key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+            hit = next((i for i in range(0, end) if key_re.match(lines[i])), None)
+            if hit is None:
+                lines.insert(0, line)
+            else:
+                lines[hit] = line
+            text = "\n".join(lines)
+            continue
         header = f"[{section}]"
         start = next((i for i, l in enumerate(lines) if l.strip() == header), None)
         if start is None:
@@ -327,11 +337,58 @@ def model_from_config(text):
     return m.group(1) if m else None
 
 
-def preflight(endpoint, timeout=20):
+def api_key_from_config(text):
+    m = re.search(r'^\s*api_key\s*=\s*"([^"]+)"', text, re.M)
+    return m.group(1) if m else None
+
+
+def _is_placeholder_key(val):
+    if not val:
+        return True
+    s = val.strip()
+    return not s or s.lower() in ("empty", "none") or s.startswith("${")
+
+
+def resolve_api_key_for_endpoint(endpoint, cfg_text=""):
+    """Resolve an API key when the tracked config uses `api_key = "EMPTY"`.
+
+    Order:
+    1. Non-placeholder `api_key` in `cfg_text`
+    2. `LIVE_EVAL_API_KEY` or `SELFWARE_API_KEY` in caller `os.environ`
+    3. Caller's `~/.config/selfware/config.toml` if its endpoint matches `endpoint`
+    """
+    cfg_key = api_key_from_config(cfg_text)
+    if not _is_placeholder_key(cfg_key):
+        return cfg_key.strip()
+    for var in ("LIVE_EVAL_API_KEY", "SELFWARE_API_KEY"):
+        val = os.environ.get(var)
+        if not _is_placeholder_key(val):
+            return val.strip()
+    user_cfg_path = Path.home() / ".config" / "selfware" / "config.toml"
+    try:
+        if user_cfg_path.is_file():
+            user_text = user_cfg_path.read_text(errors="replace")
+            user_ep = (endpoint_from_config(user_text) or "").rstrip("/")
+            target_ep = (endpoint or "").rstrip("/")
+            if user_ep and target_ep and user_ep == target_ep:
+                user_key = api_key_from_config(user_text)
+                if not _is_placeholder_key(user_key):
+                    return user_key.strip()
+    except OSError:
+        pass
+    return None
+
+
+def preflight(endpoint, timeout=20, api_key=None):
     """(ok, detail): GET <endpoint>/models answered with a model list."""
     url = endpoint.rstrip("/") + "/models"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        req = (
+            urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+            if api_key
+            else url
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(65536)
         data = json.loads(body)
         ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
@@ -792,6 +849,9 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         return finish("fail", f"setup_failed: {exc}", {}, {"setup": False})
     endpoint = endpoint_from_config(cfg_text)
     model = model_from_config(cfg_text)
+    api_key = resolve_api_key_for_endpoint(endpoint, cfg_text)
+    if api_key and _is_placeholder_key(api_key_from_config(cfg_text)):
+        env["SELFWARE_API_KEY"] = api_key
     record = state["record"] = _record_base(
         spec, binary, run_id, state["record"]["started_at"], endpoint, model
     )
@@ -810,7 +870,7 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         log(f"[{spec['name']}] FAIL {reason}")
         return finish("fail", reason, metrics or {}, criteria)
 
-    ok, detail = preflight(endpoint or "")
+    ok, detail = preflight(endpoint or "", api_key=api_key)
     record["endpoint_models"] = detail if ok else None
     if not ok:
         return fail(f"endpoint_unreachable: {detail}", {"endpoint_reachable": False})
@@ -849,6 +909,8 @@ def _run_scenario(spec, binary, results_dir, run_id, run_dir, scratch, state, ab
         twin_ws.mkdir()
         twin_home.mkdir()
         twin_env = child_env(twin_home, results_dir, tc)
+        if "SELFWARE_API_KEY" in env:
+            twin_env["SELFWARE_API_KEY"] = env["SELFWARE_API_KEY"]
         _git_init_commit(twin_ws)
         subprocess.run(
             [binary.path, "trust", str(cfg_path), "-q"], cwd=twin_ws, env=twin_env,

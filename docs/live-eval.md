@@ -1,7 +1,7 @@
 # Live evaluation harness (`scripts/live_eval`)
 
-`scripts/live_eval/run.py` runs selfware against a real endpoint
-(llm.selfware.design, model `qwen38-flash-next`) over a fixed set of
+`scripts/live_eval/run.py` runs selfware against a real OpenAI-compatible
+endpoint (such as `qwen38-flash-next` or `deepseek-v4.1-flash`) over a fixed set of
 scenarios, records one JSONL line per run, and reports with statistics
 whether a commit made selfware better or worse. It is the empirical layer
 of the validation design: golden scenarios, N-run statistics, planted-bug

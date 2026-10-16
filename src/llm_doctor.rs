@@ -31,6 +31,7 @@ const MIN_RECOMMENDED_CONTEXT: u64 = 32_768;
 /// Recognised LLM backends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
+    Colibri,
     Sglang,
     Vllm,
     Ollama,
@@ -42,6 +43,7 @@ pub enum Backend {
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Backend::Colibri => write!(f, "colibri"),
             Backend::Sglang => write!(f, "sglang"),
             Backend::Vllm => write!(f, "vllm"),
             Backend::Ollama => write!(f, "ollama"),
@@ -1684,6 +1686,9 @@ async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<Detecti
 /// found — the caller will fall back to active probing.
 fn detect_backend_from_headers(header_blob: &str, models_body: &Value) -> Option<Backend> {
     let lower = header_blob.to_lowercase();
+    if lower.contains("server: colibri") || lower.contains("x-colibri") {
+        return Some(Backend::Colibri);
+    }
     if lower.contains("x-vllm-version") || lower.contains("server: vllm") {
         return Some(Backend::Vllm);
     }
@@ -1992,6 +1997,9 @@ fn print_context_extension_help(backend: &Backend) {
         ">>".yellow()
     );
     match backend {
+        Backend::Colibri => {
+            println!("     colibri: configure model context window on the server");
+        }
         Backend::Sglang => {
             println!(
                 "     sglang: {} or {}",
@@ -2037,6 +2045,18 @@ fn check_template(det: &DetectionResult, config: &Config, thinking_support: Opti
     let is_qwen = is_qwen_model(model_name);
 
     match det.backend {
+        Backend::Colibri => {
+            println!(
+                "  {} colibri custom backend detected — checking chat template and thinking control",
+                "ok".green().bold()
+            );
+            if thinking_support == Some(true) {
+                println!(
+                    "  {} Endpoint accepts chat_template_kwargs — per-workload thinking control active.",
+                    "ok".green().bold()
+                );
+            }
+        }
         Backend::Sglang => {
             println!(
                 "  {} sglang detected — checking chat template configuration",
@@ -2196,6 +2216,20 @@ fn assess_capabilities(model_name: &str) {
         ModelAssessment {
             quality: "Excellent",
             summary: "Excellent for code generation, tool use, and visual processing",
+        }
+    } else if lower.contains("deepseek-v4")
+        || lower.contains("deepseek-v3")
+        || lower.contains("deepseek-r1")
+        || lower.contains("deepseek")
+    {
+        ModelAssessment {
+            quality: "Excellent",
+            summary: "DeepSeek reasoning/coding model — strong multi-step tool use and synthesis",
+        }
+    } else if lower.contains("nemotron-3-ultra") || lower.contains("glm-5") {
+        ModelAssessment {
+            quality: "Excellent",
+            summary: "Frontier coding/reasoning model — strong multi-step tool use",
         }
     } else if lower.contains("qwen3-coder") || lower.contains("qwen3.5-coder") {
         ModelAssessment {

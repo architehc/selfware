@@ -1987,3 +1987,34 @@ fn bare_names_and_repeated_expressions_never_make_a_citation_wrong() {
         }
     ));
 }
+
+#[test]
+fn finding_heading_with_inline_code_quote_on_next_line_verifies() {
+    let ws = slugify_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    let text = "**FINDING: slugify/special.py:18 — `add_uppercase_char` inserts in reverse**\n\
+                `char_list.insert(0, upper_dict)` reverses the order of insertions.";
+    let citations = parse_citations(text);
+    assert_eq!(citations.len(), 1);
+    assert_eq!(
+        citations[0].quote.as_deref(),
+        Some("char_list.insert(0, upper_dict)")
+    );
+    assert!(matches!(
+        r.check(&citations[0]),
+        CitationVerdict::Verified { .. }
+    ));
+
+    let same_line_bold =
+        "**FINDING: slugify/special.py:18 — reverse insertion.** `char_list.insert(0, upper_dict)` reverses insertions.";
+    let citations2 = parse_citations(same_line_bold);
+    assert_eq!(citations2.len(), 1);
+    assert_eq!(
+        citations2[0].quote.as_deref(),
+        Some("char_list.insert(0, upper_dict)")
+    );
+    assert!(matches!(
+        r.check(&citations2[0]),
+        CitationVerdict::Verified { .. }
+    ));
+}

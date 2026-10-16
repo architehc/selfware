@@ -65,7 +65,7 @@ cargo build --bin selfware
 python3 scripts/validate_phi_agents.py \
   --binary target/debug/selfware \
   --output target/phi-agents-live \
-  --endpoint https://llm.selfware.design/v1 \
+  --endpoint http://localhost:8000/v1 \
   --model qwen38-flash-next --agents 16 --concurrency 16
 ```
 

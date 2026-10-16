@@ -1311,18 +1311,30 @@ impl Agent {
         );
         self.review_shard_progress("review_shards", &start_detail);
 
-        let thinking_first = if cfg.shard_thinking {
-            crate::api::ThinkingMode::Workload(crate::config::TurnWorkload::Synthesis)
-        } else {
-            crate::api::ThinkingMode::Disabled
-        };
+        let shard_thinking = cfg.shard_thinking;
         let client = self.client.clone();
         let governor = std::sync::Arc::clone(&self.governor);
         // Longest shard call so far (seconds), for the wall-budget reserve.
         let longest_shard_secs = std::sync::atomic::AtomicU64::new(0);
         let longest_ref = &longest_shard_secs;
         let max_tokens = cfg.shard_max_tokens.max(1024);
-        let cap = cfg.shard_time_cap_secs.max(30);
+        let pre_reserve_secs = self
+            .config
+            .agent
+            .max_wall_secs
+            .filter(|&s| s > 0)
+            .map(|max| {
+                let remaining = max.saturating_sub(self.budget_elapsed_secs());
+                let reserve = synthesis_reserve_secs(max, self.call_forecast().answer_secs());
+                remaining.saturating_sub(reserve)
+            });
+        // Never let a single shard attempt consume the entire pre-reserve
+        // window (which would starve both its own thinking-off retry and the
+        // main loop's fallback reading turns).
+        let cap = match pre_reserve_secs.filter(|&p| p >= 90) {
+            Some(pre) => cfg.shard_time_cap_secs.min(pre / 3).max(30),
+            None => cfg.shard_time_cap_secs.max(30),
+        };
         // Every call — its stream-permit wait included — is dropped when the
         // time left reaches the synthesis reserve.
         let cut = self
@@ -1352,11 +1364,13 @@ impl Agent {
                 let spec = crate::api::client::SideCall::new("review_shard")
                     .max_tokens(max_tokens)
                     .time_cap_secs(cap);
-                // The retry goes with thinking switched off in the request:
-                // a first attempt that failed usually spent its whole budget
-                // reasoning.
-                let spec = if first {
-                    spec.thinking(thinking_first)
+                // The retry (or first attempt when shard_thinking = false) goes
+                // with thinking switched off in the request: a first attempt
+                // that failed usually spent its whole budget reasoning.
+                let spec = if first && shard_thinking {
+                    spec.thinking(crate::api::ThinkingMode::Workload(
+                        crate::config::TurnWorkload::Synthesis,
+                    ))
                 } else {
                     spec.thinking_off()
                 };

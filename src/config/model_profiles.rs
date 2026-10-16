@@ -541,6 +541,92 @@ pub const QWEN38_MEASURED: &[MeasuredQuota] = &[
     },
 ];
 
+fn deepseek_v4_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDefaultsProfile {
+    ModelDefaultsProfile {
+        name,
+        pattern,
+        native_function_calling: Some(false),
+        streaming: Some(true),
+        temperature: Some(0.6),
+        max_tokens: Some(32_768),
+        context_length: Some(163_840),
+        max_streams: Some(4),
+        max_global: Some(12),
+        max_call_secs: Some(2_400),
+        context_content_ratio: None,
+        context_growth_p99_tokens: Some(21_221),
+        reasoning_effort_honored: false,
+        extra_body: json!({
+            "top_p": 0.95,
+            "chat_template_kwargs": {
+                "enable_thinking": true,
+                "preserve_thinking": false,
+            },
+        }),
+        workload_quotas: Some(DEEPSEEK_V4_WORKLOAD_QUOTAS),
+        measured: DEEPSEEK_V4_MEASURED,
+    }
+}
+
+/// Per-workload quotas for `deepseek-v4.1-flash` (`deepseek-v4*`).
+///
+/// - `planning`: thinking OFF, `max_tokens` 12,288 so initial tool selection
+///   and short side calls (`SideCall`) do not burn minutes of deep reasoning.
+/// - `mechanical` / `edit`: thinking ON, session `max_tokens`.
+/// - `synthesis`: thinking ON, `max_tokens` 24,576.
+pub const DEEPSEEK_V4_WORKLOAD_QUOTAS: WorkloadQuotas = WorkloadQuotas {
+    planning: WorkloadQuota {
+        enable_thinking: Some(false),
+        max_tokens: Some(12_288),
+    },
+    mechanical: WorkloadQuota {
+        enable_thinking: Some(true),
+        max_tokens: None,
+    },
+    edit: WorkloadQuota {
+        enable_thinking: Some(true),
+        max_tokens: None,
+    },
+    synthesis: WorkloadQuota {
+        enable_thinking: Some(true),
+        max_tokens: Some(24_576),
+    },
+};
+
+/// Operational endpoint quotas for the `deepseek-v4` profile.
+pub const DEEPSEEK_V4_MEASURED: &[MeasuredQuota] = &[
+    MeasuredQuota {
+        name: "context_length",
+        value: "163840",
+        basis: "160k operational context window for multi-turn coding and repository review",
+    },
+    MeasuredQuota {
+        name: "max_tokens",
+        value: "32768",
+        basis: "headroom for deep reasoning chains plus full code edits",
+    },
+    MeasuredQuota {
+        name: "agent.max_call_secs",
+        value: "2400",
+        basis: "32,768 tokens on slower deep reasoning turns (~13.6 tok/s floor)",
+    },
+    MeasuredQuota {
+        name: "concurrency.max_streams",
+        value: "4",
+        basis: "4 concurrent streams + 8 tool permits (max_global = 12) for heavy reasoning model",
+    },
+    MeasuredQuota {
+        name: "workloads.planning",
+        value: "thinking off, max_tokens 12288",
+        basis: "fast initial tool selection and side calls without deep thinking latency",
+    },
+    MeasuredQuota {
+        name: "workloads.synthesis",
+        value: "thinking on, max_tokens 24576",
+        basis: "bounded synthesis completion with step-down retry to thinking-off on exhaustion",
+    },
+];
+
 /// Where a resolved `workloads.<kind>.<field>` value came from, for display.
 fn workload_field_origin(config: &crate::config::Config, key: &str, set: bool) -> &'static str {
     use crate::config::ConfigSource;
@@ -659,16 +745,23 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             workload_quotas: None,
             measured: &[],
         },
-        // Qwen 3.8 / Qwen3.8-Flash-Next — endpoint deployment uses SGLang.
+        // Qwen 3.8 / Qwen3.8-Flash-Next — custom colibri / SGLang deployments.
         // Follows upstream card defaults: temp=0.7 for agentic reproducibility,
         // top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0.
         // Sets preserve_thinking=false as the agent-loop default to keep multi-turn
-        // context growth compact. Operational limits measured on llm.selfware.design
-        // (2026-09-24): context 163,840, max_tokens 24,576, 8 streams (the server's
-        // max_running_requests) with max_global = 16.  See qwen38_defaults_profile.
-        // Native FC is false since SGLang Qwen3.8 emits XML tool calls in content.
+        // context growth compact. Operational limits measured on custom endpoint
+        // (2026-09-24): context 163,840, max_tokens 24,576, 8 streams
+        // with max_global = 16.  See qwen38_defaults_profile.
+        // Native FC is false since Qwen3.8 emits XML tool calls in content.
         qwen38_defaults_profile("qwen3.8", "qwen3.8-*"),
         qwen38_defaults_profile("qwen38", "qwen38-flash-*"),
+        // DeepSeek V4 / V4.1-Flash — slower, high-capability reasoning model on custom
+        // colibri endpoint (`deepseek-v4.1-flash`, `DeepSeek-V4.1-Flash`, `deepseek-v41`,
+        // `deepseek-v4.1`). Uses per-workload thinking control (planning & side calls
+        // disable thinking for fast responses; mechanical, edit, and synthesis keep
+        // thinking enabled), 160k operational context window, 32k max_tokens, 2,400s
+        // per-call cap, and 4 concurrent streams.
+        deepseek_v4_defaults_profile("deepseek-v4", "deepseek-v4*"),
         // Qwen 3.6 — needs the high presence_penalty / min_p kit and the
         // SGLang `preserve_thinking` template knob to produce its best
         // function-calling output.  Without these, SWE-bench Pro hovers

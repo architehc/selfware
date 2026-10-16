@@ -1436,3 +1436,14 @@ fn quota_report_lists_workloads_and_measured_quotas() {
         "{text}"
     );
 }
+
+#[test]
+fn detect_backend_from_headers_identifies_colibri() {
+    let headers = "content-type: application/json\nserver: colibri Python/3.10.12\n";
+    let body = serde_json::json!({"object": "list", "data": []});
+    assert_eq!(
+        detect_backend_from_headers(headers, &body),
+        Some(Backend::Colibri)
+    );
+    assert_eq!(Backend::Colibri.to_string(), "colibri");
+}

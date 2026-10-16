@@ -67,6 +67,9 @@ static MALFORMED_CLOSE_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static JSON_STRING_REGEX: OnceLock<Regex> = OnceLock::new();
 static KIMI_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static KIMI_ARG_REGEX: OnceLock<Regex> = OnceLock::new();
+static DEEPSEEK_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static DEEPSEEK_DSML_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static DEEPSEEK_DSML_PARAM_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn kimi_call_regex() -> &'static Regex {
     KIMI_CALL_REGEX.get_or_init(|| {
@@ -79,6 +82,33 @@ fn kimi_arg_regex() -> &'static Regex {
     KIMI_ARG_REGEX.get_or_init(|| {
         Regex::new(r#"(?s)<\|open\|>argument\s+key="([^"]+)"(?:\s+type="([^"]+)")?<\|sep\|>(.*?)<\|close\|>argument(?:<\|sep\|>)?"#)
             .expect("Invalid Kimi arg regex")
+    })
+}
+
+fn deepseek_call_regex() -> &'static Regex {
+    DEEPSEEK_CALL_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<｜tool▁call▁begin｜>|<\|tool_call_begin\|>)\s*(?:function\s*(?:<｜tool▁sep｜>|<\|tool_sep\|>)\s*)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:<｜tool▁sep｜>|<\|tool_sep\|>|\n)\s*([\s\S]*?)\s*(?:<｜tool▁call▁end｜>|<\|tool_call_end\|>)",
+        )
+        .expect("Invalid DeepSeek call regex")
+    })
+}
+
+fn deepseek_dsml_call_regex() -> &'static Regex {
+    DEEPSEEK_DSML_CALL_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?s)(?:<｜DSML｜|<\|DSML\|)invoke\s+name="([^"]+)"\s*>([\s\S]*?)(?:</｜DSML｜|</\|DSML\|)invoke\s*>"#,
+        )
+        .expect("Invalid DeepSeek DSML call regex")
+    })
+}
+
+fn deepseek_dsml_param_regex() -> &'static Regex {
+    DEEPSEEK_DSML_PARAM_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?s)(?:<｜DSML｜|<\|DSML\|)parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)(?:</｜DSML｜|</\|DSML\|)parameter\s*>"#,
+        )
+        .expect("Invalid DeepSeek DSML param regex")
     })
 }
 
@@ -644,11 +674,12 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
     ));
     for (family, found) in [
         (11, try_parse_kimi_tools(content, &code)),
+        (12, try_parse_deepseek_tools(content, &code)),
         // Fenced JSON blocks are code by construction (not filtered by
         // `code`): `[^`]*` already stops a match at the next fence, so one
         // block cannot swallow another.
-        (12, try_parse_json_blocks(content)),
-        (13, try_parse_plain_function_calls(content, &code)),
+        (13, try_parse_json_blocks(content)),
+        (14, try_parse_plain_function_calls(content, &code)),
     ] {
         for (result, span) in found.unwrap_or_default() {
             all.push(Candidate {
@@ -860,7 +891,16 @@ fn in_spans(pos: usize, spans: &[std::ops::Range<usize>]) -> bool {
 }
 
 /// Openers of a tool-call region in any supported syntax.
-const TOOL_CALL_OPENERS: &[&str] = &["<tool_call>", "<tool>", "<function=", "<|open|>call "];
+const TOOL_CALL_OPENERS: &[&str] = &[
+    "<tool_call>",
+    "<tool>",
+    "<function=",
+    "<|open|>call ",
+    "<｜tool▁call▁begin｜>",
+    "<|tool_call_begin|>",
+    "<｜DSML｜invoke",
+    "<|DSML|invoke",
+];
 
 /// Whether streamed text has started a tool call in ANY supported syntax
 /// (the parser's own openers, plus the `<tool` prefix and Kimi's
@@ -870,6 +910,10 @@ const TOOL_CALL_OPENERS: &[&str] = &["<tool_call>", "<tool>", "<function=", "<|o
 pub(crate) fn text_opens_tool_call(text: &str) -> bool {
     text.contains("<tool")
         || text.contains("<|open|>tools")
+        || text.contains("<｜tool▁calls▁begin｜>")
+        || text.contains("<|tool_calls_begin|>")
+        || text.contains("<｜DSML｜function_calls>")
+        || text.contains("<|DSML|function_calls>")
         || TOOL_CALL_OPENERS.iter().any(|o| text.contains(o))
 }
 
@@ -883,6 +927,14 @@ const TOOL_CALL_WRAPPERS: &[&str] = &[
     "<|open|>tools<|sep|>",
     "<|close|>tools<|sep|>",
     "<|close|>tools",
+    "<｜tool▁calls▁begin｜>",
+    "<｜tool▁calls▁end｜>",
+    "<|tool_calls_begin|>",
+    "<|tool_calls_end|>",
+    "<｜DSML｜function_calls>",
+    "</｜DSML｜function_calls>",
+    "<|DSML|function_calls>",
+    "</|DSML|function_calls>",
 ];
 
 fn strip_wrappers(text: &str) -> String {
@@ -1142,6 +1194,21 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
             text = text.replace(token, "");
         }
     }
+    if content.contains("tool▁call") || content.contains("tool_call_") || content.contains("DSML")
+    {
+        for token in [
+            "<｜tool▁calls▁begin｜>",
+            "<｜tool▁calls▁end｜>",
+            "<|tool_calls_begin|>",
+            "<|tool_calls_end|>",
+            "<｜DSML｜function_calls>",
+            "</｜DSML｜function_calls>",
+            "<|DSML|function_calls>",
+            "</|DSML|function_calls>",
+        ] {
+            text = text.replace(token, "");
+        }
+    }
     result.text_content = text.trim().to_string();
 
     result
@@ -1149,6 +1216,98 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
 
 /// A parsed (or failed) call with the byte span of the text it came from.
 type SpannedCall = (Result<ParsedToolCall>, std::ops::Range<usize>);
+
+/// Try to parse DeepSeek V3 / V4 delimiter-style and DSML tool calls:
+/// 1. `<｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json\n{...}\n```<｜tool▁call▁end｜>`
+/// 2. `<｜DSML｜invoke name="name"><｜DSML｜parameter name="k">v</｜DSML｜parameter></｜DSML｜invoke>`
+fn try_parse_deepseek_tools(
+    content: &str,
+    code: &[std::ops::Range<usize>],
+) -> Option<Vec<SpannedCall>> {
+    if !content.contains("tool▁call▁begin")
+        && !content.contains("tool_call_begin")
+        && !content.contains("DSML")
+    {
+        return None;
+    }
+
+    let mut results = Vec::new();
+
+    for cap in live_matches(content, deepseek_call_regex(), code) {
+        let whole = cap.get(0).expect("regex group 0 always matches");
+        let raw = whole.as_str().to_string();
+        let span = whole.range();
+        let tool_name = cap[1].trim().to_string();
+        let body = cap[2].trim();
+
+        let arguments = if let Some((json_str, _)) = extract_json_balanced(body) {
+            serde_json::from_str::<serde_json::Value>(json_str)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::from_str::<serde_json::Value>(body)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        };
+
+        results.push((
+            Ok(ParsedToolCall {
+                tool_name,
+                arguments,
+                raw_text: raw,
+                parse_method: ParseMethod::Xml,
+            }),
+            span,
+        ));
+    }
+
+    let param_regex = deepseek_dsml_param_regex();
+    for cap in live_matches(content, deepseek_dsml_call_regex(), code) {
+        let whole = cap.get(0).expect("regex group 0 always matches");
+        let raw = whole.as_str().to_string();
+        let span = whole.range();
+        let tool_name = cap[1].trim().to_string();
+        let body = &cap[2];
+
+        let mut args_map = serde_json::Map::new();
+        for p_cap in param_regex.captures_iter(body) {
+            let key = p_cap[1].trim().to_string();
+            let is_string_hint = p_cap.get(2).map(|m| m.as_str() == "true").unwrap_or(false);
+            let val_str = p_cap[3].trim();
+
+            let json_val = if !is_string_hint {
+                serde_json::from_str::<serde_json::Value>(val_str)
+                    .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()))
+            } else {
+                serde_json::Value::String(val_str.to_string())
+            };
+            args_map.insert(key, json_val);
+        }
+
+        let arguments = if !args_map.is_empty() {
+            serde_json::Value::Object(args_map)
+        } else if let Some((json_str, _)) = extract_json_balanced(body) {
+            serde_json::from_str::<serde_json::Value>(json_str)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        results.push((
+            Ok(ParsedToolCall {
+                tool_name,
+                arguments,
+                raw_text: raw,
+                parse_method: ParseMethod::Xml,
+            }),
+            span,
+        ));
+    }
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
 
 /// Try to parse Moonshot/Kimi delimiter-style tool calls:
 /// `<|open|>call tool="name" index="1"<|sep|><|open|>argument key="arg" type="string"<|sep|>val<|close|>argument<|close|>call`

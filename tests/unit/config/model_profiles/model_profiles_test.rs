@@ -629,3 +629,27 @@ fn qwen38_compaction_ratio_follows_the_session_budget() {
     let ratio = config.effective_context_content_ratio();
     assert!(((1.0 - 21_221.0 / budget as f64) as f32 - ratio).abs() < 1e-5);
 }
+
+#[test]
+fn match_profile_picks_deepseek_v4_for_all_colibri_aliases() {
+    for alias in [
+        "deepseek-v4.1-flash",
+        "DeepSeek-V4.1-Flash",
+        "deepseek-v41",
+        "deepseek-v4.1",
+        "deepseek/deepseek-v4.1-flash",
+    ] {
+        let p = match_profile(alias).unwrap_or_else(|| panic!("should match {alias}"));
+        assert_eq!(p.name, "deepseek-v4", "alias {alias}");
+        assert_eq!(p.context_length, Some(163_840));
+        assert_eq!(p.max_tokens, Some(32_768));
+        assert_eq!(p.max_call_secs, Some(2_400));
+        assert_eq!(p.max_streams, Some(4));
+        assert_eq!(p.max_global, Some(12));
+        let quotas = p.workload_quotas.expect("workload quotas set");
+        assert_eq!(quotas.planning.enable_thinking, Some(false));
+        assert_eq!(quotas.planning.max_tokens, Some(12_288));
+        assert_eq!(quotas.synthesis.enable_thinking, Some(true));
+        assert_eq!(quotas.synthesis.max_tokens, Some(24_576));
+    }
+}

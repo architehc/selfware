@@ -847,10 +847,6 @@ class HarnessHardeningTest(unittest.TestCase):
                          ["checkpoint-a.json.gz", "checkpoint-b.json.gz"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ConfigSwitchVariantTest(unittest.TestCase):
     """A config switch (the done-check) is A/B-tested as a scenario variant."""
 
@@ -896,3 +892,30 @@ class ConfigSwitchVariantTest(unittest.TestCase):
             _dest, text, _src = harness.prepare_config(spec, None, d)
             self.assertIn("done_check = true", text)
             self.assertIn("done_check = true", (Path(d) / "cfg.toml").read_text())
+
+    def test_top_level_config_set_and_api_key_resolution(self):
+        sets = harness.parse_config_set(["model=deepseek-v4.1-flash"])
+        self.assertEqual(sets, {"model": "deepseek-v4.1-flash"})
+        out = harness.apply_config_set(
+            'endpoint = "https://example.invalid/v1"\nmodel = "qwen38-flash-next"\n[agent]\n',
+            sets,
+        )
+        self.assertIn('model = "deepseek-v4.1-flash"', out)
+        self.assertNotIn('model = "qwen38-flash-next"', out)
+        saved = os.environ.get("SELFWARE_API_KEY")
+        try:
+            os.environ["SELFWARE_API_KEY"] = "sw_test_key_123"
+            resolved = harness.resolve_api_key_for_endpoint(
+                "https://example.invalid/v1", 'api_key = "EMPTY"\n'
+            )
+            self.assertEqual(resolved, "sw_test_key_123")
+        finally:
+            if saved is None:
+                os.environ.pop("SELFWARE_API_KEY", None)
+            else:
+                os.environ["SELFWARE_API_KEY"] = saved
+
+
+if __name__ == "__main__":
+    unittest.main()
+

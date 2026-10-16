@@ -1,13 +1,12 @@
 # Serving qwen38-flash-next with SGLang
 
-This page is for operators running their own SGLang server for Selfware, like
-the one behind `https://llm.selfware.design/v1`. The numbers come from our
-endpoint validation on 2026-09-24 with `qwen38-flash-next`, a hybrid
-Mamba/GDN (linear-attention) model. Other models may behave differently, so
-measure before copying.
+This page is for operators running their own SGLang server for Selfware. The
+numbers come from our endpoint validation on 2026-09-24 with
+`qwen38-flash-next`, a hybrid Mamba/GDN (linear-attention) model. Other models
+may behave differently, so measure before copying.
 
 For the client side (what to put in `selfware.toml`), see
-[Running against llm.selfware.design / SGLang](../README.md#running-against-llmselfwaredesign--sglang)
+[Built-in Model Profiles](../README.md#built-in-model-profiles)
 in the README.
 
 ## Recommended flags
