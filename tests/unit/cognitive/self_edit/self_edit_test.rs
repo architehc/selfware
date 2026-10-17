@@ -1124,3 +1124,23 @@ fn test_killswitch_blocks_self_edit_operations() {
     crate::safety::killswitch::reset_in_process();
     assert!(!orchestrator.is_denied(&target));
 }
+
+#[test]
+fn test_rewrite_todo_fixme_marker_preserves_string_literals_and_skips_commentless_code() {
+    // 1. A line with "TODO" only inside a string literal and no comment must not be rewritten.
+    let code_only = "fn check(line: &str) -> bool {\n    line.contains(\"TODO\") || line.contains(\"FIXME\")\n}\n";
+    assert!(
+        rewrite_todo_fixme_marker(code_only, Some(2)).is_none(),
+        "string literals on comment-less code lines must never be mutated"
+    );
+
+    // 2. A line with both a string literal containing "TODO" and a trailing "// TODO:" comment
+    // must preserve the string literal intact and rewrite only the comment marker.
+    let mixed = "fn demo() -> &'static str {\n    let label = \"TODO: keep literal\"; // TODO: rewrite comment\n    label\n}\n";
+    let (updated, line_no) = rewrite_todo_fixme_marker(mixed, Some(2)).unwrap();
+    assert_eq!(line_no, 2);
+    assert!(
+        updated.contains("let label = \"TODO: keep literal\"; // Resolved: rewrite comment"),
+        "must preserve string literal and rewrite only the comment, got: {updated}"
+    );
+}

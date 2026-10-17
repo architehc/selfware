@@ -195,8 +195,8 @@ impl ChatStore {
     /// Load a saved chat by name
     pub fn load(&self, name: &str) -> Result<SavedChat> {
         let path = self.chat_path(name);
-        ensure_regular_chat_file(&path)?;
-        let data = std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
+        let data =
+            read_regular_chat_file(&path).with_context(|| format!("Chat '{}' not found", name))?;
 
         let json = if let Some(encryption) = EncryptionManager::get() {
             // Fail closed: if encryption is enabled and decryption fails, do NOT
@@ -235,10 +235,7 @@ impl ChatStore {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    if ensure_regular_chat_file(&path).is_err() {
-                        continue;
-                    }
-                    if let Ok(data) = std::fs::read(&path) {
+                    if let Ok(data) = read_regular_chat_file(&path) {
                         let json_opt = if let Some(encryption) = EncryptionManager::get() {
                             // Fail closed: skip files that fail decryption.
                             match encryption.decrypt(&data) {
@@ -374,6 +371,8 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+const MAX_CHAT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn ensure_regular_chat_file(path: &Path) -> Result<()> {
     let metadata = path
         .symlink_metadata()
@@ -385,6 +384,53 @@ fn ensure_regular_chat_file(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Open and read a regular chat file via a single descriptor (`O_NOFOLLOW` on
+/// Unix) so the path cannot be swapped for a symlink or FIFO between metadata
+/// inspection and reading.
+fn read_regular_chat_file(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    ensure_regular_chat_file(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).with_context(|| {
+        format!(
+            "refusing chat path that cannot be opened safely: {}",
+            path.display()
+        )
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "refusing chat path that is a symlink or non-regular file: {}",
+            path.display()
+        );
+    }
+    if metadata.len() > MAX_CHAT_FILE_BYTES {
+        anyhow::bail!(
+            "refusing oversized chat file ({} bytes > {} byte limit): {}",
+            metadata.len(),
+            MAX_CHAT_FILE_BYTES,
+            path.display()
+        );
+    }
+    let mut data = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CHAT_FILE_BYTES + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_CHAT_FILE_BYTES {
+        anyhow::bail!(
+            "refusing oversized chat file (exceeded {} byte limit): {}",
+            MAX_CHAT_FILE_BYTES,
+            path.display()
+        );
+    }
+    Ok(data)
 }
 
 fn write_private_temp_file(path: &Path, data: &[u8]) -> Result<()> {

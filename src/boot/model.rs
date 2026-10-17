@@ -120,6 +120,22 @@ pub async fn ensure_model(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub(crate) fn check_download_progress(
+    downloaded: u64,
+    chunk_len: usize,
+    expected_size: u64,
+) -> Result<u64> {
+    let next = downloaded.saturating_add(chunk_len as u64);
+    if next > expected_size {
+        bail!(
+            "model download exceeded expected size ({} > {} bytes); aborting stream",
+            next,
+            expected_size
+        );
+    }
+    Ok(next)
+}
+
 async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
     use futures::StreamExt;
 
@@ -139,6 +155,15 @@ async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
     if !resp.status().is_success() {
         bail!("model download returned HTTP {}", resp.status());
     }
+    if let Some(content_len) = resp.content_length() {
+        if content_len != MODEL_SIZE_BYTES {
+            bail!(
+                "model download reported unexpected Content-Length {} (expected {} bytes)",
+                content_len,
+                MODEL_SIZE_BYTES
+            );
+        }
+    }
     let (partial, mut file) = crate::session::checkpoint::create_atomic_temp_file(dest, 0o600)
         .with_context(|| format!("creating a temporary model beside {}", dest.display()))?;
     let download_result = async {
@@ -147,8 +172,8 @@ async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
         let mut next_report: u64 = 64 * 1024 * 1024;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("model download stream")?;
+            downloaded = check_download_progress(downloaded, chunk.len(), MODEL_SIZE_BYTES)?;
             file.write_all(&chunk)?;
-            downloaded += chunk.len() as u64;
             if downloaded >= next_report {
                 println!(
                     "    {} MB / {} MB",

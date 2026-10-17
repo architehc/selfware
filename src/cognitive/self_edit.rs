@@ -667,7 +667,11 @@ impl SelfEditOrchestrator {
                         .to_string();
 
                     for (i, line) in content.lines().enumerate() {
-                        if !line.contains("TODO") && !line.contains("FIXME") {
+                        let Some(comment_idx) = find_comment_start(line) else {
+                            continue;
+                        };
+                        let comment = &line[comment_idx..];
+                        if !comment.contains("TODO") && !comment.contains("FIXME") {
                             continue;
                         }
                         // A marker on a whole-line comment can only be rewritten
@@ -779,6 +783,53 @@ pub(crate) fn line_is_non_code(line: &str, strip_hash: bool, strip_asterisk: boo
         || line.starts_with("--")
 }
 
+/// Return the byte offset of the first comment opener (`//` or `/*`) on `line`
+/// outside string and char literals, or `None` if the line has no comment.
+fn find_comment_start(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if in_string {
+            if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            if b == b'\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'\'' => in_char = true,
+            b'/' if matches!(bytes.get(i + 1), Some(&b'/') | Some(&b'*')) => {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Drop a trailing `//` line comment from `line`, returning the code prefix
 /// (right-trimmed). `//` sequences inside string or char literals are left
 /// intact, so `let url = "http://a/b";` is untouched — that keeps code that
@@ -860,18 +911,20 @@ fn rewrite_todo_fixme_marker(
             candidate_indices.push(idx);
         }
     }
-    // Fallback candidates are restricted to lines that carry code. If the hint
-    // misses (the file shifted between scan and apply, which is what the hint
-    // exists to absorb), falling through to a whole-line comment would produce
-    // a comment-only diff that `mutation_is_trivial` discards — the same no-op
-    // the scanner refuses to propose, arriving by a side door.
+    // Fallback candidates are restricted to lines that carry code AND a
+    // comment marker. If the hint misses (the file shifted between scan and
+    // apply, which is what the hint exists to absorb), falling through to a
+    // whole-line comment would produce a comment-only diff that
+    // `mutation_is_trivial` discards — and matching a string literal on a
+    // comment-less code line would corrupt source code.
     candidate_indices.extend(
         lines
             .iter()
             .enumerate()
             .filter(|(_, line)| {
-                (line.contains("TODO") || line.contains("FIXME"))
-                    && !line_is_non_code(line, false, false)
+                find_comment_start(line).is_some_and(|cidx| {
+                    line[cidx..].contains("TODO") || line[cidx..].contains("FIXME")
+                }) && !line_is_non_code(line, false, false)
             })
             .map(|(idx, _)| idx),
     );
@@ -879,18 +932,17 @@ fn rewrite_todo_fixme_marker(
 
     for idx in candidate_indices {
         let original = &lines[idx];
-        // Only a candidate whose marker the regex actually matched may be
-        // rewritten. The old guard was `replaced != original` computed *after* a
-        // blanket `.replace("  ", " ")`, which is true for ANY line holding two
-        // consecutive spaces — so a hint that had drifted onto an unrelated line
-        // was "rewritten" by collapsing its indentation and returned as a
-        // successful mutation. The marker match is the real condition, and the
-        // regex already swallows the marker's trailing `: `/`- `, so the blanket
-        // collapse only ever damaged whitespace outside the replacement.
-        if !todo_re.is_match(original) {
+        // Only rewrite a TODO/FIXME inside the comment portion of the line,
+        // never inside string literals or code identifiers before the comment.
+        let Some(comment_idx) = find_comment_start(original) else {
+            continue;
+        };
+        let (code_prefix, comment_part) = original.split_at(comment_idx);
+        if !todo_re.is_match(comment_part) {
             continue;
         }
-        lines[idx] = todo_re.replace(original, "Resolved: ").to_string();
+        let rewritten_comment = todo_re.replace(comment_part, "Resolved: ");
+        lines[idx] = format!("{code_prefix}{rewritten_comment}");
         let mut updated = lines.join("\n");
         if content.ends_with('\n') {
             updated.push('\n');

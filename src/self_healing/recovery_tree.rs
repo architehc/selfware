@@ -543,11 +543,18 @@ impl Resolution for CredentialReload {
         if classify(ctx.message) != FailureKind::AuthError {
             return ResolutionOutcome::Escalate;
         }
-        if Self::find_available_key(&ctx.config.endpoint).is_some() {
-            ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials)
-        } else {
-            ResolutionOutcome::Escalate
+        let Some(new_key) = Self::find_available_key(&ctx.config.endpoint) else {
+            return ResolutionOutcome::Escalate;
+        };
+        if ctx
+            .config
+            .api_key
+            .as_ref()
+            .is_some_and(|existing| existing.expose() == new_key)
+        {
+            return ResolutionOutcome::Escalate;
         }
+        ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials)
     }
 }
 

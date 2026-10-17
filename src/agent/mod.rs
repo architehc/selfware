@@ -2541,6 +2541,17 @@ To call a tool, use this EXACT XML structure:
                     warn!("Recovery tree: no credential source available for reload");
                     return Ok(false);
                 };
+                if self
+                    .config
+                    .api_key
+                    .as_ref()
+                    .is_some_and(|existing| existing.expose() == key)
+                {
+                    warn!(
+                        "Recovery tree: credential source returned the same API key already configured; skipping reload"
+                    );
+                    return Ok(false);
+                }
                 // Set the key on the top-level Config (where api_key lives as
                 // Option<RedactedString>) so ApiClient::new picks it up.
                 let mut config = self.config.clone();

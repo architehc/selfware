@@ -77,3 +77,15 @@ fn build_server_args_cpu_safe_and_aliased() {
     // No GPU assumption in the recovery path.
     assert!(!args.iter().any(|a| a == "-ngl"));
 }
+
+#[test]
+fn check_download_progress_rejects_oversized_stream() {
+    use super::check_download_progress;
+
+    let exact = check_download_progress(MODEL_SIZE_BYTES - 16, 16, MODEL_SIZE_BYTES).unwrap();
+    assert_eq!(exact, MODEL_SIZE_BYTES);
+
+    let err = check_download_progress(MODEL_SIZE_BYTES, 1, MODEL_SIZE_BYTES)
+        .expect_err("stream exceeding MODEL_SIZE_BYTES must fail immediately");
+    assert!(err.to_string().contains("exceeded expected size"));
+}

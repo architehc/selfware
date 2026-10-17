@@ -90,6 +90,25 @@ fn test_save_refuses_symlink_chat_file() {
     assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
 }
 
+#[cfg(unix)]
+#[test]
+fn test_load_refuses_symlink_chat_file() {
+    use std::os::unix::fs::symlink;
+
+    let (store, dir) = test_store();
+    let outside = dir.path().join("outside.json");
+    write_legacy_file("linked", &outside);
+    symlink(&outside, store.chat_path("linked")).unwrap();
+
+    let err = store
+        .load("linked")
+        .expect_err("loading through a symlink chat file must be refused");
+    assert!(
+        format!("{err:#}").contains("symlink"),
+        "expected symlink refusal, got: {err:#}"
+    );
+}
+
 #[test]
 fn test_list_chats() {
     let (store, _dir) = test_store();

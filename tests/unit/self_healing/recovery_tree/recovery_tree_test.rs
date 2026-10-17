@@ -627,6 +627,28 @@ fn test_credential_reload_resolves_when_key_present() {
 }
 
 #[test]
+fn test_credential_reload_escalates_when_key_already_matches_config() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
+    std::env::set_var("SELFWARE_API_KEY", "already-active-failing-key");
+    let resolver = CredentialReload;
+    let mut config = make_config("https://api.example.com/v1");
+    config.api_key = Some(crate::config::RedactedString::new(
+        "already-active-failing-key".to_string(),
+    ));
+    let ctx = RecoveryContext {
+        config: &config,
+        message: "401 Unauthorized",
+    };
+    match resolver.resolve(&ctx) {
+        ResolutionOutcome::Escalate => {}
+        other => panic!(
+            "expected Escalate when available key matches failing config.api_key, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 fn classify_typed_context_overflow_beats_token_counts_and_tool_words() {
     // "4035 tokens" contains "403" and the body mentions tools: before the
     // typed-prefix check this misrouted to AuthError (credential reload
