@@ -167,24 +167,36 @@ impl LongTermStore {
         })
     }
 
-    /// Load all stored records from disk.
+    /// Load all stored records from disk (bounded to the 512 most recently modified files).
     pub fn load_all(&self) -> Result<Vec<TemporalRecord>> {
+        const MAX_LOADED_FILES: usize = 512;
         let mut records = Vec::new();
 
         if !self.storage_dir.exists() {
             return Ok(records);
         }
 
-        for entry in std::fs::read_dir(&self.storage_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let content = std::fs::read_to_string(&path)?;
-                match serde_json::from_str::<TemporalRecord>(&content) {
-                    Ok(record) => records.push(record),
-                    Err(e) => {
-                        tracing::warn!("Failed to parse {}: {e}", path.display());
-                    }
+        let mut json_paths: Vec<std::path::PathBuf> = std::fs::read_dir(&self.storage_dir)?
+            .filter_map(|e| e.ok().map(|entry| entry.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+
+        if json_paths.len() > MAX_LOADED_FILES {
+            json_paths.sort_by_key(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            });
+            let drop_count = json_paths.len() - MAX_LOADED_FILES;
+            json_paths.drain(..drop_count);
+        }
+
+        for path in json_paths {
+            let content = std::fs::read_to_string(&path)?;
+            match serde_json::from_str::<TemporalRecord>(&content) {
+                Ok(record) => records.push(record),
+                Err(e) => {
+                    tracing::warn!("Failed to parse {}: {e}", path.display());
                 }
             }
         }

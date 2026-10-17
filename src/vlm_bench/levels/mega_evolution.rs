@@ -156,10 +156,10 @@ fn evaluate_visual_scores(response: &str, ground_truth: &[f64]) -> LevelScore {
     let mut accuracy = 0.0;
 
     if predicted.len() == ground_truth.len() && !predicted.is_empty() {
-        // Compute Pearson correlation
+        // Compute Pearson correlation and clamp to [0, 1] so uncorrelated
+        // predictions (r <= 0) score 0.0 and correlation > 0.5 passes PASS_THRESHOLD (0.50).
         let correlation = scoring::pearson_correlation(&predicted, ground_truth);
-        // Normalize correlation from [-1, 1] to [0, 1]
-        accuracy = (correlation + 1.0) / 2.0;
+        accuracy = correlation.clamp(0.0, 1.0);
 
         for (i, dim) in dimensions.iter().enumerate() {
             if i < predicted.len() && i < ground_truth.len() {

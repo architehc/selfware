@@ -2393,3 +2393,30 @@ async fn graceful_stop_does_not_lock_the_process_map_during_exit_wait() {
     let stopped = stopper.await.expect("stop task panicked").unwrap();
     assert_eq!(stopped.status, ProcessStatus::Stopped);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_health_check_pattern_matches_and_marks_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = ProcessManager::new();
+
+    let config = ProcessConfig {
+        id: "stderr-ready".into(),
+        command: "sh".into(),
+        args: vec![
+            "-c".into(),
+            "echo 'Server listening on :9090' >&2; sleep 5".into(),
+        ],
+        cwd: Some(dir.path().to_path_buf()),
+        env: HashMap::new(),
+        health_check_pattern: Some("Server listening".into()),
+        health_check_timeout_secs: Some(3),
+        expected_port: None,
+        auto_restart: false,
+        max_restart_attempts: 0,
+    };
+
+    let summary = manager.start(config).await.expect("start process");
+    assert_eq!(summary.status, ProcessStatus::Running);
+    let _ = manager.stop("stderr-ready", true).await;
+}

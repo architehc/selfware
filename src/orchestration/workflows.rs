@@ -754,6 +754,8 @@ pub struct WorkflowContext {
     pub budget: WorkflowBudget,
     /// Set when the run stopped early on a budget
     pub stop_reason: Option<WorkflowStopReason>,
+    /// Timeout of the currently executing step attempt, if set by the step runner
+    pub active_step_timeout: Option<Duration>,
 }
 
 /// Log entry
@@ -785,6 +787,7 @@ impl WorkflowContext {
             step_executions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             budget: WorkflowBudget::default(),
             stop_reason: None,
+            active_step_timeout: None,
         }
     }
 
@@ -1933,6 +1936,8 @@ impl WorkflowExecutor {
                 .map(|d| timeout_duration.min(d.saturating_duration_since(Instant::now())))
                 .unwrap_or(timeout_duration);
 
+            let prev_timeout = context.active_step_timeout.replace(attempt_timeout);
+
             // Use tokio::select! to ensure the step future is explicitly
             // dropped (cancelled) when the timeout fires, preventing
             // background work from continuing after timeout.
@@ -1955,6 +1960,7 @@ impl WorkflowExecutor {
                 }
                 // step_fut is dropped here, releasing the borrow on context
             };
+            context.active_step_timeout = prev_timeout;
 
             match execution_result {
                 Some(Ok(output)) => {
@@ -2276,19 +2282,19 @@ impl WorkflowExecutor {
                     .output_grouped();
 
                 const WORKFLOW_SHELL_TIMEOUT_SECS: u64 = 300;
-                let output = tokio::time::timeout(
-                    Duration::from_secs(WORKFLOW_SHELL_TIMEOUT_SECS),
-                    shell_future,
-                )
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "Command '{}' timed out after {}s",
-                        resolved_cmd,
-                        WORKFLOW_SHELL_TIMEOUT_SECS
-                    )
-                })?
-                .map_err(|e| anyhow!("Failed to execute command: {}", e))?;
+                let shell_timeout = context
+                    .active_step_timeout
+                    .unwrap_or(Duration::from_secs(WORKFLOW_SHELL_TIMEOUT_SECS));
+                let output = tokio::time::timeout(shell_timeout, shell_future)
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "Command '{}' timed out after {}s",
+                            resolved_cmd,
+                            shell_timeout.as_secs()
+                        )
+                    })?
+                    .map_err(|e| anyhow!("Failed to execute command: {}", e))?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();

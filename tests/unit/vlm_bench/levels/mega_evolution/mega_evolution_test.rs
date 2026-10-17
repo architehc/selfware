@@ -88,3 +88,15 @@ fn test_mega_evaluate_keywords() {
     let score = level.evaluate(&scenario, response);
     assert!((score.accuracy - 1.0).abs() < f64::EPSILON);
 }
+
+#[test]
+fn test_evaluate_visual_scores_negative_correlation_fails() {
+    let response = r#"{"composition": 20, "hierarchy": 90, "readability": 10, "consistency": 85, "accessibility": 95}"#;
+    let ground_truth = vec![75.0, 70.0, 80.0, 72.0, 68.0];
+    let score = evaluate_visual_scores(response, &ground_truth);
+    assert!(
+        score.accuracy < PASS_THRESHOLD,
+        "anti-correlated scores must not pass threshold: {score:?}"
+    );
+    assert_eq!(score.rating, Rating::Frost);
+}

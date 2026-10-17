@@ -799,6 +799,7 @@ impl ProcessManager {
             if let Some(stderr) = child.stderr.take() {
                 let processes = processes_clone.clone();
                 let id = id_clone.clone();
+                let health_pattern_stderr = health_pattern.clone();
 
                 tokio::spawn(async move {
                     collect_output(
@@ -808,7 +809,7 @@ impl ProcessManager {
                         0,
                         stderr,
                         LogStream::Stderr,
-                        None,
+                        health_pattern_stderr,
                     )
                     .await;
                 });
@@ -1735,6 +1736,7 @@ async fn monitor_process(
                         if let Some(stderr) = stderr {
                             let procs = processes.clone();
                             let proc_id = id.clone();
+                            let hp = health_pattern.clone();
                             tokio::spawn(async move {
                                 collect_output(
                                     procs,
@@ -1743,7 +1745,7 @@ async fn monitor_process(
                                     u64::from(restart_attempt),
                                     stderr,
                                     LogStream::Stderr,
-                                    None,
+                                    hp,
                                 )
                                 .await;
                             });

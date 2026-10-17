@@ -801,8 +801,13 @@ impl Agent {
         }
 
         // Restore estimated token count from the checkpoint so the agent's
-        // memory budget awareness matches the pre-checkpoint state.
-        if checkpoint.estimated_tokens > 0 {
+        // memory budget awareness matches the pre-checkpoint state, unless
+        // add_raw_entry had to evict entries to fit the current memory cap.
+        if checkpoint.estimated_tokens > 0
+            && (checkpoint.memory_entries.is_empty()
+                || (agent.memory.len() == checkpoint.memory_entries.len()
+                    && checkpoint.estimated_tokens <= agent.memory.max_memory_tokens()))
+        {
             agent.memory.set_total_tokens(checkpoint.estimated_tokens);
             info!(
                 "Restored token estimate ({}) from checkpoint",

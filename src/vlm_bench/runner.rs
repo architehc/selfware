@@ -29,11 +29,14 @@ impl VlmBenchRunner {
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
 
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .build()
-            .context("Failed to build HTTP client")?;
+            .redirect(reqwest::redirect::Policy::none());
+        if crate::config::is_local_endpoint(&config.endpoint) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context("Failed to build HTTP client")?;
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
 
@@ -124,7 +127,10 @@ impl VlmBenchRunner {
             let model = self.config.model.clone();
             let max_tokens = self.config.max_tokens;
             let temperature = self.config.temperature;
-            let scenario = scenario.clone();
+            let mut scenario = scenario.clone();
+            if let Ok(rel) = scenario.image_path.strip_prefix("vlm_fixtures") {
+                scenario.image_path = self.config.fixtures_dir.join(rel);
+            }
 
             let handle = tokio::spawn(async move {
                 let start = Instant::now();
