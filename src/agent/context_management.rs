@@ -419,15 +419,33 @@ impl Agent {
 
         use super::context::estimate_message_tokens;
         let token_counts: Vec<usize> = messages.iter().map(estimate_message_tokens).collect();
+        let tail_protect_start = messages
+            .iter()
+            .rposition(|m| m.role == "user" || m.role == "assistant")
+            .unwrap_or(messages.len());
+
         let max_pinned_critical = (max_context_tokens / 6_000).clamp(2, 6);
-        let mut pinned_critical: std::collections::HashSet<usize> = messages
+        let max_pinned_critical_tokens = (max_context_tokens / 2).max(1);
+        let mut pinned_tokens = 0usize;
+        let mut pinned_critical: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        for (idx, _) in messages
             .iter()
             .enumerate()
             .rev()
             .filter(|(_, message)| Self::is_critical_context_message(message))
             .take(max_pinned_critical)
-            .map(|(idx, _)| idx)
-            .collect();
+        {
+            let msg_tokens = token_counts[idx];
+            if idx < tail_protect_start
+                && !pinned_critical.is_empty()
+                && pinned_tokens.saturating_add(msg_tokens) > max_pinned_critical_tokens
+            {
+                break;
+            }
+            pinned_tokens = pinned_tokens.saturating_add(msg_tokens);
+            pinned_critical.insert(idx);
+        }
 
         if let Some(anchor) = anchor_idx {
             pinned_critical.insert(anchor);
@@ -448,10 +466,6 @@ impl Agent {
 
         // Pass 2: If still over budget, shed older critical/tool messages (except the root task prompt
         // and the active turn at the tail so newest tool results are not dropped)
-        let tail_protect_start = messages
-            .iter()
-            .rposition(|m| m.role == "user" || m.role == "assistant")
-            .unwrap_or(messages.len());
 
         for (i, tokens) in token_counts.iter().enumerate() {
             if remaining <= max_context_tokens {

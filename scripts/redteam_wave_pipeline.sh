@@ -20,7 +20,7 @@ SELFDEV="${SELFDEV:-$HOME/selfdev}"
 E2_ENDPOINT="${E2_ENDPOINT:-http://localhost:31000/v1}"
 E2_MODEL="${E2_MODEL:-/home/rig/models/qwen38-unc-kt}"
 E3_ENDPOINT="${E3_ENDPOINT:-https://llm.selfware.design/v1}"
-E3_MODEL="${E3_MODEL:-qwen38-flash-next}"
+E3_MODEL="${E3_MODEL:-deepseek-v4.1-flash}"
 LOCK=/tmp/redteam_wave_pipeline.lock
 exec 9>"$LOCK"
 flock -n 9 || { echo "pipeline already running"; exit 0; }

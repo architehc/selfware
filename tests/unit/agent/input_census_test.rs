@@ -527,6 +527,7 @@ fn census_gate_stays_off_for_code_review_explain_task_shapes() {
         "Refactor the config loader to use serde",
         "Add unit tests for the tokenizer",
         "Update the README with the new install steps",
+        "Read lines 1 to 60 of src/phi/activity.rs using file_read and summarize the FoxPosture variants in 3 bullet points. Do not edit any files.",
     ] {
         assert!(
             !task_requests_data_inventory(task),

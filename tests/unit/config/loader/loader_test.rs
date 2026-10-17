@@ -383,13 +383,11 @@ fn test_load_empty_file_uses_defaults() {
     let (_dir, path) = write_temp_config("", "empty.toml");
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
-    assert_eq!(config.model, "qwen38-flash-next");
-    // The default model matches the built-in qwen38 profile, whose measured
-    // 24,576 completion cap fills the omitted field (not the 65,536
-    // profile-less default).
-    assert_eq!(config.max_tokens, 24576);
-    assert_eq!(config.context_length, 163_840);
-    assert_eq!(config.agent.max_call_secs, Some(1_628));
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    // The default model matches the built-in deepseek-v4 profile.
+    assert_eq!(config.max_tokens, 65_536);
+    assert_eq!(config.context_length, 262_144);
+    assert_eq!(config.agent.max_call_secs, Some(3_600));
 }
 
 #[test]
@@ -3729,16 +3727,15 @@ fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
 #[test]
 fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
     // The tracked endpoint config must not pin context_length / max_tokens:
-    // explicit values override the profile measured against this endpoint
-    // (a 350,000 window let prompts outgrow what the server serves).
+    // explicit values override the profile calibrated against this endpoint.
     let _guard = clear_env();
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("selfware-llm-selfware-design.toml");
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-    assert_eq!(config.model, "qwen38-flash-next");
-    assert_eq!(config.context_length, 163_840, "profile context_length");
-    assert_eq!(config.max_tokens, 24_576, "profile max_tokens");
-    assert_eq!(config.agent.max_call_secs, Some(1_628), "profile call cap");
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    assert_eq!(config.context_length, 262_144, "profile context_length");
+    assert_eq!(config.max_tokens, 65_536, "profile max_tokens");
+    assert_eq!(config.agent.max_call_secs, Some(3_600), "profile call cap");
     // Long read-only reviews measured 91-136 turns; a pin of 100 cut them off.
     assert_eq!(
         config.agent.max_iterations,
@@ -3750,7 +3747,7 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
     // reported as overridden.
     assert_eq!(
         config.workloads,
-        crate::config::model_profiles::QWEN38_WORKLOAD_QUOTAS
+        crate::config::model_profiles::DEEPSEEK_V4_WORKLOAD_QUOTAS
     );
     assert!(
         config.workload_overrides.is_empty(),

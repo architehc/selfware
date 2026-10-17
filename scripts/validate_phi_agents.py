@@ -448,7 +448,7 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=Path("target/release/selfware"))
     parser.add_argument("--output", type=Path, required=True, help="New run directory; existing paths are refused")
     parser.add_argument("--endpoint", default="https://llm.selfware.design/v1")
-    parser.add_argument("--model", default="qwen38-flash-next")
+    parser.add_argument("--model", default="deepseek-v4.1-flash")
     parser.add_argument("--agents", type=int, default=16)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout", type=int, default=600)

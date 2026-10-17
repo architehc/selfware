@@ -438,3 +438,50 @@ fn test_plan_step_default_status() {
     assert_eq!(step.status, StepStatus::Pending);
     assert!(step.notes.is_none());
 }
+
+#[test]
+fn test_working_memory_capacity_caps() {
+    let mut wm = WorkingMemory::new();
+    for i in 0..70 {
+        wm.add_question(&format!("Question {i}"));
+    }
+    assert_eq!(wm.open_questions.len(), 50);
+    assert_eq!(wm.open_questions.first().unwrap(), "Question 20");
+    assert_eq!(wm.open_questions.last().unwrap(), "Question 69");
+
+    for i in 0..150 {
+        wm.add_fact(&format!("fact_{i}"));
+    }
+    assert_eq!(wm.discovered_facts.len(), 100);
+    assert_eq!(wm.discovered_facts.first().unwrap(), "fact_50");
+    assert_eq!(wm.discovered_facts.last().unwrap(), "fact_149");
+}
+
+#[test]
+fn test_episodic_memory_capacity_caps() {
+    let mut em = EpisodicMemory::new();
+    for i in 0..520 {
+        em.record_lesson(Lesson {
+            category: LessonCategory::Success,
+            content: format!("Lesson {i}"),
+            context: "ctx".to_string(),
+            tags: vec![],
+            timestamp: Utc::now(),
+        });
+    }
+    assert_eq!(em.lessons.len(), 500);
+    assert_eq!(em.lessons.first().unwrap().content, "Lesson 20");
+    assert_eq!(em.lessons.last().unwrap().content, "Lesson 519");
+
+    for i in 0..220 {
+        em.record_pattern(Pattern {
+            name: format!("Pattern {i}"),
+            description: "desc".to_string(),
+            trigger: "trig".to_string(),
+            action: "act".to_string(),
+            confidence: 0.9,
+            occurrences: if i == 0 { 1 } else { 10 },
+        });
+    }
+    assert_eq!(em.patterns.len(), 200);
+}

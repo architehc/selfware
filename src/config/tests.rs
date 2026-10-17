@@ -16,7 +16,7 @@ use std::path::PathBuf;
 fn test_config_default() {
     let config = Config::default();
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
-    assert_eq!(config.model, "qwen38-flash-next");
+    assert_eq!(config.model, "deepseek-v4.1-flash");
     assert_eq!(config.max_tokens, 65536);
     assert!((config.temperature - 1.0).abs() < f32::EPSILON);
     assert!(config.api_key.is_none());
@@ -202,7 +202,7 @@ fn test_config_partial_deserialization() {
         "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.endpoint, "http://custom:1234/v1");
-    assert_eq!(config.model, "qwen38-flash-next"); // default
+    assert_eq!(config.model, "deepseek-v4.1-flash"); // default
     assert_eq!(config.max_tokens, 65536); // default
 }
 
@@ -435,7 +435,7 @@ fn test_empty_config_uses_all_defaults() {
     let toml_str = "";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
-    assert_eq!(config.model, "qwen38-flash-next");
+    assert_eq!(config.model, "deepseek-v4.1-flash");
     assert_eq!(config.max_tokens, 65536);
     assert!(!config.yolo.enabled);
 }
@@ -623,7 +623,7 @@ fn test_config_empty_protected_branches() {
 #[test]
 fn test_default_helpers() {
     assert_eq!(default_endpoint(), "https://llm.selfware.design/v1");
-    assert_eq!(default_model(), "qwen38-flash-next");
+    assert_eq!(default_model(), "deepseek-v4.1-flash");
     assert_eq!(default_max_tokens(), 65536);
     assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
     assert_eq!(default_max_iterations(), 400);
@@ -1821,14 +1821,11 @@ fn test_config_load_empty_file() {
 
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
-    assert_eq!(config.model, "qwen38-flash-next");
-    // The default model matches the built-in qwen38 profile, which fills
-    // native_function_calling = false (SGLang emits XML tool calls in
-    // content) and the profile's measured 24,576 completion cap for any field
-    // the empty config omits — not the 65,536 profile-less default.
-    assert_eq!(config.max_tokens, 24576);
-    assert_eq!(config.agent.max_call_secs, Some(1_628));
-    assert_eq!(config.matched_profile.as_deref(), Some("qwen38"));
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    // The default model matches the built-in deepseek-v4 profile.
+    assert_eq!(config.max_tokens, 65536);
+    assert_eq!(config.agent.max_call_secs, Some(3_600));
+    assert_eq!(config.matched_profile.as_deref(), Some("deepseek-v4"));
     assert!(config.models.contains_key("default"));
 }
 

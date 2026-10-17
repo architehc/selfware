@@ -699,12 +699,14 @@ impl ContextMap {
             total_files, self.total_tokens, self.budget,
         ));
 
-        // Show loaded/skeleton files first (more relevant), then tree-only up to cap
+        // Show loaded/skeleton files first (more relevant), then primary source
+        // trees before docs/assets/benchmark artifacts so large repos don't hide
+        // `src/` behind alphabetically earlier asset directories.
         sorted.sort_by_key(|e| match e.level {
-            ContextMode::Full => 0,
-            ContextMode::Lite => 1,
-            // Map and any non-agent tier sort last (tree-only).
-            _ => 2,
+            ContextMode::Full => (0u8, 0u8),
+            ContextMode::Lite => (1u8, 0u8),
+            // Map and any non-agent tier sort last (tree-only), sub-ordered by source tier.
+            _ => (2u8, Self::tree_path_priority(&e.path)),
         });
 
         for (shown, entry) in sorted.iter().enumerate() {
@@ -921,25 +923,74 @@ impl ContextMap {
         self.sync_budget();
     }
 
-    /// Get the most relevant files for a query using simple keyword matching.
+    /// Sub-priority for L1 tree entries so primary source code (`src/`, `crates/`,
+    /// `lib/`, root manifests) is rendered before docs/assets/benchmark dumps.
+    fn tree_path_priority(path: &Path) -> u8 {
+        let mut components = path.components();
+        let Some(first) = components.next().and_then(|c| c.as_os_str().to_str()) else {
+            return 3;
+        };
+        if components.next().is_none() {
+            // Root-level files (Cargo.toml, package.json, main.rs, etc.)
+            return 0;
+        }
+        match first {
+            "src" | "crates" | "lib" | "packages" | "app" | "cmd" | "pkg" | "internal" => 0,
+            "tests" | "benches" | "examples" | "scripts" | "system_tests" | "experiments" => 1,
+            "bench_results" | "expansion_recommendation" | "design" | "docs" | "editors" => 3,
+            _ => 2,
+        }
+    }
+
+    /// Get the most relevant files for a query using weighted keyword + stem/symbol matching.
     /// Returns paths sorted by relevance score (highest first).
     /// For deeper semantic search, use BM25/vector search externally
     /// and pass results through `add_external_context` or `load_full`.
     pub fn find_relevant_files(&self, query: &str) -> Vec<(PathBuf, f32)> {
+        const STOP_WORDS: &[&str] = &[
+            "the", "and", "for", "with", "from", "into", "that", "this", "are", "was", "not",
+            "only", "use", "add", "fix",
+        ];
         let query_lower = query.to_lowercase();
-        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+        let raw_terms: Vec<&str> = query_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.' && c != '-')
+            .filter(|s| !s.is_empty())
+            .collect();
+        let filtered_terms: Vec<&str> = raw_terms
+            .iter()
+            .copied()
+            .filter(|s| s.len() > 2 && !STOP_WORDS.contains(s))
+            .collect();
+        let query_terms = if filtered_terms.is_empty() {
+            raw_terms
+        } else {
+            filtered_terms
+        };
 
         let mut scored: Vec<(PathBuf, f32)> = self
             .entries
             .values()
             .filter_map(|entry| {
                 let path_str = entry.path.to_string_lossy().to_lowercase();
+                let file_name = entry
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let file_stem = entry
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
                 let mut score = 0.0f32;
 
-                // Score by path match.
+                // Score by path and exact stem/filename match.
                 for term in &query_terms {
                     if path_str.contains(term) {
                         score += 1.0;
+                    }
+                    if *term == file_name || *term == file_stem {
+                        score += 1.5;
                     }
                 }
 
@@ -971,7 +1022,11 @@ impl ContextMap {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         scored
     }
 

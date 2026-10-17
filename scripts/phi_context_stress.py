@@ -16,7 +16,7 @@ import argparse, json, os, statistics, sys, time, urllib.error, urllib.request, 
 from concurrent.futures import ThreadPoolExecutor
 
 ENDPOINT = os.environ.get("SELFWARE_ENDPOINT", "https://llm.selfware.design/v1")
-MODEL = os.environ.get("SELFWARE_MODEL", "qwen38-flash-next")
+MODEL = os.environ.get("SELFWARE_MODEL", "deepseek-v4.1-flash")
 
 # A repeating synthetic module. Deliberately plausible Rust: the point is a deep
 # prefix the server can cache, not a realistic program.

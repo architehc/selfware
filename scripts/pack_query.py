@@ -14,7 +14,7 @@ import sys
 import urllib.request
 
 ENDPOINT = "https://llm.selfware.design/v1"
-MODEL = "qwen38-flash-next"
+MODEL = "deepseek-v4.1-flash"
 
 
 def main() -> int:

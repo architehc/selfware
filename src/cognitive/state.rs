@@ -361,9 +361,13 @@ impl WorkingMemory {
         self.current_step()
     }
 
-    /// Add an open question
+    /// Add an open question (capped at `MAX_OPEN_QUESTIONS`, evicting oldest).
     pub fn add_question(&mut self, question: &str) {
+        const MAX_OPEN_QUESTIONS: usize = 50;
         if !self.open_questions.contains(&question.to_string()) {
+            if self.open_questions.len() >= MAX_OPEN_QUESTIONS {
+                self.open_questions.remove(0);
+            }
             self.open_questions.push(question.to_string());
         }
     }
@@ -373,9 +377,13 @@ impl WorkingMemory {
         self.open_questions.retain(|q| q != question);
     }
 
-    /// Add a discovered fact
+    /// Add a discovered fact (capped at `MAX_DISCOVERED_FACTS`, evicting oldest).
     pub fn add_fact(&mut self, fact: &str) {
+        const MAX_DISCOVERED_FACTS: usize = 100;
         if !self.discovered_facts.contains(&fact.to_string()) {
+            if self.discovered_facts.len() >= MAX_DISCOVERED_FACTS {
+                self.discovered_facts.remove(0);
+            }
             self.discovered_facts.push(fact.to_string());
         }
     }
@@ -509,17 +517,32 @@ impl EpisodicMemory {
         Self::default()
     }
 
-    /// Record a lesson learned
+    /// Record a lesson learned (capped at `MAX_EPISODIC_LESSONS` with FIFO eviction of oldest).
     pub fn record_lesson(&mut self, lesson: Lesson) {
+        const MAX_EPISODIC_LESSONS: usize = 500;
         // Avoid duplicates
         if !self.lessons.iter().any(|l| l.content == lesson.content) {
+            if self.lessons.len() >= MAX_EPISODIC_LESSONS {
+                self.lessons.remove(0);
+            }
             self.lessons.push(lesson);
         }
     }
 
-    /// Record a pattern
+    /// Record a pattern (capped at `MAX_EPISODIC_PATTERNS` with occurrences-based eviction).
     pub fn record_pattern(&mut self, pattern: Pattern) {
+        const MAX_EPISODIC_PATTERNS: usize = 200;
         if !self.patterns.iter().any(|p| p.name == pattern.name) {
+            if self.patterns.len() >= MAX_EPISODIC_PATTERNS {
+                if let Some((min_idx, _)) = self
+                    .patterns
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, p)| p.occurrences)
+                {
+                    self.patterns.remove(min_idx);
+                }
+            }
             self.patterns.push(pattern);
         }
     }

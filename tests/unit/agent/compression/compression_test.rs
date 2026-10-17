@@ -386,6 +386,7 @@ fn test_compression_orchestrator_with_config() {
         reserve_buffer: 10_000,
         max_summary_tokens: 15_000,
         max_consecutive_failures: 5,
+        ..Default::default()
     };
 
     let orchestrator = CompressionOrchestrator::with_config(config.clone());
@@ -393,6 +394,24 @@ fn test_compression_orchestrator_with_config() {
     assert!(orchestrator.metrics_history().is_empty());
     assert!(orchestrator.file_tracker().is_empty());
     assert_eq!(orchestrator.total_tokens_saved(), 0);
+}
+
+#[test]
+fn test_auto_compact_manager_half_open_cooldown_recovery() {
+    let config = AutoCompactConfig {
+        token_threshold: 75,
+        reserve_buffer: 10_000,
+        max_summary_tokens: 15_000,
+        max_consecutive_failures: 2,
+        circuit_cooldown_secs: 0, // immediate cooldown expiry for test
+    };
+    let mut manager = AutoCompactManager::new(config);
+    manager.record_failure();
+    manager.record_failure();
+    assert_eq!(manager.consecutive_failures, 2);
+
+    // Because circuit_cooldown_secs == 0, cooldown has already elapsed and half-open probe is allowed
+    assert!(manager.should_compress(80_000, 100_000));
 }
 
 #[test]

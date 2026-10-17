@@ -43,7 +43,7 @@ from pathlib import Path
 import requests
 
 DEFAULT_ENDPOINT = "https://llm.selfware.design"
-MODEL = "qwen38-flash-next"
+MODEL = "deepseek-v4.1-flash"
 _lock = threading.Lock()
 
 

@@ -629,9 +629,13 @@ fn config_show_prints_the_scaled_call_cap_with_its_provenance() {
     let _guard = clear_config_env();
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("selfware.toml");
-    // The default model matches the built-in qwen38 profile (600 s cap sized
-    // for its 24,576 max_tokens); a larger user max_tokens scales it.
-    std::fs::write(&cfg_path, "max_tokens = 65536\n").unwrap();
+    // The qwen38 profile (1,628 s cap sized for its 24,576 max_tokens);
+    // a larger user max_tokens scales it.
+    std::fs::write(
+        &cfg_path,
+        "model = \"qwen38-flash-next\"\nmax_tokens = 65536\n",
+    )
+    .unwrap();
     let cfg = Config::load(Some(cfg_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.matched_profile.as_deref(), Some("qwen38"));
 

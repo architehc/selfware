@@ -44,7 +44,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 ENDPOINT = os.environ.get("SELFWARE_REDTEAM_ENDPOINT", "https://llm.selfware.design/v1")
-MODEL = os.environ.get("SELFWARE_REDTEAM_MODEL", "qwen38-flash-next")
+MODEL = os.environ.get("SELFWARE_REDTEAM_MODEL", "deepseek-v4.1-flash")
 
 # ── container profiles ──────────────────────────────────────────────────────
 # DEFAULT == what src/tools/container ContainerRun emits today: a bare `run`

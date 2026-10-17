@@ -106,6 +106,8 @@ pub struct AutoCompactConfig {
     pub max_summary_tokens: usize,
     /// Max consecutive failures before circuit breaker (default: 3)
     pub max_consecutive_failures: usize,
+    /// Cooldown in seconds before an open circuit breaker allows a half-open retry (default: 300s)
+    pub circuit_cooldown_secs: u64,
 }
 
 impl Default for AutoCompactConfig {
@@ -115,6 +117,7 @@ impl Default for AutoCompactConfig {
             reserve_buffer: 13_000,
             max_summary_tokens: 20_000,
             max_consecutive_failures: 3,
+            circuit_cooldown_secs: 300,
         }
     }
 }
@@ -124,6 +127,7 @@ pub struct AutoCompactManager {
     config: AutoCompactConfig,
     consecutive_failures: usize,
     circuit_open: bool,
+    circuit_opened_at: Option<std::time::Instant>,
     last_compression: Option<CompressionMetrics>,
 }
 
@@ -133,6 +137,7 @@ impl AutoCompactManager {
             config,
             consecutive_failures: 0,
             circuit_open: false,
+            circuit_opened_at: None,
             last_compression: None,
         }
     }
@@ -145,20 +150,31 @@ impl AutoCompactManager {
         Self::new(config)
     }
 
-    /// Check if compression should trigger based on token count
+    /// Check if compression should trigger based on token count.
+    /// When the circuit breaker is open, allows a half-open probe once
+    /// `circuit_cooldown_secs` has elapsed since the breaker opened.
     pub fn should_compress(&self, current_tokens: usize, context_window: usize) -> bool {
         if self.circuit_open {
-            debug!("Circuit breaker open, skipping auto-compression");
-            return false;
+            let cooldown_elapsed = self.circuit_opened_at.is_some_and(|opened_at| {
+                opened_at.elapsed()
+                    >= std::time::Duration::from_secs(self.config.circuit_cooldown_secs)
+            });
+            if !cooldown_elapsed {
+                debug!("Circuit breaker open, skipping auto-compression");
+                return false;
+            }
+            debug!("AutoCompact circuit breaker cooldown elapsed; allowing half-open probe");
         }
 
         let threshold = (context_window * self.config.token_threshold) / 100;
         current_tokens >= threshold
     }
 
-    /// Record a successful compression
+    /// Record a successful compression (closes the circuit breaker if half-open).
     pub fn record_success(&mut self, metrics: CompressionMetrics) {
         self.consecutive_failures = 0;
+        self.circuit_open = false;
+        self.circuit_opened_at = None;
         self.last_compression = Some(metrics);
     }
 
@@ -167,6 +183,7 @@ impl AutoCompactManager {
         self.consecutive_failures += 1;
         if self.consecutive_failures >= self.config.max_consecutive_failures {
             self.circuit_open = true;
+            self.circuit_opened_at = Some(std::time::Instant::now());
             warn!(
                 "AutoCompact circuit breaker opened after {} consecutive failures",
                 self.consecutive_failures
@@ -177,11 +194,16 @@ impl AutoCompactManager {
     /// Reset the circuit breaker
     pub fn reset_circuit(&mut self) {
         self.circuit_open = false;
+        self.circuit_opened_at = None;
         self.consecutive_failures = 0;
     }
 
     pub fn is_circuit_open(&self) -> bool {
         self.circuit_open
+            && !self.circuit_opened_at.is_some_and(|opened_at| {
+                opened_at.elapsed()
+                    >= std::time::Duration::from_secs(self.config.circuit_cooldown_secs)
+            })
     }
 
     pub fn last_compression(&self) -> Option<&CompressionMetrics> {

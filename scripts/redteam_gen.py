@@ -37,10 +37,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from redteam_sse import read_sse_response
 
 CORPUS_DIR = Path(__file__).resolve().parent.parent / "tests" / "redteam" / "corpus"
-# Local Qwen 3.8 Flash-Next NVFP4 (8 streams, 1M ctx). Reasoning model:
-# reasoning_content is separate from content — chat() collects both.
+# Reasoning model: reasoning_content is separate from content — chat() collects both.
 DEFAULT_ENDPOINT = "https://llm.selfware.design/v1"
-MODEL = "qwen38-flash-next"
+MODEL = "deepseek-v4.1-flash"
 
 KNOWN_TOOLS = {
     "file_read", "file_write", "file_edit", "file_delete", "shell_exec",

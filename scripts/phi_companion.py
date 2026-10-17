@@ -27,7 +27,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 DEFAULT_ENDPOINT = "https://llm.selfware.design/v1"
-DEFAULT_MODEL = "qwen38-flash-next"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 PHI_ASCII_POSES = {
     "head_tilt": r"""

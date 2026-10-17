@@ -96,7 +96,7 @@ pub fn default_endpoint() -> String {
     "https://llm.selfware.design/v1".to_string()
 }
 pub fn default_model() -> String {
-    "qwen38-flash-next".to_string()
+    "deepseek-v4.1-flash".to_string()
 }
 pub fn default_max_tokens() -> usize {
     65536

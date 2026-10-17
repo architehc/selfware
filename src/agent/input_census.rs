@@ -33,6 +33,8 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".venv",
     "vendor",
+    "bench_results",
+    "expansion_recommendation",
 ];
 /// Naming conventions that mark content which must not leak into outputs.
 const SUSPICIOUS_WORDS: &[&str] = &["private", "secret", "internal"];
@@ -69,7 +71,7 @@ pub(crate) fn task_requests_data_inventory(task: &str) -> bool {
     static NOUN_RE: OnceLock<regex::Regex> = OnceLock::new();
     let verbs = VERB_RE.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)\b(account for|enumerate[sd]?|inventor(?:y|ies|ied)|catalog(?:ue)?[sd]?|audit(?:s|ed|ing)?|tall(?:y|ies|ied)|survey(?:s|ed|ing)?|process(?:es|ed|ing)?|extract(?:s|ed|ing)?|aggregate[sd]?|ingest(?:s|ed|ing)?|pars(?:e|es|ed|ing)|summari[sz]e[sd]?)\b",
+            r"(?i)\b(account for|enumerate[sd]?|inventor(?:y|ies|ied)|catalog(?:ue)?[sd]?|audit(?:s|ed|ing)?|tall(?:y|ies|ied)|survey(?:s|ed|ing)?|process(?:es|ed|ing)?|extract(?:s|ed|ing)?|aggregate[sd]?|ingest(?:s|ed|ing)?|pars(?:e|es|ed|ing))\b",
         )
         .expect("inventory verb regex")
     });

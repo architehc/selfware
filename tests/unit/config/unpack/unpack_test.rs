@@ -882,7 +882,7 @@ fn test_default_endpoint_is_llm_selfware_design() {
 
 #[test]
 fn test_default_model_is_qwen38_flash_next() {
-    assert_eq!(default_model(), "qwen38-flash-next");
+    assert_eq!(default_model(), "deepseek-v4.1-flash");
 }
 
 #[test]
