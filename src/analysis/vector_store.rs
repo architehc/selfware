@@ -695,7 +695,7 @@ impl TfIdfEmbeddingProvider {
         // Evict least-used terms if vocabulary exceeds the cap
         if write.len() > MAX_VOCABULARY_SIZE {
             let mut counts = self.usage_counts.write().unwrap_or_else(|e| e.into_inner());
-            let evict_count = write.len() - MAX_VOCABULARY_SIZE;
+            let evict_count = (write.len() - MAX_VOCABULARY_SIZE).max(MAX_VOCABULARY_SIZE / 10);
 
             warn!(
                 "TF-IDF vocabulary exceeded cap of {}; evicting {} least-used terms",

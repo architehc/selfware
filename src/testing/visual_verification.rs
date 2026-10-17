@@ -495,7 +495,7 @@ impl VisualVerifier {
         let policy = crate::tools::net_policy::validate_url_target(&parsed, allow_private)
             .context("VLM endpoint rejected by network policy")?;
 
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .connect_timeout(Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
@@ -504,9 +504,11 @@ impl VisualVerifier {
                     policy.allow_private,
                     policy.allow_localhost,
                 ),
-            ))
-            .build()
-            .context("Failed to build HTTP client")?;
+            ));
+        if crate::config::is_local_endpoint(&self.endpoint) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context("Failed to build HTTP client")?;
 
         // Shared authenticated-request factory: refuses plaintext-HTTP/userinfo
         // credential exposure, then attaches the bearer token.

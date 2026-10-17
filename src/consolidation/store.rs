@@ -235,10 +235,13 @@ impl LongTermStore {
     ///
     /// Returns the number of records indexed.
     pub async fn index_existing(&self) -> Result<usize> {
+        const MAX_INDEXED_RECORDS: usize = 256;
         let records = self.load_all()?;
-        let count = records.len();
+        let start = records.len().saturating_sub(MAX_INDEXED_RECORDS);
+        let slice = &records[start..];
+        let count = slice.len();
 
-        for record in &records {
+        for record in slice {
             let text = record_text(record);
             match self.embedder.embed(&text).await {
                 Ok(embedding) => {

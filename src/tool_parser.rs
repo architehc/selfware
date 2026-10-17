@@ -952,13 +952,13 @@ fn guess_rejected_tool_name(region: &str) -> Option<String> {
     static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
     let re = NAME_REGEX.get_or_init(|| {
         Regex::new(
-            r#"<function=([A-Za-z_][A-Za-z0-9_]*)|<name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</name>|<parameter=name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</parameter>|call\s+tool="([^"]+)""#,
+            r#"<function=([A-Za-z_][A-Za-z0-9_]*)|<name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</name>|<parameter=name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</parameter>|call\s+tool="([^"]+)"|(?:<｜tool▁call▁begin｜>|<\|tool_call_begin\|>|<｜tool▁sep｜>|<\|tool_sep\|>)\s*([A-Za-z_][A-Za-z0-9_]*)|(?:<｜DSML｜|<\|DSML\|)invoke\s+name="([^"]+)""#,
         )
         .expect("Invalid rejected-name regex")
     });
     let mut generic = None;
     for cap in re.captures_iter(region) {
-        let name = (1..=4)
+        let name = (1..=6)
             .find_map(|i| cap.get(i))
             .map(|m| m.as_str().to_string())?;
         if GENERIC_WRAPPER_NAMES.contains(&name.as_str()) {
@@ -1241,24 +1241,43 @@ fn try_parse_deepseek_tools(
         let span = whole.range();
         let tool_name = cap[1].trim().to_string();
         let body = cap[2].trim();
+        let stripped = body
+            .strip_prefix("```json")
+            .or_else(|| body.strip_prefix("```"))
+            .unwrap_or(body)
+            .trim();
+        let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
 
-        let arguments = if let Some((json_str, _)) = extract_json_balanced(body) {
-            serde_json::from_str::<serde_json::Value>(json_str)
-                .unwrap_or_else(|_| serde_json::json!({}))
+        let parsed_args = if stripped.is_empty() {
+            Ok(serde_json::json!({}))
+        } else if let Some((json_str, _)) = extract_json_balanced(body) {
+            serde_json::from_str::<serde_json::Value>(json_str).or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(stripped).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Invalid JSON arguments in DeepSeek tool call '{}': {}",
+                        tool_name,
+                        e
+                    )
+                })
+            })
         } else {
-            serde_json::from_str::<serde_json::Value>(body)
-                .unwrap_or_else(|_| serde_json::json!({}))
+            serde_json::from_str::<serde_json::Value>(stripped).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid JSON arguments in DeepSeek tool call '{}': {}",
+                    tool_name,
+                    e
+                )
+            })
         };
 
-        results.push((
-            Ok(ParsedToolCall {
-                tool_name,
-                arguments,
-                raw_text: raw,
-                parse_method: ParseMethod::Xml,
-            }),
-            span,
-        ));
+        let call_res = parsed_args.map(|arguments| ParsedToolCall {
+            tool_name,
+            arguments,
+            raw_text: raw,
+            parse_method: ParseMethod::Xml,
+        });
+
+        results.push((call_res, span));
     }
 
     let param_regex = deepseek_dsml_param_regex();
@@ -1284,24 +1303,37 @@ fn try_parse_deepseek_tools(
             args_map.insert(key, json_val);
         }
 
-        let arguments = if !args_map.is_empty() {
-            serde_json::Value::Object(args_map)
-        } else if let Some((json_str, _)) = extract_json_balanced(body) {
-            serde_json::from_str::<serde_json::Value>(json_str)
-                .unwrap_or_else(|_| serde_json::json!({}))
+        let trimmed_body = body.trim();
+        let parsed_args = if !args_map.is_empty() {
+            Ok(serde_json::Value::Object(args_map))
+        } else if trimmed_body.is_empty() {
+            Ok(serde_json::json!({}))
+        } else if let Some((json_str, _)) = extract_json_balanced(trimmed_body) {
+            serde_json::from_str::<serde_json::Value>(json_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid JSON arguments in DeepSeek DSML tool call '{}': {}",
+                    tool_name,
+                    e
+                )
+            })
         } else {
-            serde_json::json!({})
+            serde_json::from_str::<serde_json::Value>(trimmed_body).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid arguments in DeepSeek DSML tool call '{}': {}",
+                    tool_name,
+                    e
+                )
+            })
         };
 
-        results.push((
-            Ok(ParsedToolCall {
-                tool_name,
-                arguments,
-                raw_text: raw,
-                parse_method: ParseMethod::Xml,
-            }),
-            span,
-        ));
+        let call_res = parsed_args.map(|arguments| ParsedToolCall {
+            tool_name,
+            arguments,
+            raw_text: raw,
+            parse_method: ParseMethod::Xml,
+        });
+
+        results.push((call_res, span));
     }
 
     if results.is_empty() {
@@ -1369,22 +1401,25 @@ fn try_parse_kimi_tools(
                 args_map.insert(key, json_val);
             }
 
-            let arguments = if found_any {
-                serde_json::Value::Object(args_map)
-            } else if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body.trim()) {
-                parsed_json
+            let trimmed_body = body.trim();
+            let parsed_args = if found_any {
+                Ok(serde_json::Value::Object(args_map))
+            } else if trimmed_body.is_empty() {
+                Ok(serde_json::json!({}))
             } else {
-                serde_json::json!({})
+                serde_json::from_str::<serde_json::Value>(trimmed_body).map_err(|e| {
+                    anyhow::anyhow!("Invalid arguments in Kimi tool call '{}': {}", tool_name, e)
+                })
             };
 
-            let call = ParsedToolCall {
+            let call_res = parsed_args.map(|arguments| ParsedToolCall {
                 tool_name,
                 arguments,
                 raw_text: raw.clone(),
                 parse_method: ParseMethod::Xml,
-            };
+            });
 
-            (Ok(call), span)
+            (call_res, span)
         })
         .collect();
 

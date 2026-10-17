@@ -447,19 +447,44 @@ impl WindowManager {
         }
     }
 
+    /// Validate an application name before passing it to desktop launchers.
+    pub(crate) fn validate_app_name(app_name: &str) -> Result<&str> {
+        let trimmed = app_name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Application name cannot be empty");
+        }
+        if trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains('\0')
+            || trimmed.contains("..")
+        {
+            anyhow::bail!(
+                "Invalid application name '{}': path separators and traversal sequences are not allowed",
+                app_name
+            );
+        }
+        Ok(trimmed)
+    }
+
     /// Launch an application.
     pub async fn launch_app(&self, app_name: &str) -> Result<()> {
+        let app_name = Self::validate_app_name(app_name)?;
         info!("Launching application: {}", app_name);
 
         #[cfg(target_os = "macos")]
         {
             let mut cmd = tokio::process::Command::new("open");
             sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
-            cmd.arg("-a")
+            let output = cmd
+                .arg("-a")
                 .arg(app_name)
                 .output()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to launch '{}': {}", app_name, e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to launch '{}': {}", app_name, stderr.trim());
+            }
         }
 
         #[cfg(target_os = "linux")]

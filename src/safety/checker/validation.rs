@@ -5986,4 +5986,39 @@ mod outbound_credential_shape_tests {
             "rm${{IFS}}-rf${{IFS}}/ should normalize to rm -rf /"
         );
     }
+
+    #[test]
+    fn context_action_validates_file_targets_and_allows_symbol_targets() {
+        use super::{SafetyChecker, SafetyConfig, ToolCall};
+        use crate::api::ToolFunction;
+
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        let blocked_call = ToolCall {
+            id: "ctx1".into(),
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "context_action".into(),
+                arguments: r#"{"action":"expand","target":"/etc/shadow"}"#.into(),
+            },
+        };
+        assert!(
+            checker.check_tool_call(&blocked_call).is_err(),
+            "context_action targeting /etc/shadow must be rejected by SafetyChecker"
+        );
+
+        let symbol_call = ToolCall {
+            id: "ctx2".into(),
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "context_action".into(),
+                arguments: r#"{"action":"expand","target":"src/main.rs::main"}"#.into(),
+            },
+        };
+        assert!(
+            checker.check_tool_call(&symbol_call).is_ok(),
+            "context_action targeting a symbol identifier must pass path check"
+        );
+    }
 }

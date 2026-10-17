@@ -519,3 +519,41 @@ mod macos {
         assert!(err.contains("close_window"), "{err}");
     }
 }
+
+#[test]
+fn test_validate_app_name_rejects_traversal_and_separators() {
+    assert!(WindowManager::validate_app_name("").is_err());
+    assert!(WindowManager::validate_app_name("   ").is_err());
+    assert!(WindowManager::validate_app_name("../etc/passwd").is_err());
+    assert!(WindowManager::validate_app_name("foo/bar").is_err());
+    assert!(WindowManager::validate_app_name("foo\\bar").is_err());
+    assert!(WindowManager::validate_app_name("foo\0bar").is_err());
+    assert_eq!(
+        WindowManager::validate_app_name("Safari").unwrap(),
+        "Safari"
+    );
+}
+
+#[tokio::test]
+async fn test_launch_app_rejects_invalid_and_nonexistent_app() {
+    let wm = WindowManager::new();
+    let traversal_err = wm
+        .launch_app("../../etc/passwd")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        traversal_err.contains("Invalid application name"),
+        "{traversal_err}"
+    );
+
+    let missing_err = wm
+        .launch_app("SelfwareNonExistentTestApp_998877")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing_err.contains("Failed to launch") || missing_err.contains("not found"),
+        "{missing_err}"
+    );
+}

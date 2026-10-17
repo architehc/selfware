@@ -1596,13 +1596,12 @@ impl Agent {
             return;
         }
 
+        let Some(dir) = Self::consolidated_memory_dir() else {
+            return;
+        };
+
         // Store to disk (non-blocking)
-        let store = LongTermStore::new(
-            dirs::data_local_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("selfware")
-                .join("consolidated_memory"),
-        );
+        let store = LongTermStore::new(dir);
 
         let item_count = items.len();
         let task_id = checkpoint.task_id.clone();
@@ -1659,6 +1658,28 @@ impl Agent {
         });
     }
 
+    #[cfg(feature = "consolidation")]
+    fn consolidated_memory_dir() -> Option<std::path::PathBuf> {
+        if let Some(custom) = std::env::var_os("SELFWARE_CONSOLIDATED_MEMORY_DIR") {
+            if !custom.is_empty() {
+                return Some(std::path::PathBuf::from(custom));
+            }
+        }
+        #[cfg(test)]
+        {
+            None
+        }
+        #[cfg(not(test))]
+        {
+            Some(
+                dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("selfware")
+                    .join("consolidated_memory"),
+            )
+        }
+    }
+
     /// Retrieve relevant long-term consolidated session records for `task`,
     /// bounded to a measured 300-token `<selfware_context_note>` block.
     #[cfg(feature = "consolidation")]
@@ -1666,10 +1687,7 @@ impl Agent {
         use crate::consolidation::LongTermStore;
 
         const CONSOLIDATED_MEMORY_BUDGET_TOKENS: usize = 300;
-        let dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware")
-            .join("consolidated_memory");
+        let dir = Self::consolidated_memory_dir()?;
         if !dir.exists() {
             return None;
         }
@@ -1817,9 +1835,35 @@ impl Agent {
         let requested_restore = execution
             .actions_executed
             .iter()
-            .any(|a| a.contains("RestoreCheckpoint"))
+            .any(|a| a.contains("RestoreCheckpoint") || a.contains("Restart"))
             || self.messages.is_empty();
         let restored = requested_restore && self.restore_from_self_healing_checkpoint();
+
+        let requested_compress = execution
+            .actions_executed
+            .iter()
+            .any(|a| a.contains("compress_context"));
+        if requested_compress {
+            let target_tokens = (self.max_context_tokens / 2).max(1024);
+            self.compress_to_structured_summary(target_tokens);
+            info!(
+                "Self-healing recovery '{}' compressed context (target {} tokens)",
+                execution.strategy, target_tokens
+            );
+        }
+
+        let requested_switch_parsing = execution
+            .actions_executed
+            .iter()
+            .any(|a| a.contains("switch_parsing_mode"));
+        if requested_switch_parsing && self.config.agent.native_function_calling {
+            self.config.agent.native_function_calling = false;
+            info!(
+                "Self-healing recovery '{}' switched native_function_calling to false (XML tool fallback)",
+                execution.strategy
+            );
+        }
+
         if restored {
             info!(
                 "Self-healing recovery '{}' restored agent state (actions: {:?})",

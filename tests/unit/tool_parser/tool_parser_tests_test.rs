@@ -2150,3 +2150,34 @@ fn stray_quote_in_prose_does_not_invert_json_string_protection() {
     assert_eq!(result.tool_calls.len(), 1, "{result:?}");
     assert_eq!(result.tool_calls[0].arguments["content"], "foo name><bar>");
 }
+
+#[test]
+fn malformed_deepseek_and_kimi_arguments_produce_rejections_not_empty_args() {
+    let bad_deepseek = "<｜tool▁call▁begin｜>function<｜tool▁sep｜>file_write\n```json\n{\"path\": \"src/main.rs\", \"content\": \"unterminated\n```<｜tool▁call▁end｜>";
+    let res_ds = parse_tool_calls(bad_deepseek);
+    assert!(res_ds.tool_calls.is_empty(), "{res_ds:?}");
+    assert_eq!(res_ds.rejections.len(), 1, "{res_ds:?}");
+    assert_eq!(
+        res_ds.rejections[0].tool_name.as_deref(),
+        Some("file_write")
+    );
+
+    let bad_dsml =
+        "<｜DSML｜invoke name=\"file_write\">{\"path\": \"src/main.rs\", broken</｜DSML｜invoke>";
+    let res_dsml = parse_tool_calls(bad_dsml);
+    assert!(res_dsml.tool_calls.is_empty(), "{res_dsml:?}");
+    assert_eq!(res_dsml.rejections.len(), 1, "{res_dsml:?}");
+    assert_eq!(
+        res_dsml.rejections[0].tool_name.as_deref(),
+        Some("file_write")
+    );
+
+    let bad_kimi = "<|open|>call tool=\"file_write\"<|sep|>{\"path\": \"unterminated<|close|>call";
+    let res_kimi = parse_tool_calls(bad_kimi);
+    assert!(res_kimi.tool_calls.is_empty(), "{res_kimi:?}");
+    assert_eq!(res_kimi.rejections.len(), 1, "{res_kimi:?}");
+    assert_eq!(
+        res_kimi.rejections[0].tool_name.as_deref(),
+        Some("file_write")
+    );
+}
