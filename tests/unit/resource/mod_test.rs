@@ -237,3 +237,13 @@ fn test_resource_reservation_clone() {
         reservation.request.gpu_memory_bytes
     );
 }
+
+#[tokio::test]
+async fn test_global_resource_pressure_shares_handle_with_manager() {
+    let config = ResourcesConfig::default();
+    let manager = ResourceManager::new(&config).await.unwrap();
+    assert!(Arc::ptr_eq(
+        &manager.shared_pressure(),
+        &global_resource_pressure()
+    ));
+}

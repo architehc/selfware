@@ -1707,6 +1707,11 @@ impl Agent {
             )));
         }
 
+        #[cfg(feature = "consolidation")]
+        if let Some(memory_note) = self.recall_consolidated_memory_note(task).await {
+            self.messages.push(Message::user(memory_note));
+        }
+
         // A code review starts from the deterministic repository inventory
         // (shown to the user, compact version in context) and runs under the
         // coverage ledger + gate. No-op for any other task.

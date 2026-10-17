@@ -177,6 +177,7 @@ impl LogParser {
         let message = json
             .get("message")
             .or_else(|| json.get("msg"))
+            .or_else(|| json.get("fields").and_then(|f| f.get("message")))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -185,6 +186,7 @@ impl LogParser {
             .get("source")
             .or_else(|| json.get("component"))
             .or_else(|| json.get("logger"))
+            .or_else(|| json.get("target"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -193,7 +195,13 @@ impl LogParser {
             .get("timestamp")
             .or_else(|| json.get("time"))
             .or_else(|| json.get("ts"))
-            .and_then(|v| v.as_u64())
+            .and_then(|v| {
+                v.as_u64().or_else(|| {
+                    v.as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp().max(0) as u64)
+                })
+            })
             .unwrap_or_else(|| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -232,6 +240,11 @@ impl LogParser {
     }
 
     fn parse_plain(&self, line: &str) -> Option<LogEntry> {
+        if line.trim_start().starts_with('{') {
+            if let Some(entry) = self.parse_json(line) {
+                return Some(entry);
+            }
+        }
         // Try to parse: [LEVEL] [SOURCE] Message
         // or: TIMESTAMP LEVEL SOURCE: Message
 
@@ -249,7 +262,43 @@ impl LogParser {
             LogLevel::Info
         };
 
-        Some(LogEntry::new(level, "unknown", line).with_raw(line))
+        let mut timestamp = None;
+        let mut source = "unknown".to_string();
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if let Some(&first) = tokens.first() {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(first) {
+                timestamp = Some(dt.timestamp().max(0) as u64);
+            } else if first.starts_with('[') && first.ends_with(']') && tokens.len() >= 2 {
+                let second = tokens[1];
+                if second.starts_with('[') && second.ends_with(']') && second.len() > 2 {
+                    source = second[1..second.len() - 1].to_string();
+                }
+            }
+        }
+        if source == "unknown" {
+            for window in tokens.windows(2) {
+                let lvl = window[0].trim_matches(|c| c == '[' || c == ']');
+                if matches!(
+                    lvl,
+                    "TRACE" | "DEBUG" | "INFO" | "WARN" | "WARNING" | "ERROR" | "ERR" | "FATAL"
+                ) {
+                    let candidate = window[1]
+                        .trim_end_matches(':')
+                        .trim_matches(|c| c == '[' || c == ']');
+                    if !candidate.is_empty() {
+                        source = candidate.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut entry = LogEntry::new(level, &source, line).with_raw(line);
+        if let Some(ts) = timestamp {
+            entry.timestamp = ts;
+            entry.id = ts * 1000 + (ts % 1000);
+        }
+        Some(entry)
     }
 
     fn parse_common(&self, line: &str) -> Option<LogEntry> {
@@ -687,15 +736,14 @@ impl AnomalyDetector {
                 counts.pop_front();
             }
 
-            // Check for spike
+            // Check for spike across >= 5 windows, or a single-window burst (> 5 errors)
+            let baseline = self.error_baseline.read().map(|b| *b).unwrap_or(0.05);
             if counts.len() >= 5 {
                 let recent: Vec<_> = counts.iter().rev().take(5).collect();
                 let avg: f32 =
                     counts.iter().map(|(_, c)| *c as f32).sum::<f32>() / counts.len() as f32;
 
                 if let Some(current) = recent.first() {
-                    // Use error_baseline to determine if current rate is anomalous
-                    let baseline = self.error_baseline.read().map(|b| *b).unwrap_or(0.05);
                     let spike_threshold = (avg * 3.0).max(baseline * 100.0);
                     if current.1 as f32 > spike_threshold && current.1 > 5 {
                         let anomaly = Anomaly::new(
@@ -711,6 +759,21 @@ impl AnomalyDetector {
                         self.record_anomaly(anomaly.clone());
                         return Some(anomaly);
                     }
+                }
+            } else if let Some(&(_, current_count)) = counts.back() {
+                let burst_threshold = (baseline * 100.0).ceil() as u32;
+                if current_count > burst_threshold.max(5)
+                    && current_count == burst_threshold.max(5) + 1
+                {
+                    let anomaly = Anomaly::new(
+                        AnomalyType::ErrorSpike,
+                        0.8,
+                        &format!("Error spike detected: {} errors in 1 minute", current_count),
+                    )
+                    .with_action("Investigate recent changes and check system health");
+
+                    self.record_anomaly(anomaly.clone());
+                    return Some(anomaly);
                 }
             }
         }

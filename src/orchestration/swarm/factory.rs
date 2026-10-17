@@ -8,6 +8,7 @@ use super::types::{Agent, AgentRole};
 /// Create a standard development swarm
 pub fn create_dev_swarm() -> Swarm {
     let mut swarm = Swarm::new();
+    swarm.set_resource_pressure(crate::resources::hardware::global_resource_pressure());
 
     swarm.add_agent(Agent::new("Archie", AgentRole::Architect));
     swarm.add_agent(Agent::new("Cody", AgentRole::Coder));

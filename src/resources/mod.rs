@@ -45,7 +45,8 @@ pub use disk::DiskManager;
 pub use driver::{Probe, ResourceDriver, SystemDriver};
 pub use gpu::GpuManager;
 pub use hardware::{
-    ResourceManager, ResourcePressure, ResourceRequest, ResourceReservation, ResourceUsage,
+    global_resource_pressure, ResourceManager, ResourcePressure, ResourceRequest,
+    ResourceReservation, ResourceUsage,
 };
 pub use memory::MemoryManager;
 pub use quotas::AdaptiveQuotas;

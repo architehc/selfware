@@ -563,3 +563,41 @@ fn test_pattern_detector_threshold() {
     assert_eq!(detector2.threshold, 1.0);
     assert_eq!(detector3.threshold, 0.0);
 }
+
+#[test]
+fn test_log_parser_plain_extracts_rfc3339_timestamp_and_source() {
+    let parser = LogParser::new(LogFormat::Plain);
+    let line = "2026-10-17T12:00:00Z ERROR selfware::agent: Tool call failed";
+    let entry = parser.parse(line).expect("plain log line should parse");
+    assert_eq!(entry.level, LogLevel::Error);
+    assert_eq!(entry.source, "selfware::agent");
+    assert_eq!(entry.timestamp, 1_792_238_400);
+}
+
+#[test]
+fn test_log_parser_plain_auto_detects_json_line() {
+    let parser = LogParser::new(LogFormat::Plain);
+    let line = r#"{"timestamp":"2026-10-17T12:00:00Z","level":"ERROR","target":"selfware::api","fields":{"message":"Endpoint timeout"}}"#;
+    let entry = parser
+        .parse(line)
+        .expect("JSON log line should parse in Plain mode");
+    assert_eq!(entry.level, LogLevel::Error);
+    assert_eq!(entry.source, "selfware::api");
+    assert_eq!(entry.message, "Endpoint timeout");
+    assert_eq!(entry.timestamp, 1_792_238_400);
+}
+
+#[test]
+fn test_anomaly_detector_flags_single_window_error_burst() {
+    let analyzer = LogAnalyzer::new(LogFormat::Plain);
+    for i in 0..7 {
+        analyzer.process_line(&format!(
+            "2026-10-17T12:00:{i:02}Z ERROR selfware::agent: Burst failure #{i}"
+        ));
+    }
+    let summary = analyzer.summary();
+    assert!(
+        summary.anomalies.anomalies_detected >= 1,
+        "expected error burst anomaly to be detected in single 1-minute window"
+    );
+}

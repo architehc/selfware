@@ -113,7 +113,7 @@ impl GpuManager {
             config: config.clone(),
             nvml,
             devices,
-            throttled: AtomicU32::new(0),
+            throttled: AtomicU32::new(100),
         })
     }
 

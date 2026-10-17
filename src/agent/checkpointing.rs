@@ -1659,6 +1659,63 @@ impl Agent {
         });
     }
 
+    /// Retrieve relevant long-term consolidated session records for `task`,
+    /// bounded to a measured 300-token `<selfware_context_note>` block.
+    #[cfg(feature = "consolidation")]
+    pub(super) async fn recall_consolidated_memory_note(&self, task: &str) -> Option<String> {
+        use crate::consolidation::LongTermStore;
+
+        const CONSOLIDATED_MEMORY_BUDGET_TOKENS: usize = 300;
+        let dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware")
+            .join("consolidated_memory");
+        if !dir.exists() {
+            return None;
+        }
+        let store = LongTermStore::new(dir);
+        let hits = store.retrieve(task, 3).await.ok()?;
+        if hits.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for rec in hits {
+            if rec.content.key_facts.is_empty() {
+                continue;
+            }
+            let facts = rec
+                .content
+                .key_facts
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            let line = format!("- {}: {}", rec.content.summary, facts);
+            let candidate = if lines.is_empty() {
+                line.clone()
+            } else {
+                format!("{}\n{}", lines.join("\n"), line)
+            };
+            let note = format!(
+                "<selfware_context_note kind=consolidated_memory>\n## Prior Consolidated Sessions\n{candidate}\n</selfware_context_note>"
+            );
+            if crate::token_count::estimate_content_tokens(&note)
+                > CONSOLIDATED_MEMORY_BUDGET_TOKENS
+            {
+                break;
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "<selfware_context_note kind=consolidated_memory>\n## Prior Consolidated Sessions\n{}\n</selfware_context_note>",
+            lines.join("\n")
+        ))
+    }
+
     /// Mark current task as failed
     pub(super) fn fail_checkpoint(&mut self, reason: &str) -> Result<()> {
         if let Some(plan) = self.cognitive_state.active_tactical_plan.as_mut() {

@@ -358,7 +358,7 @@ impl Tool for ComputerWindowTool {
     }
 
     fn description(&self) -> &str {
-        "Manage desktop windows: list visible windows, focus a window, get active window, launch applications."
+        "Manage desktop windows: list visible windows, focus/move/resize/minimize/close a window, get active window, launch applications."
     }
 
     fn schema(&self) -> Value {
@@ -367,10 +367,14 @@ impl Tool for ComputerWindowTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "focus", "active", "launch"],
+                    "enum": ["list", "focus", "active", "launch", "move", "resize", "minimize", "close"],
                     "description": "Window action to perform"
                 },
-                "window_id": { "type": "integer", "description": "Window ID (for focus)" },
+                "window_id": { "type": "integer", "description": "Window ID (for focus, move, resize, minimize, close)" },
+                "x": { "type": "integer", "description": "Target X coordinate (for move)" },
+                "y": { "type": "integer", "description": "Target Y coordinate (for move)" },
+                "width": { "type": "integer", "description": "Target width in pixels (for resize)" },
+                "height": { "type": "integer", "description": "Target height in pixels (for resize)" },
                 "app_name": { "type": "string", "description": "Application name (for launch)" },
                 "expected_visual": {
                     "type": "string",
@@ -404,6 +408,54 @@ impl Tool for ComputerWindowTool {
                 wm.focus_window(&crate::computer::window::WindowId(id))
                     .await?;
                 Ok(json!({"status": "ok", "action": "focus", "window_id": id}))
+            }
+            "move" => {
+                let id = args["window_id"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'window_id'"))?;
+                let x = args["x"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'x'"))? as i32;
+                let y = args["y"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'y'"))? as i32;
+                wm.move_window(&crate::computer::window::WindowId(id), x, y)
+                    .await?;
+                Ok(json!({"status": "ok", "action": "move", "window_id": id, "x": x, "y": y}))
+            }
+            "resize" => {
+                let id = args["window_id"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'window_id'"))?;
+                let width = args["width"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'width'"))?
+                    as u32;
+                let height = args["height"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'height'"))?
+                    as u32;
+                wm.resize_window(&crate::computer::window::WindowId(id), width, height)
+                    .await?;
+                Ok(
+                    json!({"status": "ok", "action": "resize", "window_id": id, "width": width, "height": height}),
+                )
+            }
+            "minimize" => {
+                let id = args["window_id"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'window_id'"))?;
+                wm.minimize_window(&crate::computer::window::WindowId(id))
+                    .await?;
+                Ok(json!({"status": "ok", "action": "minimize", "window_id": id}))
+            }
+            "close" => {
+                let id = args["window_id"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'window_id'"))?;
+                wm.close_window(&crate::computer::window::WindowId(id))
+                    .await?;
+                Ok(json!({"status": "ok", "action": "close", "window_id": id}))
             }
             "launch" => {
                 let app_name = args["app_name"]

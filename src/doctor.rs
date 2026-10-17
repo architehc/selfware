@@ -665,17 +665,36 @@ fn newest_log_file(dir: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Count error-level entries and anomalies in a log file (last `max_lines`
-/// lines). Returns `None` when the file can't be read — doctor treats that as
+/// lines). Reads at most the trailing 512 KiB so multi-megabyte log files do
+/// not cause unbounded allocations during `selfware doctor`.
+/// Returns `None` when the file can't be read — doctor treats that as
 /// "no logs yet", not a failure.
 #[cfg(feature = "log-analysis")]
 fn analyze_log_file(path: &Path, max_lines: usize) -> Option<(usize, u64)> {
-    use crate::observability::log_analysis::{LogAnalyzer, LogFormat, LogLevel};
+    use crate::observability::log_analysis::{LogAnalyzer, LogFormat};
+    use std::io::{Read, Seek, SeekFrom};
 
-    let content = std::fs::read_to_string(path).ok()?;
+    const MAX_LOG_TAIL_BYTES: u64 = 512 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let skip_partial_first_line = if file_len > MAX_LOG_TAIL_BYTES {
+        file.seek(SeekFrom::End(-(MAX_LOG_TAIL_BYTES as i64)))
+            .ok()?;
+        true
+    } else {
+        false
+    };
+    let mut buf = Vec::with_capacity((file_len.min(MAX_LOG_TAIL_BYTES)) as usize);
+    file.read_to_end(&mut buf).ok()?;
+    let content = String::from_utf8_lossy(&buf);
+    let mut lines_iter = content.lines();
+    if skip_partial_first_line {
+        let _ = lines_iter.next();
+    }
+
     let analyzer = LogAnalyzer::new(LogFormat::Plain);
     let mut errors = 0usize;
-    for line in content
-        .lines()
+    for line in lines_iter
         .rev()
         .take(max_lines)
         .collect::<Vec<_>>()
@@ -683,7 +702,7 @@ fn analyze_log_file(path: &Path, max_lines: usize) -> Option<(usize, u64)> {
         .rev()
     {
         if let Some(entry) = analyzer.process_line(line) {
-            if entry.level == LogLevel::Error {
+            if entry.level.is_error() {
                 errors += 1;
             }
         }

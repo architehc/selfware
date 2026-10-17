@@ -356,9 +356,30 @@ fn test_window_tool_schema() {
     let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
     assert!(actions.contains(&json!("list")));
     assert!(actions.contains(&json!("focus")));
+    assert!(actions.contains(&json!("move")));
+    assert!(actions.contains(&json!("resize")));
+    assert!(actions.contains(&json!("minimize")));
+    assert!(actions.contains(&json!("close")));
     assert!(actions.contains(&json!("active")));
     assert!(actions.contains(&json!("launch")));
+    assert!(schema["properties"]["x"].is_object());
+    assert!(schema["properties"]["y"].is_object());
+    assert!(schema["properties"]["width"].is_object());
+    assert!(schema["properties"]["height"].is_object());
     assert!(schema["properties"]["expected_visual"].is_object());
+}
+
+#[tokio::test]
+async fn test_window_tool_move_resize_minimize_close_missing_id() {
+    let tool = ComputerWindowTool::default();
+    for action in ["move", "resize", "minimize", "close"] {
+        let result = tool.execute(json!({"action": action})).await;
+        assert!(
+            result.is_err(),
+            "expected error for missing window_id on {action}"
+        );
+        assert!(result.unwrap_err().to_string().contains("window_id"));
+    }
 }
 
 #[tokio::test]

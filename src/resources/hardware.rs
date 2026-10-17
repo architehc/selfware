@@ -59,6 +59,17 @@ impl ResourcePressure {
     }
 }
 
+static GLOBAL_RESOURCE_PRESSURE: std::sync::OnceLock<Arc<std::sync::RwLock<ResourcePressure>>> =
+    std::sync::OnceLock::new();
+
+/// Process-wide shared resource pressure handle updated by `ResourceManager::monitor_loop`.
+pub fn global_resource_pressure() -> Arc<std::sync::RwLock<ResourcePressure>> {
+    Arc::clone(
+        GLOBAL_RESOURCE_PRESSURE
+            .get_or_init(|| Arc::new(std::sync::RwLock::new(ResourcePressure::None))),
+    )
+}
+
 impl ResourceManager {
     /// Create a new resource manager
     pub async fn new(config: &ResourcesConfig) -> Result<Self, SelfwareError> {
@@ -68,6 +79,8 @@ impl ResourceManager {
 
         let quotas = Arc::new(RwLock::new(AdaptiveQuotas::new(config.quotas.clone())));
         let usage = Arc::new(RwLock::new(ResourceUsage::default()));
+        let shared_pressure = global_resource_pressure();
+        *shared_pressure.write().unwrap_or_else(|e| e.into_inner()) = ResourcePressure::None;
 
         Ok(Self {
             config: config.clone(),
@@ -76,7 +89,7 @@ impl ResourceManager {
             disk,
             quotas,
             usage,
-            shared_pressure: Arc::new(std::sync::RwLock::new(ResourcePressure::None)),
+            shared_pressure,
         })
     }
 
@@ -170,31 +183,41 @@ impl ResourceManager {
             usage.disk_used_bytes = disk_usage.used;
             usage.disk_total_bytes = disk_usage.total;
         }
-
-        // Emit metrics
-        // metrics::gauge!("resource.memory.used_bytes", usage.memory_used_bytes as f64);
-        // metrics::gauge!("resource.gpu.memory.used_bytes", usage.gpu_memory_used_bytes as f64);
-        // metrics::gauge!("resource.gpu.temperature", usage.gpu_temperature as f64);
-        // metrics::gauge!("resource.disk.used_bytes", usage.disk_used_bytes as f64);
     }
 
     /// Get current resource pressure
     pub async fn get_resource_pressure(&self) -> ResourcePressure {
         let usage = self.usage.read().await;
 
-        let memory_ratio = usage.memory_used_bytes as f32 / usage.memory_total_bytes as f32;
+        let memory_ratio = if usage.memory_total_bytes > 0 {
+            usage.memory_used_bytes as f32 / usage.memory_total_bytes as f32
+        } else {
+            0.0
+        };
         let gpu_memory_ratio = if usage.gpu_memory_total_bytes > 0 {
             usage.gpu_memory_used_bytes as f32 / usage.gpu_memory_total_bytes as f32
+        } else {
+            0.0
+        };
+        let disk_ratio = if usage.disk_total_bytes > 0 {
+            usage.disk_used_bytes as f32 / usage.disk_total_bytes as f32
         } else {
             0.0
         };
 
         // Determine overall pressure
         let max_ratio = memory_ratio.max(gpu_memory_ratio);
+        let gpu_overheating = self.config.gpu.temperature_threshold > 0
+            && usage.gpu_temperature > self.config.gpu.temperature_threshold;
+        let disk_exceeded = self.config.disk.max_usage_percent > 0.0
+            && disk_ratio > self.config.disk.max_usage_percent;
 
         if max_ratio > self.config.memory.emergency_threshold {
             ResourcePressure::Critical
-        } else if max_ratio > self.config.memory.critical_threshold {
+        } else if max_ratio > self.config.memory.critical_threshold
+            || gpu_overheating
+            || disk_exceeded
+        {
             ResourcePressure::High
         } else if max_ratio > self.config.memory.warning_threshold {
             ResourcePressure::Medium
