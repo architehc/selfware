@@ -11,6 +11,7 @@ fn make_result(task_id: &str, success: bool, latency_ms: u64, tokens: u64) -> St
         prompt_tokens: tokens,
         completion_tokens: tokens * 2,
         latency_ms,
+        queue_wait_ms: 0,
         eval: Some(EvalResult {
             score: if success { 1.0 } else { 0.0 },
             passed: success,
@@ -86,6 +87,7 @@ fn latency_counts_transport_success_even_when_eval_fails() {
         prompt_tokens: 10,
         completion_tokens: 20,
         latency_ms: 150,
+        queue_wait_ms: 0,
         eval: Some(EvalResult {
             score: 0.0,
             passed: false,
@@ -98,6 +100,22 @@ fn latency_counts_transport_success_even_when_eval_fails() {
     assert_eq!(report.latency_p50_ms, 150);
     assert_eq!(report.latency_max_ms, 150);
     assert_eq!(report.latency_min_ms, 150);
+}
+
+#[test]
+fn queue_wait_separates_inference_throughput_and_latency() {
+    let config = HarnessConfig::default();
+    let mut r1 = make_result("t1", true, 10_000, 50);
+    r1.queue_wait_ms = 9_000;
+    let mut r2 = make_result("t2", true, 10_000, 50);
+    r2.queue_wait_ms = 9_000;
+    let report = HarnessReport::from_results(&config, vec![r1, r2], 10.0);
+    assert_eq!(report.total_queue_wait_ms, 18_000);
+    assert_eq!(report.latency_p50_ms, 10_000);
+    assert_eq!(report.inference_p50_ms, 1_000);
+    // 200 completion tokens / 10s wall = 20 tok/s wall; active inference is 10% of wall (1s) = 200 tok/s
+    assert!((report.tokens_per_sec - 20.0).abs() < 0.1);
+    assert!((report.inference_tokens_per_sec - 200.0).abs() < 0.1);
 }
 
 #[test]

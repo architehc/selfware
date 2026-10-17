@@ -49,6 +49,33 @@ use super::provenance::{ConfigSource, ConfigSources};
 use super::types::ExecutionMode;
 use super::Config;
 
+/// Upper bound for a config file; real ones are a few kilobytes.
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Read a config file, refusing anything that is not a regular file or is
+/// larger than `MAX_CONFIG_FILE_BYTES`. The type is checked on the opened
+/// handle (after following symlinks), so a home config managed through a
+/// dotfile-manager symlink keeps working, while a checkout that ships
+/// `selfware.toml` as a symlink to a device such as `/dev/zero` — on which
+/// an unbounded `read_to_string` never returns — is refused.
+fn read_config_file(path: &str) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let mut content = String::new();
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_string(&mut content)?;
+    if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(std::io::Error::other(format!(
+            "larger than {} bytes",
+            MAX_CONFIG_FILE_BYTES
+        )));
+    }
+    Ok(content)
+}
+
 /// Emit a user-actionable config warning. Goes through `tracing::warn!`, and
 /// additionally straight to stderr ONLY when no tracing subscriber exists.
 /// `init_tracing()` installs a subscriber iff RUST_LOG / SELFWARE_LOG_LEVEL is
@@ -281,6 +308,112 @@ fn untrusted_checkout_origin<'a>(
     }
 }
 
+/// Keys an UNTRUSTED checkout-local `selfware.toml` may not overlay onto the
+/// operator's home config (`Config::parse_config_file`): the fields
+/// `restrict_untrusted_project_config` neutralizes, plus the endpoint and
+/// credential keys the trust gates in `load_without_validation_impl` inspect.
+/// Whole sections are listed where every key in them is privileged
+/// (`[safety]`, `[[hooks]]`, `[mcp]`, `[yolo]`); profile endpoints and
+/// credentials (`models.<name>.endpoint` / `.api_key`) are handled by
+/// `strip_privileged_overlay_keys`.
+const UNTRUSTED_OVERLAY_PRIVILEGED_KEYS: &[&str] = &[
+    "endpoint",
+    "api_key",
+    "execution_mode",
+    "safety",
+    "hooks",
+    "mcp",
+    "yolo",
+    "agent.post_edit_test_command",
+    "agent.require_verification_before_completion",
+];
+
+/// Remove the value at a dotted key from a TOML table; `true` if one was there.
+fn remove_dotted_key(table: &mut toml::value::Table, dotted: &str) -> bool {
+    match dotted.split_once('.') {
+        Some((head, rest)) => match table.get_mut(head) {
+            Some(toml::Value::Table(t)) => remove_dotted_key(t, rest),
+            _ => false,
+        },
+        None => table.remove(dotted).is_some(),
+    }
+}
+
+/// Remove from an untrusted checkout overlay every key it may not set over
+/// the operator's `base` (`UNTRUSTED_OVERLAY_PRIVILEGED_KEYS`), returning the
+/// dropped dotted names for the user-facing warning. Top-level `endpoint` is
+/// only dropped when `base` sets `endpoint` or `api_key`, so a home config
+/// without an endpoint or credential still lets a local checkout point at
+/// `127.0.0.1` while downstream endpoint/credential gates inspect its
+/// provenance. A profile's endpoint and credential are dropped when the base
+/// defines that profile, so the checkout can only tune it; a profile the base
+/// does not know stays whole (`endpoint` is a required field) and
+/// `restrict_untrusted_project_config` resets its endpoint to the top-level
+/// one, as for any untrusted checkout file.
+fn strip_privileged_overlay_keys(
+    overlay: &mut toml::value::Table,
+    base: &toml::value::Table,
+) -> Vec<String> {
+    let mut ignored: Vec<String> = Vec::new();
+    for key in UNTRUSTED_OVERLAY_PRIVILEGED_KEYS {
+        if *key == "endpoint" && !base.contains_key("endpoint") && !base.contains_key("api_key") {
+            continue;
+        }
+        if remove_dotted_key(overlay, key) {
+            ignored.push((*key).to_string());
+        }
+    }
+    if let (Some(toml::Value::Table(profiles)), Some(toml::Value::Table(base_profiles))) =
+        (overlay.get_mut("models"), base.get("models"))
+    {
+        for (name, profile) in profiles.iter_mut() {
+            let toml::Value::Table(profile) = profile else {
+                continue;
+            };
+            if !base_profiles.contains_key(name) {
+                continue;
+            }
+            for field in ["endpoint", "api_key"] {
+                if profile.remove(field).is_some() {
+                    ignored.push(format!("models.{name}.{field}"));
+                }
+            }
+        }
+    }
+    ignored
+}
+
+/// Deep-merge `overlay` into `base`: tables merge key by key, every other
+/// value (scalars, arrays, arrays of tables) in the overlay replaces the
+/// base's.
+fn merge_toml_tables(base: &mut toml::value::Table, overlay: toml::value::Table) {
+    for (key, value) in overlay {
+        match value {
+            toml::Value::Table(o) => match base.get_mut(&key) {
+                Some(toml::Value::Table(b)) => merge_toml_tables(b, o),
+                _ => {
+                    base.insert(key, toml::Value::Table(o));
+                }
+            },
+            other => {
+                base.insert(key, other);
+            }
+        }
+    }
+}
+
+/// What `Config::parse_config_file` produced for the selected config file.
+struct ParsedConfigFile {
+    config: Config,
+    /// The effective TOML text: the file as read, or — when an untrusted
+    /// checkout file was layered over the home config — the merged document.
+    /// Downstream explicit-field detection (`context_length`, `token_budget`,
+    /// profile defaults) reads this.
+    raw_toml: String,
+    /// The home config the checkout file was layered over, if any.
+    layered_home: Option<PathBuf>,
+}
+
 impl Config {
     fn content_sets_agent_token_budget(content: &str) -> bool {
         toml::from_str::<toml::Value>(content)
@@ -464,6 +597,103 @@ impl Config {
         origin.map(|p| (p, reset))
     }
 
+    fn parse_toml_table(content: &str, p: &str) -> Result<toml::value::Table> {
+        toml::from_str(content)
+            .with_context(|| format!("Failed to parse config file: {}. Check TOML syntax.", p))
+    }
+
+    /// Parse the selected config file into a `Config`, recording per-key
+    /// provenance in `sources`.
+    ///
+    /// An auto-discovered, untrusted checkout-local `selfware.toml` — one the
+    /// operator did not name via `--config` / `SELFWARE_CONFIG` — must not
+    /// REPLACE the operator's `~/.config/selfware/config.toml`: with the
+    /// single-file selection, any repository shipping a `selfware.toml` (even
+    /// an empty one) withdrew the operator's own denied_paths, hooks,
+    /// endpoint, ... down to the built-in defaults, with no trust decision
+    /// involved. So when the home config exists it is the BASE layer and the
+    /// checkout file only overlays its non-privileged keys (model parameters,
+    /// UI, ...); the privileged ones (`UNTRUSTED_OVERLAY_PRIVILEGED_KEYS`) are
+    /// dropped with a warning and the operator's values stay in force — the
+    /// same set `restrict_untrusted_project_config` guards, which then has
+    /// nothing left to reset. A trusted checkout file, or one the operator
+    /// selected explicitly, keeps the documented replace semantics.
+    fn parse_config_file(
+        p: &str,
+        content: &str,
+        operator_selected: bool,
+        sources: &mut ConfigSources,
+    ) -> Result<ParsedConfigFile> {
+        Self::warn_unknown_keys(content);
+        let mut overlay = Self::parse_toml_table(content, p)?;
+        let path = PathBuf::from(p);
+        let home = if !operator_selected
+            && config_is_checkout_local(&path)
+            && !super::trust::is_config_trusted(&path)
+        {
+            dirs::home_dir()
+                .map(|h| h.join(".config/selfware/config.toml"))
+                .filter(|h| h.is_file())
+        } else {
+            None
+        };
+        let Some(home) = home else {
+            let config: Config = toml::from_str(content).with_context(|| {
+                format!("Failed to parse config file: {}. Check TOML syntax.", p)
+            })?;
+            record_toml_sources(sources, &overlay, &path, "");
+            return Ok(ParsedConfigFile {
+                config,
+                raw_toml: content.to_string(),
+                layered_home: None,
+            });
+        };
+
+        // The operator's file is the base; it is loaded in full. A broken home
+        // config is an error here as it is everywhere else — silently running
+        // without the operator's settings is exactly what this layering
+        // prevents.
+        let home_content = read_config_file(&home.to_string_lossy())
+            .with_context(|| format!("Failed to read config from {}", home.display()))?;
+        Self::warn_unknown_keys(&home_content);
+        let mut merged = Self::parse_toml_table(&home_content, &home.to_string_lossy())?;
+        record_toml_sources(sources, &merged, &home, "");
+
+        let ignored = strip_privileged_overlay_keys(&mut overlay, &merged);
+        if !ignored.is_empty() {
+            config_warning(&format!(
+                "Untrusted project selfware.toml '{}': ignored privileged settings [{}]; the \
+                 values from {} stay in force. Run `selfware trust` in this directory to \
+                 enable them.",
+                p,
+                ignored.join(", "),
+                super::display_config_path(&home)
+            ));
+        }
+        record_toml_sources(sources, &overlay, &path, "");
+        merge_toml_tables(&mut merged, overlay);
+
+        let raw_toml = toml::to_string(&merged).with_context(|| {
+            format!(
+                "Failed to layer config file {} over the home config {}",
+                p,
+                home.display()
+            )
+        })?;
+        let config: Config = merged.try_into().with_context(|| {
+            format!(
+                "Failed to parse config file: {} (layered over {})",
+                p,
+                home.display()
+            )
+        })?;
+        Ok(ParsedConfigFile {
+            config,
+            raw_toml,
+            layered_home: Some(home),
+        })
+    }
+
     /// Warn about unknown top-level TOML keys that would be silently ignored,
     /// and about unknown SUB-keys inside known fixed sections (a nested typo
     /// like `[agent] max_iteration = 5` is otherwise dropped by serde and the
@@ -519,7 +749,7 @@ impl Config {
         if let Ok(metadata) = std::fs::metadata(path) {
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
-                let holds_credential = match std::fs::read_to_string(path) {
+                let holds_credential = match read_config_file(path) {
                     Ok(content) => config_content_holds_credential(&content),
                     Err(_) => true,
                 };
@@ -586,25 +816,25 @@ impl Config {
         let path_was_from_env = path.is_none() && env_config_path.is_some();
 
         let mut loaded_from_path: Option<String> = None;
-        let mut token_budget_was_explicit = false;
         let mut sources = ConfigSources::new();
         // Raw TOML content as read from disk. Captured so we can later compute
         // which fields the user set explicitly and so model-defaults profiles
         // do not overwrite them.
         let mut raw_toml_content: Option<String> = None;
+        // The home config an untrusted checkout `selfware.toml` was layered
+        // over (`parse_config_file`), if any.
+        let mut layered_home: Option<PathBuf> = None;
         let mut config = match effective_path {
             Some(p) => {
-                let content = std::fs::read_to_string(p)
+                let content = read_config_file(p)
                     .with_context(|| format!("Failed to read config from {}", p))?;
                 loaded_from_path = Some(p.to_string());
-                token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
-                Self::warn_unknown_keys(&content);
-                let cfg: Config = toml::from_str(&content).with_context(|| {
-                    format!("Failed to parse config file: {}. Check TOML syntax.", p)
-                })?;
-                if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(&content) {
-                    record_toml_sources(&mut sources, &table, &PathBuf::from(p), "");
-                }
+                let parsed = Self::parse_config_file(
+                    p,
+                    &content,
+                    path_was_from_env || path_was_cli_explicit,
+                    &mut sources,
+                )?;
                 if path_was_from_env {
                     sources.set(
                         "__config_path_source".to_string(),
@@ -617,8 +847,9 @@ impl Config {
                         ConfigSource::CliArg("--config".to_string()),
                     );
                 }
-                raw_toml_content = Some(content);
-                cfg
+                raw_toml_content = Some(parsed.raw_toml);
+                layered_home = parsed.layered_home;
+                parsed.config
             }
             None => {
                 // Try default locations - expand ~ to actual home directory
@@ -635,20 +866,22 @@ impl Config {
 
                 let mut loaded = None;
                 for p in &default_paths {
-                    if let Ok(content) = std::fs::read_to_string(p) {
-                        loaded_from_path = Some(p.to_string());
-                        token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
-                        Self::warn_unknown_keys(&content);
-                        let cfg: Config = toml::from_str(&content).with_context(|| {
-                            format!("Failed to parse config file: {}. Check TOML syntax.", p)
-                        })?;
-                        if let Ok(toml::Value::Table(table)) =
-                            toml::from_str::<toml::Value>(&content)
-                        {
-                            record_toml_sources(&mut sources, &table, &PathBuf::from(*p), "");
+                    let read = read_config_file(p);
+                    // A missing default location is the normal case; any
+                    // other failure (unreadable, not a regular file,
+                    // oversized) is skipped out loud so the operator knows
+                    // why the file did not take effect.
+                    if let Err(e) = &read {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            config_warning(&format!("Ignoring config file '{}': {}", p, e));
                         }
-                        raw_toml_content = Some(content);
-                        loaded = Some(cfg);
+                    }
+                    if let Ok(content) = read {
+                        loaded_from_path = Some(p.to_string());
+                        let parsed = Self::parse_config_file(p, &content, false, &mut sources)?;
+                        raw_toml_content = Some(parsed.raw_toml);
+                        layered_home = parsed.layered_home;
+                        loaded = Some(parsed.config);
                         break;
                     }
                 }
@@ -658,36 +891,53 @@ impl Config {
                 })
             }
         };
+        let token_budget_was_explicit = raw_toml_content
+            .as_deref()
+            .map(Self::content_sets_agent_token_budget)
+            .unwrap_or(false);
 
         // Surface which file won the precedence search (and when a
-        // checkout-local `selfware.toml` shadows the global config) — this
-        // makes the cwd-shadows-global trap visible on every run instead of
-        // silently loading an unexpected file. The loaded path is also
-        // recorded in the provenance map under a reserved key so downstream
-        // diagnostics (`doctor`, `llm-doctor`) can report it.
+        // checkout-local `selfware.toml` shadows the global config, or — when
+        // untrusted — was layered over it) — this makes the
+        // cwd-shadows-global trap visible on every run instead of silently
+        // loading an unexpected file. The loaded path is also recorded in the
+        // provenance map under a reserved key so downstream diagnostics
+        // (`doctor`, `llm-doctor`) can report it.
         if let Some(ref p) = loaded_from_path {
-            let shadowed_home = if config_is_checkout_local(std::path::Path::new(p)) {
-                dirs::home_dir()
-                    .map(|h| h.join(".config/selfware/config.toml"))
-                    .filter(|h| h.is_file())
-            } else {
-                None
-            };
+            let shadowed_home =
+                if layered_home.is_none() && config_is_checkout_local(std::path::Path::new(p)) {
+                    dirs::home_dir()
+                        .map(|h| h.join(".config/selfware/config.toml"))
+                        .filter(|h| h.is_file())
+                } else {
+                    None
+                };
             let shown = super::display_config_path(std::path::Path::new(p));
             if !super::config_line_suppressed() {
-                match shadowed_home {
-                    Some(h) => eprintln!(
+                match (&layered_home, shadowed_home) {
+                    (Some(h), _) => eprintln!(
+                        "config: {} (untrusted, over {})",
+                        shown,
+                        super::display_config_path(h)
+                    ),
+                    (None, Some(h)) => eprintln!(
                         "config: {} (shadowing {})",
                         shown,
                         super::display_config_path(&h)
                     ),
-                    None => eprintln!("config: {}", shown),
+                    (None, None) => eprintln!("config: {}", shown),
                 }
             }
             sources.set(
                 "__config_path".to_string(),
                 ConfigSource::ConfigFile(PathBuf::from(p)),
             );
+            if let Some(ref h) = layered_home {
+                sources.set(
+                    "__layered_home".to_string(),
+                    ConfigSource::ConfigFile(h.clone()),
+                );
+            }
         }
 
         // On Unix, check if the config file has overly permissive permissions.
@@ -701,6 +951,11 @@ impl Config {
                 .unwrap_or(false);
             let strict = config.safety.strict_permissions || env_strict;
             Self::check_config_file_permissions(cfg_path, strict)?;
+            // The layered home config is loaded too (and is the file that
+            // would hold a credential).
+            if let Some(ref home) = layered_home {
+                Self::check_config_file_permissions(&home.to_string_lossy(), strict)?;
+            }
         }
         // Suppress unused-variable warning on non-Unix platforms
         let _ = &loaded_from_path;
@@ -900,8 +1155,9 @@ impl Config {
         // above: it answers "is the endpoint authorized", not "is the transport
         // safe". Explicit --config / home-config endpoints are not
         // "selfware.toml" and so are unaffected — as is SELFWARE_ENDPOINT
-        // (operator naming the endpoint directly). Trust a repo by adding its
-        // config's canonical path to ~/.selfware/trusted_repos.
+        // (operator naming the endpoint directly). Trust a repo with
+        // `selfware trust`, which records the config's canonical path and a
+        // digest of its reviewed content in ~/.selfware/trusted_repos.
         let config_path_from_operator = matches!(
             sources.get("__config_path_source"),
             Some(ConfigSource::EnvVar(_) | ConfigSource::CliArg(_))
@@ -916,7 +1172,7 @@ impl Config {
                     bail!(
                         "Refusing to send the global SELFWARE_API_KEY to endpoint '{}' selected by \
                          the project's selfware.toml: this repository is not trusted. If you trust \
-                         it, add this path to ~/.selfware/trusted_repos:\n  {}",
+                         it, run `selfware trust` on this path:\n  {}",
                         config.endpoint,
                         canon.display()
                     );
@@ -938,8 +1194,7 @@ impl Config {
                         bail!(
                             "Refusing to send the global SELFWARE_API_KEY to profile endpoint '{}' \
                              selected by the project's selfware.toml: this repository is not \
-                             trusted. If you trust it, add this path to \
-                             ~/.selfware/trusted_repos:\n  {}",
+                             trusted. If you trust it, run `selfware trust` on this path:\n  {}",
                             profile.endpoint,
                             canon.display()
                         );
@@ -967,7 +1222,7 @@ impl Config {
                         "Refusing to load remote endpoint '{}' selected by the project's \
                          selfware.toml: this repository is not trusted, and the endpoint \
                          would receive the full conversation. If you trust it, run \
-                         `selfware trust` or add this path to ~/.selfware/trusted_repos:\n  {}",
+                         `selfware trust` on this path:\n  {}",
                         config.endpoint,
                         canon.display()
                     );
@@ -992,7 +1247,7 @@ impl Config {
                             "Refusing to load remote endpoint '{}' selected by the project's \
                              selfware.toml: this repository is not trusted, and the endpoint \
                              would receive the full conversation. If you trust it, run \
-                             `selfware trust` or add this path to ~/.selfware/trusted_repos:\n  {}",
+                             `selfware trust` on this path:\n  {}",
                             profile.endpoint,
                             canon.display()
                         );
@@ -1573,6 +1828,15 @@ impl Config {
     /// for `Config::default()` and hand-built configs.
     pub fn loaded_config_path(&self) -> Option<&std::path::Path> {
         match self.sources.get("__config_path") {
+            Some(ConfigSource::ConfigFile(p)) => Some(p.as_path()),
+            _ => None,
+        }
+    }
+
+    /// Path of the home config that an untrusted checkout `selfware.toml` was
+    /// layered over, if any.
+    pub fn layered_home_config_path(&self) -> Option<&std::path::Path> {
+        match self.sources.get("__layered_home") {
             Some(ConfigSource::ConfigFile(p)) => Some(p.as_path()),
             _ => None,
         }

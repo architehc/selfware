@@ -5,10 +5,10 @@ use crate::hooks::HookContext;
 fn test_expand_placeholders() {
     let ctx = HookContext::post_tool("file_write", r#"{"path": "src/main.rs"}"#, true, "ok");
 
-    let cmd = expand_placeholders("cargo fmt -- {path}", &ctx);
+    let cmd = expand_placeholders("cargo fmt -- {path}", &ctx).unwrap();
     assert_eq!(cmd, "cargo fmt -- 'src/main.rs'");
 
-    let cmd = expand_placeholders("echo {tool} modified {path}", &ctx);
+    let cmd = expand_placeholders("echo {tool} modified {path}", &ctx).unwrap();
     assert_eq!(cmd, "echo 'file_write' modified 'src/main.rs'");
 }
 
@@ -20,14 +20,14 @@ fn test_expand_placeholders_quotes_every_multi_edit_path() {
         true,
         "ok",
     );
-    let cmd = expand_placeholders("rustfmt {path}", &ctx);
+    let cmd = expand_placeholders("rustfmt {path}", &ctx).unwrap();
     assert_eq!(cmd, "rustfmt 'a.rs' 'b c.rs'");
 }
 
 #[test]
 fn test_expand_placeholders_no_path() {
     let ctx = HookContext::stop();
-    let cmd = expand_placeholders("cargo test", &ctx);
+    let cmd = expand_placeholders("cargo test", &ctx).unwrap();
     assert_eq!(cmd, "cargo test");
 }
 
@@ -40,8 +40,129 @@ fn test_expand_placeholders_shell_quotes_injection_chars() {
         "ok",
     );
 
-    let cmd = expand_placeholders("cargo fmt -- {path}", &ctx);
+    let cmd = expand_placeholders("cargo fmt -- {path}", &ctx).unwrap();
     assert_eq!(cmd, "cargo fmt -- 'src/main.rs; touch /tmp/pwned'");
+}
+
+/// Inside "…" a '…' wrapper is literal and `$(…)` / backticks in a file name
+/// would run (the documented auto-commit hook), so the value is escaped for
+/// the double-quoted context instead.
+#[test]
+fn test_expand_placeholders_escapes_for_double_quoted_context() {
+    let ctx = HookContext::post_tool(
+        "file_edit",
+        r#"{"path": "CHANGELOG $(touch x) `touch y` \"a\\b.md", "old_str": "a", "new_str": "b"}"#,
+        true,
+        "ok",
+    );
+
+    let cmd = expand_placeholders(
+        "git add {path} && git commit -m \"[selfware] auto-commit: {tool} {path}\" --no-verify 2>/dev/null || true",
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        cmd,
+        "git add 'CHANGELOG $(touch x) `touch y` \"a\\b.md' && git commit -m \
+         \"[selfware] auto-commit: file_edit CHANGELOG \\$(touch x) \\`touch y\\` \\\"a\\\\b.md\" \
+         --no-verify 2>/dev/null || true"
+    );
+
+    let builtin_cmd =
+        expand_placeholders(&crate::hooks::builtin::auto_commit().command, &ctx).unwrap();
+    assert_eq!(
+        builtin_cmd,
+        "git add -- 'CHANGELOG $(touch x) `touch y` \"a\\b.md' && git commit -m \
+         '[selfware] auto-commit: ''file_edit'' ''CHANGELOG $(touch x) `touch y` \"a\\b.md' \
+         --no-verify 2>/dev/null || true"
+    );
+
+    // A `$(…)` inside "…" is a fresh unquoted context again.
+    let cmd = expand_placeholders("echo \"$(basename {path})\"", &ctx).unwrap();
+    assert_eq!(
+        cmd,
+        "echo \"$(basename 'CHANGELOG $(touch x) `touch y` \"a\\b.md')\""
+    );
+}
+
+#[test]
+fn test_expand_placeholders_splices_into_single_quoted_context() {
+    let ctx = HookContext::post_tool("file_write", r#"{"path": "it's.md"}"#, true, "ok");
+
+    let cmd = expand_placeholders("echo 'wrote {path} with {tool}'", &ctx).unwrap();
+    assert_eq!(cmd, "echo 'wrote it'\\''s.md with file_write'");
+
+    // Quotes in a comment or escaped with a backslash do not open a context.
+    let cmd = expand_placeholders("echo \\\" \\' x # it's\n{path}", &ctx).unwrap();
+    assert_eq!(cmd, "echo \\\" \\' x # it's\n'it'\\''s.md'");
+}
+
+/// Where no quoting can make the value inert the hook is not run at all.
+#[test]
+fn test_expand_placeholders_refuses_unquotable_contexts() {
+    let ctx = HookContext::post_tool("file_write", r#"{"path": "a.md"}"#, true, "ok");
+
+    let err = expand_placeholders("echo `basename {path}`", &ctx).unwrap_err();
+    assert!(err.to_string().contains("{path}"), "{err}");
+    assert!(err.to_string().contains("backticks"), "{err}");
+
+    let err = expand_placeholders("cat <<EOF\n{path}\nEOF", &ctx).unwrap_err();
+    assert!(err.to_string().contains("here-document"), "{err}");
+
+    // Backticks that are closed before the placeholder are fine.
+    let cmd = expand_placeholders("echo `date` {path}", &ctx).unwrap();
+    assert_eq!(cmd, "echo `date` 'a.md'");
+}
+
+/// End to end through `sh`: a hostile file name reaches the hook command as
+/// data in every quoting context, and an unquotable placement fails closed.
+#[tokio::test]
+async fn hook_path_placeholder_is_inert_in_every_quoting_context() {
+    use crate::tools::workspace_root::WorkspaceRoot;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = WorkspaceRoot::fixed(dir.path());
+    let name = "CHANGELOG $(touch marker) `touch marker` \"it's\".md";
+    let args = serde_json::json!({"path": name, "content": ""}).to_string();
+    let ctx = HookContext::post_tool("file_write", &args, true, "ok");
+
+    let hook = HookConfig {
+        event: crate::hooks::HookEvent::PostToolUse,
+        command: "printf '%s\\n' \"msg: {path}\" {path} 'x {path}' \"$(basename {path})\" > out"
+            .to_string(),
+        match_tools: vec![],
+        timeout_secs: 10,
+    };
+    let action = execute_hook_in_root(&hook, &ctx, &root).await;
+    assert!(matches!(action, HookAction::Continue), "got: {action:?}");
+    assert!(
+        !dir.path().join("marker").exists(),
+        "the file name was executed by the hook's shell"
+    );
+    let out = std::fs::read_to_string(dir.path().join("out")).unwrap();
+    assert_eq!(
+        out,
+        format!("msg: {name}\n{name}\nx {name}\n{name}\n"),
+        "the file name must reach the command unchanged in every context"
+    );
+
+    let hook = HookConfig {
+        command: "echo `basename {path}` > out".to_string(),
+        ..hook
+    };
+    match execute_hook_in_root(&hook, &ctx, &root).await {
+        HookAction::Error { message } => assert!(message.contains("backticks"), "{message}"),
+        other => panic!("unquotable placeholder must not run, got: {other:?}"),
+    }
+    let pre_hook = HookConfig {
+        event: crate::hooks::HookEvent::PreToolUse,
+        ..hook
+    };
+    let pre_ctx = HookContext::pre_tool("file_write", &args);
+    match execute_hook_in_root(&pre_hook, &pre_ctx, &root).await {
+        HookAction::Skip { kind, .. } => assert_eq!(kind, crate::hooks::SkipKind::HookFailure),
+        other => panic!("unquotable PreToolUse placeholder must fail closed, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

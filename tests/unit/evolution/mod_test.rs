@@ -85,6 +85,37 @@ fn test_repository_instruction_files_protected() {
     assert!(!is_protected(std::path::Path::new("my_AGENTS.md")));
 }
 
+/// Every file name the prompt loaders read from the checkout is protected, not
+/// just AGENTS.md: the CLAUDE.md / .claude.md workspace guidance files and the
+/// .selfware.md memory files reach later sessions' system prompts the same way,
+/// so a self-modification run must not be able to leave any of them behind.
+#[test]
+fn test_prompt_loader_files_protected() {
+    for name in ["CLAUDE.md", ".claude.md", ".selfware.md"] {
+        assert!(is_protected(std::path::Path::new(name)), "{name}");
+        assert!(
+            is_protected(&std::path::Path::new(".").join(name)),
+            "./{name}"
+        );
+        assert!(
+            is_protected(&std::path::Path::new("src").join(name)),
+            "src/{name}"
+        );
+        assert!(
+            is_protected(&std::path::Path::new("src/deep").join(name)),
+            "src/deep/{name}"
+        );
+        // Lookalike / suffix-trick names must NOT match.
+        let bak = format!("{name}.bak");
+        assert!(!is_protected(std::path::Path::new(&bak)), "{bak}");
+        let lookalike = format!("my_{name}");
+        assert!(
+            !is_protected(std::path::Path::new(&lookalike)),
+            "{lookalike}"
+        );
+    }
+}
+
 #[test]
 fn test_fitness_weights_default() {
     let w = FitnessWeights::default();

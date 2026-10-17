@@ -181,12 +181,19 @@ impl EnvGuard {
     /// let a `SELFWARE_*` mutator race a `HOME`/cwd mutator.
     pub(crate) fn clear_selfware_env() -> Self {
         let lock = state_lock();
+        let saved = vec![
+            ("HOME", std::env::var_os("HOME")),
+            ("XDG_CONFIG_HOME", std::env::var_os("XDG_CONFIG_HOME")),
+        ];
         for var in SELFWARE_ENV_VARS {
             std::env::remove_var(var);
         }
+        let isolated_home = std::env::temp_dir().join("selfware-test-isolated-home");
+        std::env::set_var("HOME", &isolated_home);
+        std::env::set_var("XDG_CONFIG_HOME", isolated_home.join(".config"));
         Self {
             _lock: lock,
-            saved: Vec::new(),
+            saved,
             clear_selfware_on_drop: true,
         }
     }

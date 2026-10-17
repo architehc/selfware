@@ -358,12 +358,20 @@ static MODEL_FORMAT_PATTERNS: OnceLock<Vec<FormatPattern>> = OnceLock::new();
 static INHERITED_PATTERNS: OnceLock<Vec<FormatPattern>> = OnceLock::new();
 static MODEL_PEM_BEGIN: OnceLock<Option<Regex>> = OnceLock::new();
 static MODEL_PEM_END: OnceLock<Option<Regex>> = OnceLock::new();
+static MODEL_ARMOR_BEGIN: OnceLock<Option<Regex>> = OnceLock::new();
 static GREP_PREFIX: OnceLock<Option<Regex>> = OnceLock::new();
 static ENV_CHAIN: OnceLock<Option<Regex>> = OnceLock::new();
 static CLI_FLAG_TAIL: OnceLock<Option<Regex>> = OnceLock::new();
 static NEXT_PAIR: OnceLock<Option<Regex>> = OnceLock::new();
 static TYPE_ANNOTATION: OnceLock<Option<Regex>> = OnceLock::new();
 static PUTTY_PRIVATE_LINES: OnceLock<Option<Regex>> = OnceLock::new();
+static BOUND_CALL: OnceLock<Option<Regex>> = OnceLock::new();
+static BOUND_ELEMENT: OnceLock<Option<Regex>> = OnceLock::new();
+static BOUND_PAIR: OnceLock<Option<Regex>> = OnceLock::new();
+static BOUND_WORD: OnceLock<Option<Regex>> = OnceLock::new();
+static BOUND_FLAG: OnceLock<Option<Regex>> = OnceLock::new();
+static PENDING_NAME: OnceLock<Option<Regex>> = OnceLock::new();
+static PENDING_VALUE: OnceLock<Option<Regex>> = OnceLock::new();
 
 fn build(pattern: &str) -> Option<Regex> {
     RegexBuilder::new(pattern)
@@ -418,6 +426,26 @@ fn model_format_patterns() -> &'static Vec<FormatPattern> {
                 Always,
             ),
             ("azure_account_key", r"AccountKey=([A-Za-z0-9+/=]{20,})", Always),
+            // Azure SAS: the `sig=` of a SAS URL or `SharedAccessSignature=`
+            // connection string (a base64 HMAC, 44+ chars). A key-driven
+            // span cannot cover it — `sig` is not a secret-named key, and an
+            // unquoted `SAS_TOKEN=?sv=…&sig=…` value ends at the first `&`.
+            ("azure_sas", r"(?i)\bsig=([A-Za-z0-9%+/=]{40,})", Always),
+            (
+                "aws_signature",
+                r"(?i)\bX-Amz-Signature=([0-9a-f]{64})",
+                Always,
+            ),
+            (
+                "digitalocean_token",
+                r"\b(do[opr]_v1_[0-9a-f]{64})\b",
+                Always,
+            ),
+            (
+                "google_client_secret",
+                r"\b(GOCSPX-[A-Za-z0-9_\-]{28,})",
+                Always,
+            ),
             ("twilio_sid", r"\b(AC[0-9a-f]{32})\b", Always),
             (
                 "jwt",
@@ -464,6 +492,30 @@ fn model_format_patterns() -> &'static Vec<FormatPattern> {
                 r#"\bcurl\b[^\r\n]*?[ \t](?:-u|--user)[ \t=]*["']?[^\s:'"]+:([^\s'"]+)"#,
                 Literal,
             ),
+            // `sshpass -p SECRET`.
+            (
+                "password",
+                r#"(?:^|[\s;&|(])sshpass[ \t]+-p[ \t]*(?:'([^'\s]+)'|"([^"\s]+)"|([^\s'"-][^\s'"]*))"#,
+                Literal,
+            ),
+            // `docker login -u user -p SECRET registry` (and its relatives).
+            (
+                "password",
+                r#"(?:^|[\s;&|(])(?:docker|podman|nerdctl|helm|skopeo|crane)\b[^|;&\r\n]*?\blogin\b[^|;&\r\n]*?[ \t]-p[ \t]*(?:'([^'\s]+)'|"([^"\s]+)"|([^\s'"-][^\s'"]*))"#,
+                Literal,
+            ),
+            // SQL: `WITH PASSWORD '…'`, `IDENTIFIED BY '…'`.
+            (
+                "password",
+                r#"(?i)\b(?:with(?:[ \t]+(?:encrypted|unencrypted))?[ \t]+password|identified[ \t]+(?:with[ \t]+[\w.]+[ \t]+)?by)[ \t]+(?:'([^'\r\n]+)'|"([^"\r\n]+)")"#,
+                Literal,
+            ),
+            // .netrc: `machine HOST login USER password SECRET`.
+            (
+                "password",
+                r#"\b(?:machine[ \t]+\S+|default)[ \t]+login[ \t]+\S+[ \t]+password[ \t]+([^\s'"`]+)"#,
+                Literal,
+            ),
         ];
         specs
             .iter()
@@ -506,6 +558,10 @@ fn inherited_patterns() -> &'static Vec<FormatPattern> {
                     "Slack Token" => ("slack_token", Digit),
                     "Slack Webhook" => ("slack_webhook", Always),
                     "Azure Account Key" => ("azure_account_key", Always),
+                    "Azure SAS Signature" => ("azure_sas", Always),
+                    "AWS Presigned URL Signature" => ("aws_signature", Always),
+                    "DigitalOcean Token" => ("digitalocean_token", Always),
+                    "Google OAuth Client Secret" => ("google_client_secret", Always),
                     "Twilio SID" => ("twilio_sid", Always),
                     "Base64 Secret" => ("secret", NotCode),
                     other => {
@@ -556,6 +612,14 @@ fn pem_end() -> Option<&'static Regex> {
         &MODEL_PEM_END,
         r"-----END[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----",
     )
+}
+
+/// The BEGIN line of any armored block (PEM, PGP, the four-dash RFC 4716
+/// public key), private-key ones included; `pem_begin` is the subset whose
+/// body is secret. Matched on `armor_text`, which may have taken one
+/// leading dash for a diff marker.
+fn armor_begin() -> Option<&'static Regex> {
+    cached(&MODEL_ARMOR_BEGIN, r"^-{3,5} ?BEGIN [A-Z0-9 ]+?-{4,5}")
 }
 
 /// Where a line's own text starts: after a `file_read` line-number prefix
@@ -635,6 +699,7 @@ const KEY_METADATA_WORDS: &[&str] = &[
     "env",
     "var",
     "vars",
+    "stdin",
     "header",
     "headers",
     "param",
@@ -972,12 +1037,11 @@ fn accepts(check: ValueCheck, value: &str) -> bool {
 /// `quoted`: a string literal, where a secret-named passphrase may contain
 /// spaces.
 fn looks_like_secret_value(value: &str, kind: &str, quoted: bool) -> bool {
+    // No upper bound: a single token of any length under a secret-named key
+    // is a secret (the base64 of an RSA-4096 PEM is ~4.3k characters on one
+    // kubeconfig `client-key-data:` line).
     let len = value.chars().count();
-    if !(8..=4096).contains(&len)
-        || is_placeholder(value)
-        || is_path_like(value)
-        || value.contains("://")
-    {
+    if len < 8 || is_placeholder(value) || is_path_like(value) || value.contains("://") {
         return false;
     }
     let password_kind = kind == "password";
@@ -1026,28 +1090,80 @@ fn carries_key_material(segment: &str) -> bool {
     })
 }
 
+/// A line's own text, trimmed, without a leading `+`/`-` diff marker: a
+/// key body shown by `git_diff` is `+MIIE…`, or `-    MIIE…` inside a YAML
+/// block scalar.
+fn armor_text(line: &str) -> &str {
+    let text = line[logical_start(line)..].trim();
+    text.strip_prefix(['+', '-']).map_or(text, str::trim_start)
+}
+
 /// A line that can belong to an armored key body: base64-ish without
-/// spaces, an armor header (`Proc-Type: …`, `Version: …`), or blank.
+/// spaces, an RFC 1421 / OpenPGP armor header (`Proc-Type: …`, `Version: …`),
+/// or blank.
 fn is_key_body_line(line: &str) -> bool {
     let text = line[logical_start(line)..].trim();
+    let body = armor_text(line);
     text.is_empty()
-        || text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-        || text.split_once(": ").is_some_and(|(k, _)| {
-            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || (!body.is_empty()
+            && body
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')))
+        || body.split_once(": ").is_some_and(|(k, _)| {
+            matches!(
+                k.to_ascii_lowercase().as_str(),
+                "proc-type" | "dek-info" | "version" | "comment" | "hash" | "charset" | "messageid"
+            )
         })
 }
 
-/// Multi-line private-key state carried from line to line — and from one
-/// JSON leaf to the next under the same key, since grep matches split a PEM
-/// block into one leaf per line.
+/// Whether `text` begins mid-stream inside a private-key block whose closing
+/// `-----END … PRIVATE KEY-----` line is present in `text` (such as `tail`
+/// output or a `line_range` slice reaching the end of a key). Requires every
+/// line before the `END` line to be a valid key-body line and at least one to
+/// carry key material, with no preceding `BEGIN` line of any kind.
+fn starts_inside_terminated_pem_block(text: &str) -> bool {
+    let Some(end) = pem_end().and_then(|re| re.find(text)) else {
+        return false;
+    };
+    let before = &text[..end.start()];
+    if pem_begin().is_some_and(|re| re.is_match(before))
+        || armor_begin().is_some_and(|re| before.lines().any(|l| re.is_match(armor_text(l))))
+    {
+        return false;
+    }
+    let mut saw_key_material = false;
+    for line in before.lines() {
+        if !is_key_body_line(line) {
+            return false;
+        }
+        if carries_key_material(armor_text(line)) {
+            saw_key_material = true;
+        }
+    }
+    saw_key_material
+}
+
+/// Multi-line state carried from line to line — and from one JSON leaf to
+/// the next under the same key, since grep matches split a PEM block (or a
+/// `name:` / `value:` pair) into one leaf per line.
 #[derive(Debug, Clone, Copy, Default)]
-struct KeyBlockState {
+pub(crate) struct KeyBlockState {
     /// Inside a PEM/PGP body (BEGIN seen, END not yet).
     in_pem: bool,
     /// PuTTY `Private-Lines` still to redact.
     putty_remaining: usize,
+    /// Kind and column of the secret-named `name:` / `variable "…" {` line
+    /// whose `value:` / `default =` line, at that column or deeper, has not
+    /// come yet ([`binding_spans`]).
+    pending_name: Option<(&'static str, usize)>,
+}
+
+/// Redact private-key blocks on one line while tracking `state` from the
+/// start of a file (used by `file_read` `line_range` and `grep_search`).
+pub(crate) fn redact_file_key_blocks_in_line(line: &str, state: &mut KeyBlockState) -> String {
+    let mut count = 0usize;
+    redact_key_blocks_in_line(line, state, &mut count)
 }
 
 /// Redact private-key material on one line: PEM/PGP bodies (BEGIN/END kept;
@@ -1093,7 +1209,8 @@ fn redact_key_blocks_in_line(line: &str, state: &mut KeyBlockState, count: &mut 
                 let body = &rest[..e.start()];
                 let keep = prefix.min(body.len());
                 out.push_str(&body[..keep]);
-                if body[keep..].trim().is_empty() || is_marker_only(&body[keep..]) {
+                // Blank, a lone diff marker, or already a marker: not a body.
+                if armor_text(&body[keep..]).is_empty() || is_marker_only(&body[keep..]) {
                     out.push_str(&body[keep..]);
                 } else {
                     out.push_str(&marker("private_key"));
@@ -1391,6 +1508,114 @@ fn assignment_spans(line: &str, context: RedactionContext, spans: &mut Vec<Span>
     }
 }
 
+/// The value `m` bound to a secret-named key of `kind` by something other
+/// than an operator, if it looks like a real secret. A quoted literal is
+/// judged as one (in code files too, as in [`assignment_value`]); a bare
+/// token is data here, so it is code only in a Rust file.
+fn bound_span(
+    text: &str,
+    m: regex::Match<'_>,
+    kind: &'static str,
+    context: RedactionContext,
+) -> Option<Span> {
+    let quoted = m.start() > 0 && matches!(text.as_bytes()[m.start() - 1], b'"' | b'\'');
+    if !quoted && context == RedactionContext::RustSource {
+        return None;
+    }
+    looks_like_secret_value(m.as_str(), kind, quoted).then_some((m.start(), m.end(), kind))
+}
+
+/// Secret values bound to a secret-named key by something other than
+/// `key <op> value`: the first argument of a call or an index
+/// (`define('DB_PASSWORD', '…')`, `setdefault("API_TOKEN", "…")`,
+/// `environ["DB_PASSWORD"] = "…"`), an XML element (`<password>…</password>`),
+/// a name/value pair on one line (`{"name": "DB_PASSWORD", "value": "…"}`,
+/// `<add key="ApiKey" value="…" />`), a word pair (Dockerfile `ENV API_KEY …`,
+/// `setenv API_KEY …`) or a spaced CLI flag (`--password …`). A name/value
+/// pair spread over lines (`- name: DB_PASSWORD` / `value: …`, `variable
+/// "db_password" {` / `default = "…"`, a diff marker allowed) binds through
+/// `state.pending_name`, which the next blank, closing, list-item or less
+/// indented line drops.
+fn binding_spans(
+    line: &str,
+    context: RedactionContext,
+    state: &mut KeyBlockState,
+    spans: &mut Vec<Span>,
+) {
+    let logical = logical_start(line);
+    let text = &line[logical..];
+    let shift = |span: Span| (span.0 + logical, span.1 + logical, span.2);
+    // The key is the first group that participated, the value the next one.
+    let keyed = [
+        (
+            &BOUND_CALL,
+            r#"(?:\([ \t]*["']([A-Za-z_][A-Za-z0-9_.\-]*)["'][ \t]*,|\[[ \t]*["']([A-Za-z_][A-Za-z0-9_.\-]*)["'][ \t]*\][ \t]*=)[ \t]*(?:'([^'\r\n]*)'|"([^"\r\n]*)")"#,
+        ),
+        (
+            &BOUND_ELEMENT,
+            r"<([A-Za-z_][A-Za-z0-9_.\-]*)>[ \t]*([^<>\s]+)[ \t]*</",
+        ),
+        (
+            &BOUND_PAIR,
+            r#"(?i)\b(?:name|key)["']?[ \t]*[:=][ \t]*["']?([A-Za-z_][A-Za-z0-9_.\-]*)["']?[ \t]*,?[ \t]*["']?value["']?[ \t]*[:=][ \t]*(?:'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s'",;)}\]\-][^\s'",;)}\]]*))"#,
+        ),
+        (
+            &BOUND_WORD,
+            r#"^[ \t]*(?:ENV|setenv)[ \t]+([A-Za-z_][A-Za-z0-9_.\-]*)[ \t]+(?:'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s'"\-][^\s'"]*))"#,
+        ),
+        (
+            &BOUND_FLAG,
+            r#"(?:^|[ \t])--?([A-Za-z_][A-Za-z0-9_.\-]*)[ \t]+(?:'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s'",;)}\]\-][^\s'",;)}\]]*))"#,
+        ),
+    ];
+    for (cell, pattern) in keyed {
+        let Some(re) = cached(cell, pattern) else {
+            continue;
+        };
+        for caps in re.captures_iter(text) {
+            let mut groups = caps.iter().skip(1).flatten();
+            let Some(kind) = groups.next().and_then(|m| secret_key_kind(m.as_str())) else {
+                continue;
+            };
+            let value = groups
+                .next()
+                .and_then(|m| bound_span(text, m, kind, context));
+            spans.extend(value.map(shift));
+        }
+    }
+    // Column of the key, past a diff marker and a list dash.
+    let column = text.len() - text.trim_start_matches(['+', '-', ' ', '\t']).len();
+    if let Some(caps) = cached(
+        &PENDING_NAME,
+        r#"(?i)^[+\-]?[ \t]*(?:(?:-[ \t]+)?["']?name["']?[ \t]*[:=][ \t]*["']?([A-Za-z_][A-Za-z0-9_.\-]*)["']?[ \t]*,?|variable[ \t]+"([A-Za-z_][A-Za-z0-9_.\-]*)"[ \t]*\{)[ \t]*(?:#.*)?$"#,
+    )
+    .and_then(|re| re.captures(text))
+    {
+        let key = caps.iter().skip(1).flatten().next();
+        let kind = key.and_then(|m| secret_key_kind(m.as_str()));
+        state.pending_name = kind.map(|kind| (kind, column));
+    } else if let Some(caps) = cached(
+        &PENDING_VALUE,
+        r#"(?i)^[+\-]?[ \t]*["']?(?:value|default)["']?[ \t]*[:=][ \t]*(?:'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s'",;)}\]\-][^\s'",;)}\]]*))"#,
+    )
+    .and_then(|re| re.captures(text))
+    {
+        if let Some((kind, _)) = state.pending_name.take().filter(|(_, c)| column >= *c) {
+            let value = caps.iter().skip(1).flatten().next();
+            spans.extend(
+                value
+                    .and_then(|m| bound_span(text, m, kind, context))
+                    .map(shift),
+            );
+        }
+    } else if text.trim().is_empty()
+        || text.trim_start().starts_with(['}', ']', '-'])
+        || state.pending_name.is_some_and(|(_, c)| column < c)
+    {
+        state.pending_name = None;
+    }
+}
+
 /// `scheme://user:PASSWORD@host` in any scheme. The userinfo runs to the
 /// LAST `@` before whitespace/quotes, so a password containing `/` or `@`
 /// is redacted whole.
@@ -1478,7 +1703,12 @@ fn outside_markers(line: &str, spans: Vec<Span>) -> Vec<Span> {
 }
 
 /// Redact one line (no terminator inside).
-fn redact_line(line: &str, context: RedactionContext, count: &mut usize) -> String {
+fn redact_line(
+    line: &str,
+    context: RedactionContext,
+    state: &mut KeyBlockState,
+    count: &mut usize,
+) -> String {
     // Collect secret spans (order = marker-kind priority), then splice.
     let mut spans: Vec<Span> = Vec::new();
     for pattern in model_format_patterns() {
@@ -1503,6 +1733,7 @@ fn redact_line(line: &str, context: RedactionContext, count: &mut usize) -> Stri
         }
     }
     assignment_spans(line, context, &mut spans);
+    binding_spans(line, context, state, &mut spans);
     if spans.is_empty() {
         return line.to_string();
     }
@@ -1549,6 +1780,9 @@ fn redact_text_for_model(
     state: &mut KeyBlockState,
     count: &mut usize,
 ) -> String {
+    if !state.in_pem && starts_inside_terminated_pem_block(text) {
+        state.in_pem = true;
+    }
     let mut out = String::with_capacity(text.len());
     for segment in text.split_inclusive('\n') {
         let (body, term) = match segment.strip_suffix("\r\n") {
@@ -1558,8 +1792,17 @@ fn redact_text_for_model(
                 None => (segment, ""),
             },
         };
-        let keyed = redact_key_blocks_in_line(body, state, count);
-        out.push_str(&redact_line(&keyed, context, count));
+        let nul_free;
+        let matched = if body.contains('\0') {
+            nul_free = body.replace('\0', "");
+            nul_free.as_str()
+        } else {
+            body
+        };
+        let before = *count;
+        let keyed = redact_key_blocks_in_line(matched, state, count);
+        let redacted = redact_line(&keyed, context, state, count);
+        out.push_str(if *count == before { body } else { &redacted });
         out.push_str(term);
     }
     out
@@ -1597,8 +1840,32 @@ fn redact_json_leaves_for_model(
             }
         }
         serde_json::Value::Object(map) => {
-            for (key, item) in map.iter_mut() {
-                redact_json_leaves_for_model(item, Some(key.as_str()), context, states, count);
+            // In a grep match object (`context_before` / `content` / `context_after`),
+            // visit the lines in file order and share one KeyBlockState so a BEGIN
+            // line in `context_before` or `content` redacts following body lines.
+            let is_grep_match = map.contains_key("content")
+                && (map.contains_key("context_before") || map.contains_key("context_after"));
+            if is_grep_match {
+                for key in ["context_before", "content", "context_after"] {
+                    if let Some(item) = map.get_mut(key) {
+                        redact_json_leaves_for_model(item, Some("content"), context, states, count);
+                    }
+                }
+                for (key, item) in map.iter_mut() {
+                    if !matches!(key.as_str(), "context_before" | "content" | "context_after") {
+                        redact_json_leaves_for_model(
+                            item,
+                            Some(key.as_str()),
+                            context,
+                            states,
+                            count,
+                        );
+                    }
+                }
+            } else {
+                for (key, item) in map.iter_mut() {
+                    redact_json_leaves_for_model(item, Some(key.as_str()), context, states, count);
+                }
             }
         }
         _ => {}

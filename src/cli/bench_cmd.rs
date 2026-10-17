@@ -109,7 +109,7 @@ pub(crate) async fn handle_bench_command(
                 max_concurrent: concurrent,
                 max_tokens: 256,
                 temperature: 0.7,
-                timeout_secs: 120,
+                timeout_secs: config.agent.step_timeout_secs.max(300),
                 output_dir: "bench_results/cli_bench".into(),
                 extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
                 api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
@@ -139,14 +139,27 @@ pub(crate) async fn handle_bench_command(
 
             match runner.run(tasks).await {
                 Ok(report) => {
-                    println!(
-                        "{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
-                        "✓".green(),
-                        report.tokens_per_sec,
-                        report.latency_p50_ms as f64 / 1000.0,
-                        report.tasks_passed,
-                        report.tasks_total,
-                    );
+                    if report.total_queue_wait_ms > 0 {
+                        println!(
+                            "{} Throughput: {:.0} tok/s ({:.0} tok/s active infer) | p50: {:.1}s ({:.1}s infer) | {}/{} passed\n",
+                            "✓".green(),
+                            report.tokens_per_sec,
+                            report.inference_tokens_per_sec,
+                            report.latency_p50_ms as f64 / 1000.0,
+                            report.inference_p50_ms as f64 / 1000.0,
+                            report.tasks_passed,
+                            report.tasks_total,
+                        );
+                    } else {
+                        println!(
+                            "{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
+                            "✓".green(),
+                            report.tokens_per_sec,
+                            report.latency_p50_ms as f64 / 1000.0,
+                            report.tasks_passed,
+                            report.tasks_total,
+                        );
+                    }
                 }
                 Err(e) => println!("{} Throughput test failed: {}\n", "✗".red(), e),
             }
@@ -179,7 +192,7 @@ pub(crate) async fn handle_bench_command(
                 max_concurrent: concurrent,
                 max_tokens: 2048,
                 temperature: 0.3,
-                timeout_secs: 120,
+                timeout_secs: config.agent.step_timeout_secs.max(300),
                 output_dir: "bench_results/cli_bench".into(),
                 extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
                 api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
@@ -246,13 +259,24 @@ pub(crate) async fn handle_bench_command(
 
             match runner.run(tasks).await {
                 Ok(report) => {
-                    println!(
-                        "{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
-                        "✓".green(),
-                        report.tasks_passed,
-                        report.tasks_total,
-                        report.tokens_per_sec,
-                    );
+                    if report.total_queue_wait_ms > 0 {
+                        println!(
+                            "{} Multi-lang: {}/{} passed | {:.0} tok/s ({:.0} tok/s active infer)\n",
+                            "✓".green(),
+                            report.tasks_passed,
+                            report.tasks_total,
+                            report.tokens_per_sec,
+                            report.inference_tokens_per_sec,
+                        );
+                    } else {
+                        println!(
+                            "{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
+                            "✓".green(),
+                            report.tasks_passed,
+                            report.tasks_total,
+                            report.tokens_per_sec,
+                        );
+                    }
                     for r in &report.results {
                         let score = r
                             .eval
@@ -365,7 +389,7 @@ pub(crate) async fn handle_long_test_command(
             }
             Err(e) => {
                 println!("{} Failed to initialize: {}\n", "✗".red(), e);
-                return Ok(());
+                anyhow::bail!("Failed to initialize long-running test runner: {}", e);
             }
         };
 

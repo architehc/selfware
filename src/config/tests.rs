@@ -2430,7 +2430,7 @@ fn test_default_min_completion_steps_fn() {
 #[test]
 fn test_default_denied_paths_fn() {
     let paths = default_denied_paths();
-    assert_eq!(paths.len(), 30);
+    assert_eq!(paths.len(), 36);
     assert!(paths.contains(&"**/.env".to_string()));
     assert!(paths.contains(&"**/.env.local".to_string()));
     // .env.production / .env.staging etc. (red-team wave-3 finding).
@@ -2446,6 +2446,12 @@ fn test_default_denied_paths_fn() {
     // .git executable-config vectors (hooks + config) are denied by default.
     assert!(paths.contains(&"**/.git/hooks/**".to_string()));
     assert!(paths.contains(&"**/.git/config".to_string()));
+    // ...and the same config under its other names (commondir redirect,
+    // per-worktree config, submodule and linked-worktree git dirs).
+    assert!(paths.contains(&"**/.git/commondir".to_string()));
+    assert!(paths.contains(&"**/.git/config.worktree".to_string()));
+    assert!(paths.contains(&"**/.git/modules/**".to_string()));
+    assert!(paths.contains(&"**/.git/worktrees/**".to_string()));
     // Killswitch paths are denied by default.
     assert!(paths.contains(&"**/.selfware/KILLSWITCH".to_string()));
     assert!(paths.contains(&"**/.selfware/KILLSWITCH/**".to_string()));
@@ -2456,6 +2462,8 @@ fn test_default_denied_paths_fn() {
     assert!(paths.contains(&"**/.selfware/commands/**".to_string()));
     assert!(paths.contains(&"**/.selfware/skill-candidates".to_string()));
     assert!(paths.contains(&"**/.selfware/skill-candidates/**".to_string()));
+    assert!(paths.contains(&"**/.selfware/skill-admissions".to_string()));
+    assert!(paths.contains(&"**/.selfware/skill-admissions/**".to_string()));
     assert!(paths.contains(&"**/.selfware/attempts".to_string()));
     assert!(paths.contains(&"**/.selfware/attempts/**".to_string()));
     assert!(paths.contains(&"**/.selfware/runs".to_string()));

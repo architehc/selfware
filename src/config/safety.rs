@@ -82,6 +82,16 @@ pub fn default_denied_paths() -> Vec<String> {
         // through file_write/file_edit into .git/.
         "**/.git/hooks/**".to_string(),
         "**/.git/config".to_string(),
+        // The same config by its other names: git also reads `core.*` from
+        // `config.worktree`, from the git dir a `commondir` file points at,
+        // and from the private git dirs of submodules (`.git/modules/<name>/`)
+        // and linked worktrees (`.git/worktrees/<name>/`), each with its own
+        // config and hooks (red-team finding: `core.fsmonitor` planted in
+        // `.git/modules/sub/config` ran on the operator's next `git status`).
+        "**/.git/commondir".to_string(),
+        "**/.git/config.worktree".to_string(),
+        "**/.git/modules/**".to_string(),
+        "**/.git/worktrees/**".to_string(),
         // Block writing/modifying the fail-closed killswitch file via agent tools
         "**/.selfware/KILLSWITCH".to_string(),
         "**/.selfware/KILLSWITCH/**".to_string(),
@@ -92,6 +102,8 @@ pub fn default_denied_paths() -> Vec<String> {
         "**/.selfware/commands/**".to_string(),
         "**/.selfware/skill-candidates".to_string(),
         "**/.selfware/skill-candidates/**".to_string(),
+        "**/.selfware/skill-admissions".to_string(),
+        "**/.selfware/skill-admissions/**".to_string(),
         "**/.selfware/attempts".to_string(),
         "**/.selfware/attempts/**".to_string(),
         "**/.selfware/runs".to_string(),

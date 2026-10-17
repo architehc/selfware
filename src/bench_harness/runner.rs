@@ -77,9 +77,19 @@ impl HarnessRunner {
                 .as_ref()
                 .map(|e| format!("{:.0}%", e.score * 100.0))
                 .unwrap_or_else(|| "N/A".into());
+            let timing_str = if result.queue_wait_ms > 0 {
+                format!(
+                    "{}ms ({}ms infer + {}ms queue)",
+                    result.latency_ms,
+                    result.inference_latency_ms(),
+                    result.queue_wait_ms
+                )
+            } else {
+                format!("{}ms", result.latency_ms)
+            };
             eprintln!(
-                "  [{completed}/{total_tasks}] {} — {status} | {score_str} | {}ms | {}+{} tokens",
-                result.task_id, result.latency_ms, result.prompt_tokens, result.completion_tokens,
+                "  [{completed}/{total_tasks}] {} — {status} | {score_str} | {timing_str} | {}+{} tokens",
+                result.task_id, result.prompt_tokens, result.completion_tokens,
             );
             results.push(result);
         }
@@ -90,11 +100,12 @@ impl HarnessRunner {
             HarnessReport::from_results(&self.config, results, total_duration.as_secs_f64());
 
         info!(
-            "Benchmark complete: {:.1}s | {}/{} passed | {:.0} tok/s",
+            "Benchmark complete: {:.1}s | {}/{} passed | {:.0} tok/s (infer: {:.0} tok/s)",
             report.total_duration_secs,
             report.tasks_passed,
             report.tasks_total,
             report.tokens_per_sec,
+            report.inference_tokens_per_sec,
         );
 
         Ok(report)
@@ -127,6 +138,7 @@ async fn execute_task(
             prompt_tokens: 0,
             completion_tokens: 0,
             latency_ms: start.elapsed().as_millis() as u64,
+            queue_wait_ms: 0,
             eval: None,
             error: Some(e.to_string()),
         };
@@ -159,7 +171,7 @@ async fn execute_task(
     // retries × timeout_secs (~20 min). timeout_secs is the whole-task budget.
     let deadline = start + std::time::Duration::from_secs(config.timeout_secs);
 
-    let (status, body_text) = loop {
+    let (status, queue_wait_ms, body_text) = loop {
         // Stop before starting another attempt once the task budget is spent.
         if std::time::Instant::now() >= deadline {
             return StreamResult {
@@ -171,6 +183,7 @@ async fn execute_task(
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 latency_ms: start.elapsed().as_millis() as u64,
+                queue_wait_ms: 0,
                 eval: None,
                 error: Some(format!("Task deadline exceeded ({}s)", config.timeout_secs)),
             };
@@ -193,6 +206,7 @@ async fn execute_task(
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     latency_ms: start.elapsed().as_millis() as u64,
+                    queue_wait_ms: 0,
                     eval: None,
                     error: Some(format!("Task deadline exceeded ({}s)", config.timeout_secs)),
                 };
@@ -201,6 +215,13 @@ async fn execute_task(
         match send_result {
             Ok(resp) => {
                 let status = resp.status();
+                let queue_wait_ms = resp
+                    .headers()
+                    .get("x-colibri-queue-wait-ms")
+                    .or_else(|| resp.headers().get("x-queue-wait-ms"))
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 let body_text = match tokio::time::timeout(remaining, resp.text()).await {
                     Ok(r) => r.unwrap_or_default(),
@@ -214,6 +235,7 @@ async fn execute_task(
                             prompt_tokens: 0,
                             completion_tokens: 0,
                             latency_ms: start.elapsed().as_millis() as u64,
+                            queue_wait_ms,
                             eval: None,
                             error: Some(format!(
                                 "Task deadline exceeded ({}s)",
@@ -223,7 +245,7 @@ async fn execute_task(
                     }
                 };
                 if status.is_success() {
-                    break (status, body_text);
+                    break (status, queue_wait_ms, body_text);
                 }
                 if is_retryable_status(status) && attempt < max_attempts {
                     warn!(
@@ -239,7 +261,7 @@ async fn execute_task(
                     delay_ms = (delay_ms * 2).min(10_000);
                     continue;
                 }
-                break (status, body_text);
+                break (status, queue_wait_ms, body_text);
             }
             Err(e) => {
                 if attempt < max_attempts {
@@ -265,6 +287,7 @@ async fn execute_task(
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     latency_ms: start.elapsed().as_millis() as u64,
+                    queue_wait_ms: 0,
                     eval: None,
                     transport_succeeded: false,
                     error: Some(format!("Request error: {e}")),
@@ -282,6 +305,7 @@ async fn execute_task(
             prompt_tokens: 0,
             completion_tokens: 0,
             latency_ms: start.elapsed().as_millis() as u64,
+            queue_wait_ms,
             eval: None,
             transport_succeeded: false,
             error: Some(format!("HTTP {status}: {body_text}")),
@@ -300,6 +324,7 @@ async fn execute_task(
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 latency_ms: start.elapsed().as_millis() as u64,
+                queue_wait_ms,
                 eval: None,
                 transport_succeeded: false,
                 error: Some(format!("JSON parse error: {e}")),
@@ -345,6 +370,7 @@ async fn execute_task(
         stream_id,
         score = eval.score,
         latency_ms,
+        queue_wait_ms,
         "Task complete"
     );
 
@@ -357,6 +383,7 @@ async fn execute_task(
         prompt_tokens,
         completion_tokens,
         latency_ms,
+        queue_wait_ms,
         eval: Some(eval),
         error: None,
     }

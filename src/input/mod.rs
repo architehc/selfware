@@ -134,12 +134,27 @@ impl SelfwareEditor {
         let validator = Box::new(DefaultValidator);
 
         // Configure external editor for Ctrl+X
-        let editor_cmd = std::env::var("VISUAL")
+        let editor_raw = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
-        let temp_file =
-            std::env::temp_dir().join(format!("selfware_edit_{}.tmp", std::process::id()));
-        let buffer_editor = std::process::Command::new(editor_cmd);
+        let mut editor_parts = editor_raw.split_whitespace();
+        let editor_bin = editor_parts.next().unwrap_or("vi");
+        let mut buffer_editor = std::process::Command::new(editor_bin);
+        crate::safety::process_env::sanitize_std_command_env(&mut buffer_editor);
+        for arg in editor_parts {
+            buffer_editor.arg(arg);
+        }
+        let edit_dir = dirs::data_local_dir()
+            .or_else(dirs::home_dir)
+            .map(|d| d.join("selfware"))
+            .unwrap_or_else(std::env::temp_dir);
+        let _ = std::fs::create_dir_all(&edit_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&edit_dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let temp_file = edit_dir.join(format!("selfware_edit_{}.tmp", std::process::id()));
 
         let mut editor = Reedline::create()
             .with_history(history)

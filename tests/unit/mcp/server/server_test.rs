@@ -1896,6 +1896,85 @@ async fn test_tools_call_grep_search_redacts_secrets() {
     );
 }
 
+/// symbol_search is not a content-serving tool by name, but its `signature`
+/// field is the whole declaration line — a token-valued `const` came back
+/// raw while file_read of the same line was redacted. Every tools/call
+/// result goes through the redactor now, whatever the tool.
+#[tokio::test]
+async fn test_tools_call_symbol_search_redacts_secrets() {
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let dir = std::path::Path::new("target/tmp")
+        .join(format!("mcp-redact-symbol-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.rs"),
+        "pub const GITHUB_TOKEN: &str = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12\";\n",
+    )
+    .unwrap();
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(42)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "symbol_search",
+            "arguments": {"name": "GITHUB_TOKEN", "path": dir.to_string_lossy()}
+        })),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(response.error.is_none());
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(false));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("GITHUB_TOKEN"),
+        "the symbol itself must still be found: {text}"
+    );
+    assert!(
+        !text.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12"),
+        "raw token must not leak via tools/call symbol_search: {text}"
+    );
+    assert!(
+        text.contains("[REDACTED:"),
+        "expected a redaction marker in the symbol_search output: {text}"
+    );
+}
+
+/// An inline screenshot is image bytes, not workspace text: the redactor
+/// must not touch `base64_png` (its token-shape patterns would corrupt a
+/// large blob) while the rest of the same result is still redacted.
+#[test]
+fn test_redact_tool_result_keeps_base64_png_intact() {
+    // A blob the redactor would otherwise mangle: a JWT-looking run.
+    let png = format!("iVBORw0KGgo{}", "eyJ".repeat(40));
+    let raw = serde_json::json!({
+        "path": "/tmp/shot.png",
+        "note": "token = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12\"",
+        "base64_png": png,
+    });
+
+    let text = redact_tool_result(raw.clone());
+    let out: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(out["base64_png"], raw["base64_png"]);
+    assert!(
+        !text.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij12"),
+        "the note's token must be redacted: {text}"
+    );
+    assert!(
+        out.get("redaction").is_some(),
+        "expected the redaction note: {text}"
+    );
+
+    // Nothing to redact: the result is delivered byte for byte.
+    let clean = serde_json::json!({"path": "/tmp/shot.png", "base64_png": "iVBORw0KGgo"});
+    let text = redact_tool_result(clean.clone());
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), clean);
+}
+
 #[tokio::test]
 async fn test_resources_read_blocks_denied_paths() {
     let temp = tempfile::tempdir().unwrap();

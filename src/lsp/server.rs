@@ -6,12 +6,13 @@
 //! offer symbol search, outline, go-to-definition, and hover.
 
 use crate::cognitive::intelligence::{ProjectIntelligence, SearchResult, Symbol, SymbolKind};
-use crate::mcp::transport::write_message;
+use crate::mcp::transport::{read_content_length_message, write_message};
+use crate::safety::SafetyChecker;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::BufReader;
 use tracing::{debug, info};
 use url::Url;
 
@@ -50,6 +51,7 @@ const INTERNAL_ERROR: i64 = -32603;
 
 pub struct SelfwareLspServer {
     root: PathBuf,
+    safety: SafetyChecker,
     shutdown_requested: bool,
 }
 
@@ -61,10 +63,42 @@ impl Default for SelfwareLspServer {
 
 impl SelfwareLspServer {
     pub fn new() -> Self {
+        let safety_config = crate::config::Config::load(None)
+            .map(|c| c.safety)
+            .unwrap_or_default();
         Self {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            safety: SafetyChecker::new(&safety_config),
             shutdown_requested: false,
         }
+    }
+
+    fn resolve_validated_uri(&self, uri: &str) -> std::result::Result<PathBuf, JsonRpcError> {
+        let raw_path = uri_to_path(uri).ok_or_else(|| invalid_params("Invalid file URI"))?;
+        if self.safety.is_path_denied(&raw_path) {
+            return Err(invalid_params("Access denied: path is not permitted"));
+        }
+        let canonical = raw_path
+            .canonicalize()
+            .map_err(|e| invalid_params(&format!("Cannot resolve file URI '{}': {}", uri, e)))?;
+        let root_canonical = self
+            .root
+            .canonicalize()
+            .map_err(|e| internal_error(&format!("Cannot canonicalize workspace root: {}", e)))?;
+        if !canonical.starts_with(&root_canonical) {
+            return Err(invalid_params("File URI escapes workspace root"));
+        }
+        if self.safety.is_path_denied(&canonical) {
+            return Err(invalid_params("Access denied: path is not permitted"));
+        }
+        if let Ok(rel) = canonical.strip_prefix(&root_canonical) {
+            if self.safety.is_path_denied(rel)
+                || self.safety.check_path(&rel.to_string_lossy()).is_err()
+            {
+                return Err(invalid_params("Access denied: path is not permitted"));
+            }
+        }
+        Ok(canonical)
     }
 
     async fn handle_request(&mut self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -169,7 +203,7 @@ impl SelfwareLspServer {
             return Err(invalid_params("Missing textDocument.uri"));
         };
 
-        let path = uri_to_path(uri).ok_or_else(|| invalid_params("Invalid file URI"))?;
+        let path = self.resolve_validated_uri(uri)?;
         let intelligence = self.load_intelligence()?;
         let symbols = intelligence
             .symbols()
@@ -216,7 +250,7 @@ impl SelfwareLspServer {
             return Err(invalid_params("Missing textDocument.uri"));
         };
 
-        let path = uri_to_path(uri).ok_or_else(|| invalid_params("Invalid file URI"))?;
+        let path = self.resolve_validated_uri(uri)?;
         let position = params
             .and_then(|p| p.get("position"))
             .ok_or_else(|| invalid_params("Missing position"))?;
@@ -226,9 +260,12 @@ impl SelfwareLspServer {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
 
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read '{}'", path.display()))
-            .map_err(|err| internal_error(&err.to_string()))?;
+        let content = crate::tools::file::read_to_string_capped(
+            &path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .with_context(|| format!("failed to read '{}'", path.display()))
+        .map_err(|err| internal_error(&err.to_string()))?;
         let Some(token) = extract_token_at(&content, line, character) else {
             return Ok(Value::Null);
         };
@@ -260,7 +297,7 @@ impl SelfwareLspServer {
             return Err(invalid_params("Missing textDocument.uri"));
         };
 
-        let path = uri_to_path(uri).ok_or_else(|| invalid_params("Invalid file URI"))?;
+        let path = self.resolve_validated_uri(uri)?;
         let position = params
             .and_then(|p| p.get("position"))
             .ok_or_else(|| invalid_params("Missing position"))?;
@@ -270,9 +307,12 @@ impl SelfwareLspServer {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
 
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read '{}'", path.display()))
-            .map_err(|err| internal_error(&err.to_string()))?;
+        let content = crate::tools::file::read_to_string_capped(
+            &path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .with_context(|| format!("failed to read '{}'", path.display()))
+        .map_err(|err| internal_error(&err.to_string()))?;
         let Some(token) = extract_token_at(&content, line, character) else {
             return Ok(Value::Null);
         };
@@ -323,7 +363,7 @@ pub async fn run_lsp_server() -> Result<()> {
     let mut server = SelfwareLspServer::new();
 
     loop {
-        let Some(message) = read_message(&mut reader).await? else {
+        let Some(message) = read_content_length_message(&mut reader).await? else {
             break;
         };
 
@@ -355,49 +395,6 @@ pub async fn run_lsp_server() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn read_message<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<Option<String>> {
-    let mut content_length = None;
-
-    loop {
-        let mut header_line = String::new();
-        let bytes_read = reader.read_line(&mut header_line).await?;
-        if bytes_read == 0 {
-            return Ok(None);
-        }
-
-        let trimmed = header_line.trim();
-        if trimmed.is_empty() {
-            break;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .context("invalid Content-Length header")?,
-            );
-        }
-    }
-
-    let length = content_length.context("missing Content-Length header")?;
-    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
-    if length > MAX_MESSAGE_BYTES {
-        anyhow::bail!(
-            "LSP message too large: {} bytes (max {})",
-            length,
-            MAX_MESSAGE_BYTES
-        );
-    }
-    let mut buf = vec![0u8; length];
-    reader.read_exact(&mut buf).await?;
-    Ok(Some(
-        String::from_utf8(buf).context("message was not valid UTF-8")?,
-    ))
 }
 
 fn extract_root(params: Option<&Value>) -> Option<PathBuf> {

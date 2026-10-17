@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 /// Output budget for the compaction summary side calls (also the automatic
 /// `ContextCompressor::compress_with_task` summary).
-pub(crate) const COMPACT_SUMMARY_MAX_TOKENS: usize = 4096;
+pub(crate) const COMPACT_SUMMARY_MAX_TOKENS: usize = 8192;
 
 /// Compression method used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

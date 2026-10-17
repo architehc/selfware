@@ -1570,7 +1570,9 @@ impl Agent {
                 if let Some(dur) = tc.duration_ms {
                     metadata.insert("duration_ms".to_string(), dur.to_string());
                 }
-                let content = tool_call_content_preview(&tc.tool_name, &tc.arguments, tc.success);
+                let raw_content =
+                    tool_call_content_preview(&tc.tool_name, &tc.arguments, tc.success);
+                let content = crate::safety::redact::redact_secrets(&raw_content).into_owned();
                 let token_estimate = crate::token_count::estimate_content_tokens(&content);
 
                 CollectedItem {
@@ -1755,7 +1757,12 @@ impl Agent {
             return false;
         }
 
-        let restored = self.messages.is_empty() && self.restore_from_self_healing_checkpoint();
+        let requested_restore = execution
+            .actions_executed
+            .iter()
+            .any(|a| a.contains("RestoreCheckpoint"))
+            || self.messages.is_empty();
+        let restored = requested_restore && self.restore_from_self_healing_checkpoint();
         if restored {
             info!(
                 "Self-healing recovery '{}' restored agent state (actions: {:?})",

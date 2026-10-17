@@ -739,8 +739,10 @@ pub async fn run() -> Result<()> {
             println!(
                 "  This repo's selfware.toml may now run its hooks, MCP servers, \
                  and post-edit command, apply its permission/yolo/safety settings, \
-                 and use its endpoint with your API key. Untrust by removing that \
-                 line from ~/.selfware/trusted_repos."
+                 and use its endpoint with your API key. Trust covers the file as it \
+                 is now: after it changes (a pull, a branch switch, an edit), review \
+                 it and run `selfware trust` again. Untrust by removing that line \
+                 from ~/.selfware/trusted_repos."
             );
         }
         return Ok(());
@@ -3521,7 +3523,7 @@ temperature = {}
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
 denied_paths = {}
-protected_branches = ["main"]
+protected_branches = ["main", "master"]
 
 [agent]
 native_function_calling = {}
@@ -3595,6 +3597,7 @@ max_recovery_attempts = 3
                                 }
                                 Err(e) => {
                                     eprintln!("  {} Failed to save config: {}", "✗".red(), e);
+                                    anyhow::bail!("Failed to save config: {}", e);
                                 }
                             }
                         } else {
@@ -3614,6 +3617,7 @@ max_recovery_attempts = 3
                 }
                 Err(e) => {
                     eprintln!("\n  {} Unpack failed: {}", "✗".red(), e);
+                    anyhow::bail!("Unpack failed: {}", e);
                 }
             }
             println!();
@@ -4245,6 +4249,10 @@ fn edit_mcp_servers(
         .ok_or_else(|| anyhow::anyhow!("mcp.servers in {} is not an array", path.display()))?;
     let message = edit(servers)?;
 
+    // Trust is bound to the file's content, so this operator-initiated
+    // rewrite of a trusted repo config must re-record it afterwards or the
+    // next run would treat the edited file as an untrusted checkout.
+    let was_trusted = crate::config::trust::is_config_trusted(path);
     let rendered = toml::to_string_pretty(&doc)?;
     let parent = path
         .parent()
@@ -4258,6 +4266,9 @@ fn edit_mcp_servers(
     tmp.as_file().sync_all()?;
     tmp.persist(path)
         .map_err(|e| anyhow::anyhow!("failed to persist {}: {}", path.display(), e.error))?;
+    if was_trusted {
+        crate::config::trust::add_trusted_config(path)?;
+    }
     Ok(message)
 }
 

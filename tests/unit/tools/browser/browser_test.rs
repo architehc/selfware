@@ -825,3 +825,34 @@ async fn default_output_path_is_anchored_to_the_workspace_root() {
     );
     assert_eq!(std::path::PathBuf::from(pdf), expected_dir.join("page.pdf"));
 }
+
+const WEBRTC_PROXY_ONLY: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+
+#[tokio::test]
+async fn test_configure_chromium_proxy_keeps_udp_transports_behind_proxy() {
+    let proxy = GuardedProxy::start(false, None).await.unwrap();
+    let mut cmd = Command::new("google-chrome");
+    configure_chromium_proxy(&mut cmd, &proxy);
+    let args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(args.contains(&format!("--proxy-server={}", proxy.url())));
+    for arg in CHROMIUM_PROXY_ARGS {
+        assert!(args.iter().any(|a| a == arg), "missing {arg}");
+    }
+    assert!(args.iter().any(|a| a == WEBRTC_PROXY_ONLY));
+}
+
+#[test]
+fn test_playwright_launch_prelude_keeps_udp_transports_behind_proxy() {
+    let extra_args = "['--host-resolver-rules=x']";
+    let prelude = playwright_launch_prelude(extra_args, "http://127.0.0.1:1");
+    assert!(prelude.contains("proxy: { server: 'http://127.0.0.1:1' }"));
+    for arg in CHROMIUM_PROXY_ARGS {
+        assert!(prelude.contains(&format!("'{arg}'")), "missing {arg}");
+    }
+    assert!(prelude.contains(WEBRTC_PROXY_ONLY));
+    assert!(prelude.contains(&format!("...{extra_args}]")));
+}

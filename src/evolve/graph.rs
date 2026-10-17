@@ -131,6 +131,8 @@ impl GraphBuilder {
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
 
         let node_ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
+        // No import prefix longer than the longest node id can resolve.
+        let longest_id = node_ids.iter().map(String::len).max().unwrap_or(0);
 
         // Symbol nodes (schema v2): top-level `pub` items of Code-layer Rust
         // files. `file_symbols` keeps (parent id, rel path, decls) for the
@@ -194,7 +196,7 @@ impl GraphBuilder {
             };
             let full_path = project_root.join(path);
             for imported in imported_modules(&full_path, &node.id) {
-                if let Some(target) = resolve_import(&imported, &node_ids) {
+                if let Some(target) = resolve_import(&imported, &node_ids, longest_id) {
                     if target != node.id {
                         edges.push(Edge {
                             from: node.id.clone(),
@@ -480,18 +482,21 @@ fn repository_file_walk_impl(
 
 /// The `use` paths of a Rust source file, flattened (`use a::{b, c::d}` →
 /// `[a, b]`, `[a, c, d]`; a glob keeps its prefix). Top-level `use` items
-/// only, parsed with `syn`; a file that does not parse falls back to the
-/// line scan the graph uses. The same extraction as the graph's
-/// `DependsOn` edges.
+/// only, each parsed with `syn` on its own — never the whole file, whose
+/// nesting depth is untrusted (`AstAnalyzer::top_level_items`); a file that
+/// does not parse falls back to the line scan the graph uses. The same
+/// extraction as the graph's `DependsOn` edges.
 pub(crate) fn rust_use_paths(content: &str) -> Vec<Vec<String>> {
-    let Ok(file) = syn::parse_file(content) else {
+    let parser = AstAnalyzer::new();
+    let Ok(uses) = parser.top_level_items::<syn::ItemUse>(content, "use_declaration") else {
         return fallback_imports(content);
     };
+    if uses.is_empty() {
+        return fallback_imports(content);
+    }
     let mut imports = Vec::new();
-    for item in file.items {
-        if let syn::Item::Use(item_use) = item {
-            flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
-        }
+    for item_use in uses {
+        flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
     }
     imports
 }
@@ -765,6 +770,14 @@ struct TestSourcePartition {
     owners: HashMap<PathBuf, PathBuf>,
 }
 
+/// Largest Rust source the test partition reads and parses. The repository
+/// inventory's size rule (`MAX_TEXT_BYTES`) is this value, so a file the
+/// inventory reports as "over N MB" and never opens is never opened here
+/// either: the read and the `syn` tree both grow with the file (about 130
+/// bytes of memory per byte of source), and every `.rs` file in the
+/// checkout went through this loop with no limit at all.
+pub(crate) const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+
 fn discover_test_sources(src_root: &Path, source_files: &[PathBuf]) -> Result<TestSourcePartition> {
     let source_set: HashSet<PathBuf> = source_files.iter().cloned().collect();
     let mut test_only: HashSet<PathBuf> = source_files
@@ -773,18 +786,25 @@ fn discover_test_sources(src_root: &Path, source_files: &[PathBuf]) -> Result<Te
         .cloned()
         .collect();
     let mut module_edges: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    let parser = AstAnalyzer::new();
 
     for source in source_files {
         if !is_rust_source(source) {
             continue;
         }
-        // An unreadable (or non-UTF-8) source contributes no module edges;
-        // it must not fail the whole partition — the repository inventory
-        // names such files instead (review 2026-09-27, F3).
+        // An unreadable, non-UTF-8, or oversized source contributes no module
+        // edges; it must not fail the whole partition — the repository
+        // inventory names such files instead (review 2026-09-27, F3).
         let Ok(content) = crate::safety::source_context::open_broad_discovery_regular(source)
             .and_then(|mut file| {
                 use std::io::Read;
 
+                if !file.metadata().is_ok_and(|m| m.len() <= MAX_SOURCE_BYTES) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "source exceeds MAX_SOURCE_BYTES",
+                    ));
+                }
                 let mut content = String::new();
                 file.read_to_string(&mut content)?;
                 Ok(content)
@@ -792,10 +812,14 @@ fn discover_test_sources(src_root: &Path, source_files: &[PathBuf]) -> Result<Te
         else {
             continue;
         };
-        let Ok(file) = syn::parse_file(&content) else {
+        // Only the top-level `mod name;` items reach `syn`, one at a time:
+        // `syn::parse_file` on the whole file recurses once per nesting
+        // level, and one deeply nested file in the repository aborted the
+        // whole review with a stack overflow (`AstAnalyzer::top_level_items`).
+        let Ok(modules) = parser.top_level_items::<syn::ItemMod>(&content, "mod_item") else {
             continue;
         };
-        collect_external_modules(source, &file.items, &source_set, &mut module_edges);
+        collect_external_modules(source, &modules, &source_set, &mut module_edges);
     }
 
     for (_, target, requires_test) in &module_edges {
@@ -845,14 +869,11 @@ fn extracted_test_name(path: &Path) -> bool {
 
 fn collect_external_modules(
     source: &Path,
-    items: &[syn::Item],
+    modules: &[syn::ItemMod],
     source_files: &HashSet<PathBuf>,
     output: &mut Vec<(PathBuf, PathBuf, bool)>,
 ) {
-    for item in items {
-        let syn::Item::Mod(module) = item else {
-            continue;
-        };
+    for module in modules {
         if module.content.is_some() {
             continue;
         }
@@ -1170,16 +1191,30 @@ fn fallback_imports(content: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn resolve_import(parts: &[String], node_ids: &HashSet<String>) -> Option<String> {
-    let mut candidate = parts.to_vec();
-    while !candidate.is_empty() {
-        let id = candidate.join("::");
-        if node_ids.contains(&id) {
-            return Some(id);
+/// The longest prefix of a use path that is a node id. Built left to
+/// right and cut off at `longest_id` (the longest id in `node_ids`): the
+/// path comes from an untrusted source line that may be megabytes long,
+/// and re-joining the remaining path per segment was quadratic in it.
+fn resolve_import(
+    parts: &[String],
+    node_ids: &HashSet<String>,
+    longest_id: usize,
+) -> Option<String> {
+    let mut prefix = String::new();
+    let mut longest_match = None;
+    for (n, part) in parts.iter().enumerate() {
+        if n > 0 {
+            prefix.push_str("::");
         }
-        candidate.pop();
+        prefix.push_str(part);
+        if prefix.len() > longest_id {
+            break;
+        }
+        if node_ids.contains(&prefix) {
+            longest_match = Some(prefix.clone());
+        }
     }
-    None
+    longest_match
 }
 
 fn analyze_quality(analyzer: &QualityAnalyzer, node: &mut Node, label: &str) {
@@ -1366,8 +1401,45 @@ fn edge_type_order(edge_type: &EdgeType) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_excluded_repository_directory, repository_file_walk};
+    use super::{
+        classify_repository_paths, is_excluded_repository_directory, repository_file_walk,
+        rust_use_paths, RepositoryFileClass,
+    };
     use std::ffi::OsStr;
+
+    /// Valid Rust whose nesting overflowed a 2 MiB stack through
+    /// `syn::parse_file`; the expression and the `use` path each recurse
+    /// once per level in `syn`.
+    fn deeply_nested_source() -> String {
+        format!(
+            "use a::b;\npub fn answer() -> i32 {{ {}42{} }}\nuse {};\n#[cfg(test)]\nmod tests;\n",
+            "(".repeat(20_000),
+            ")".repeat(20_000),
+            vec!["c"; 20_000].join("::")
+        )
+    }
+
+    #[test]
+    fn deeply_nested_file_keeps_its_other_use_paths() {
+        assert_eq!(
+            rust_use_paths(&deeply_nested_source()),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+    }
+
+    #[test]
+    fn deeply_nested_file_keeps_its_external_test_module() {
+        let project = tempfile::tempdir().unwrap();
+        let src = project.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), deeply_nested_source()).unwrap();
+        std::fs::write(src.join("tests.rs"), "#[test]\nfn smoke() {}\n").unwrap();
+        let paths = vec![src.join("lib.rs"), src.join("tests.rs")];
+        assert_eq!(
+            classify_repository_paths(project.path(), &paths).unwrap(),
+            vec![RepositoryFileClass::Production, RepositoryFileClass::Test]
+        );
+    }
 
     #[test]
     fn excludes_cargo_style_build_dirs_under_any_name() {

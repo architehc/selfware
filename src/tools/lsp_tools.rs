@@ -250,7 +250,12 @@ impl Tool for LspGotoDefinitionTool {
         let client = self.handle.get().await?;
 
         // Ensure the file is open in the server.
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            std::path::Path::new(&file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         client.did_open(&file, &content).await?;
 
         let outcome = client
@@ -300,7 +305,12 @@ impl Tool for LspFindReferencesTool {
         let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            std::path::Path::new(&file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         client.did_open(&file, &content).await?;
 
         let outcome = client
@@ -344,7 +354,12 @@ impl Tool for LspDocumentSymbolsTool {
         let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            std::path::Path::new(&file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         client.did_open(&file, &content).await?;
 
         let outcome = client.document_symbols(&file).await?;
@@ -388,7 +403,12 @@ impl Tool for LspHoverTool {
         let file = validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            std::path::Path::new(&file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         client.did_open(&file, &content).await?;
 
         let outcome = client.hover(&file, args.line, args.column).await?;
@@ -460,7 +480,12 @@ impl Tool for LspDiagnosticsTool {
         // Previously this read the (usually empty) passive store without
         // opening the file, so it reported `status: ok, 0 errors` for files
         // the server had never analyzed — a false "clean" signal.
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            std::path::Path::new(&file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         client.did_open(&file, &content).await?;
 
         // Wait for the server to publish, polling the store. A background

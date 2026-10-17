@@ -40,7 +40,13 @@ mod friction;
 mod phi_activity;
 mod speech;
 
-const WEB_DIR: &str = "src/evolve/web";
+/// Opt-in for UI iteration: names the `src/evolve/web` of a selfware source
+/// checkout to serve from disk instead of the embedded assets. Never derived
+/// from the working directory: that is the project under analysis, and a
+/// checkout shipping its own `src/evolve/web/` would otherwise replace the
+/// UI with a script that runs in the server's origin and holds the session
+/// token.
+const DEV_WEB_DIR_ENV: &str = "SELFWARE_EVOLVE_WEB_DIR";
 const SESSION_HEADER: &str = "x-selfware-session";
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
@@ -303,7 +309,11 @@ impl EvolveServer {
             .route("/api/actions/apply", post(apply_action_handler))
             .route("/api/actions/apply/commit", post(apply_commit_handler))
             .route("/api/actions/apply/status", get(apply_status_handler));
-        with_web_fallback(router, Path::new(WEB_DIR))
+        let router = match std::env::var_os(DEV_WEB_DIR_ENV) {
+            Some(web_dir) => with_web_fallback(router, Path::new(&web_dir)),
+            None => router.fallback(embedded_web),
+        };
+        router
             .with_state(Arc::new(self.clone()))
             .layer(middleware::from_fn(security_headers))
     }
@@ -3259,11 +3269,12 @@ fn document_write_error(error: impl std::fmt::Display) -> ApiError {
     }
 }
 
-/// UI fallback for the evolve workspace. DEV OVERRIDE: when the source
-/// checkout's web dir exists on disk, serve from it (`ServeDir`) so UI
-/// iteration doesn't need rebuilds. Otherwise serve the assets embedded in
-/// the binary — release artifacts ship only binary + docs, so `src/evolve/web`
-/// doesn't exist at runtime there and a disk-only fallback 404s / and /app.js.
+/// UI fallback for the evolve workspace. DEV OVERRIDE: when the operator
+/// names a source checkout's web dir (`SELFWARE_EVOLVE_WEB_DIR`) and it exists
+/// on disk, serve from it (`ServeDir`) so UI iteration doesn't need rebuilds.
+/// Otherwise serve the assets embedded in the binary — release artifacts ship
+/// only binary + docs, so `src/evolve/web` doesn't exist at runtime there and
+/// a disk-only fallback 404s / and /app.js.
 fn with_web_fallback<S>(router: Router<S>, web_dir: &Path) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -3279,8 +3290,9 @@ where
 /// `include_str!`/`include_bytes!`. d3 and lucide are REQUIRED by index.html
 /// for the core UI (graph + icons), so they're embedded; vendor/monaco (12 MB,
 /// 114 files, editor-only) is NOT — editor mode requires a source checkout
-/// (where the dev override serves it from disk); embedded-mode requests for
-/// other vendor paths get a 404 with an honest note.
+/// named by `SELFWARE_EVOLVE_WEB_DIR` (the dev override then serves it from
+/// disk); embedded-mode requests for other vendor paths get a 404 with an
+/// honest note.
 fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
     Some(match path {
         "/" | "/index.html" => (
@@ -3440,7 +3452,7 @@ async fn embedded_web(uri: axum::http::Uri) -> Response {
         Some((body, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            "not found (monaco editor assets are served only from a source checkout)",
+            "not found (monaco editor assets are served only from a source checkout via SELFWARE_EVOLVE_WEB_DIR)",
         )
             .into_response(),
     }

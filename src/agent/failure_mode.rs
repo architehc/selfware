@@ -625,8 +625,12 @@ impl FailureMode {
                             .to_string(),
                     };
                 }
-                // Fall through: treat as a classified failure based on counters.
-                classify_max_iter_failure(
+                // Fall through: check counter-based loop detectors first, but if
+                // none fired, do NOT claim `max_iterations reached` (`reason` did
+                // not contain "Max iterations" — e.g. an unrecoverable API 404/502
+                // error at iteration 5/400). Report `FailureKind::Unknown` with the
+                // actual stop reason instead (AGENTS.md rules 3 & 5).
+                let fm = classify_max_iter_failure(
                     mutating,
                     progress_guard,
                     no_action_consecutive,
@@ -635,7 +639,21 @@ impl FailureMode {
                     final_answer_len,
                     safety_blocked,
                     read_only,
-                )
+                );
+                if fm.kind == FailureKind::MaxIterations {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::Unknown,
+                        evidence: format!(
+                            "stopped: {} ({} mutating, {} total tool calls)",
+                            truncate(&reason, 160),
+                            mutating,
+                            total_calls
+                        ),
+                        advice: "inspect the failure reason above (e.g. provider/endpoint status or environment error); do NOT raise max_iterations".to_string(),
+                    };
+                }
+                fm
             }
             RunOutcome::Partial => classify_max_iter_failure(
                 mutating,

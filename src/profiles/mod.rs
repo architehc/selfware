@@ -237,16 +237,26 @@ impl ProfileManager {
             if let Some(native_fc) = agent.native_function_calling {
                 config.agent.native_function_calling = native_fc;
             }
-            // `enable_thinking` has no direct Config field — it's expressed as
-            // chat_template_kwargs in extra_body — so it's intentionally not
-            // mapped here rather than silently faked. (Follow-up: wire it into
-            // extra_body if profile-level thinking control is wanted.)
+            if let Some(enable_thinking) = agent.enable_thinking {
+                let extra = config.extra_body.get_or_insert_with(Default::default);
+                let kwargs = extra
+                    .entry("chat_template_kwargs".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = kwargs.as_object_mut() {
+                    obj.entry("enable_thinking".to_string())
+                        .or_insert_with(|| serde_json::Value::Bool(enable_thinking));
+                }
+            }
         }
         if let Some(concurrency) = &o.concurrency {
             if let Some(max_parallel) = concurrency.max_parallel_requests {
                 config.concurrency.max_streams = max_parallel;
             }
-            // `timeout_secs` has no ConcurrencyConfig field; not mapped (see above).
+            if o.step_timeout_secs.is_none() {
+                if let Some(timeout_secs) = concurrency.timeout_secs {
+                    config.agent.step_timeout_secs = timeout_secs;
+                }
+            }
         }
 
         Ok(())

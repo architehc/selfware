@@ -49,6 +49,17 @@ fn test_json_evaluator_invalid() {
 }
 
 #[test]
+fn test_json_evaluator_missing_required_field() {
+    let eval = JsonEvaluator::new(vec!["name".into()]);
+    let result = eval.evaluate("{}");
+    assert!((result.score - 0.5).abs() < f64::EPSILON);
+    assert!(
+        !result.passed,
+        "valid JSON missing a required field must not pass"
+    );
+}
+
+#[test]
 fn test_noop_evaluator() {
     let eval = NoopEvaluator;
     let result = eval.evaluate("anything");

@@ -181,10 +181,16 @@ fn is_multimodal(model: &str, info: &serde_json::Value) -> bool {
 
 fn is_multimodal_by_name(model: &str) -> bool {
     let lower = model.to_lowercase();
+    let stripped_vllm = lower.replace("vllm", "");
     lower.contains("vision")
-        || lower.contains("-vl-")
-        || lower.contains("vl")
-        || lower.ends_with("-vl")
+        || stripped_vllm.contains("-vl-")
+        || stripped_vllm.contains("_vl_")
+        || stripped_vllm.ends_with("-vl")
+        || stripped_vllm.ends_with("_vl")
+        || stripped_vllm.contains("vl2")
+        || stripped_vllm.contains("internvl")
+        || stripped_vllm.contains("cogvlm")
+        || stripped_vllm.contains("minicpm-v")
         || lower.contains("llava")
         || lower.contains("onevision")
         || lower.contains("pixtral")
@@ -742,7 +748,7 @@ temperature = {}
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
 denied_paths = {}
-protected_branches = ["main"]
+protected_branches = ["main", "master"]
 
 [agent]
 native_function_calling = {}

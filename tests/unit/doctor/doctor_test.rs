@@ -321,3 +321,26 @@ fn rust_workspace_skips_other_language_tools_unless_all() {
     assert_eq!(kept.len(), 11);
     assert_eq!(skipped, 0);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn probes_run_from_the_home_dir_not_the_workspace() {
+    // A checkout's `.cargo/config.toml` alias or `rust-toolchain.toml` path
+    // override would turn `cargo clippy --version` into a build-and-run of
+    // the checkout; cargo and rustup only look at the cwd and its parents.
+    let home = std::fs::canonicalize(dirs::home_dir().expect("home dir")).unwrap();
+    let (cwd_fut, key_fut) = {
+        let _env = crate::test_support::EnvGuard::capture(&["HOME", "SELFWARE_API_KEY"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("SELFWARE_API_KEY", "secret-probe-leak-check");
+        (
+            run_cmd("sh", &["-c", "pwd -P"]),
+            run_cmd("sh", &["-c", "printf %s \"${SELFWARE_API_KEY-unset}\""]),
+        )
+    };
+    let cwd = cwd_fut.await.expect("sh runs");
+    assert_eq!(std::path::Path::new(&cwd), home);
+    // Probes get the scrubbed child environment, never the operator's secrets.
+    let key = key_fut.await;
+    assert_eq!(key.as_deref(), Some("unset"));
+}

@@ -98,17 +98,28 @@ impl LongTermStore {
     /// 2. Embed each record's textual content and add it to the in-memory
     ///    vector index for semantic retrieval.
     pub async fn store(&self, records: &[TemporalRecord]) -> Result<StoreResult> {
-        std::fs::create_dir_all(&self.storage_dir)?;
+        tokio::fs::create_dir_all(&self.storage_dir).await?;
 
         let mut stored = 0;
         let mut errors = Vec::new();
 
         for record in records {
-            let path = self.storage_dir.join(format!("{}.json", record.id));
+            let safe_id: String = record
+                .id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let path = self.storage_dir.join(format!("{safe_id}.json"));
 
             match serde_json::to_string_pretty(record) {
                 Ok(json) => {
-                    if let Err(e) = std::fs::write(&path, &json) {
+                    if let Err(e) = tokio::fs::write(&path, &json).await {
                         errors.push(format!("Failed to write {}: {e}", record.id));
                     } else {
                         stored += 1;

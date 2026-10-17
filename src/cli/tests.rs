@@ -1859,6 +1859,7 @@ fn mcp_servers_text_covers_empty_and_configured() {
         command: "uvx".to_string(),
         args: vec!["docs-mcp".to_string()],
         env: Default::default(),
+        cwd: None,
         init_timeout_secs: 30,
         framing: crate::mcp::transport::Framing::default(),
     });

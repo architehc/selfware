@@ -41,6 +41,7 @@ fn test_mcp_server_config_serialize_roundtrip() {
             m.insert("GITHUB_TOKEN".to_string(), "ghp_test".to_string());
             m
         },
+        cwd: None,
         init_timeout_secs: 30,
         framing: Default::default(),
     };
@@ -64,6 +65,7 @@ fn test_mcp_server_config_defaults() {
     assert_eq!(config.command, "echo");
     assert!(config.args.is_empty());
     assert!(config.env.is_empty());
+    assert!(config.cwd.is_none());
     assert_eq!(config.init_timeout_secs, 30);
 }
 
@@ -88,6 +90,7 @@ fn test_mcp_server_config_clone() {
         command: "cmd".to_string(),
         args: vec!["--arg".to_string()],
         env: std::collections::HashMap::new(),
+        cwd: None,
         init_timeout_secs: 60,
         framing: Default::default(),
     };
@@ -104,6 +107,7 @@ fn test_mcp_config_clone() {
             command: "c1".to_string(),
             args: vec![],
             env: std::collections::HashMap::new(),
+            cwd: None,
             init_timeout_secs: 30,
             framing: Default::default(),
         }],
@@ -147,6 +151,7 @@ fn test_mcp_server_config_debug() {
         command: "cmd".to_string(),
         args: vec![],
         env: std::collections::HashMap::new(),
+        cwd: None,
         init_timeout_secs: 30,
         framing: Default::default(),
     };

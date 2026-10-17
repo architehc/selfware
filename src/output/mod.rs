@@ -368,8 +368,26 @@ fn cargo_test_summary(result: Option<&str>, success: bool) -> String {
     format!("Tests: {}", parts.join(", "))
 }
 
-/// Generate a one-line semantic summary for a tool call
+/// Generate a one-line semantic summary for a tool call. Arguments and
+/// tool output are model- and process-authored: the line carries no control
+/// characters (see [`live::escape_controls`]).
 pub(crate) fn semantic_summary(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: Option<&str>,
+    success: bool,
+    duration_ms: u64,
+) -> String {
+    live::escape_controls(&semantic_summary_text(
+        tool_name,
+        args,
+        result,
+        success,
+        duration_ms,
+    ))
+}
+
+fn semantic_summary_text(
     tool_name: &str,
     args: &serde_json::Value,
     result: Option<&str>,
@@ -796,8 +814,13 @@ fn format_number(n: u64) -> String {
     }
 }
 
-/// Generate the activity message for a running tool
+/// Generate the activity message for a running tool (tool name and
+/// arguments are model-authored: control characters are escaped).
 pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> String {
+    live::escape_controls(&tool_activity_text(name, args))
+}
+
+fn tool_activity_text(name: &str, args: &serde_json::Value) -> String {
     match name {
         "file_read" => format!("Reading {}...", extract_path(args).unwrap_or("file")),
         "file_write" | "file_create" => {
@@ -864,7 +887,7 @@ pub(crate) fn safety_blocked(message: &str) {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    println!("{} {}", "🚫".bright_red(), message);
+    println!("{} {}", "🚫".bright_red(), live::escape_controls(message));
 }
 
 /// Print thinking/reasoning output.
@@ -882,6 +905,8 @@ pub(crate) fn thinking(text: &str, inline: bool) {
     }
 
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Reasoning is model text: no control characters reach the terminal.
+    let text = &live::escape_controls(text);
 
     if !inline && !is_verbose() {
         let line = live::reasoning_summary_line(text);
@@ -1222,6 +1247,7 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let safe_path = live::escape_controls(path);
 
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
@@ -1255,7 +1281,8 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
             {
                 // Added lines
                 for line in new_lines.iter().skip(j).take(lookahead) {
-                    diff_lines.push(format!("  {} {}", "+".bright_green(), line.bright_green()));
+                    let safe = live::escape_controls(line);
+                    diff_lines.push(format!("  {} {}", "+".bright_green(), safe.bright_green()));
                 }
                 j += lookahead;
                 found_sync = true;
@@ -1267,7 +1294,8 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
             {
                 // Deleted lines
                 for line in old_lines.iter().skip(i).take(lookahead) {
-                    diff_lines.push(format!("  {} {}", "-".bright_red(), line.bright_red()));
+                    let safe = live::escape_controls(line);
+                    diff_lines.push(format!("  {} {}", "-".bright_red(), safe.bright_red()));
                 }
                 i += lookahead;
                 found_sync = true;
@@ -1278,19 +1306,13 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
         if !found_sync {
             // Changed line (delete old + add new)
             if i < old_lines.len() {
-                diff_lines.push(format!(
-                    "  {} {}",
-                    "-".bright_red(),
-                    old_lines[i].bright_red()
-                ));
+                let safe = live::escape_controls(old_lines[i]);
+                diff_lines.push(format!("  {} {}", "-".bright_red(), safe.bright_red()));
                 i += 1;
             }
             if j < new_lines.len() {
-                diff_lines.push(format!(
-                    "  {} {}",
-                    "+".bright_green(),
-                    new_lines[j].bright_green()
-                ));
+                let safe = live::escape_controls(new_lines[j]);
+                diff_lines.push(format!("  {} {}", "+".bright_green(), safe.bright_green()));
                 j += 1;
             }
         }
@@ -1298,13 +1320,13 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
 
     if !diff_lines.is_empty() {
         if is_plain_mode() {
-            println!("\r  --- {}", path);
+            println!("\r  --- {}", safe_path);
             for line in &diff_lines {
                 println!("\r{}", line);
             }
             println!("\r  ---");
         } else {
-            println!("\r\x1b[2K  {} {}", "┌─".dimmed(), path.dimmed());
+            println!("\r\x1b[2K  {} {}", "┌─".dimmed(), safe_path.dimmed());
             for line in &diff_lines {
                 println!("\r\x1b[2K{}", line);
             }
@@ -1812,11 +1834,13 @@ impl TaskProgress {
     }
 }
 
-/// Print step announcement (used by agent)
+/// Print step announcement (used by agent). `name` quotes the tool call
+/// the model made, so it is printed with control characters escaped.
 pub(crate) fn step_start(step: usize, name: &str) {
     if should_suppress_output() {
         return;
     }
+    let name = &live::escape_controls(name);
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_plain_mode() {
         println!("[Step {}] {}...", step, name);

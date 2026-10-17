@@ -816,7 +816,9 @@ impl Agent {
     ///   `pytest`, ...), passing or failing,
     /// - the gate's freshness ledger: a pass only counts when it covers the
     ///   current mutation sequence, and an outstanding in-scope failure
-    ///   (`verification_failures.blocking`) makes the result failed.
+    ///   (`verification_failures.blocking`), or a model-run failure that
+    ///   predates the latest edit and was never re-run
+    ///   (`verification_failures.stale_unresolved`), makes the result failed.
     ///
     /// A gate report that PASSED at an earlier revision, with no later
     /// credited pass covering the final tree, is not credited at all (it is
@@ -937,10 +939,18 @@ impl Agent {
                 (passed || only_preexisting_failed, n)
             })
         });
+        // A model-run failure the edits have outdated, with no pass of the
+        // same check since, fails the verdict too: it is not known to be
+        // fixed, and the summary names the failed command in its count.
         let blocking = self
             .verification_failures
             .blocking(&task_root, self.mutation_sequence)
-            .is_some();
+            .is_some()
+            || (self.has_code_affecting_mutation()
+                && self
+                    .verification_failures
+                    .stale_unresolved(&task_root, self.mutation_sequence)
+                    .is_some());
         let verdict = credited_verification_verdict(
             gate,
             tool_passes,
@@ -1550,17 +1560,7 @@ impl Agent {
                 let activated_tools = explicit_task_tools
                     .iter()
                     .filter_map(|name| self.tools.get(name))
-                    .map(|tool| {
-                        format!(
-                            r#"<tool name="{}">
-  <description>{}</description>
-  <parameters>{}</parameters>
-</tool>"#,
-                            tool.name(),
-                            tool.description(),
-                            tool.schema()
-                        )
-                    })
+                    .map(super::result_envelope::tool_element)
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(

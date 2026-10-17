@@ -24,6 +24,19 @@ use crate::tools::file::{resolve_safety_config, validate_tool_path};
 /// Prevents a runaway command from consuming unlimited memory while draining pipes.
 const MAX_PACKAGE_OUTPUT_SIZE: usize = 10 * 1024 * 1024;
 
+/// Entry point for the pip tools, replacing `python -m pip`.
+///
+/// `-m` puts the child's cwd — the workspace — first on `sys.path`, so a
+/// checkout shipping `pip/__init__.py` or `pip.py` was imported and run as
+/// the operator instead of pip; `pip_list` is read-only and runs unprompted
+/// in every mode, so a hostile repository only needed the model to list its
+/// packages. Under `-c` the cwd entry is `''`: drop it before anything else
+/// is imported (`sys` is built in and cannot be shadowed; `runpy` is only
+/// imported once the path is clean). `-P`/`PYTHONSAFEPATH` do the same but
+/// need Python ≥ 3.11, and `-I` would hide `--user` installs from the output.
+const PIP_BOOTSTRAP: &str = "import sys; sys.path[:] = [p for p in sys.path if p]; \
+     import runpy; runpy.run_module('pip', run_name='__main__', alter_sys=True)";
+
 // ============================================================================
 // NPM Tools
 // ============================================================================
@@ -347,21 +360,26 @@ impl Tool for NpmScripts {
     async fn execute(&self, args: Value) -> Result<Value> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-        // The tool READS package.json under `path` — the directory obeys the
-        // same workspace path policy as file_read.
+        // The tool READS package.json under `path` — both the directory and
+        // the resolved package.json file obey the workspace path policy and
+        // size cap (so a symlinked package.json cannot escape the workspace).
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(path, &safety)?;
 
         let package_json_path =
             Path::new(&crate::tools::workspace_root::anchor(path)).join("package.json");
+        validate_tool_path(&package_json_path.to_string_lossy(), &safety)?;
 
         if !package_json_path.exists() {
             anyhow::bail!("package.json not found: {}", package_json_path.display());
         }
 
-        let content = tokio::fs::read_to_string(&package_json_path)
-            .await
-            .context("Failed to read package.json")?;
+        let content = crate::tools::file::read_to_string_capped_async(
+            &package_json_path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .context("Failed to read package.json")?;
 
         let package: Value =
             serde_json::from_str(&content).context("Failed to parse package.json")?;
@@ -510,7 +528,7 @@ impl Tool for PipInstall {
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
-        cmd.args(["-m", "pip", "install"]);
+        cmd.args(["-c", PIP_BOOTSTRAP, "install"]);
 
         if let Some(req_file) = requirements {
             cmd.args(["-r", req_file]);
@@ -605,7 +623,7 @@ impl Tool for PipList {
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
-        cmd.args(["-m", "pip", "list", "--format=json"]);
+        cmd.args(["-c", PIP_BOOTSTRAP, "list", "--format=json"]);
 
         if outdated {
             cmd.arg("--outdated");
@@ -696,7 +714,7 @@ impl Tool for PipFreeze {
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
-        cmd.args(["-m", "pip", "freeze"]);
+        cmd.args(["-c", PIP_BOOTSTRAP, "freeze"]);
         let output = crate::tools::process_guard::run_command_bounded(
             cmd,
             std::time::Duration::from_secs(60),

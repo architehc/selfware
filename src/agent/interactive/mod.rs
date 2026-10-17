@@ -1196,6 +1196,7 @@ impl Agent {
             // /plan - Enter structured plan mode
             if input == "/plan" {
                 self.enter_plan_mode();
+                self.set_plan_mode(true);
                 println!();
                 println!("{}", "🔍 Plan Mode Enabled".bright_cyan().bold());
                 println!("{}", "─".repeat(50).bright_black());

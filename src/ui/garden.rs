@@ -645,6 +645,7 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        let plant_type = PlantType::from_path(&path_str);
         let plant = GardenPlant {
             path: path_str,
             name,
@@ -653,7 +654,7 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
             age_days,
             last_tended_days: last_modified_days,
             growth_stage: GrowthStage::from_metrics(lines, age_days, last_modified_days),
-            plant_type: PlantType::from_path(path.to_string_lossy().as_ref()),
+            plant_type,
         };
 
         garden.add_plant(plant);

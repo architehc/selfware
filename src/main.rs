@@ -16,6 +16,10 @@ const SHUTDOWN_GRACE_SECS: u64 = 10;
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    // Clear the Linux dumpable bit before spawning any threads or child
+    // processes so sanitized children cannot read the parent's environment
+    // (`SELFWARE_API_KEY`, cloud tokens) back out of `/proc/$PPID/environ`.
+    selfware::safety::process_env::protect_process_env();
     // SIGPIPE is deliberately left at Rust's default (ignored). Resetting it
     // to SIG_DFL made ANY write to a closed pipe fatal — including pipes to
     // child processes (MCP stdio servers, LSP servers, the PTY shell, the

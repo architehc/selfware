@@ -47,7 +47,7 @@ use selfware::api::types::{
 use selfware::api::{ApiClient, StreamChunk, ThinkingMode};
 use selfware::config::{AgentConfig, Config, RedactedString};
 
-const PER_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const PER_CHECK_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -59,7 +59,7 @@ const PER_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 )]
 struct Cli {
     /// Endpoint base URL (must include the `/v1` path segment).
-    #[arg(long, default_value = "http://127.0.0.1:8000/v1")]
+    #[arg(long, default_value = "https://llm.selfware.design/v1")]
     endpoint: String,
 
     /// Model id. If omitted, the first model from `/v1/models` is used.

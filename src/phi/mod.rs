@@ -7,6 +7,7 @@
 pub mod activity;
 pub mod ledger;
 pub mod observer;
+pub mod policy;
 
 #[cfg(test)]
 #[path = "ledger_tests.rs"]
@@ -15,3 +16,7 @@ mod ledger_tests;
 #[cfg(test)]
 #[path = "observer_tests.rs"]
 mod observer_tests;
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod policy_tests;

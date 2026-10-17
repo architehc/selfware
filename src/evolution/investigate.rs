@@ -339,8 +339,20 @@ pub fn extract_symbols_from_patch(patch: &str) -> Vec<String> {
     symbols
 }
 
+/// True when `rev` is a full git object id (40 hex digits, or 64 for SHA-256 repos).
+///
+/// The daemon only ever records `git rev-parse HEAD` in an attempt node's
+/// `base_commit` / `committed_commit`, but the attempts log itself is repository
+/// content in a clone. A revision read back from it is therefore only trusted in
+/// this exact shape: anything else could be parsed by git as an option
+/// (`--output=…`, `--format=…`) or walk out of `.selfware/snapshots/` as a path.
+pub fn is_git_object_id(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Reads file content at an explicit git revision, falling back to repo_root working tree
-/// only when revision is None.
+/// only when revision is None. A revision that is not a full object id yields None
+/// (see [`is_git_object_id`]); it never falls through to the working tree.
 pub fn read_file_content_at_revision(
     repo_root: &Path,
     file_path: &str,
@@ -349,6 +361,9 @@ pub fn read_file_content_at_revision(
     if let Some(rev) = revision {
         let trimmed_rev = rev.trim();
         if !trimmed_rev.is_empty() {
+            if !is_git_object_id(trimmed_rev) {
+                return None;
+            }
             let spec = format!("{trimmed_rev}:{file_path}");
             // Sanitized env: git identity/proxy passthrough only (see
             // safety::process_env); no inherited credentials, no operator
@@ -482,64 +497,89 @@ pub fn scan_patch_for_opaque_structures(
                     )
                 });
 
-            if is_contained {
+            if !is_git_object_id(commit) {
+                // The commit becomes both a `git show` argument and a component of the
+                // snapshot path; an attempts log shipped inside the repository must not
+                // be able to choose either.
+                format!("unavailable://git/{commit}/{file_path}")
+            } else if is_contained {
                 let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
                 let snapshot_file = snapshot_dir.join(file_path);
-
-                // Sanitized env (see safety::process_env): snapshot export
-                // must not inherit host credentials or operator GIT_* state.
-                let mut cmd = crate::safety::git_exec::git_command(
-                    repo_root,
-                    crate::safety::git_exec::GitScope::Internal,
-                );
-                cmd.env_remove("GIT_INDEX_FILE");
-                cmd.args(["show", &format!("{commit}:{file_path}")]);
-                cmd.current_dir(repo_root);
-
-                match cmd.output() {
-                    Ok(out) if out.status.success() => {
-                        let expected_bytes = out.stdout;
-                        let cached_valid = if snapshot_file.exists() {
-                            std::fs::read(&snapshot_file)
-                                .map(|b| b == expected_bytes)
+                let has_symlink = snapshot_file
+                    .strip_prefix(repo_root)
+                    .map(|rel| {
+                        let mut cur = repo_root.to_path_buf();
+                        for comp in rel.components() {
+                            cur.push(comp);
+                            if std::fs::symlink_metadata(&cur)
+                                .map(|m| m.file_type().is_symlink())
                                 .unwrap_or(false)
-                        } else {
-                            false
-                        };
+                            {
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
 
-                        let mut is_valid = cached_valid;
-                        if !is_valid {
-                            if let Some(parent) = snapshot_file.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                                if crate::session::checkpoint::write_bytes_atomically(
-                                    &snapshot_file,
-                                    &expected_bytes,
-                                    0o600,
-                                )
-                                .is_ok()
-                                {
-                                    // Verify the replaced file content matches git show expected bytes
-                                    is_valid = std::fs::read(&snapshot_file)
-                                        .map(|b| b == expected_bytes)
-                                        .unwrap_or(false);
+                if has_symlink {
+                    format!("unavailable://git/{commit}/{file_path}")
+                } else {
+                    // Sanitized env (see safety::process_env): snapshot export
+                    // must not inherit host credentials or operator GIT_* state.
+                    let mut cmd = crate::safety::git_exec::git_command(
+                        repo_root,
+                        crate::safety::git_exec::GitScope::Internal,
+                    );
+                    cmd.env_remove("GIT_INDEX_FILE");
+                    cmd.args(["show", &format!("{commit}:{file_path}")]);
+                    cmd.current_dir(repo_root);
+
+                    match cmd.output() {
+                        Ok(out) if out.status.success() => {
+                            let expected_bytes = out.stdout;
+                            let cached_valid = if snapshot_file.exists() {
+                                std::fs::read(&snapshot_file)
+                                    .map(|b| b == expected_bytes)
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
+                            let mut is_valid = cached_valid;
+                            if !is_valid {
+                                if let Some(parent) = snapshot_file.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                    if crate::session::checkpoint::write_bytes_atomically(
+                                        &snapshot_file,
+                                        &expected_bytes,
+                                        0o600,
+                                    )
+                                    .is_ok()
+                                    {
+                                        // Verify the replaced file content matches git show expected bytes
+                                        is_valid = std::fs::read(&snapshot_file)
+                                            .map(|b| b == expected_bytes)
+                                            .unwrap_or(false);
+                                    }
                                 }
                             }
-                        }
 
-                        if is_valid {
-                            if start_line > 0 && end_line > 0 {
-                                format!(
-                                    "file://{}#L{start_line}-L{end_line}",
-                                    snapshot_file.display()
-                                )
+                            if is_valid {
+                                if start_line > 0 && end_line > 0 {
+                                    format!(
+                                        "file://{}#L{start_line}-L{end_line}",
+                                        snapshot_file.display()
+                                    )
+                                } else {
+                                    format!("file://{}", snapshot_file.display())
+                                }
                             } else {
-                                format!("file://{}", snapshot_file.display())
+                                format!("unavailable://git/{commit}/{file_path}")
                             }
-                        } else {
-                            format!("unavailable://git/{commit}/{file_path}")
                         }
+                        _ => format!("unavailable://git/{commit}/{file_path}"),
                     }
-                    _ => format!("unavailable://git/{commit}/{file_path}"),
                 }
             } else {
                 format!("unavailable://invalid-path/{file_path}")
@@ -1451,7 +1491,10 @@ pub fn find_affected_callers(
         if files_touched.iter().any(|t| t == &rel) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(content) = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             for sym in symbols {
                 let pat1 = format!("{sym}(");
                 let pat2 = format!("{sym}::");
@@ -1546,7 +1589,9 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         .any(|f| crate::evolution::is_protected(Path::new(f)));
 
     let merkle_tree_equality = match (&node.git_tree_id, &node.committed_commit) {
-        (Some(eval_tree), Some(commit)) => {
+        // `committed_commit` is read back from the attempts log: only a full object id
+        // may become a git argument (see is_git_object_id).
+        (Some(eval_tree), Some(commit)) if is_git_object_id(commit) => {
             // Sanitized env (see safety::process_env).
             let mut git_cmd = crate::safety::git_exec::git_command(
                 repo_root,

@@ -268,6 +268,93 @@ fn proxy_credentials_opt_in(lookup: &impl Fn(&str) -> Option<std::ffi::OsString>
         .is_some_and(|v| v == "1" || v == "true")
 }
 
+/// Mark the agent process non-dumpable (`PR_SET_DUMPABLE = 0` on Linux) so
+/// non-root processes running under the same UID — including sanitized child
+/// processes — cannot read `/proc/<agent-pid>/environ` or `/proc/<agent-pid>/mem`.
+///
+/// Without this, [`sanitize_command_env`]'s `env_clear()` only removes secrets
+/// (`SELFWARE_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, …) from the child's own
+/// `environ`: on Linux the child shares the agent's real/effective UID, and
+/// `/proc/<pid>/environ` is readable by any same-UID process so long as the
+/// target is dumpable (`fs/proc/base.c:environ_read` checks `mm_access` with
+/// `PTRACE_MODE_READ_FSCREDS`). Clearing `dumpable` makes the kernel reassign
+/// `/proc/<agent-pid>/environ`, `mem`, `auxv`, `syscall`, and `maps` to
+/// `root:root` (`0400`), closing the procfs readback regardless of
+/// `kernel.yama.ptrace_scope` (`0` in standard Docker containers and on many
+/// distro defaults).
+///
+/// `PR_SET_DUMPABLE` is reset across `execve`, so child processes remain
+/// normally dumpable/debuggable themselves. Operators debugging `selfware`
+/// itself with `gdb`/`strace`/core dumps can opt out by setting
+/// `SELFWARE_ALLOW_DUMPABLE=1`.
+pub fn protect_process_env() {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("SELFWARE_ALLOW_DUMPABLE")
+            .and_then(|v| v.into_string().ok())
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            return;
+        }
+        // SAFETY: `prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)` takes integer flags only,
+        // touches no user pointers, and is safe to call from any thread at startup.
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+    }
+}
+
+/// Pin `RUSTUP_TOOLCHAIN` on `cmd` so a `rustup` proxy spawned inside an
+/// untrusted directory ignores that directory's `rust-toolchain.toml`.
+///
+/// `rustup`'s `rust-analyzer`, `cargo`, and `rustc` binaries are proxy shims
+/// that walk up from the current directory looking for `rust-toolchain.toml`
+/// before dispatching. That file accepts `path = "relative/dir"`, which points
+/// the proxy at `<dir>/bin/<tool>` inside the workspace — so spawning
+/// `rust-analyzer` with `current_dir(workspace_root)` executes a binary
+/// shipped by the repository, even on auto-approved read-only calls (`lsp_*`).
+///
+/// In `rustup`'s override precedence, `RUSTUP_TOOLCHAIN` beats both directory
+/// overrides and `rust-toolchain.toml`. If the operator already exported
+/// `RUSTUP_TOOLCHAIN` it is forwarded; otherwise we resolve the active
+/// toolchain from `$HOME` (outside the workspace) and pin that, falling back
+/// to `"stable"`. Call AFTER [`sanitize_command_env`].
+pub fn pin_rustup_toolchain(cmd: &mut tokio::process::Command) {
+    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+        .filter(|v| !v.is_empty())
+        .or_else(|| default_rustup_toolchain().map(std::ffi::OsString::from))
+        .unwrap_or_else(|| std::ffi::OsString::from("stable"));
+    cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+}
+
+/// Resolve the operator's default `rustup` toolchain name once, from a safe
+/// directory (`$HOME`, never the workspace) and with `RUSTUP_HOME` /
+/// `CARGO_HOME` taken from the sanitized keep-list.
+fn default_rustup_toolchain() -> Option<&'static str> {
+    static TOOLCHAIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOOLCHAIN
+        .get_or_init(|| {
+            // `$RUSTUP_HOME/settings.toml` holds `default_toolchain = "..."`
+            // directly — read it without spawning a child when available.
+            let rustup_home = std::env::var_os("RUSTUP_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|h| h.join(".rustup")))?;
+            let settings = std::fs::read_to_string(rustup_home.join("settings.toml")).ok()?;
+            for line in settings.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("default_toolchain") {
+                    let rest = rest.trim_start().strip_prefix('=')?.trim();
+                    let val = rest.strip_prefix('"')?.strip_suffix('"')?;
+                    if !val.is_empty() && !val.contains(['/', '\\']) {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .as_deref()
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/safety/process_env/process_env_test.rs"]
 mod tests;

@@ -127,15 +127,20 @@ pub(crate) fn ensure_configured_remote(remote: &str, configured: &[String]) -> R
 static COMMIT_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The directory whose git configuration governs a `git -C <repo_path>`
-/// call: `repo_path` under the workspace root when it is a directory, the
-/// workspace root otherwise (a file path is diffed from the root).
+/// call: `repo_path` under the workspace root when it is a directory, its
+/// parent directory when it names a file inside a subdirectory (which may
+/// itself be a nested git repository), or the workspace root otherwise.
 fn git_config_dir(repo_path: &str) -> std::path::PathBuf {
     let root = crate::tools::workspace_root::current().path();
     let joined = root.join(repo_path);
     if joined.is_dir() {
         joined
     } else {
-        root
+        joined
+            .parent()
+            .filter(|p| p.is_dir())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(root)
     }
 }
 
@@ -182,6 +187,9 @@ fn validate_git_path(path: &str, safety_config: Option<&SafetyConfig>) -> Result
 
 /// Cap on captured `git push` output.
 const MAX_PUSH_OUTPUT_BYTES: usize = 256 * 1024;
+/// Cap on captured `git diff` output (10 MiB, matching `shell_exec`) so a
+/// single commit with a huge diff cannot OOM the agent.
+const MAX_DIFF_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 /// Upper bound on the follow-up remote check after a push timed out (also
 /// never longer than the push's own timeout).
 const PUSH_REMOTE_CHECK_MAX_SECS: u64 = 15;
@@ -608,6 +616,11 @@ impl Tool for GitStatus {
         validate_git_path(repo_path, self.safety_config.as_ref())?;
 
         let repo = Repository::open(repo_path)?;
+        crate::safety::git_exec::ensure_work_tree_is_checkout(
+            &repo,
+            repo_path.as_ref(),
+            crate::safety::git_exec::GitScope::UserOperation,
+        )?;
         let head = repo.head()?;
         let branch = head.shorthand().unwrap_or("HEAD");
 
@@ -697,6 +710,24 @@ impl Tool for GitDiff {
 
         let path_obj = std::path::Path::new(repo_path);
         if path_obj.is_dir() {
+            // A directory limits nothing: git prints every tracked path it
+            // selects, which `validate_git_path` never saw. Refuse a denied
+            // one before it is printed, as the headless shell guard refuses
+            // `git diff` (`crate::safety::recursive_read`).
+            use crate::safety::recursive_read::{git_prints_denied_path, GitPaths};
+            let scope = match base {
+                Some(base) if base != "HEAD" => GitPaths::History,
+                _ => GitPaths::Index,
+            };
+            let safety = resolve_safety_config(self.safety_config.as_ref());
+            if let Some(why) = git_prints_denied_path(
+                &git_config_dir(repo_path),
+                repo_path,
+                scope,
+                &safety.denied_paths,
+            ) {
+                anyhow::bail!("Safety error: {why}");
+            }
             cmd.arg("-C").arg(repo_path).arg("diff");
             if staged {
                 cmd.arg("--cached");
@@ -713,7 +744,12 @@ impl Tool for GitDiff {
             } else {
                 (std::path::Path::new("."), path_obj.as_os_str())
             };
-            cmd.arg("-C").arg(work_dir).arg("diff");
+            // `path` is one file, not a pattern: `sec*` would otherwise
+            // select what `validate_git_path` never saw.
+            cmd.arg("--literal-pathspecs")
+                .arg("-C")
+                .arg(work_dir)
+                .arg("diff");
             if staged {
                 cmd.arg("--cached");
             }
@@ -723,18 +759,26 @@ impl Tool for GitDiff {
             cmd.arg("--").arg(file_spec);
         }
 
-        let output = cmd.output_grouped().await?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(60),
+            MAX_DIFF_OUTPUT_BYTES,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute git diff: {e}"))?;
         // A non-zero exit (bad revision, not a repo, ...) used to be reported
         // as `has_changes: false` with the error text silently dropped.
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("git diff failed: {}", stderr.trim());
         }
+        let truncated = output.stdout.len() >= MAX_DIFF_OUTPUT_BYTES;
         let diff = String::from_utf8_lossy(&output.stdout);
 
         Ok(serde_json::json!({
             "diff": diff.to_string(),
-            "has_changes": !diff.is_empty()
+            "has_changes": !diff.is_empty(),
+            "truncated": truncated
         }))
     }
 
@@ -974,19 +1018,18 @@ impl Tool for GitPush {
                 .with_context(|| format!("current checkout {current:?} is not a pushable branch"))?
         };
 
-        if let Some(ref safety_config) = self.safety_config {
-            if safety_config
-                .protected_branches
-                .iter()
-                .any(|b| b == &branch)
-            {
-                anyhow::bail!(
-                    "Push to protected branch '{}' is blocked by the safety checker \
-                     (protected_branches: {:?}).",
-                    branch,
-                    safety_config.protected_branches
-                );
-            }
+        let safety_config = resolve_safety_config(self.safety_config.as_ref());
+        if safety_config
+            .protected_branches
+            .iter()
+            .any(|b| b == &branch)
+        {
+            anyhow::bail!(
+                "Push to protected branch '{}' is blocked by the safety checker \
+                 (protected_branches: {:?}).",
+                branch,
+                safety_config.protected_branches
+            );
         }
 
         // Only push to a remote the user configured: git treats an unknown

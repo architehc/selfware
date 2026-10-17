@@ -54,6 +54,30 @@ fn test_validate_volume_spec() {
     assert!(!validate_volume_spec(".git:/app/.git"));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_validate_volume_spec_follows_symlinks() {
+    // The runtime binds what a symlink points at: `<workspace>/data -> /`
+    // is the root mount `/:/host` refuses.
+    let workspace = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/", workspace.path().join("data")).unwrap();
+    std::os::unix::fs::symlink("/etc", workspace.path().join("cfg")).unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    let ws = workspace.path().canonicalize().unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(ws.clone());
+    crate::tools::workspace_root::sync_scope(root, || {
+        assert!(!validate_volume_spec(&format!(
+            "{}/data:/host",
+            ws.display()
+        )));
+        assert!(!validate_volume_spec("./data:/host"));
+        assert!(!validate_volume_spec("cfg:/cfg:ro"));
+        assert!(validate_volume_spec(&format!("{}/src:/app", ws.display())));
+        assert!(validate_volume_spec("./src:/app"));
+        assert!(validate_volume_spec("named_volume:/container"));
+    });
+}
+
 #[test]
 fn test_is_valid_memory() {
     assert!(is_valid_memory("512m"));

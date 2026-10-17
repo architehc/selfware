@@ -466,6 +466,9 @@ impl LspServerConnection {
                 cmd.env(key, val);
             }
         }
+        if matches!(language, Language::Rust) {
+            crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
+        }
 
         #[cfg(unix)]
         cmd.process_group(0);
@@ -518,9 +521,14 @@ impl LspServerConnection {
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 let mut line = String::new();
+                const MAX_STDERR_LINE_BYTES: u64 = 64 * 1024;
                 loop {
                     line.clear();
-                    match reader.read_line(&mut line).await {
+                    match (&mut reader)
+                        .take(MAX_STDERR_LINE_BYTES)
+                        .read_line(&mut line)
+                        .await
+                    {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {
                             let trimmed = line.trim();
@@ -995,45 +1003,10 @@ impl Drop for LspServerConnection {
 async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<Value>> {
-    // Read headers until we find Content-Length.
-    let mut content_length: Option<usize> = None;
-    let mut header_line = String::new();
-
-    loop {
-        header_line.clear();
-        let n = reader.read_line(&mut header_line).await?;
-        if n == 0 {
-            return Ok(None); // EOF
-        }
-
-        let trimmed = header_line.trim();
-        if trimmed.is_empty() {
-            // End of headers
-            break;
-        }
-
-        if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(
-                len_str
-                    .trim()
-                    .parse::<usize>()
-                    .context("Invalid Content-Length value")?,
-            );
-        }
-        // Ignore other headers (e.g. Content-Type)
-    }
-
-    let length = content_length.context("Missing Content-Length header in LSP message")?;
-
-    // Sanity cap: 64 MiB
-    if length > 64 * 1024 * 1024 {
-        bail!("LSP message too large: {} bytes", length);
-    }
-
-    let mut body = vec![0u8; length];
-    reader.read_exact(&mut body).await?;
-
-    let msg: Value = serde_json::from_slice(&body)?;
+    let Some(body) = crate::mcp::transport::read_content_length_message(reader).await? else {
+        return Ok(None);
+    };
+    let msg: Value = serde_json::from_str(&body)?;
     Ok(Some(msg))
 }
 
@@ -1391,7 +1364,12 @@ impl LspClient {
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
 
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            Path::new(file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         self.did_open(file, &content).await?;
 
         let outcome = self
@@ -1593,7 +1571,12 @@ impl LspClient {
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
 
-        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        let content = crate::tools::file::read_to_string_capped_async(
+            Path::new(file),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .unwrap_or_default();
         self.did_open(file, &content).await?;
 
         let outcome = self

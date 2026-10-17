@@ -57,6 +57,47 @@ impl std::fmt::Display for QaLanguage {
     }
 }
 
+/// The stages a runner is allowed to START. Every stage executes
+/// project-controlled programs — test discovery imports every `test_*.py`
+/// module body, `npm test` runs the package.json script, `node_modules/.bin/*`
+/// ships with the checkout — so a stage the operator has not opted into must
+/// not run at all, not even to report itself as not-run. The post-edit gate
+/// derives the set from its `VerificationConfig` (`check_on_edit`,
+/// `format_on_edit`, `lint_on_edit`, `test_on_edit`), whose default is type
+/// check only; tests and lint are opt-in there exactly as for Rust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QaStageSet {
+    pub syntax: bool,
+    pub format: bool,
+    pub lint: bool,
+    pub type_check: bool,
+    pub test: bool,
+    pub security: bool,
+}
+
+impl QaStageSet {
+    /// Every stage (the full QA pipeline).
+    pub const ALL: Self = Self {
+        syntax: true,
+        format: true,
+        lint: true,
+        type_check: true,
+        test: true,
+        security: true,
+    };
+
+    pub fn enabled(&self, stage: QaStage) -> bool {
+        match stage {
+            QaStage::Syntax => self.syntax,
+            QaStage::Format => self.format,
+            QaStage::Lint => self.lint,
+            QaStage::TypeCheck => self.type_check,
+            QaStage::Test => self.test,
+            QaStage::Security => self.security,
+        }
+    }
+}
+
 /// Run a shell command and capture output, returning a QA stage result.
 ///
 /// The child runs with a SANITIZED environment (see `safety::process_env`):
@@ -640,7 +681,11 @@ async fn run_if_configured(
 // Python QA Runner
 // ============================================================================
 
-pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
+pub async fn run_python_qa(
+    project_root: &Path,
+    timeout_secs: u64,
+    stages: QaStageSet,
+) -> Vec<QaStageResult> {
     let mut results = Vec::new();
 
     // Syntax: compile() every .py file (up to 50). NOT `py_compile`, which
@@ -651,45 +696,60 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     //
     // The pipeline runs under `sh -c`, so a missing interpreter would surface
     // as a shell exit 127 (a bogus failure), not a spawn error: probe first.
-    let interp = python_for_project(project_root).await;
-    if on_path(&interp).await {
-        let syntax_cmd = format!(
-            "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs {} -B -c '{}' 2>&1",
-            interp, PY_COMPILE_ALL
-        );
-        results.push(
-            run_stage(
+    if stages.enabled(QaStage::Syntax) {
+        let interp = python_for_project(project_root).await;
+        if on_path(&interp).await {
+            let syntax_cmd = format!(
+                "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs {} -B -c '{}' 2>&1",
+                interp, PY_COMPILE_ALL
+            );
+            results.push(
+                run_stage(
+                    QaStage::Syntax,
+                    "sh",
+                    &["-c", &syntax_cmd],
+                    project_root,
+                    timeout_secs,
+                )
+                .await,
+            );
+        } else {
+            results.push(QaStageResult::not_run(
                 QaStage::Syntax,
-                "sh",
-                &["-c", &syntax_cmd],
-                project_root,
-                timeout_secs,
-            )
-            .await,
-        );
-    } else {
-        results.push(QaStageResult::not_run(
-            QaStage::Syntax,
-            format!("`{}` is not installed", interp),
-        ));
+                format!("`{}` is not installed", interp),
+            ));
+        }
     }
 
     // Format: ruff format --check (falls back to black) — only for a project
     // that configures the formatter; an unconfigured project was never
     // formatted by it, so a diff is not a finding.
-    let ruff_configured = python_tool_configured(
-        project_root,
-        &["ruff.toml", ".ruff.toml"],
-        Some("[tool.ruff"),
-        None,
-    );
-    let black_configured = python_tool_configured(project_root, &[], Some("[tool.black"), None);
-    if on_path("ruff").await {
-        if let Some(r) = run_if_configured(
+    if stages.enabled(QaStage::Format) {
+        let ruff_configured = python_tool_configured(
+            project_root,
+            &["ruff.toml", ".ruff.toml"],
+            Some("[tool.ruff"),
+            None,
+        );
+        let black_configured = python_tool_configured(project_root, &[], Some("[tool.black"), None);
+        if on_path("ruff").await {
+            if let Some(r) = run_if_configured(
+                QaStage::Format,
+                "ruff",
+                &["format", "--check", "."],
+                ruff_configured || black_configured,
+                project_root,
+                timeout_secs,
+            )
+            .await
+            {
+                results.push(r);
+            }
+        } else if let Some(r) = run_if_configured(
             QaStage::Format,
-            "ruff",
-            &["format", "--check", "."],
-            ruff_configured || black_configured,
+            "black",
+            &["--check", "."],
+            black_configured,
             project_root,
             timeout_secs,
         )
@@ -697,17 +757,6 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
         {
             results.push(r);
         }
-    } else if let Some(r) = run_if_configured(
-        QaStage::Format,
-        "black",
-        &["--check", "."],
-        black_configured,
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(r);
     }
 
     // Lint: `ruff check` runs whenever ruff is installed — its DEFAULT rule
@@ -715,92 +764,100 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     // syntax-level errors), so it is meaningful without project config.
     // flake8's defaults include pycodestyle style rules (E501 line length,
     // ...), so it runs only when the project configures it.
-    if let Some(lint) = try_run_stage(
-        QaStage::Lint,
-        "ruff",
-        &["check", "."],
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(lint);
-    } else if let Some(lint) = run_if_configured(
-        QaStage::Lint,
-        "flake8",
-        &["."],
-        python_tool_configured(project_root, &[".flake8"], None, Some("[flake8")),
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(lint);
+    if stages.enabled(QaStage::Lint) {
+        if let Some(lint) = try_run_stage(
+            QaStage::Lint,
+            "ruff",
+            &["check", "."],
+            project_root,
+            timeout_secs,
+        )
+        .await
+        {
+            results.push(lint);
+        } else if let Some(lint) = run_if_configured(
+            QaStage::Lint,
+            "flake8",
+            &["."],
+            python_tool_configured(project_root, &[".flake8"], None, Some("[flake8")),
+            project_root,
+            timeout_secs,
+        )
+        .await
+        {
+            results.push(lint);
+        }
     }
 
     // TypeCheck: mypy, only when configured — unconfigured mypy on untyped
     // code reports missing stubs / untyped imports, not defects.
-    if let Some(tc) = run_if_configured(
-        QaStage::TypeCheck,
-        "mypy",
-        &["."],
-        python_tool_configured(
+    if stages.enabled(QaStage::TypeCheck) {
+        if let Some(tc) = run_if_configured(
+            QaStage::TypeCheck,
+            "mypy",
+            &["."],
+            python_tool_configured(
+                project_root,
+                &["mypy.ini", ".mypy.ini"],
+                Some("[tool.mypy"),
+                Some("[mypy"),
+            ),
             project_root,
-            &["mypy.ini", ".mypy.ini"],
-            Some("[tool.mypy"),
-            Some("[mypy"),
-        ),
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(tc);
+            timeout_secs,
+        )
+        .await
+        {
+            results.push(tc);
+        }
     }
 
     // Test: pytest (falls back to python -m unittest). Exit status 5 means
     // "no tests were collected/ran" for both runners (unittest since 3.12);
     // older unittest exits 0 after "Ran 0 tests". Neither is a pass or a
     // failure: nothing was tested.
-    let (test, code) = if on_path("pytest").await {
-        run_stage_with_code(
-            QaStage::Test,
-            "pytest",
-            &["--quiet", "--tb=short"],
-            project_root,
-            timeout_secs * 2,
-        )
-        .await
-    } else {
-        run_stage_with_code(
-            QaStage::Test,
-            "python3",
-            &["-m", "unittest", "discover", "-s", ".", "-q"],
-            project_root,
-            timeout_secs * 2,
-        )
-        .await
-    };
-    results.push(classify_python_test(test, code));
+    if stages.enabled(QaStage::Test) {
+        let (test, code) = if on_path("pytest").await {
+            run_stage_with_code(
+                QaStage::Test,
+                "pytest",
+                &["--quiet", "--tb=short"],
+                project_root,
+                timeout_secs * 2,
+            )
+            .await
+        } else {
+            run_stage_with_code(
+                QaStage::Test,
+                "python3",
+                &["-m", "unittest", "discover", "-s", ".", "-q"],
+                project_root,
+                timeout_secs * 2,
+            )
+            .await
+        };
+        results.push(classify_python_test(test, code));
+    }
 
     // Security: bandit, only when configured — its defaults flag every
     // `assert` (B101), which fails any pytest suite.
-    if let Some(sec) = run_if_configured(
-        QaStage::Security,
-        "bandit",
-        &["-r", ".", "-q"],
-        python_tool_configured(
+    if stages.enabled(QaStage::Security) {
+        if let Some(sec) = run_if_configured(
+            QaStage::Security,
+            "bandit",
+            &["-r", ".", "-q"],
+            python_tool_configured(
+                project_root,
+                &[".bandit", "bandit.yaml", "bandit.yml"],
+                Some("[tool.bandit"),
+                None,
+            ),
             project_root,
-            &[".bandit", "bandit.yaml", "bandit.yml"],
-            Some("[tool.bandit"),
-            None,
-        ),
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(sec);
+            timeout_secs,
+        )
+        .await
+        {
+            results.push(sec);
+        }
     }
 
     results
@@ -824,12 +881,16 @@ pub(crate) fn classify_python_test(r: QaStageResult, exit_code: Option<i32>) -> 
 // Node.js / TypeScript QA Runner
 // ============================================================================
 
-pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
+pub async fn run_node_qa(
+    project_root: &Path,
+    timeout_secs: u64,
+    stages: QaStageSet,
+) -> Vec<QaStageResult> {
     let mut results = Vec::new();
     let has_ts = project_root.join("tsconfig.json").exists();
 
     // TypeCheck: tsc --noEmit, when the project configures TypeScript.
-    if has_ts {
+    if has_ts && stages.enabled(QaStage::TypeCheck) {
         if let Some(tsc) = resolve_node_tool(project_root, "tsc").await {
             results.push(
                 run_stage(
@@ -849,14 +910,22 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
         }
     }
 
-    if let Some(r) = node_format_stage(project_root, timeout_secs).await {
-        results.push(r);
+    if stages.enabled(QaStage::Format) {
+        if let Some(r) = node_format_stage(project_root, timeout_secs).await {
+            results.push(r);
+        }
     }
-    if let Some(r) = node_lint_stage(project_root, timeout_secs).await {
-        results.push(r);
+    if stages.enabled(QaStage::Lint) {
+        if let Some(r) = node_lint_stage(project_root, timeout_secs).await {
+            results.push(r);
+        }
     }
-    results.push(node_test_stage(project_root, timeout_secs * 2).await);
-    results.push(node_audit_stage(project_root, timeout_secs).await);
+    if stages.enabled(QaStage::Test) {
+        results.push(node_test_stage(project_root, timeout_secs * 2).await);
+    }
+    if stages.enabled(QaStage::Security) {
+        results.push(node_audit_stage(project_root, timeout_secs).await);
+    }
 
     results
 }
@@ -994,89 +1063,103 @@ pub(crate) async fn node_audit_stage(project_root: &Path, timeout_secs: u64) -> 
 // Go QA Runner
 // ============================================================================
 
-pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
+pub async fn run_go_qa(
+    project_root: &Path,
+    timeout_secs: u64,
+    stages: QaStageSet,
+) -> Vec<QaStageResult> {
     let mut results = Vec::new();
 
     // Syntax + TypeCheck: go build (a missing `go` is a not-run stage via
     // the spawn error in run_stage_with_code).
-    results.push(
-        run_stage(
-            QaStage::Syntax,
-            "go",
-            &["build", "./..."],
-            project_root,
-            timeout_secs,
-        )
-        .await,
-    );
-
-    // Format: gofmt -l. Runs under `sh -c` with stderr discarded, so a
-    // missing gofmt would print nothing and PASS: probe it first.
-    if on_path("gofmt").await {
+    if stages.enabled(QaStage::Syntax) {
         results.push(
             run_stage(
-                QaStage::Format,
-                "sh",
-                &["-c", "test -z \"$(gofmt -l . 2>/dev/null)\""],
+                QaStage::Syntax,
+                "go",
+                &["build", "./..."],
                 project_root,
                 timeout_secs,
             )
             .await,
         );
-    } else {
-        results.push(QaStageResult::not_run(
-            QaStage::Format,
-            "`gofmt` is not installed",
-        ));
+    }
+
+    // Format: gofmt -l. Runs under `sh -c` with stderr discarded, so a
+    // missing gofmt would print nothing and PASS: probe it first.
+    if stages.enabled(QaStage::Format) {
+        if on_path("gofmt").await {
+            results.push(
+                run_stage(
+                    QaStage::Format,
+                    "sh",
+                    &["-c", "test -z \"$(gofmt -l . 2>/dev/null)\""],
+                    project_root,
+                    timeout_secs,
+                )
+                .await,
+            );
+        } else {
+            results.push(QaStageResult::not_run(
+                QaStage::Format,
+                "`gofmt` is not installed",
+            ));
+        }
     }
 
     // Lint: go vet
-    results.push(
-        run_stage(
-            QaStage::Lint,
-            "go",
-            &["vet", "./..."],
-            project_root,
-            timeout_secs,
-        )
-        .await,
-    );
+    if stages.enabled(QaStage::Lint) {
+        results.push(
+            run_stage(
+                QaStage::Lint,
+                "go",
+                &["vet", "./..."],
+                project_root,
+                timeout_secs,
+            )
+            .await,
+        );
+    }
 
     // Test: go test
-    let test = run_stage(
-        QaStage::Test,
-        "go",
-        &["test", "-v", "./..."],
-        project_root,
-        timeout_secs * 2,
-    )
-    .await;
-    results.push(classify_go_test(test));
+    if stages.enabled(QaStage::Test) {
+        let test = run_stage(
+            QaStage::Test,
+            "go",
+            &["test", "-v", "./..."],
+            project_root,
+            timeout_secs * 2,
+        )
+        .await;
+        results.push(classify_go_test(test));
+    }
 
     // Security: govulncheck (if available). It downloads the vulnerability
     // database, so an unreachable network is not-run, not a finding.
-    if let Some(sec) = try_run_stage(
-        QaStage::Security,
-        "govulncheck",
-        &["./..."],
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        let lower = sec.output.to_lowercase();
-        let offline = lower.contains("dial tcp")
-            || lower.contains("no such host")
-            || lower.contains("connection refused")
-            || lower.contains("i/o timeout");
-        results.push(if sec.failed() && offline {
-            demote_to_not_run(
-                sec,
-                "govulncheck could not reach the vulnerability database".into(),
-            )
-        } else {
-            sec
-        });
+    if stages.enabled(QaStage::Security) {
+        if let Some(sec) = try_run_stage(
+            QaStage::Security,
+            "govulncheck",
+            &["./..."],
+            project_root,
+            timeout_secs,
+        )
+        .await
+        {
+            let lower = sec.output.to_lowercase();
+            let offline = lower.contains("dial tcp")
+                || lower.contains("no such host")
+                || lower.contains("connection refused")
+                || lower.contains("i/o timeout");
+            results.push(if sec.failed() && offline {
+                demote_to_not_run(
+                    sec,
+                    "govulncheck could not reach the vulnerability database".into(),
+                )
+            } else {
+                sec
+            });
+        }
     }
 
     results

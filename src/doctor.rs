@@ -206,12 +206,38 @@ pub fn scope_checks_to_languages(
 // Check helpers
 // ---------------------------------------------------------------------------
 
+/// Directory the probes run in: the operator's home, never the workspace.
+///
+/// cargo reads `.cargo/config.toml` (an `[alias]` may shadow `clippy`,
+/// `fmt`, … with `run`) and rustup reads `rust-toolchain.toml` (a `path`
+/// override names the `rustc`/`cargo` to execute) from the cwd and its
+/// parents, so a `--version` probe started inside an untrusted checkout
+/// would build and run whatever the checkout shipped. The home directory
+/// and its parents hold only the operator's own configuration.
+fn probe_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir()
+        .filter(|home| home.is_dir())
+        .or_else(|| Some(std::env::temp_dir()).filter(|tmp| tmp.is_dir()))
+}
+
 /// Run a command with a timeout, returning stdout on success.
+///
+/// The probe gets the same scrubbed environment as every other child
+/// (`PATH`, `HOME`, `CARGO_HOME`, `RUSTUP_HOME`, … but no credentials): a
+/// version probe never needs `SELFWARE_API_KEY`, and the tool that runs is
+/// only as trustworthy as `PATH`. Runs from [`probe_dir`], and is killed
+/// when the timeout drops the future instead of outliving the report.
 async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
-    let result = tokio::time::timeout(CHECK_TIMEOUT, Command::new(program).args(args).output())
-        .await
-        .ok()?
-        .ok()?;
+    let mut cmd = Command::new(program);
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.args(args).current_dir(probe_dir()?);
+    let result = tokio::time::timeout(
+        CHECK_TIMEOUT,
+        crate::tools::process_guard::output_in_process_group(&mut cmd),
+    )
+    .await
+    .ok()?
+    .ok()?;
 
     if !result.status.success() {
         return None;
@@ -738,11 +764,19 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
     // cwd-shadows-global trap explicitly.
     match config.loaded_config_path() {
         Some(path) => {
+            let layered_home = config.layered_home_config_path();
             let home_config = dirs::home_dir().map(|h| h.join(".config/selfware/config.toml"));
-            let shadows_global = path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
+            let shadows_global = layered_home.is_none()
+                && path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
                 && home_config.as_ref().map(|h| h.is_file()).unwrap_or(false)
                 && Some(path) != home_config.as_deref();
-            let shown = if shadows_global {
+            let shown = if let Some(h) = layered_home {
+                format!(
+                    "{} (untrusted, over {})",
+                    crate::config::display_config_path(path),
+                    crate::config::display_config_path(h)
+                )
+            } else if shadows_global {
                 format!(
                     "{} (shadowing {})",
                     crate::config::display_config_path(path),

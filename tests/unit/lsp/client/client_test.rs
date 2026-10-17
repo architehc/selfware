@@ -791,3 +791,40 @@ async fn kill_now_stops_language_server_descendants() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rust_lsp_spawn_pins_rustup_toolchain_against_repo_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen_file = dir.path().join("toolchain.seen");
+    let script = format!(
+        "printf '%s' \"${{RUSTUP_TOOLCHAIN-}}\" > '{}'",
+        seen_file.display()
+    );
+    let conn = LspServerConnection::spawn(
+        "sh",
+        &["-c".to_string(), script],
+        dir.path(),
+        Language::Rust,
+    )
+    .await
+    .expect("spawn");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let seen = loop {
+        if let Ok(text) = std::fs::read_to_string(&seen_file) {
+            if !text.is_empty() {
+                break text;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "RUSTUP_TOOLCHAIN not written by child"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    conn.kill_now().await;
+    assert!(
+        !seen.is_empty() && !seen.contains('/'),
+        "Rust LSP spawn must pin a named RUSTUP_TOOLCHAIN, got {seen:?}"
+    );
+}

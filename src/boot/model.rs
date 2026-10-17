@@ -73,8 +73,11 @@ pub fn resolve_llama_server(env_val: Option<String>, path_hit: Option<PathBuf>) 
 
 /// Find `llama-server`: `LLAMA_SERVER` env var, then `which llama-server`.
 pub fn find_llama_server() -> Option<PathBuf> {
+    use crate::safety::process_env::SanitizedEnvExt;
+
     let env_val = std::env::var("LLAMA_SERVER").ok();
     let path_hit = Command::new("which")
+        .sanitized_env()
         .arg("llama-server")
         .output()
         .ok()
@@ -214,7 +217,10 @@ impl Drop for LlamaServerGuard {
 /// timeout elapses). stdout/stderr are muted unless it exits early, in which
 /// case the hint points at `--check`.
 pub async fn spawn_server(binary: &Path, model: &Path, port: u16) -> Result<LlamaServerGuard> {
+    use crate::safety::process_env::SanitizedEnvExt;
+
     let mut child = Command::new(binary)
+        .sanitized_env()
         .args(build_server_args(model, port))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -222,6 +228,7 @@ pub async fn spawn_server(binary: &Path, model: &Path, port: u16) -> Result<Llam
         .with_context(|| format!("spawning {}", binary.display()))?;
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(2))
         .build()?;
     let health = format!("http://127.0.0.1:{}/health", port);

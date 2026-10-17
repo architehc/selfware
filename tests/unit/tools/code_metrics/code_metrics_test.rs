@@ -92,3 +92,29 @@ async fn test_code_metrics_file_path_policy() {
         "missing workspace file should surface the read error, got: {err2}"
     );
 }
+
+/// code_metrics keeps every line of the file it reads: a file over
+/// `MAX_SOURCE_READ_SIZE` is refused with the `file_read` error instead of
+/// being loaded whole.
+#[tokio::test]
+async fn test_code_metrics_refuses_oversized_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.rs");
+    // Sparse: takes no disk, but is larger than the per-file read bound.
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(MAX_SOURCE_READ_SIZE + 1)
+        .unwrap();
+    let tool = CodeMetricsTool::with_safety_config(SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..SafetyConfig::default()
+    });
+    let err = tool
+        .execute(serde_json::json!({"file_path": big.to_str().unwrap()}))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("File too large to read"),
+        "oversized file must be refused, got: {err:#}"
+    );
+}

@@ -325,7 +325,15 @@ pub fn graph_summary_note(root: &Path) -> Option<String> {
             out.push_str(
                 &hotspots
                     .iter()
-                    .map(|row| format!("{} ({})", row["id"].as_str().unwrap_or("?"), row["tokens"]))
+                    .map(|row| {
+                        format!(
+                            "{} ({})",
+                            crate::safety::source_context::quote_untrusted_label(
+                                row["id"].as_str().unwrap_or("?")
+                            ),
+                            row["tokens"]
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", "),
             );
@@ -1323,7 +1331,10 @@ fn symbol_tests_for(root: &Path, symbol: &Node, linked_paths: &[String]) -> Vec<
         if !seen.insert(rel.clone()) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
+        let Ok(content) = crate::tools::file::read_to_string_capped(
+            &root.join(rel),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) else {
             continue;
         };
         for (index, line) in content.lines().enumerate() {

@@ -10,6 +10,8 @@
 //!   a unified diff with a path header and `+N −M lines`,
 //! - `file_write` of a new file: path, line count and the first lines,
 //! - `patch_apply`: the patch itself, coloured, with the same counts,
+//! - `shell_exec` / `pty_shell`: the command in full (wrapped) and the
+//!   `env` map one variable per line — both decide what runs,
 //! - every other tool: `key: value` lines with strings unescaped.
 //!
 //! Everything here is pure (the caller supplies any existing file content),
@@ -380,6 +382,38 @@ pub fn render_fields(tool_name: &str, args: &Value) -> Vec<ConfirmLine> {
                     hidden += total - MAX_LINES_PER_VALUE;
                 }
             }
+            Value::Object(entries) if is_command_tool && key == "env" && !entries.is_empty() => {
+                // The environment is part of what runs: one line per
+                // variable, so no entry can push another past the line
+                // width (one long padding value used to hide the
+                // `GIT_EXTERNAL_DIFF` serialized after it).
+                if out.len() >= MAX_BODY_LINES {
+                    hidden += entries.len() + 1;
+                    continue;
+                }
+                out.push(ConfirmLine::new(
+                    LineKind::Field,
+                    format!("{}: ({} variables)", key, entries.len()),
+                ));
+                for (name, value) in entries {
+                    if out.len() >= MAX_BODY_LINES {
+                        hidden += 1;
+                        continue;
+                    }
+                    let text = match value {
+                        Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    };
+                    out.push(ConfirmLine::new(
+                        LineKind::Field,
+                        format!(
+                            "  {}={}",
+                            sanitize_line(name, 80),
+                            sanitize_line(&text, MAX_LINE_CHARS)
+                        ),
+                    ));
+                }
+            }
             other => {
                 if out.len() >= MAX_BODY_LINES {
                     hidden += 1;
@@ -664,9 +698,21 @@ impl RiskTag {
 pub fn classify_risk(tool_name: &str, args: &Value) -> RiskTag {
     match tool_name {
         "shell_exec" | "pty_shell" => {
-            return match str_arg(args, &["command", "cmd"]) {
+            let tag = match str_arg(args, &["command", "cmd"]) {
                 Some(cmd) if !cmd.trim().is_empty() => classify_shell_risk(cmd),
                 _ => RiskTag::RunsCommand,
+            };
+            // The structured `env` map is part of what runs: it steers the
+            // program exactly like an inline `NAME=value` prefix, which
+            // `classify_shell_risk` never labels a read outside `SAFE_ENV`
+            // (`{"GIT_EXTERNAL_DIFF": "./x"}` next to `git diff` runs `./x`).
+            return if tag == RiskTag::Reads
+                && (!crate::safety::shell_read::env_arg_is_safe(args.get("env"))
+                    || args.get("shell").is_some_and(|s| !s.is_null()))
+            {
+                RiskTag::RunsCommand
+            } else {
+                tag
             };
         }
         "file_delete" => return RiskTag::DeletesFiles,

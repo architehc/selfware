@@ -37,7 +37,14 @@ init_timeout_secs = 30                                # Startup timeout (default
 | `command` | string | yes | -- | Command to spawn the server process |
 | `args` | array | no | `[]` | Command arguments |
 | `env` | object | no | `{}` | Environment variables for the process |
+| `cwd` | string | no | `~/.selfware/mcp` | Working directory for the process (see below) |
 | `init_timeout_secs` | number | no | `30` | Seconds to wait for initialization |
+
+Servers do **not** start in the project selfware is working on: a repository could otherwise decide what a
+launcher such as `python -m my_mcp_server` or `npx …` runs by committing a `my_mcp_server.py` or a `node_modules/`.
+By default a server starts in the empty, operator-owned `~/.selfware/mcp`; relative paths in `command` and `args`
+resolve against that directory. Set `cwd` (absolute, or relative to the directory selfware runs in, e.g. `"."`) for
+a server that needs the project as its working directory.
 
 ## Popular MCP Servers
 

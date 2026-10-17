@@ -601,7 +601,7 @@ async fn a_review_is_read_by_shards_and_findings_are_verified() {
         .find(|t| t.contains("kind=review_shards"))
         .expect("shard context note");
     assert!(
-        note.contains("pkg/a.py: ratio(x, n) divides x by n"),
+        note.contains("\"pkg/a.py\": ratio(x, n) divides x by n"),
         "{note}"
     );
     assert!(note.contains("a made-up issue"), "{note}");

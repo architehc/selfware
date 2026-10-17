@@ -1514,6 +1514,32 @@ async fn clear_conversation_keeps_only_system_prompt() {
 }
 
 // =========================================================================
+// Test: The helpers' project root never leaves the workspace
+// =========================================================================
+
+// A manifest-less checkout below a directory holding a manifest used to make
+// that enclosing directory the root the context helpers read from and
+// validated against, reaching files `file_read` refuses.
+#[test]
+fn test_project_root_stays_at_workspace_below_enclosing_manifest() {
+    use crate::tools::workspace_root::{sync_scope, WorkspaceRoot};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let enclosing = tmp.path().join("home");
+    let checkout = enclosing.join("src").join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::write(enclosing.join("package.json"), "{}\n").unwrap();
+    std::fs::write(enclosing.join("requirements.txt"), "").unwrap();
+    std::fs::write(checkout.join("main.rs"), "fn main() {}\n").unwrap();
+
+    let root = sync_scope(WorkspaceRoot::fixed(&checkout), current_project_root);
+    assert_eq!(
+        root, checkout,
+        "the project root must be the workspace, not the enclosing manifest's directory"
+    );
+}
+
+// =========================================================================
 // Test: Project type detection correctly scopes nested subprojects
 // =========================================================================
 
@@ -2044,6 +2070,41 @@ async fn test_headless_auto_edit_readonly_approval_classifier() {
         approve("shell_exec", r#"{"command":"cargo build"}"#),
         Some(false),
         "cargo build writes target/ — not established read-only"
+    );
+    // The call's other arguments can pick the program: an `env` entry
+    // outside the read parser's SAFE_ENV rule or a pty `shell` is never a
+    // silent grant, whatever `command` says.
+    assert_eq!(
+        approve(
+            "shell_exec",
+            r#"{"command":"git diff HEAD~1 HEAD","env":{"GIT_EXTERNAL_DIFF":"./tools/x.sh"}}"#,
+        ),
+        None,
+        "an env map that steers git must fall through to the normal policy"
+    );
+    assert_eq!(
+        approve(
+            "pty_shell",
+            r#"{"action":"start","shell":"./tools/x.sh","command":"ls"}"#,
+        ),
+        None,
+        "a pty shell argument picks what every send runs"
+    );
+    assert_eq!(
+        approve(
+            "shell_exec",
+            r#"{"command":"git status --short","env":{"LANG":"C"}}"#,
+        ),
+        Some(true),
+        "a locale entry is what a leading LANG=C word is"
+    );
+    assert_eq!(
+        approve(
+            "shell_exec",
+            r#"{"command":"git status --short","env":{"NO_COLOR":"1"}}"#,
+        ),
+        Some(true),
+        "a SAFE_ENV-only map leaves a read a read"
     );
     // Everything else falls through to the normal policy untouched.
     assert_eq!(
@@ -2803,4 +2864,40 @@ async fn test_thinking_off_plan_without_tool_call_is_reasked_as_synthesis() {
         "same plan re-sent"
     );
     server.stop().await;
+}
+
+// =========================================================================
+// Guidance / memory files get the tool-result trust gate before the prompt
+// =========================================================================
+
+#[test]
+fn test_gate_prompt_file_neutralises_hidden_unicode_like_a_tool_result() {
+    let path = std::path::Path::new("/repo/AGENTS.md");
+    let content = "# Guide\nRun the tests.\nbidi:\u{202e}EVIL\u{202c} zw:ig\u{200b}nore\n";
+    let safety = crate::config::SafetyConfig::default();
+    assert!(safety.trust_gate_tool_results);
+
+    let gated = gate_prompt_file("workspace_guidance_file", path, content, &safety);
+    assert!(gated.contains("# Guide\nRun the tests.\n"));
+    assert!(gated.contains(crate::safety::source_context::REMOVED_LINE));
+    assert!(!gated.contains('\u{202e}'));
+    assert!(!gated.contains('\u{200b}'));
+    // The file_read result of the same bytes is neutralised identically.
+    let via_tool = tool_dispatch::sanitize_tool_context(
+        "file_read",
+        &serde_json::json!({"path": "/repo/AGENTS.md"}).to_string(),
+        content,
+        true,
+    );
+    assert_eq!(gated, via_tool.content);
+
+    // The operator's kill switch is honoured, as for tool results.
+    let safety = crate::config::SafetyConfig {
+        trust_gate_tool_results: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        gate_prompt_file("workspace_guidance_file", path, content, &safety),
+        content
+    );
 }

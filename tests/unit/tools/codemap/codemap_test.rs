@@ -330,3 +330,120 @@ fn test_file_token_base_prefers_graph_when_fresh() {
     assert_eq!(tokens, UNREADABLE_FILE_FALLBACK_TOKENS);
     assert_eq!(source, "live");
 }
+
+// ── focus / target path policy ───────────────────────────────────────────
+//
+// code_map walks `root/src/<focus>` with per-file live reads and
+// context_action opens its resolved target for a live token measurement;
+// both must obey the same workspace path policy as file_read, applied to
+// the resolved path (the raw `focus` can encode traversal as `..::..`).
+
+fn path_policy_refused(msg: &str) -> bool {
+    msg.contains("Path traversal")
+        || msg.contains("not in allowed")
+        || msg.contains("outside working")
+        || msg.contains("protected")
+}
+
+/// Workspace plus an unrelated sibling tree holding one `.rs` file whose
+/// only content is an import that exists nowhere inside the workspace.
+fn fixture_with_outside_tree() -> (tempfile::TempDir, tempfile::TempDir) {
+    let (temp, _) = fixture_project_with_graph();
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::create_dir_all(outside.path().join("acme/src")).expect("outside src");
+    std::fs::write(
+        outside.path().join("acme/src/rotate.rs"),
+        "use crate::outside_only_marker;\n",
+    )
+    .expect("write outside file");
+    (temp, outside)
+}
+
+#[tokio::test]
+async fn test_code_map_focus_obeys_workspace_path_policy() {
+    let (temp, outside) = fixture_with_outside_tree();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(temp.path());
+    let tool = CodeMapTool;
+
+    // Both temp dirs share a parent: root/src/../../<outside>/acme leaves the
+    // workspace by `..`, by `::`-encoded `..`, and by an absolute focus.
+    let outside_name = outside
+        .path()
+        .file_name()
+        .expect("outside dir name")
+        .to_string_lossy()
+        .to_string();
+    let dotdot = format!("../../{outside_name}/acme");
+    let colons = format!("..::..::{outside_name}::acme");
+    let absolute = outside.path().join("acme").to_string_lossy().to_string();
+    for focus in [dotdot.as_str(), colons.as_str(), absolute.as_str()] {
+        let err = crate::tools::workspace_root::scope(
+            root.clone(),
+            tool.execute(serde_json::json!({"focus": focus, "depth": 3})),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            path_policy_refused(&msg),
+            "focus {focus:?} must be refused by the path policy, got: {msg}"
+        );
+        assert!(
+            !msg.contains("outside_only_marker"),
+            "focus {focus:?} leaked outside content: {msg}"
+        );
+    }
+
+    // In-workspace focuses — a directory, a file and a missing module (which
+    // falls back to the whole src tree) — still answer as before.
+    for (focus, key) in [
+        ("widgets", "src/widgets/widget.rs"),
+        ("alpha", "src/alpha.rs"),
+        ("does::not::exist", "src/alpha.rs"),
+    ] {
+        let out = crate::tools::workspace_root::scope(
+            root.clone(),
+            tool.execute(serde_json::json!({"focus": focus, "format": "json"})),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("focus {focus:?} should pass the policy: {e}"));
+        let nodes = out["nodes"].as_object().expect("nodes object");
+        assert!(nodes.contains_key(key), "focus {focus:?}: {nodes:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_context_action_module_target_obeys_workspace_path_policy() {
+    let (temp, outside) = fixture_with_outside_tree();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(temp.path());
+    let tool = ContextActionTool;
+
+    let outside_name = outside
+        .path()
+        .file_name()
+        .expect("outside dir name")
+        .to_string_lossy()
+        .to_string();
+    let target = format!("..::..::{outside_name}::acme::src::rotate");
+    let err = crate::tools::workspace_root::scope(
+        root.clone(),
+        tool.execute(serde_json::json!({"action": "read", "target": target})),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        path_policy_refused(&err.to_string()),
+        "module-style target outside the workspace must be refused, got: {err}"
+    );
+
+    // Module-style and file targets inside the workspace still resolve.
+    for target in ["widgets::widget", "src/alpha.rs", "tools::missing"] {
+        let out = crate::tools::workspace_root::scope(
+            root.clone(),
+            tool.execute(serde_json::json!({"action": "read", "target": target})),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("target {target:?} should pass the policy: {e}"));
+        assert!(out["estimated_tokens"].as_u64().is_some(), "{out}");
+    }
+}

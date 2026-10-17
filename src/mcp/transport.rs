@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -87,18 +88,40 @@ pub(crate) async fn read_message<R: tokio::io::AsyncRead + Unpin>(
 ///
 /// Returns `Ok(None)` on EOF, `Ok(Some(body))` on a successful read, and
 /// `Err` when headers are malformed or the body is truncated.
+const MAX_HEADER_LINE_BYTES: usize = 64 * 1024;
+const MAX_HEADER_COUNT: usize = 64;
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<String>> {
     let mut content_length: Option<usize> = None;
+    let mut header_count: usize = 0;
 
     // Read headers until we hit the empty line.
     loop {
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT {
+            anyhow::bail!(
+                "Too many JSON-RPC headers (exceeded max {})",
+                MAX_HEADER_COUNT
+            );
+        }
+
         let mut header_line = String::new();
-        let bytes_read = reader.read_line(&mut header_line).await?;
+        let bytes_read = (&mut *reader)
+            .take(MAX_HEADER_LINE_BYTES as u64 + 1)
+            .read_line(&mut header_line)
+            .await?;
         if bytes_read == 0 {
             // EOF
             return Ok(None);
+        }
+        if header_line.len() > MAX_HEADER_LINE_BYTES && !header_line.ends_with('\n') {
+            anyhow::bail!(
+                "JSON-RPC header line too large (exceeded {} bytes)",
+                MAX_HEADER_LINE_BYTES
+            );
         }
 
         let trimmed = header_line.trim();
@@ -119,7 +142,6 @@ pub(crate) async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>
     }
 
     let length = content_length.context("Missing Content-Length header")?;
-    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
     if length > MAX_MESSAGE_BYTES {
         anyhow::bail!(
             "MCP message too large: {} bytes (max {})",
@@ -144,10 +166,19 @@ pub(crate) async fn read_newline_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<String>> {
     let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).await?;
+    let bytes_read = (&mut *reader)
+        .take(MAX_MESSAGE_BYTES as u64 + 1)
+        .read_line(&mut line)
+        .await?;
     if bytes_read == 0 {
         // EOF
         return Ok(None);
+    }
+    if line.len() > MAX_MESSAGE_BYTES && !line.ends_with('\n') {
+        anyhow::bail!(
+            "MCP message too large: exceeded {} bytes",
+            MAX_MESSAGE_BYTES
+        );
     }
     Ok(Some(line.trim().to_string()))
 }
@@ -399,21 +430,49 @@ impl StdioTransport {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> Result<Self> {
-        Self::spawn_named(command, command, args, env).await
+        Self::spawn_named(command, command, args, env, None).await
+    }
+
+    /// Where a server starts when its config names no `cwd`:
+    /// `~/.selfware/mcp`, operator-owned and empty by default (created on
+    /// first use). Never selfware's own working directory — that is the
+    /// checkout being worked on, and a committed `my_mcp_server.py`
+    /// (`python -m my_mcp_server`) or `node_modules/` (`npx …`) there would
+    /// replace the operator's server with the repository's code, at agent
+    /// start-up and with the server's `env` block.
+    pub fn default_server_dir() -> Result<PathBuf> {
+        let dir = dirs::home_dir()
+            .context("cannot resolve home directory for the MCP server working directory")?
+            .join(".selfware")
+            .join("mcp");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating MCP server dir {}", dir.display()))?;
+        Ok(dir)
     }
 
     /// Like [`spawn`](Self::spawn), but names the server in typed errors
-    /// (`MCP server '<name>' exited ...`).
+    /// (`MCP server '<name>' exited ...`) and takes the server's working
+    /// directory (`None`: [`default_server_dir`](Self::default_server_dir)).
     pub async fn spawn_named(
         server_name: &str,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
+        cwd: Option<&Path>,
     ) -> Result<Self> {
         info!("Spawning MCP server: {} {:?}", command, args);
 
+        // The server's working directory is the operator's choice, not the
+        // checkout's: a relative `command`, a `-m` module or a package lookup
+        // resolves against it.
+        let cwd = match cwd {
+            Some(dir) => dir.to_path_buf(),
+            None => Self::default_server_dir()?,
+        };
+
         let mut cmd = Command::new(command);
         cmd.args(args)
+            .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -599,9 +658,14 @@ impl StdioTransport {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
+            const MAX_STDERR_LINE_BYTES: u64 = 64 * 1024;
             loop {
                 line.clear();
-                match reader.read_line(&mut line).await {
+                match (&mut reader)
+                    .take(MAX_STDERR_LINE_BYTES)
+                    .read_line(&mut line)
+                    .await
+                {
                     Ok(0) => break, // EOF
                     Ok(_) => {
                         let trimmed = line.trim();

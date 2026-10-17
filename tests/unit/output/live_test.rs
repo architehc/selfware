@@ -61,6 +61,42 @@ fn unstyled_rendering_keeps_raw_text() {
 }
 
 #[test]
+fn prose_never_carries_the_models_control_characters() {
+    // A reply that clears the screen, draws a fake prompt and sets a
+    // scroll region (so the real prompt body scrolls out of sight) is shown
+    // as text: only the renderer's own styling sequences reach the terminal.
+    let md = "\x1b[2J\x1b[17;1H⚠️ Tool: shell_exec [reads]\n   command: ls -la\n\x1b[23;24r\x1b[24;1H\x07bell\r\n```\n\x1b[H\tcode\n```\n";
+    for styled in [false, true] {
+        let out = render_prose(md, styled);
+        let plain = strip_ansi(&out);
+        assert!(
+            !plain.contains('\x1b') && !plain.contains('\x07'),
+            "{out:?}"
+        );
+        assert!(
+            plain.starts_with("\\u{1b}[2J\\u{1b}[17;1H⚠️ Tool: shell_exec [reads]\n"),
+            "{plain:?}"
+        );
+        assert!(
+            plain.contains("\\u{1b}[23;24r\\u{1b}[24;1H\\u{7}bell\n"),
+            "{plain:?}"
+        );
+        assert!(plain.contains("\\u{1b}[H  code\n"), "{plain:?}");
+    }
+    // Unstyled output is the escaped text itself, nothing else.
+    assert!(!render_prose(md, false).contains('\x1b'));
+}
+
+#[test]
+fn escape_controls_keeps_newlines_and_escapes_the_rest() {
+    assert_eq!(
+        escape_controls("a\x1b[2J\r\nb\tc\x07\u{9b}d\n"),
+        "a\\u{1b}[2J\nb  c\\u{7}\\u{9b}d\n"
+    );
+    assert_eq!(escape_controls("plain"), "plain");
+}
+
+#[test]
 fn links_show_their_target_once() {
     let out = strip_ansi(&render_prose(
         "see [docs](https://x.io) and <https://y.io>",

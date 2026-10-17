@@ -351,6 +351,7 @@ async fn eof_fails_requests_fast_with_server_exited() {
         "sh",
         &["-c".to_string(), "echo bye >&2; exit 3".to_string()],
         &HashMap::new(),
+        None,
     )
     .await
     .expect("spawn sh")
@@ -404,6 +405,7 @@ async fn eof_cause_reports_exit_status_and_stderr_tail() {
             "echo 'fatal: no token' >&2; sleep 0.2; exit 7".to_string(),
         ],
         &HashMap::new(),
+        None,
     )
     .await
     .expect("spawn sh");
@@ -441,6 +443,7 @@ async fn write_to_closed_stdin_is_typed_broken_pipe() {
         // Close stdin, keep stdout open (so the reader sees no EOF), linger.
         &["-c".to_string(), "exec 0<&-; sleep 30".to_string()],
         &HashMap::new(),
+        None,
     )
     .await
     .expect("spawn sh")
@@ -540,7 +543,7 @@ async fn spawn_registers_a_session_owned_mcp_resource_released_on_shutdown() {
     let name = format!("reg-test-{}", uuid::Uuid::new_v4().simple());
     let transport = context::scope(
         context::Owner::for_task("task-that-happened-to-run"),
-        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new()),
+        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new(), None),
     )
     .await
     .expect("spawn sleep")
@@ -585,7 +588,7 @@ async fn session_drain_stops_a_registered_mcp_server() {
     use std::collections::HashMap;
     let name = format!("drain-test-{}", uuid::Uuid::new_v4().simple());
     let transport =
-        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new())
+        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new(), None)
             .await
             .expect("spawn sleep");
     let pid = transport.child.lock().await.id().expect("pid");
@@ -621,6 +624,7 @@ async fn server_exit_reaps_background_descendant_before_recording_status() {
         "sh",
         &["-c".to_string(), script],
         &HashMap::new(),
+        None,
     )
     .await
     .expect("spawn server stub");
@@ -660,4 +664,77 @@ async fn server_exit_reaps_background_descendant_before_recording_status() {
         "EOF cleanup must release the reaped MCP resource immediately"
     );
     drop(transport);
+}
+
+// -----------------------------------------------------------------------
+// Working directory: the operator's choice, never the checkout.
+// -----------------------------------------------------------------------
+
+/// Spawns `sh -c 'pwd > $OUT'` as the "server" and returns what it printed.
+#[cfg(unix)]
+async fn server_cwd(cwd: Option<&std::path::Path>) -> std::path::PathBuf {
+    use std::collections::HashMap;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("cwd.txt");
+    let script = format!("pwd > '{}'; exit 0", out.display());
+    let _transport = StdioTransport::spawn_named(
+        "cwd-test",
+        "sh",
+        &["-c".to_string(), script],
+        &HashMap::new(),
+        cwd,
+    )
+    .await
+    .expect("spawn sh");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&out) {
+            if !text.is_empty() {
+                break std::path::PathBuf::from(text.trim());
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "server stub did not record its working directory"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Without a configured `cwd` the server starts in the operator-owned
+/// default directory, not in selfware's working directory (the checkout):
+/// a committed `my_mcp_server.py` there must not become the server
+/// `python -m my_mcp_server` runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_does_not_start_the_server_in_the_checkout() {
+    // The default dir is under `$HOME` and the assertion reads the cwd: hold
+    // the lock so no concurrent test moves either underneath us.
+    let _guard = crate::test_support::CwdGuard::hold();
+    let expected = StdioTransport::default_server_dir().expect("default dir");
+    let got = server_cwd(None).await;
+    assert_eq!(
+        got.canonicalize().expect("canonicalize"),
+        expected.canonicalize().expect("canonicalize")
+    );
+    assert_ne!(
+        got.canonicalize().expect("canonicalize"),
+        std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canonicalize"),
+        "MCP server must not inherit selfware's working directory"
+    );
+}
+
+/// A configured `cwd` is honoured as given.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_honours_the_configured_cwd() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let got = server_cwd(Some(dir.path())).await;
+    assert_eq!(
+        got.canonicalize().expect("canonicalize"),
+        dir.path().canonicalize().expect("canonicalize")
+    );
 }

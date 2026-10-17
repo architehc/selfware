@@ -63,6 +63,19 @@ fn unparseable_source_yields_no_symbols_not_guesses() {
 }
 
 #[test]
+fn deeply_nested_source_skips_overflow_item_without_aborting() {
+    let deep = format!(
+        "pub struct SafeStruct;\npub fn pathological() -> i32 {{\n    {}42{}\n}}\n",
+        "(".repeat(3_000),
+        ")".repeat(3_000),
+    );
+    let decls = extract_pub_symbols(&deep);
+    assert_eq!(decls.len(), 1);
+    assert_eq!(decls[0].name, "SafeStruct");
+    assert_eq!(decls[0].kind, "struct");
+}
+
+#[test]
 fn identifiers_split_on_non_identifier_chars() {
     let ids = identifiers("let _ = foo(bar::Baz, qux_1);");
     assert!(ids.contains("foo"));

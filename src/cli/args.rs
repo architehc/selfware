@@ -330,7 +330,9 @@ pub(crate) enum Commands {
     /// and safety-path/confirmation overrides — and it allows a globally-exported
     /// SELFWARE_API_KEY to be sent to the endpoint the config selects. Only trust
     /// repositories whose selfware.toml you have reviewed. Records the config's
-    /// canonical path in ~/.selfware/trusted_repos.
+    /// canonical path and a digest of its content in ~/.selfware/trusted_repos;
+    /// trust lapses when the file changes (pull, branch switch), so re-run this
+    /// after reviewing the new version.
     #[command(display_order = 27)]
     Trust {
         /// Path to the config to trust (default: ./selfware.toml).

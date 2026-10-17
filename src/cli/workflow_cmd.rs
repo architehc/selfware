@@ -795,22 +795,6 @@ pub(crate) async fn handle_workflow_command(
                             .execute_run(&workflow_name, inputs, working_dir, run)
                             .await?;
 
-                        // A workflow whose required steps failed must
-                        // not exit zero (honest status, AGENTS.md §3).
-                        if matches!(result.status, crate::workflows::WorkflowStatus::Failed) {
-                            print_workflow_resume_hint(&result, &file);
-                            anyhow::bail!(
-                                "workflow '{}' failed after {}ms{}",
-                                workflow_name,
-                                result.duration_ms,
-                                result
-                                    .stop_reason
-                                    .as_ref()
-                                    .map(|reason| format!(" — stopped: {reason}"))
-                                    .unwrap_or_default()
-                            );
-                        }
-
                         match result.status {
                             crate::workflows::WorkflowStatus::Completed => {
                                 println!(
@@ -825,6 +809,10 @@ pub(crate) async fn handle_workflow_command(
                                     Glyphs::fallen_leaf(),
                                     result.duration_ms
                                 );
+                                if let Some(reason) = &result.stop_reason {
+                                    println!("   {} Stopped: {}", Glyphs::fallen_leaf(), reason);
+                                }
+                                print_workflow_resume_hint(&result, &file);
                             }
                             other => {
                                 println!(
@@ -843,6 +831,21 @@ pub(crate) async fn handle_workflow_command(
                             }
                         }
                         println!();
+
+                        // A workflow whose required steps failed must
+                        // not exit zero (honest status, AGENTS.md §3).
+                        if matches!(result.status, crate::workflows::WorkflowStatus::Failed) {
+                            anyhow::bail!(
+                                "workflow '{}' failed after {}ms{}",
+                                workflow_name,
+                                result.duration_ms,
+                                result
+                                    .stop_reason
+                                    .as_ref()
+                                    .map(|reason| format!(" — stopped: {reason}"))
+                                    .unwrap_or_default()
+                            );
+                        }
                     }
                 }
                 Some(WorkflowFileKind::Yaml) => {

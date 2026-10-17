@@ -77,10 +77,21 @@ pub struct StreamResult {
     pub completion_tokens: u64,
     /// Wall-clock latency in milliseconds.
     pub latency_ms: u64,
+    /// Backend queue wait time in milliseconds (e.g. from `X-Colibri-Queue-Wait-Ms`),
+    /// or 0 when not queued / not reported by the gateway.
+    #[serde(default)]
+    pub queue_wait_ms: u64,
     /// Evaluation score (if evaluation succeeded).
     pub eval: Option<EvalResult>,
     /// Error message (if the request failed).
     pub error: Option<String>,
+}
+
+impl StreamResult {
+    /// Active inference latency in milliseconds (`latency_ms - queue_wait_ms`).
+    pub fn inference_latency_ms(&self) -> u64 {
+        self.latency_ms.saturating_sub(self.queue_wait_ms)
+    }
 }
 
 // --- Built-in evaluators ---
@@ -204,9 +215,12 @@ impl TaskEvaluator for JsonEvaluator {
         }
 
         let score = hits as f64 / total as f64;
+        // Pass only when every criterion is satisfied: valid JSON *and* all
+        // required fields present. A fractional threshold would falsely pass
+        // e.g. one missing field out of one required field (score 0.5).
         EvalResult {
             score,
-            passed: score >= 0.5,
+            passed: hits == total,
             details,
         }
     }

@@ -195,6 +195,58 @@ fn test_merge_extra_body_rejects_reserved_keys() {
     assert!(result.unwrap_err().to_string().contains("reserved key"));
 }
 
+// ── outbound-content secret policy ───────────────────────────────
+//
+// Every model-supplied field that is posted to the endpoint gets the same
+// credential-shape check as an http_request payload; the encoded image is
+// validated as an image instead of scanned.
+
+#[test]
+fn test_reject_vision_bound_credential_shapes() {
+    for (field, value) in [
+        ("prompt", json!("describe; context: ghp_abcdef1234567890")),
+        ("model", json!("vlm-ghp_abcdef1234567890")),
+        ("api_key", json!("ghp_abcdef1234567890")),
+        ("detail", json!("ghp_abcdef1234567890")),
+        (
+            "extra_body",
+            json!({ "chat_template_kwargs": { "note": "ghp_abcdef1234567890" } }),
+        ),
+    ] {
+        let args = json!({ field: value, "image_base64": "iVBORw0KGgo=" });
+        let err = reject_vision_bound_credential_shapes(&args).unwrap_err();
+        assert!(err.to_string().contains(field), "{field}: {err}");
+    }
+}
+
+#[test]
+fn test_reject_vision_bound_credential_shapes_benign_passes() {
+    let args = json!({
+        "prompt": "what is in this image?",
+        "model": "qwen2.5-vl",
+        "api_key": "c0ffee42-random-key",
+        "detail": "high",
+        "extra_body": { "chat_template_kwargs": { "enable_thinking": false } },
+        "image_base64": "iVBORw0KGgo="
+    });
+    assert!(reject_vision_bound_credential_shapes(&args).is_ok());
+}
+
+#[tokio::test]
+async fn test_vision_analyze_refuses_credential_shaped_prompt() {
+    let tool = VisionAnalyze;
+    let result = tool
+        .execute(json!({
+            "prompt": "describe; context: ghp_abcdef1234567890",
+            "image_base64": "iVBORw0KGgo=",
+            "endpoint": "http://127.0.0.1:1/v1",
+            "model": "vlm"
+        }))
+        .await;
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("credential-shaped"), "{err}");
+}
+
 // ── guess_mime ────────────────────────────────────────────────────
 
 #[test]
@@ -302,6 +354,25 @@ fn test_resolve_image_data_uri_base64_with_prefix() {
     let args = json!({ "image_base64": "data:image/jpeg;base64,/9j/4AAQ" });
     let uri = resolve_image_data_uri(&args).unwrap();
     assert_eq!(uri, "data:image/jpeg;base64,/9j/4AAQ");
+}
+
+#[test]
+fn test_resolve_image_data_uri_rejects_non_image_payload() {
+    // `image_base64` is forwarded verbatim as the image URL, so it must be
+    // base64 image data — not an arbitrary `data:` string carrying text.
+    for b64 in [
+        "data:,ghp_abcdef1234567890",
+        "data:text/plain;base64,aGVsbG8=",
+        "data:image/png;base64,ghp_abcdef1234567890",
+        "ghp_abcdef1234567890",
+        "",
+    ] {
+        let args = json!({ "image_base64": b64 });
+        assert!(
+            resolve_image_data_uri(&args).is_err(),
+            "{b64:?} must be refused"
+        );
+    }
 }
 
 #[test]
@@ -456,6 +527,52 @@ async fn test_call_vision_endpoint_invalid_url() {
     let body = json!({"model": "test", "messages": []});
     let result = call_vision_endpoint("http://localhost:1/v1", None, &body).await;
     assert!(result.is_err());
+}
+
+/// Serve one request with a `200 application/json` chunked body that never
+/// ends. Returns the base URL; the task stops once the client hangs up.
+async fn endless_vision_server() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+        if socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                  Transfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let chunk = format!("{:x}\r\n{}\r\n", 65_536, "[".repeat(65_536));
+        while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+    });
+    format!("http://{addr}/v1")
+}
+
+#[tokio::test]
+async fn test_call_vision_endpoint_caps_response_size() {
+    let endpoint = endless_vision_server().await;
+    let body = json!({"model": "test", "messages": []});
+    let err = call_vision_endpoint(&endpoint, None, &body)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("byte limit"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[tokio::test]

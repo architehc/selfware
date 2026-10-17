@@ -32,6 +32,14 @@ pub struct McpServerConfig {
     /// Environment variables to set for the server process.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Working directory for the server process. Unset: the operator-owned
+    /// [`StdioTransport::default_server_dir`] (`~/.selfware/mcp`), never the
+    /// checkout selfware runs in — there a committed `my_mcp_server.py`
+    /// (`python -m`) or `node_modules/` (`npx`) would decide what the
+    /// configured launcher runs. Set it (e.g. `"."`) for a server that needs
+    /// the project as its working directory.
+    #[serde(default)]
+    pub cwd: Option<std::path::PathBuf>,
     /// Timeout in seconds for server initialization (default: 30).
     #[serde(default = "default_init_timeout")]
     pub init_timeout_secs: u64,

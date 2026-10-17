@@ -11,6 +11,22 @@ use syn::punctuated::Punctuated;
 use syn::{Meta, Token};
 use tree_sitter::{Node as TsNode, Parser};
 
+/// Upper bound on the syntax-tree depth of one item handed to `syn`. `syn`
+/// is a recursive-descent parser with no depth limit of its own: a source
+/// nested deeply enough — 190 parentheses around one expression on a debug
+/// build, a 2 KB `use` path — overflows the stack of the thread parsing it
+/// and aborts the process. tree-sitter parses iteratively, so the depth of
+/// its tree is a safe measure of how far `syn` would recurse. No real `mod`,
+/// `use` or attribute comes anywhere near this.
+pub(crate) const MAX_SYN_ITEM_DEPTH: usize = 32;
+
+/// Upper bound on tree-sitter subtree depth for whole-item (`fn`, `struct`,
+/// `enum`, `trait`) parses and recursive tree walks (`cfg_test_ranges`,
+/// `convert_node`). Real functions and item declarations stay well below 64
+/// tree-sitter levels, while `syn` stack overflow requires ~190 levels even in
+/// unoptimized debug builds.
+pub(crate) const MAX_SYN_BODY_DEPTH: usize = 64;
+
 /// A language-agnostic node in a parsed syntax tree.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AstNode {
@@ -68,7 +84,7 @@ impl AstAnalyzer {
         let tree = parser
             .parse(content, None)
             .ok_or_else(|| anyhow!("tree-sitter failed to parse source"))?;
-        Ok(Self::convert_node(tree.root_node(), content.as_bytes()))
+        Ok(Self::convert_node(tree.root_node(), content.as_bytes(), 0))
     }
 
     /// Return one-based, inclusive line ranges for items whose `cfg` predicate
@@ -110,6 +126,7 @@ impl AstAnalyzer {
             content.as_bytes(),
             include_external_modules,
             &mut ranges,
+            0,
         );
         Ok(ranges)
     }
@@ -119,7 +136,11 @@ impl AstAnalyzer {
         source: &[u8],
         include_external_modules: bool,
         ranges: &mut Vec<(usize, usize)>,
+        depth: usize,
     ) {
+        if depth >= MAX_SYN_BODY_DEPTH {
+            return;
+        }
         let mut cursor = parent.walk();
         let children: Vec<_> = parent.named_children(&mut cursor).collect();
         let mut index = 0;
@@ -128,7 +149,13 @@ impl AstAnalyzer {
             let child = children[index];
             if child.kind() != "attribute_item" {
                 if !Self::is_comment(child) {
-                    Self::collect_cfg_test_ranges(child, source, include_external_modules, ranges);
+                    Self::collect_cfg_test_ranges(
+                        child,
+                        source,
+                        include_external_modules,
+                        ranges,
+                        depth + 1,
+                    );
                 }
                 index += 1;
                 continue;
@@ -171,15 +198,97 @@ impl AstAnalyzer {
                 };
                 ranges.push((start_line, end_line));
             } else {
-                Self::collect_cfg_test_ranges(target, source, include_external_modules, ranges);
+                Self::collect_cfg_test_ranges(
+                    target,
+                    source,
+                    include_external_modules,
+                    ranges,
+                    depth + 1,
+                );
             }
 
             index = target_index + 1;
         }
     }
 
+    /// The top-level items of `kind` (a tree-sitter node kind such as
+    /// `mod_item` or `use_declaration`), each parsed with `syn` from its own
+    /// text — outer attributes included — so that nothing else in the file
+    /// reaches `syn`. Items deeper than [`MAX_SYN_ITEM_DEPTH`], items with a
+    /// syntax error (an ERROR node can flatten arbitrarily nested text) and
+    /// items `syn` rejects are skipped.
+    pub(crate) fn top_level_items<T: syn::parse::Parse>(
+        &self,
+        content: &str,
+        kind: &str,
+    ) -> Result<Vec<T>> {
+        self.top_level_items_with_depth(content, &[kind], MAX_SYN_ITEM_DEPTH)
+    }
+
+    /// Same as [`Self::top_level_items`], accepting multiple tree-sitter node
+    /// kinds and an explicit subtree depth bound.
+    pub(crate) fn top_level_items_with_depth<T: syn::parse::Parse>(
+        &self,
+        content: &str,
+        kinds: &[&str],
+        max_depth: usize,
+    ) -> Result<Vec<T>> {
+        // A shebang line is skipped as `syn::parse_file` does (tree-sitter
+        // takes one only without arguments, and then loses the first item).
+        let content = match content.strip_prefix("#!") {
+            Some(rest) if !rest.trim_start().starts_with('[') => {
+                content.find('\n').map_or("", |end| &content[end..])
+            }
+            _ => content,
+        };
+        let mut parser = self
+            .parser
+            .lock()
+            .map_err(|_| anyhow!("ast parser mutex poisoned"))?;
+        let tree = parser
+            .parse(content, None)
+            .ok_or_else(|| anyhow!("tree-sitter failed to parse source"))?;
+        let source = content.as_bytes();
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+
+        let mut items = Vec::new();
+        // Outer attributes preceding the current item; `None` once one of
+        // them could not be handed to `syn`, which skips the item as well.
+        let mut attributes = Some(String::new());
+        for child in root.named_children(&mut cursor) {
+            if Self::is_comment(child) {
+                continue;
+            }
+            if child.kind() == "attribute_item" {
+                match (
+                    attributes.as_mut(),
+                    Self::syn_safe_text(child, source, MAX_SYN_ITEM_DEPTH),
+                ) {
+                    (Some(attributes), Some(text)) => {
+                        attributes.push_str(text);
+                        attributes.push('\n');
+                    }
+                    _ => attributes = None,
+                }
+                continue;
+            }
+            if kinds.contains(&child.kind()) {
+                if let (Some(attributes), Some(text)) =
+                    (&attributes, Self::syn_safe_text(child, source, max_depth))
+                {
+                    if let Ok(item) = syn::parse_str::<T>(&format!("{attributes}{text}")) {
+                        items.push(item);
+                    }
+                }
+            }
+            attributes = Some(String::new());
+        }
+        Ok(items)
+    }
+
     fn is_test_only_cfg(attribute_item: TsNode<'_>, source: &[u8]) -> bool {
-        let Ok(text) = attribute_item.utf8_text(source) else {
+        let Some(text) = Self::syn_safe_text(attribute_item, source, MAX_SYN_ITEM_DEPTH) else {
             return false;
         };
         let Ok(attributes) = syn::Attribute::parse_outer.parse_str(text) else {
@@ -188,11 +297,43 @@ impl AstAnalyzer {
         cfg_attributes_require_test(&attributes)
     }
 
+    /// The text of `node` when `syn` can parse it on a bounded stack: free
+    /// of syntax errors and at most `max_depth` levels deep.
+    fn syn_safe_text<'a>(node: TsNode<'_>, source: &'a [u8], max_depth: usize) -> Option<&'a str> {
+        if node.has_error() || Self::deeper_than(node, max_depth) {
+            return None;
+        }
+        node.utf8_text(source).ok()
+    }
+
+    /// Whether `node`'s subtree nests more than `limit` levels below it.
+    /// A cursor walk, not recursion: the tree is as deep as the source is
+    /// nested.
+    fn deeper_than(node: TsNode<'_>, limit: usize) -> bool {
+        let mut cursor = node.walk();
+        let mut depth = 0;
+        loop {
+            if cursor.goto_first_child() {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return false;
+                }
+                depth -= 1;
+            }
+        }
+    }
+
     fn is_comment(node: TsNode<'_>) -> bool {
         matches!(node.kind(), "line_comment" | "block_comment")
     }
 
-    fn convert_node(node: TsNode, source: &[u8]) -> AstNode {
+    fn convert_node(node: TsNode, source: &[u8], depth: usize) -> AstNode {
         let mut cursor = node.walk();
         let start = node.start_position();
         let end = node.end_position();
@@ -200,6 +341,13 @@ impl AstAnalyzer {
             .child_by_field_name("name")
             .and_then(|name| name.utf8_text(source).ok())
             .map(str::to_string);
+        let children = if depth < MAX_SYN_BODY_DEPTH {
+            node.children(&mut cursor)
+                .map(|child| Self::convert_node(child, source, depth + 1))
+                .collect()
+        } else {
+            Vec::new()
+        };
         AstNode {
             kind: node.kind().to_string(),
             start_byte: node.start_byte(),
@@ -211,10 +359,7 @@ impl AstAnalyzer {
             label,
             named: node.is_named(),
             has_error: node.has_error(),
-            children: node
-                .children(&mut cursor)
-                .map(|child| Self::convert_node(child, source))
-                .collect(),
+            children,
         }
     }
 }

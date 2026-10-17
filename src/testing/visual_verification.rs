@@ -489,9 +489,22 @@ impl VisualVerifier {
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         debug!("Calling VLM endpoint: {}", url);
 
+        let parsed = reqwest::Url::parse(&url).context("Invalid VLM endpoint URL")?;
+        let allow_private =
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+        let policy = crate::tools::net_policy::validate_url_target(&parsed, allow_private)
+            .context("VLM endpoint rejected by network policy")?;
+
         let client = Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .connect_timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(std::sync::Arc::new(
+                crate::safety::PinnedDnsResolver::with_localhost(
+                    policy.allow_private,
+                    policy.allow_localhost,
+                ),
+            ))
             .build()
             .context("Failed to build HTTP client")?;
 

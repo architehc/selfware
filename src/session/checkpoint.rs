@@ -3225,6 +3225,14 @@ pub fn capture_head_sha(path: &std::path::Path) -> Option<String> {
 /// Capture current git state for checkpoint
 pub fn capture_git_state(repo_path: &str) -> Option<GitCheckpointInfo> {
     let repo = git2::Repository::open(repo_path).ok()?;
+    // A repository whose config relocates its work tree (`core.worktree`)
+    // would list files outside the workspace.
+    crate::safety::git_exec::ensure_work_tree_is_checkout(
+        &repo,
+        repo_path.as_ref(),
+        crate::safety::git_exec::GitScope::Internal,
+    )
+    .ok()?;
 
     // Get current branch
     let head = repo.head().ok()?;

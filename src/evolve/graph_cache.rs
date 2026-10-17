@@ -26,6 +26,12 @@ struct CachedIndex {
 
 static CACHE: OnceLock<RwLock<Option<CachedIndex>>> = OnceLock::new();
 
+/// Upper bound for the graph file. A real graph is a few MB (~110K lines of
+/// YAML); the bound only exists so a checkout that ships
+/// `.selfware/evolve-graph.yaml` as a symlink to something enormous (such as
+/// `/proc/kcore`) cannot make the task-start read exhaust memory.
+const MAX_GRAPH_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Where `selfware self-evolve` writes the graph under a project root
 /// (see `evolve::server`).
 pub fn graph_path(root: &Path) -> PathBuf {
@@ -58,6 +64,22 @@ fn cached_or_load<'a>(
             path.display()
         )
     })?;
+    // `metadata` follows symlinks: a checkout can commit the graph path as a
+    // symlink to a device such as `/dev/zero`, on which `fs::read` never
+    // reaches EOF. Refuse anything but a bounded regular file up front.
+    if !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "evolve graph at {} is not a regular file; run `selfware self-evolve` to rebuild it",
+            path.display()
+        );
+    }
+    if metadata.len() > MAX_GRAPH_FILE_BYTES {
+        anyhow::bail!(
+            "evolve graph at {} is larger than {} bytes; run `selfware self-evolve` to rebuild it",
+            path.display(),
+            MAX_GRAPH_FILE_BYTES
+        );
+    }
     let mtime = metadata
         .modified()
         .context("evolve graph mtime unavailable")?;

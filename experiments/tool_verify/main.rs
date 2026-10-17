@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use selfware::config::Config;
 use selfware::tools::ToolRegistry;
 
-const CONCURRENCY: usize = 6;
+const CONCURRENCY: usize = 1;
 
 struct ToolSpec {
     name: String,
@@ -129,6 +129,103 @@ struct Outcome {
     provider: Option<String>,
 }
 
+fn extract_tool_call_from_response(
+    v: &Value,
+    expected_name: &str,
+) -> Result<Option<(String, String, Value)>, String> {
+    let tool_calls = v
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|t| t.as_array());
+
+    if let Some(calls) = tool_calls.filter(|c| !c.is_empty()) {
+        let call = &calls[0];
+        let name = call
+            .pointer("/function/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let raw_args = call
+            .pointer("/function/arguments")
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .to_string();
+        return match serde_json::from_str(&raw_args) {
+            Ok(a) => Ok(Some((name, raw_args, a))),
+            Err(e) => Err(format!("arguments are not valid JSON: {e} :: {raw_args}")),
+        };
+    }
+
+    for ptr in [
+        "/choices/0/message/content",
+        "/choices/0/message/reasoning_content",
+    ] {
+        let text = v.pointer(ptr).and_then(|c| c.as_str()).unwrap_or("").trim();
+        if text.is_empty() {
+            continue;
+        }
+        let parsed = selfware::tool_parser::parse_tool_calls(text);
+        if let Some(tc) = parsed.tool_calls.first() {
+            let raw = serde_json::to_string(&tc.arguments).unwrap_or_default();
+            return Ok(Some((tc.tool_name.clone(), raw, tc.arguments.clone())));
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(text) {
+            if let (Some(n), Some(a)) = (
+                val.get("name").and_then(|x| x.as_str()),
+                val.get("arguments"),
+            ) {
+                let arg_val = if let Some(s) = a.as_str() {
+                    serde_json::from_str(s).unwrap_or_else(|_| a.clone())
+                } else {
+                    a.clone()
+                };
+                let raw = serde_json::to_string(&arg_val).unwrap_or_default();
+                return Ok(Some((n.to_string(), raw, arg_val)));
+            } else if val.is_object() {
+                let raw = serde_json::to_string(&val).unwrap_or_default();
+                return Ok(Some((expected_name.to_string(), raw, val)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn minimal_required_schema(schema: &Value) -> Value {
+    let mut out = schema.clone();
+    let required: Vec<String> = out
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(props) = out.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        if !required.is_empty() {
+            props.retain(|k, _| required.contains(k));
+        }
+        for val in props.values_mut() {
+            if let Some(obj) = val.as_object_mut() {
+                obj.remove("default");
+            }
+        }
+    }
+    out
+}
+
+fn has_multi_enum_defaults(schema: &Value) -> bool {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let enums = props.values().filter(|v| v.get("enum").is_some()).count();
+    let defaults = props
+        .values()
+        .filter(|v| v.get("default").is_some())
+        .count();
+    enums >= 2 && defaults >= 2
+}
+
 async fn verify_tool(
     http: &reqwest::Client,
     url: &str,
@@ -137,12 +234,17 @@ async fn verify_tool(
     extra_body: &serde_json::Map<String, Value>,
     spec: &ToolSpec,
 ) -> Outcome {
+    let initial_params = if has_multi_enum_defaults(&spec.schema) {
+        minimal_required_schema(&spec.schema)
+    } else {
+        spec.schema.clone()
+    };
     let tool_def = json!({
         "type": "function",
         "function": {
             "name": spec.name,
             "description": spec.description,
-            "parameters": spec.schema,
+            "parameters": initial_params,
         }
     });
     let mut body = json!({
@@ -156,29 +258,54 @@ async fn verify_tool(
         ],
         "tools": [tool_def],
         "tool_choice": {"type": "function", "function": {"name": spec.name}},
-        "max_tokens": 512,
+        "max_tokens": 4096,
         "temperature": 0.2,
     });
-    // Merge config extra_body (e.g. OpenRouter provider routing).
+    // Merge config extra_body (e.g. OpenRouter provider routing), then force
+    // enable_thinking=false so reasoning tokens do not exhaust max_tokens
+    // before the forced tool call is emitted (matches the `planning` workload).
     if let Some(map) = body.as_object_mut() {
         for (k, v) in extra_body {
             map.insert(k.clone(), v.clone());
         }
+        map.insert(
+            "chat_template_kwargs".to_string(),
+            json!({"enable_thinking": false}),
+        );
     }
 
-    let resp = match http.post(url).bearer_auth(api_key).json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => {
+    let mut last_err = None;
+    let mut resp_opt = None;
+    for attempt in 0..2 {
+        match http.post(url).bearer_auth(api_key).json(&body).send().await {
+            Ok(r) if r.status().is_success() || r.status().is_client_error() => {
+                resp_opt = Some(r);
+                break;
+            }
+            Ok(r) => {
+                last_err = Some(format!("HTTP status {}", r.status()));
+            }
+            Err(e) => {
+                last_err = Some(format!("HTTP error: {e}"));
+            }
+        }
+        if attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    let resp = match resp_opt {
+        Some(r) => r,
+        None => {
             return Outcome {
                 tool: spec.name.clone(),
                 passed: false,
-                detail: format!("HTTP error: {e}"),
+                detail: last_err.unwrap_or_else(|| "HTTP error".to_string()),
                 provider: None,
             }
         }
     };
 
-    let v: Value = match resp.json().await {
+    let mut v: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
             return Outcome {
@@ -199,26 +326,105 @@ async fn verify_tool(
         };
     }
 
-    let provider = v.get("provider").and_then(|p| p.as_str()).map(String::from);
+    let mut provider = v.get("provider").and_then(|p| p.as_str()).map(String::from);
 
-    let tool_calls = v
-        .pointer("/choices/0/message/tool_calls")
-        .and_then(|t| t.as_array());
-
-    let Some(calls) = tool_calls.filter(|c| !c.is_empty()) else {
-        return Outcome {
-            tool: spec.name.clone(),
-            passed: false,
-            detail: "model returned no tool_calls".to_string(),
-            provider,
-        };
+    let mut extracted = match extract_tool_call_from_response(&v, &spec.name) {
+        Ok(res) => res,
+        Err(detail) => {
+            return Outcome {
+                tool: spec.name.clone(),
+                passed: false,
+                detail,
+                provider,
+            }
+        }
     };
 
-    let call = &calls[0];
-    let called_name = call
-        .pointer("/function/name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("");
+    // If forced tool_choice returned an empty response (common on SGLang when
+    // a schema combines multiple optional enum+default fields like `code_introspect`),
+    // retry once with the minimal required-fields schema while still validating
+    // the returned arguments against the full `spec.schema`.
+    if extracted.is_none() {
+        let min_tool_def = json!({
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": minimal_required_schema(&spec.schema),
+            }
+        });
+        let mut fallback_body = json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content":
+                    "You are validating a tool. Call the provided tool once with \
+                     realistic, schema-valid arguments for a representative use."},
+                {"role": "user", "content": format!(
+                    "Call the `{}` tool now with valid arguments (e.g. \"src\").", spec.name)}
+            ],
+            "tools": [min_tool_def],
+            "tool_choice": {"type": "function", "function": {"name": spec.name}},
+            "max_tokens": 1024,
+            "temperature": 0.2,
+        });
+        if let Some(map) = fallback_body.as_object_mut() {
+            for (k, val) in extra_body {
+                map.insert(k.clone(), val.clone());
+            }
+            map.insert(
+                "chat_template_kwargs".to_string(),
+                json!({"enable_thinking": false}),
+            );
+        }
+        if let Ok(resp2) = http
+            .post(url)
+            .bearer_auth(api_key)
+            .json(&fallback_body)
+            .send()
+            .await
+        {
+            if let Ok(v2) = resp2.json::<Value>().await {
+                if v2.get("error").is_none() {
+                    if provider.is_none() {
+                        provider = v2
+                            .get("provider")
+                            .and_then(|p| p.as_str())
+                            .map(String::from);
+                    }
+                    if let Ok(Some(found)) = extract_tool_call_from_response(&v2, &spec.name) {
+                        extracted = Some(found);
+                    } else {
+                        v = v2;
+                    }
+                }
+            }
+        }
+    }
+
+    let (called_name, args_str, args) = match extracted {
+        Some(triple) => triple,
+        None => {
+            let content = v
+                .pointer("/choices/0/message/content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .trim();
+            let finish_reason = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(|f| f.as_str())
+                .unwrap_or("unknown");
+            return Outcome {
+                tool: spec.name.clone(),
+                passed: false,
+                detail: format!(
+                    "model returned no tool_calls (finish_reason={finish_reason}, content={})",
+                    truncate(content, 80)
+                ),
+                provider,
+            };
+        }
+    };
+
     if called_name != spec.name {
         return Outcome {
             tool: spec.name.clone(),
@@ -228,33 +434,17 @@ async fn verify_tool(
         };
     }
 
-    let args_str = call
-        .pointer("/function/arguments")
-        .and_then(|a| a.as_str())
-        .unwrap_or("");
-    let args: Value = match serde_json::from_str(args_str) {
-        Ok(a) => a,
-        Err(e) => {
-            return Outcome {
-                tool: spec.name.clone(),
-                passed: false,
-                detail: format!("arguments are not valid JSON: {e} :: {args_str}"),
-                provider,
-            }
-        }
-    };
-
     match validate_args(&args, &spec.schema) {
         Ok(()) => Outcome {
             tool: spec.name.clone(),
             passed: true,
-            detail: format!("valid args: {}", truncate(args_str, 70)),
+            detail: format!("valid args: {}", truncate(&args_str, 70)),
             provider,
         },
         Err(reason) => Outcome {
             tool: spec.name.clone(),
             passed: false,
-            detail: format!("schema violation: {reason} :: {}", truncate(args_str, 70)),
+            detail: format!("schema violation: {reason} :: {}", truncate(&args_str, 70)),
             provider,
         },
     }

@@ -387,6 +387,46 @@ async fn pip_freeze_output_file_follows_the_active_workspace() {
 }
 
 #[tokio::test]
+async fn pip_list_does_not_import_the_workspace_pip_package() {
+    // `python -m pip` resolved `pip` against the cwd first, so a checkout
+    // shipping `pip/__init__.py` ran as the operator from the read-only,
+    // unprompted `pip_list`. Only python3 is needed: whether or not the real
+    // pip is installed, the checkout's copy must never be imported.
+    if tokio::process::Command::new("python3")
+        .sanitized_env()
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("python3 unavailable; skipping");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("imported_repo_pip");
+    std::fs::create_dir(dir.path().join("pip")).unwrap();
+    std::fs::write(
+        dir.path().join("pip/__init__.py"),
+        format!("open({:?}, 'w').write('x')\n", marker.to_string_lossy()),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("pip/__main__.py"), "print('[]')\n").unwrap();
+
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let result =
+        crate::tools::workspace_root::scope(root, async { PipList.execute(json!({})).await })
+            .await
+            .unwrap();
+
+    assert!(
+        !marker.exists(),
+        "pip_list imported the workspace's pip/ package: {result}"
+    );
+}
+
+#[tokio::test]
 async fn test_npm_install_path_policy() {
     let _state = policy_guard();
     let tool = NpmInstall::new();

@@ -235,7 +235,7 @@ fn trusted_or_clean_repositories_get_only_what_they_need() {
     // A clean untrusted repository still gets the fixed keys (a later
     // `git clone` + `cd` is covered for fsmonitor/hooks/pager).
     let env = shell_git_env(tmp.path());
-    assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "4".to_string()));
+    assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "5".to_string()));
     assert!(is_git_config_env("GIT_CONFIG_COUNT"));
     assert!(is_git_config_env("git_config_key_0"));
     assert!(is_git_config_env("GIT_CONFIG_PARAMETERS"));
@@ -280,5 +280,140 @@ fn exec_config_cache_follows_the_config_file() {
         2,
         "{:?}",
         repo_exec_config(dir)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn subsection_with_equals_cannot_inject_config_via_hardening_args() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let marker = dir.join("pwned");
+    let hook = dir.join("pwn.sh");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\necho pwned > '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return;
+    }
+    let cfg = dir.join(".git/config");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[diff \"a\\n\\tfsmonitor = {}\\n[x\"]\n\tcommand = {}\n",
+        hook.display(),
+        hook.display()
+    ));
+    std::fs::write(&cfg, text).unwrap();
+
+    let args = hardening_args(dir, GitScope::Internal);
+    assert!(
+        !args.iter().any(|a| a.contains("pwn.sh")),
+        "hardening_args must not splice repo-named keys into -c: {args:?}"
+    );
+    run(git_command(dir, GitScope::Internal));
+    let mut cmd = git_command(dir, GitScope::Internal);
+    cmd.args(["status", "--porcelain"]);
+    run(cmd);
+    assert!(
+        !marker.exists(),
+        "subsection `=` injection must not run fsmonitor"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn relocated_work_tree_is_pinned_to_the_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("private.txt");
+    std::fs::write(&outside, "Host bastion\n").unwrap();
+    let dir = tmp.path().join("home").join("checkout");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q"]) {
+        return;
+    }
+    std::fs::write(dir.join("empty"), "").unwrap();
+    assert!(git(&["hash-object", "-w", "empty"]));
+    std::fs::remove_file(dir.join("empty")).unwrap();
+    assert!(git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,private.txt",
+    ]));
+    let libgit2 = |scope| {
+        let repo = git2::Repository::open(&dir).unwrap();
+        ensure_work_tree_is_checkout(&repo, &dir, scope)
+    };
+    assert!(pinned_work_tree(&dir).is_none());
+    assert!(repo_git_is_inert(&dir));
+    assert!(libgit2(GitScope::Internal).is_ok());
+    assert!(git(&["config", "core.worktree", "../../.."]));
+    let root = std::fs::canonicalize(&dir).unwrap();
+    assert_eq!(pinned_work_tree(&dir).as_deref(), Some(root.as_path()));
+    assert!(!repo_git_is_inert(&dir));
+    assert!(libgit2(GitScope::Internal).is_err());
+    assert!(libgit2(GitScope::UserOperation).is_err());
+
+    let diff = |mut cmd: std::process::Command| {
+        let out = cmd
+            .args(["diff"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let mut plain = std::process::Command::new("git");
+    plain.current_dir(&dir).env("GIT_CONFIG_NOSYSTEM", "1");
+    assert!(
+        diff(plain).contains("+Host bastion"),
+        "fixture must relocate"
+    );
+    for scope in [GitScope::Internal, GitScope::UserOperation] {
+        let args = hardening_args(&dir, scope);
+        assert!(
+            args.contains(&format!("--work-tree={}", root.display())),
+            "{args:?}"
+        );
+        let out = diff(git_command(&dir, scope));
+        assert!(
+            !out.contains("Host bastion"),
+            "{scope:?} read outside: {out}"
+        );
+        assert!(
+            out.contains("deleted file"),
+            "{scope:?} diffed the checkout: {out}"
+        );
+    }
+    let env = shell_git_env(&dir);
+    assert!(
+        env.contains(&("GIT_WORK_TREE".to_string(), root.display().to_string())),
+        "{env:?}"
+    );
+    let out = shell_run(&dir, "git diff");
+    assert!(!out.contains("Host bastion"), "shell read outside: {out}");
+    assert!(
+        out.contains("deleted file"),
+        "shell diffed the checkout: {out}"
     );
 }

@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::scratch_dir::{self, ScratchDir};
 use crate::api::types::ToolCall;
 
 /// What the agent did with a model response after parsing it.
@@ -270,25 +271,30 @@ pub fn sanitize_request_body(body: &mut serde_json::Value) {
     crate::config::model::redact_config_secrets(body);
 }
 
+/// Where turn artifacts live, relative to the project-local `.selfware/`.
+pub(crate) const TURNS_SUBDIR: &str = "turns";
+
 /// Resolve the directory artifacts should be written into for the given workdir.
 ///
 /// Returns `<workdir>/.selfware/turns`.
 pub fn artifact_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".selfware").join("turns")
+    workdir.join(scratch_dir::SELFWARE_DIR).join(TURNS_SUBDIR)
 }
 
-/// Ensure a project-local `.selfware/` directory carries a `.gitignore` that
-/// ignores everything inside it, so the agent's scratch (turn artifacts,
-/// spilled tool results, …) can't be accidentally committed into the user's
-/// repo. No-op if the dir doesn't exist or the file is already present.
+/// Ensure the project-local `<workdir>/.selfware/` directory carries a
+/// `.gitignore` that ignores everything inside it, so the agent's scratch
+/// (turn artifacts, spilled tool results, …) can't be accidentally committed
+/// into the user's repo. No-op if the dir doesn't exist or the file is
+/// already present. The write is pinned to the real `.selfware/` and creates
+/// the file exclusively: a checkout shipping `.selfware/.gitignore` as a
+/// (dangling) symlink gets nothing created at its target.
 /// Best-effort — a failure to write it must never break the caller.
-pub(crate) fn ensure_selfware_gitignore(selfware_dir: &Path) {
-    if !selfware_dir.is_dir() {
-        return;
-    }
-    let gitignore = selfware_dir.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(&gitignore, "# Selfware scratch — do not commit.\n*\n");
+pub(crate) fn ensure_selfware_gitignore(workdir: &Path) {
+    if let Ok(dir) = ScratchDir::open(workdir, &[], false) {
+        let _ = dir.write_new(
+            ".gitignore",
+            "# Selfware scratch — do not commit.\n*\n".as_bytes(),
+        );
     }
 }
 
@@ -335,18 +341,27 @@ async fn prune_old_artifacts(dir: &Path) {
     }
 }
 
+/// File name of the artifact for `step`.
+fn artifact_name(step: usize) -> String {
+    format!("turn_{:04}.json", step)
+}
+
 /// Path of the artifact file for `step` under `dir`.
 pub fn artifact_path(dir: &Path, step: usize) -> PathBuf {
-    dir.join(format!("turn_{:04}.json", step))
+    dir.join(artifact_name(step))
 }
 
 /// The smallest step `>= from` whose artifact file does not exist yet in
 /// `workdir`'s artifact directory. Artifact history is append-only: a new
 /// turn never takes a slot an earlier process (or resumed segment) wrote.
 pub fn next_free_step(workdir: &Path, from: usize) -> usize {
-    let dir = artifact_dir(workdir);
     let mut step = from.max(1);
-    while artifact_path(&dir, step).exists() {
+    // No (real) artifact directory yet: nothing is taken. A directory that
+    // can't be pinned can't be written to either.
+    let Ok(dir) = ScratchDir::open(workdir, &[TURNS_SUBDIR], false) else {
+        return step;
+    };
+    while dir.exists(&artifact_name(step)) {
         step += 1;
     }
     step
@@ -356,16 +371,26 @@ pub fn next_free_step(workdir: &Path, from: usize) -> usize {
 ///
 /// Errors are logged but never propagated — debug capture must never break
 /// the agent loop.
+///
+/// The directory is pinned (see `scratch_dir`): a checkout shipping
+/// `.selfware/turns` or a `turn_NNNN.json` as a symlink gets nothing written
+/// through it.
 pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
-    let dir = artifact_dir(workdir);
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        tracing::warn!("Failed to create turn artifact dir {:?}: {}", dir, e);
-        return;
-    }
+    let dir = match ScratchDir::open(workdir, &[TURNS_SUBDIR], true) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to create turn artifact dir {:?}: {}",
+                artifact_dir(workdir),
+                e
+            );
+            return;
+        }
+    };
     // Drop a .gitignore into the project-local .selfware/ so scratch isn't
     // accidentally committed into the user's repo.
-    ensure_selfware_gitignore(&workdir.join(".selfware"));
-    let path = artifact_path(&dir, artifact.step);
+    ensure_selfware_gitignore(workdir);
+    let name = artifact_name(artifact.step);
     let json = match serde_json::to_string_pretty(artifact) {
         Ok(s) => s,
         Err(e) => {
@@ -373,11 +398,15 @@ pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
             return;
         }
     };
-    if let Err(e) = tokio::fs::write(&path, json).await {
-        tracing::warn!("Failed to write turn artifact {:?}: {}", path, e);
+    if let Err(e) = dir.write(&name, json.as_bytes()) {
+        tracing::warn!(
+            "Failed to write turn artifact {:?}: {}",
+            dir.path().join(&name),
+            e
+        );
         return;
     }
-    prune_old_artifacts(&dir).await;
+    prune_old_artifacts(dir.path()).await;
 }
 
 #[cfg(test)]

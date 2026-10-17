@@ -253,6 +253,27 @@ fn test_semantic_summary_shell_exec() {
 }
 
 #[test]
+fn test_semantic_summary_and_activity_escape_model_control_characters() {
+    // A command (or a failing command's stderr) can carry escape sequences;
+    // the lines printed around the call must not repaint the terminal.
+    let args = serde_json::json!({"command": "touch x #\x1b[2J\x1b[H"});
+    let summary = semantic_summary("shell_exec", &args, None, true, 100);
+    assert!(!summary.contains('\x1b'), "{summary:?}");
+    assert!(
+        summary.contains("touch x #\\u{1b}[2J\\u{1b}[H"),
+        "{summary:?}"
+    );
+    let result = serde_json::json!({"exit_code": 1, "stderr": "\x1b[2Jboom\n"}).to_string();
+    let summary = semantic_summary("shell_exec", &args, Some(&result), false, 100);
+    assert!(!summary.contains('\x1b'), "{summary:?}");
+    assert!(summary.contains("\\u{1b}[2Jboom"), "{summary:?}");
+    let activity = tool_activity_message("shell_exec", &args);
+    assert!(!activity.contains('\x1b'), "{activity:?}");
+    let activity = tool_activity_message("\x1b[2Jno_such_tool", &args);
+    assert_eq!(activity, "\\u{1b}[2Jno_such_tool...");
+}
+
+#[test]
 fn test_semantic_summary_cargo_check() {
     let args = serde_json::json!({});
     let summary = semantic_summary("cargo_check", &args, None, true, 200);

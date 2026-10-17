@@ -28,6 +28,15 @@ pub struct HarnessReport {
     pub total_completion_tokens: u64,
     /// Aggregate tokens/second (completion tokens / wall-clock seconds).
     pub tokens_per_sec: f64,
+    /// Active inference tokens/second (excluding gateway queue wait time).
+    #[serde(default)]
+    pub inference_tokens_per_sec: f64,
+    /// Total queue wait time across transport-succeeded tasks in milliseconds.
+    #[serde(default)]
+    pub total_queue_wait_ms: u64,
+    /// Active inference p50 latency in milliseconds (`latency_ms - queue_wait_ms`).
+    #[serde(default)]
+    pub inference_p50_ms: u64,
     /// Latency percentiles in milliseconds.
     pub latency_p50_ms: u64,
     pub latency_p95_ms: u64,
@@ -68,6 +77,32 @@ impl HarnessReport {
             0.0
         };
 
+        let total_queue_wait_ms: u64 = results
+            .iter()
+            .filter(|r| r.transport_succeeded)
+            .map(|r| r.queue_wait_ms)
+            .sum();
+        let total_wall_task_ms: u64 = results
+            .iter()
+            .filter(|r| r.transport_succeeded)
+            .map(|r| r.latency_ms)
+            .sum();
+        let total_infer_task_ms: u64 = results
+            .iter()
+            .filter(|r| r.transport_succeeded)
+            .map(|r| r.inference_latency_ms())
+            .sum();
+
+        let inference_tokens_per_sec = if total_queue_wait_ms == 0 {
+            tokens_per_sec
+        } else if total_duration_secs > 0.0 && total_wall_task_ms > 0 && total_infer_task_ms > 0 {
+            let infer_ratio = total_infer_task_ms as f64 / total_wall_task_ms as f64;
+            let effective_infer_secs = (total_duration_secs * infer_ratio).max(0.001);
+            total_completion_tokens as f64 / effective_infer_secs
+        } else {
+            tokens_per_sec
+        };
+
         // Latency stats — over TRANSPORT-successful requests only (the request
         // completed and returned a well-formed response). This is independent
         // of evaluation: a timely but wrong answer is still a valid latency
@@ -81,9 +116,17 @@ impl HarnessReport {
             .collect();
         latencies.sort_unstable();
 
+        let mut infer_latencies: Vec<u64> = results
+            .iter()
+            .filter(|r| r.transport_succeeded)
+            .map(|r| r.inference_latency_ms())
+            .collect();
+        infer_latencies.sort_unstable();
+
         let latency_p50_ms = percentile(&latencies, 50);
         let latency_p95_ms = percentile(&latencies, 95);
         let latency_p99_ms = percentile(&latencies, 99);
+        let inference_p50_ms = percentile(&infer_latencies, 50);
         let latency_avg_ms = if latencies.is_empty() {
             0.0
         } else {
@@ -125,6 +168,9 @@ impl HarnessReport {
             total_prompt_tokens,
             total_completion_tokens,
             tokens_per_sec,
+            inference_tokens_per_sec,
+            total_queue_wait_ms,
+            inference_p50_ms,
             latency_p50_ms,
             latency_p95_ms,
             latency_p99_ms,
@@ -162,10 +208,17 @@ impl HarnessReport {
             self.error_rate * 100.0,
         ));
         md.push_str(&format!("| Avg Score | {:.1}% |\n", self.avg_score * 100.0,));
-        md.push_str(&format!(
-            "| Throughput | {:.0} tok/s |\n",
-            self.tokens_per_sec,
-        ));
+        if self.total_queue_wait_ms > 0 {
+            md.push_str(&format!(
+                "| Throughput | {:.0} tok/s wall ({:.0} tok/s active inference) |\n",
+                self.tokens_per_sec, self.inference_tokens_per_sec,
+            ));
+        } else {
+            md.push_str(&format!(
+                "| Throughput | {:.0} tok/s |\n",
+                self.tokens_per_sec,
+            ));
+        }
         md.push_str(&format!(
             "| Tokens | {} prompt + {} completion |\n",
             format_tokens(self.total_prompt_tokens),
@@ -178,6 +231,12 @@ impl HarnessReport {
 
         md.push_str("\n## Latency\n\n");
         md.push_str("| Percentile | ms |\n|-----------|----|\n");
+        if self.total_queue_wait_ms > 0 {
+            md.push_str(&format!(
+                "| p50 (active inference) | {} |\n",
+                self.inference_p50_ms
+            ));
+        }
         md.push_str(&format!("| p50 | {} |\n", self.latency_p50_ms));
         md.push_str(&format!("| p95 | {} |\n", self.latency_p95_ms));
         md.push_str(&format!("| p99 | {} |\n", self.latency_p99_ms));
@@ -197,9 +256,19 @@ impl HarnessReport {
                 .as_ref()
                 .map(|e| format!("{:.0}%", e.score * 100.0))
                 .unwrap_or_else(|| "N/A".into());
+            let lat_cell = if r.queue_wait_ms > 0 {
+                format!(
+                    "{}ms ({}ms infer + {}ms queue)",
+                    r.latency_ms,
+                    r.inference_latency_ms(),
+                    r.queue_wait_ms
+                )
+            } else {
+                format!("{}ms", r.latency_ms)
+            };
             md.push_str(&format!(
-                "| {} | {} | {} | {}ms | {}+{} |\n",
-                r.task_id, status, score, r.latency_ms, r.prompt_tokens, r.completion_tokens,
+                "| {} | {} | {} | {} | {}+{} |\n",
+                r.task_id, status, score, lat_cell, r.prompt_tokens, r.completion_tokens,
             ));
         }
 

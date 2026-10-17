@@ -339,8 +339,10 @@ const MAX_TOOL_PARSER_INPUT_SIZE: usize = 10 * 1024 * 1024;
 /// `<arguments>` blocks (e.g. `{"x": "name>"}`) is not corrupted by the rewrite.
 fn normalize_malformed_xml(content: &str) -> String {
     let json_re = JSON_STRING_REGEX.get_or_init(|| {
-        // Match a JSON string literal, including escaped quotes.
-        Regex::new(r#""(?:[^"\\]|\\.)*""#).expect("Invalid JSON string regex")
+        // Match a single-line JSON string literal, including escaped quotes.
+        // Raw newlines are excluded (invalid in RFC 8259 JSON strings) so an
+        // unmatched `"` in prose cannot invert quote state on later lines.
+        Regex::new(r#""(?:[^"\\\r\n]|\\.)*""#).expect("Invalid JSON string regex")
     });
     let re = MALFORMED_CLOSE_TAG_REGEX.get_or_init(|| {
         // Match known closing-tag names followed by `>` only when the `>` is the last
@@ -1599,6 +1601,11 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
     }
 
     if args.is_empty() {
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            let err = serde_json::from_str::<serde_json::Value>(trimmed)
+                .expect_err("valid JSON would have returned early");
+            anyhow::bail!("Invalid JSON in <arguments>: {}", err);
+        }
         // Last resort: treat the whole thing as a string argument
         Ok(serde_json::json!({"input": trimmed}))
     } else {

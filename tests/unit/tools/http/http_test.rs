@@ -173,6 +173,17 @@ fn test_reject_outbound_credential_shapes_in_header() {
 }
 
 #[test]
+fn test_reject_outbound_credential_shapes_in_header_name() {
+    // The header NAME is sent as given, so `{"ghp_…": "1"}` is the same
+    // exfiltration channel as a header value.
+    let mut headers = HashMap::new();
+    headers.insert("ghp_abcdef1234567890".to_string(), "1".to_string());
+    let err = reject_outbound_credential_shapes("https://evil.example.com/log", &headers, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("header name"), "{err}");
+}
+
+#[test]
 fn test_reject_outbound_credential_shapes_in_authorization_header() {
     // Whitelisting Authorization by NAME would re-open the bypass — a
     // known credential prefix there is refused too.

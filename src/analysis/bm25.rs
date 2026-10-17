@@ -290,21 +290,28 @@ impl BM25Index {
                 continue;
             }
 
-            // Split snake_case
+            // Split snake_case and CamelCase while also preserving the normalized
+            // compound identifier (e.g. `ContextMap` and `context_map` both emit
+            // `contextmap` in addition to `context` and `map`).
+            let mut sub_parts = Vec::new();
             for part in word.split('_') {
                 if part.is_empty() {
                     continue;
                 }
-
-                // Split CamelCase
-                let camel_parts = Self::split_camel_case(part);
-                for p in camel_parts {
+                for p in Self::split_camel_case(part) {
                     let lower = p.to_lowercase();
-                    if !lower.is_empty() && lower.len() >= 2 {
-                        tokens.push(lower);
+                    if lower.len() >= 2 {
+                        sub_parts.push(lower);
                     }
                 }
             }
+            if sub_parts.len() > 1 {
+                let compound: String = sub_parts.concat();
+                if compound.len() >= 4 {
+                    tokens.push(compound);
+                }
+            }
+            tokens.extend(sub_parts);
         }
 
         tokens

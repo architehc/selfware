@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::ui::components::{render_header, WorkshopContext};
@@ -162,7 +162,8 @@ pub(crate) async fn handle_batch_command(
     println!("{}", "─".repeat(60));
 
     // ── Write results to output directory ──
-    let _ = std::fs::create_dir_all(&output);
+    std::fs::create_dir_all(&output)
+        .with_context(|| format!("Failed to create output directory '{}'", output))?;
     let summary_path = std::path::Path::new(&output).join("batch_summary.txt");
     let mut summary = format!(
         "Batch Summary: {} total, {} passed, {} failed\n\n",
@@ -176,7 +177,12 @@ pub(crate) async fn handle_batch_command(
         }
         summary.push('\n');
     }
-    let _ = std::fs::write(&summary_path, &summary);
+    std::fs::write(&summary_path, &summary).with_context(|| {
+        format!(
+            "Failed to write batch summary to '{}'",
+            summary_path.display()
+        )
+    })?;
     if !quiet {
         println!("Results written to: {}", summary_path.display());
     }

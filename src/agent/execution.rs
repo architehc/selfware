@@ -108,6 +108,24 @@ pub(super) async fn with_esc_listener_paused<T: Send + 'static>(
     result
 }
 
+/// Discard terminal input typed before a confirmation question is shown, so
+/// a line the operator entered earlier (say, answering a yes/no question in
+/// the model's prose) is not read as the answer to a prompt they have not
+/// seen yet. In the REPL the ESC listener owns the keyboard and drains what
+/// raced the handoff; a one-shot run (`run`, `-p`, `improve`, `batch`) has
+/// no listener, the terminal stays in cooked mode for the whole run and the
+/// tty queues every completed line for the next `read_line` — which is the
+/// prompt's. Call this BEFORE printing the question: anything typed after
+/// the question is on screen is a real answer and must be kept.
+pub(super) fn discard_pending_stdin() {
+    #[cfg(unix)]
+    {
+        // SAFETY: tcflush only takes a file descriptor and a queue selector;
+        // on a non-terminal stdin it fails with ENOTTY and changes nothing.
+        let _ = unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
+    }
+}
+
 /// `read_line_pausing_esc` with an optional bound on how long to wait for
 /// the operator. `Ok(None)` means the bound elapsed with no answer. The ESC
 /// listener is always unpaused afterwards (a timeout around the plain reader
@@ -888,11 +906,34 @@ impl Agent {
 
     /// Pick the verification command to auto-run when the model keeps
     /// answering without re-verifying (the StaleVerification churn breaker).
-    /// Reuse the most recent verification call with its original arguments;
-    /// otherwise prefer language manifests over generic directory heuristics.
+    /// Re-run a failed check the edits have outdated; otherwise reuse the
+    /// most recent verification call with its original arguments; otherwise
+    /// prefer language manifests over generic directory heuristics.
     /// Returns `None` when there is no honest command to run.
     /// The tuple is `(tool_name, tool_args_json, display_command)`.
     fn stale_verification_rescue_call(&self) -> Option<(String, String, String)> {
+        let display_for = |tool_name: &str, args: &str| {
+            serde_json::from_str::<serde_json::Value>(args)
+                .ok()
+                .and_then(|args| {
+                    args.get("command")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| tool_name.to_owned())
+        };
+        // A check that failed before the latest edit and has not run since is
+        // what the gate is waiting on; re-running the most recent (different,
+        // passing) check instead answers nothing and loops to the cap.
+        if let Some(super::preexisting_failure::RerunSpec::Tool { name, args }) = self
+            .verification_failures
+            .stale_unresolved(&self.verification_task_root(), self.mutation_sequence)
+            .and_then(|record| record.rerun.as_ref())
+        {
+            if self.tools.get(name).is_some() {
+                return Some((name.clone(), args.clone(), display_for(name, args)));
+            }
+        }
         // A verifier the run already used is stronger evidence than a guessed
         // ecosystem default. Keep its full arguments (notably working_dir).
         if let Some(call) = self.current_checkpoint.as_ref().and_then(|checkpoint| {
@@ -904,14 +945,7 @@ impl Agent {
                     )
             })
         }) {
-            let display = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .ok()
-                .and_then(|args| {
-                    args.get("command")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| call.tool_name.clone());
+            let display = display_for(&call.tool_name, &call.arguments);
             return Some((call.tool_name.clone(), call.arguments.clone(), display));
         }
         let root = super::current_project_root();

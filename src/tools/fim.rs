@@ -321,14 +321,12 @@ impl Tool for FileFimEdit {
             // If rustfmt is not available, proceed without the check.
         }
 
-        // Create backup before overwriting
-        let backup_path = format!("{}.fim-backup", path);
-        validate_tool_path(&backup_path, &safety)?;
-        if let Err(e) = write_atomic_checked(Path::new(&backup_path), &content, &safety).await {
-            // Non-fatal: warn but proceed (file might be new)
-            tracing::debug!("Could not create FIM backup: {}", e);
-        }
-
+        // No on-disk `<file>.fim-backup` sibling: that copy was never passed
+        // through the path policy and followed a symlink planted at the
+        // backup name (a repository shipping `x.fim-backup -> .git/hooks/
+        // pre-commit` or `-> ../../.bashrc` got the file's bytes and mode
+        // written there). Undo comes from the in-memory edit history, like
+        // file_write; crash safety from the atomic write below.
         let final_content = preserve_line_endings(&new_content, line_ending);
         // Atomic temp+rename with the parent re-validated, like the other
         // file tools: a cancel/timeout mid-write must not leave a torn file.
@@ -337,8 +335,7 @@ impl Tool for FileFimEdit {
 
         Ok(serde_json::json!({
             "status": "success",
-            "message": format!("Successfully replaced lines {}-{} using FIM.", start_line, end_line),
-            "backup": backup_path
+            "message": format!("Successfully replaced lines {}-{} using FIM.", start_line, end_line)
         }))
     }
 }

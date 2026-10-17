@@ -171,6 +171,23 @@ pub fn endpoint_has_userinfo(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Redact embedded userinfo (`user[:pass]@`) and query parameters from an
+/// endpoint URL before printing it in diagnostics or logs.
+pub fn redact_endpoint(endpoint: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(endpoint) {
+        if !url.username().is_empty() || url.password().is_some() {
+            let _ = url.set_username("REDACTED");
+            let _ = url.set_password(None);
+        }
+        url.set_query(None);
+        url.to_string()
+    } else if let Some((_, rest)) = endpoint.split_once('@') {
+        format!("<redacted>@{}", rest)
+    } else {
+        endpoint.to_string()
+    }
+}
+
 /// Whether the endpoint's URL host is exactly `openrouter.ai`. Uses proper URL
 /// parsing (never substring matching) so lookalike hosts such as
 /// `openrouter.ai.evil.com` do NOT match — this gates which endpoints may

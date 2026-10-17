@@ -251,6 +251,63 @@ fn compound_commands_take_the_most_severe_segment() {
 }
 
 #[test]
+fn structured_env_demotes_a_read_like_an_inline_assignment() {
+    // `GIT_EXTERNAL_DIFF=./tools/x.sh git diff` is `[runs command]`; the same
+    // assignment moved into `env` used to leave `git diff` tagged `[reads]`.
+    assert_eq!(
+        shell("GIT_EXTERNAL_DIFF=./tools/x.sh git diff HEAD~1 HEAD"),
+        RiskTag::RunsCommand
+    );
+    let steered = json!({
+        "command": "git diff HEAD~1 HEAD",
+        "env": {"GIT_EXTERNAL_DIFF": "./tools/x.sh", "AAA_PAD": "x".repeat(190)}
+    });
+    assert_eq!(classify_risk("shell_exec", &steered), RiskTag::RunsCommand);
+    assert_eq!(classify_risk("pty_shell", &steered), RiskTag::RunsCommand);
+    // Nothing but `SAFE_ENV` names with plain values keeps the read tag.
+    let inert = json!({"command": "git diff HEAD~1 HEAD", "env": {"NO_COLOR": "1"}});
+    assert_eq!(classify_risk("shell_exec", &inert), RiskTag::Reads);
+    let empty = json!({"command": "git diff HEAD~1 HEAD", "env": {}});
+    assert_eq!(classify_risk("shell_exec", &empty), RiskTag::Reads);
+    // A map that is not an object is never vouched for.
+    let odd = json!({"command": "git diff HEAD~1 HEAD", "env": "GIT_EXTERNAL_DIFF=./x"});
+    assert_eq!(classify_risk("shell_exec", &odd), RiskTag::RunsCommand);
+    // The tag never gets LESS severe because of the map.
+    let rm = json!({"command": "rm -rf x", "env": {"NO_COLOR": "1"}});
+    assert_eq!(classify_risk("shell_exec", &rm), RiskTag::DeletesFiles);
+}
+
+#[test]
+fn shell_env_map_is_shown_one_variable_per_line() {
+    // One long value sorted before `GIT_EXTERNAL_DIFF` used to push it past
+    // the 200-character cut of the single `env: {…}` line.
+    let args = json!({
+        "command": "git diff HEAD~1 HEAD",
+        "env": {"GIT_EXTERNAL_DIFF": "./tools/x.sh", "AAA_PAD": "x".repeat(190)}
+    })
+    .to_string();
+    let lines = render_tool_call("shell_exec", &args, None);
+    let all = texts(&lines);
+    assert!(all.contains(&"env: (2 variables)".to_string()), "{all:?}");
+    assert!(
+        all.contains(&format!("  AAA_PAD={}", "x".repeat(190))),
+        "{all:?}"
+    );
+    assert!(
+        all.contains(&"  GIT_EXTERNAL_DIFF=./tools/x.sh".to_string()),
+        "{all:?}"
+    );
+    assert!(lines.iter().all(|l| !l.text.contains('{')), "{all:?}");
+    // Other tools' object arguments keep the compact form.
+    let other = json!({"url": "http://x", "headers": {"A": "b"}}).to_string();
+    let all = texts(&render_tool_call("http_request", &other, None));
+    assert!(
+        all.contains(&r#"headers: {"A":"b"}"#.to_string()),
+        "{all:?}"
+    );
+}
+
+#[test]
 fn unrecognised_commands_are_never_labelled_reads() {
     assert_eq!(shell("python3 fix.py"), RiskTag::RunsCommand);
     assert_eq!(shell("./configure"), RiskTag::RunsCommand);

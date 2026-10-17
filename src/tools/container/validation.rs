@@ -86,6 +86,19 @@ pub fn is_safe_host_mount(host: &str) -> bool {
         }
     }
 
+    if !host_path_is_safe(clean) {
+        return false;
+    }
+    // The runtime follows a symlink in the bind source, so the path is
+    // also judged by where it lands (`<workspace>/data -> /` is `/`).
+    match crate::safety::checker::validation::resolve_volume_host_path_outside_workspace(clean) {
+        Some(resolved) if resolved != clean => host_path_is_safe(&resolved),
+        _ => true,
+    }
+}
+
+/// The host-side blocklist on one form of a mount path (spelled or resolved).
+fn host_path_is_safe(clean: &str) -> bool {
     // Disallow docker/podman daemon socket mounts
     if clean.contains("docker.sock") || clean.contains("podman.sock") {
         return false;

@@ -13,12 +13,44 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::merge_extra_body as merge_request_extra_body;
+use crate::safety::checker::validation::contains_outbound_credential_shape;
 use crate::safety::PinnedDnsResolver;
 
 use super::{net_policy, Tool};
 
 const VISION_SYSTEM_PROMPT: &str =
     "You are a precise multimodal assistant. Follow the user request exactly and answer directly.";
+
+/// Request fields that are posted to the (caller-chosen) vision endpoint:
+/// `prompt`, `model` and `detail` verbatim in the chat body, `extra_body`
+/// merged into it, `api_key` as the bearer token. `image_base64` is validated
+/// as an image payload instead (`resolve_image_data_uri`) — the shape oracle is
+/// case-insensitive and `AKIA`/`ASIA`/`AIza` occur in ordinary base64.
+const VISION_OUTBOUND_FIELDS: &[&str] = &["prompt", "model", "detail", "api_key", "extra_body"];
+
+fn vision_argument_contains_credential(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_outbound_credential_shape(text),
+        Value::Array(values) => values.iter().any(vision_argument_contains_credential),
+        Value::Object(values) => values.values().any(vision_argument_contains_credential),
+        _ => false,
+    }
+}
+
+/// Enforce the outbound-content policy where the request is built, so a
+/// direct Tool invocation gets the same protection as an agent-dispatched
+/// call (the safety checker applies the identical oracle to tool calls).
+pub(crate) fn reject_vision_bound_credential_shapes(args: &Value) -> Result<()> {
+    for field in VISION_OUTBOUND_FIELDS {
+        if args
+            .get(*field)
+            .is_some_and(vision_argument_contains_credential)
+        {
+            anyhow::bail!("Refusing vision request: credential-shaped value in {field}");
+        }
+    }
+    Ok(())
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // vision_analyze
@@ -99,6 +131,7 @@ impl Tool for VisionAnalyze {
     async fn execute(&self, args: Value) -> Result<Value> {
         // Relative paths resolve against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["image_path"]);
+        reject_vision_bound_credential_shapes(&args)?;
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
@@ -124,21 +157,6 @@ impl Tool for VisionAnalyze {
             .get("temperature")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.2);
-
-        if crate::safety::checker::validation::contains_outbound_credential_shape(prompt) {
-            anyhow::bail!("Vision request rejected: prompt contains credential-shaped value");
-        }
-        if crate::safety::checker::validation::contains_outbound_credential_shape(model) {
-            anyhow::bail!("Vision request rejected: model contains credential-shaped value");
-        }
-        if let Some(extra) = args.get("extra_body") {
-            let serialized = serde_json::to_string(extra).unwrap_or_default();
-            if crate::safety::checker::validation::contains_outbound_credential_shape(&serialized) {
-                anyhow::bail!(
-                    "Vision request rejected: extra_body contains credential-shaped value"
-                );
-            }
-        }
 
         let safety = crate::tools::file::resolve_safety_config(None);
         let data_uri = if let Some(path) = args.get("image_path").and_then(|v| v.as_str()) {
@@ -268,6 +286,7 @@ impl Tool for VisionCompare {
     async fn execute(&self, args: Value) -> Result<Value> {
         // Relative paths resolve against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["image_a", "image_b"]);
+        reject_vision_bound_credential_shapes(&args)?;
         let path_a = args
             .get("image_a")
             .and_then(|v| v.as_str())
@@ -342,19 +361,6 @@ impl Tool for VisionCompare {
         let endpoint = args.get("endpoint").and_then(|v| v.as_str());
         let model = args.get("model").and_then(|v| v.as_str());
         if let (Some(endpoint), Some(model)) = (endpoint, model) {
-            if crate::safety::checker::validation::contains_outbound_credential_shape(model) {
-                anyhow::bail!("Vision request rejected: model contains credential-shaped value");
-            }
-            if let Some(extra) = args.get("extra_body") {
-                let serialized = serde_json::to_string(extra).unwrap_or_default();
-                if crate::safety::checker::validation::contains_outbound_credential_shape(
-                    &serialized,
-                ) {
-                    anyhow::bail!(
-                        "Vision request rejected: extra_body contains credential-shaped value"
-                    );
-                }
-            }
             let b64_a = base64::engine::general_purpose::STANDARD.encode(&bytes_a);
             let b64_b = base64::engine::general_purpose::STANDARD.encode(&bytes_b);
             let uri_a = format!("data:{};base64,{}", guess_mime(path_a), b64_a);
@@ -407,6 +413,34 @@ impl Tool for VisionCompare {
 /// Maximum image file size (20 MB).
 const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
 
+/// Maximum VLM response body size (10 MB) — matches `http_request` / `web_fetch`
+/// so a model-selected `endpoint` cannot stream an unbounded response into memory.
+const MAX_VISION_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+async fn read_bounded_bytes(mut response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    if let Some(len) = response.content_length() {
+        if len > max_bytes as u64 {
+            anyhow::bail!(
+                "Vision API response too large ({} bytes, {} byte limit)",
+                len,
+                max_bytes
+            );
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read vision API response chunk")?
+    {
+        if buf.len() + chunk.len() > max_bytes {
+            anyhow::bail!("Vision API response exceeded {} byte limit", max_bytes);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 fn merge_extra_body(
     body: &mut Value,
     extra_body: Option<&Value>,
@@ -428,12 +462,29 @@ fn resolve_image_data_uri(args: &Value) -> Result<String> {
         let mime = guess_mime(path);
         Ok(format!("data:{};base64,{}", mime, b64))
     } else if let Some(b64) = args.get("image_base64").and_then(|v| v.as_str()) {
-        // Assume PNG if no prefix given
-        if b64.starts_with("data:") {
-            Ok(b64.to_string())
+        let (uri, payload) = if let Some(rest) = b64.strip_prefix("data:") {
+            let Some((meta, payload)) = rest.split_once(";base64,") else {
+                anyhow::bail!("image_base64 data URI must be data:image/<format>;base64,<payload>");
+            };
+            if !meta.starts_with("image/") {
+                anyhow::bail!("image_base64 data URI must have an image/* MIME type, got {meta}");
+            }
+            (b64.to_string(), payload)
         } else {
-            Ok(format!("data:image/png;base64,{}", b64))
+            (format!("data:image/png;base64,{}", b64), b64)
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .context("image_base64 is not valid base64")?;
+        if bytes.len() as u64 > MAX_IMAGE_SIZE {
+            anyhow::bail!(
+                "image_base64 payload too large: {} bytes (max {} MB)",
+                bytes.len(),
+                MAX_IMAGE_SIZE / (1024 * 1024)
+            );
         }
+        validate_image_magic(&bytes, "image_base64")?;
+        Ok(uri)
     } else {
         anyhow::bail!("Either image_path or image_base64 must be provided")
     }
@@ -573,9 +624,11 @@ pub(crate) async fn call_vision_endpoint(
         .await
         .with_context(|| format!("Failed to connect to vision endpoint: {}", url))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+    let status = response.status();
+    let bytes = read_bounded_bytes(response, MAX_VISION_RESPONSE_BYTES).await?;
+
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&bytes);
         anyhow::bail!(
             "Vision API returned HTTP {}: {}",
             status.as_u16(),
@@ -583,10 +636,7 @@ pub(crate) async fn call_vision_endpoint(
         );
     }
 
-    response
-        .json::<Value>()
-        .await
-        .context("Failed to parse vision API response as JSON")
+    serde_json::from_slice(&bytes).context("Failed to parse vision API response as JSON")
 }
 
 /// Compute pixel-level similarity between two same-sized RGBA images.

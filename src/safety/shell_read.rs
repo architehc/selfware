@@ -58,6 +58,33 @@ pub const SAFE_ENV: &[&str] = &[
     "CI",
 ];
 
+/// Whether one `NAME=value` assignment may precede a read: the name is in
+/// [`SAFE_ENV`] (or a locale `LC_*`) and the value is plain characters.
+pub fn assignment_is_safe(name: &str, value: &str) -> bool {
+    let safe_name = SAFE_ENV.contains(&name) || name.starts_with("LC_");
+    let safe_value = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | ','));
+    safe_name && safe_value
+}
+
+/// Whether the structured `env` argument of a `shell_exec` / `pty_shell`
+/// call leaves a read a read. The map steers the program exactly like an
+/// inline prefix (`{"GIT_EXTERNAL_DIFF": "./x"}` next to `git diff` is
+/// `GIT_EXTERNAL_DIFF=./x git diff`), so it is held to the same rule as
+/// [`parse`]: absent, null or empty, or every entry a [`SAFE_ENV`] name
+/// with a plain string value. Anything else — another name, a non-string
+/// value, a non-object — is not a read.
+pub fn env_arg_is_safe(env: Option<&serde_json::Value>) -> bool {
+    match env {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .all(|(name, value)| value.as_str().is_some_and(|v| assignment_is_safe(name, v))),
+        Some(_) => false,
+    }
+}
+
 /// Programs that print a file operand's contents (or a digest/summary of
 /// them). Shared by the checker's shell path policy (every operand of these
 /// is a path candidate) and the YOLO sensitive/denied-path heuristics.
@@ -155,6 +182,9 @@ pub struct Segment {
     pub words: Vec<Word>,
     /// Operands of `<` input redirections (files the command reads).
     pub inputs: Vec<String>,
+    /// Runs in a subshell — a pipeline stage or a backgrounded command —
+    /// so a `cd` here does not move the segments after it.
+    pub subshell: bool,
 }
 
 impl Segment {
@@ -207,9 +237,18 @@ impl Segment {
 
 #[derive(Debug)]
 enum Tok {
-    Word { word: Word, assign_ok: bool },
-    Sep,
-    Redir { op: String },
+    Word {
+        word: Word,
+        assign_ok: bool,
+    },
+    /// A list or pipeline separator; `subshell` for `|`, `|&` and a
+    /// backgrounding `&`, which run the commands on either side apart.
+    Sep {
+        subshell: bool,
+    },
+    Redir {
+        op: String,
+    },
 }
 
 /// Parse `command` into segments without expanding anything. `Err` names
@@ -223,8 +262,10 @@ pub fn parse(command: &str) -> Result<Vec<Segment>, String> {
     let mut iter = toks.into_iter().peekable();
     while let Some(tok) = iter.next() {
         match tok {
-            Tok::Sep => {
+            Tok::Sep { subshell } => {
+                cur.subshell |= subshell;
                 finish_segment(&mut segments, std::mem::take(&mut cur))?;
+                cur.subshell = subshell;
             }
             Tok::Redir { op } => {
                 let target = match iter.next() {
@@ -254,11 +295,7 @@ pub fn parse(command: &str) -> Result<Vec<Segment>, String> {
                         .split_once('=')
                         .map(|(n, v)| (n.to_string(), v.to_string()))
                         .unwrap_or_default();
-                    let safe_name = SAFE_ENV.contains(&name.as_str()) || name.starts_with("LC_");
-                    let safe_value = value.chars().all(|c| {
-                        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | ',')
-                    });
-                    if !(safe_name && safe_value) {
+                    if !assignment_is_safe(&name, &value) {
                         return Err(format!("sets environment variable `{name}`"));
                     }
                     cur.assignments.push((name, value));
@@ -341,7 +378,7 @@ fn lex(command: &str) -> Result<Vec<Tok>, String> {
             ' ' | '\t' | '\r' => flush!(),
             '\n' => {
                 flush!();
-                toks.push(Tok::Sep);
+                toks.push(Tok::Sep { subshell: false });
             }
             '\\' => match next {
                 Some('\n') => {
@@ -412,13 +449,13 @@ fn lex(command: &str) -> Result<Vec<Tok>, String> {
             }
             ';' => {
                 flush!();
-                toks.push(Tok::Sep);
+                toks.push(Tok::Sep { subshell: false });
             }
             '&' => {
                 flush!();
                 match next {
                     Some('&') => {
-                        toks.push(Tok::Sep);
+                        toks.push(Tok::Sep { subshell: false });
                         i += 2;
                         continue;
                     }
@@ -433,12 +470,14 @@ fn lex(command: &str) -> Result<Vec<Tok>, String> {
                         toks.push(Tok::Redir { op: op.to_string() });
                         continue;
                     }
-                    _ => toks.push(Tok::Sep),
+                    _ => toks.push(Tok::Sep { subshell: true }),
                 }
             }
             '|' => {
                 flush!();
-                toks.push(Tok::Sep);
+                toks.push(Tok::Sep {
+                    subshell: next != Some('|'),
+                });
                 if matches!(next, Some('|') | Some('&')) {
                     i += 2;
                     continue;

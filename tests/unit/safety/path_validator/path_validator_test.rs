@@ -144,6 +144,50 @@ fn every_default_denied_path_is_refused_inside_the_workspace() {
     }
 }
 
+/// Git reads `core.fsmonitor` / `core.hooksPath` from more than
+/// `.git/config`: a submodule's or linked worktree's own git dir, the git
+/// dir `.git/commondir` redirects to, and `config.worktree`. The defaults
+/// refuse each of them while ordinary repository metadata stays readable.
+#[cfg(unix)]
+#[test]
+fn default_denied_paths_refuse_every_git_dir_config_location() {
+    let ws = tempfile::tempdir().unwrap();
+    let config = SafetyConfig {
+        denied_paths: crate::config::default_denied_paths(),
+        ..make_config(vec![], vec![])
+    };
+    let validator = PathValidator::new(&config, ws.path().to_path_buf());
+    for path in [
+        ".git/modules/sub/config",
+        ".git/modules/sub/hooks/pre-commit",
+        ".git/modules/nested/deeper/config",
+        ".git/worktrees/wt/config.worktree",
+        ".git/worktrees/wt/commondir",
+        ".git/commondir",
+        ".git/config.worktree",
+        "sub/.git/modules/inner/config",
+    ] {
+        let err = validator.validate(path).expect_err(&format!(
+            "{path} is git executable config and must be refused"
+        ));
+        assert!(
+            err.to_string().contains("denied pattern"),
+            "{path}: expected a denied-pattern error, got: {err}"
+        );
+    }
+    for path in [
+        ".git/HEAD",
+        ".gitmodules",
+        ".gitignore",
+        "sub/.gitattributes",
+    ] {
+        assert!(
+            validator.validate(path).is_ok(),
+            "{path} is ordinary repository metadata and must stay allowed"
+        );
+    }
+}
+
 /// formal/SafetyBounds.lean S2 on the real validator: a `..` escape out of
 /// the workspace is refused, an inner `..` that stays inside is not.
 #[cfg(unix)]
@@ -681,6 +725,34 @@ mod fd_checked_io {
         let (_dir, name) = v.open_parent_dir(&target.to_string_lossy(), true).unwrap();
         assert_eq!(name, std::ffi::OsString::from("file.txt"));
         assert!(ws.join("new/nested/dir").is_dir());
+    }
+
+    /// A `.git` FILE is a gitdir pointer: writing `sub/.git` = `gitdir:
+    /// ../evil` makes git take config and hooks from `evil/`, which no
+    /// `.git/…` deny-glob matches. The write pin refuses the name itself —
+    /// new, existing (a submodule's real pointer) or the workspace's own.
+    #[test]
+    fn open_parent_dir_refuses_a_gitdir_pointer_file() {
+        let (_root, ws, _outside, v) = setup();
+        std::fs::write(ws.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        for target in [ws.join("sub/.git"), ws.join("other/.git"), ws.join(".git")] {
+            let err = v
+                .open_parent_dir(&target.to_string_lossy(), true)
+                .expect_err("a .git entry must never be written by file tools");
+            assert!(
+                matches!(err, SelfwareError::Safety(SafetyError::BlockedPath { .. })),
+                "unexpected error for {}: {err}",
+                target.display()
+            );
+        }
+        assert!(
+            !ws.join("other").exists(),
+            "refused before creating anything"
+        );
+        // Files merely NAMED like git metadata are ordinary workspace files.
+        assert!(v
+            .open_parent_dir(&ws.join("sub/.gitignore").to_string_lossy(), true)
+            .is_ok());
     }
 
     #[test]

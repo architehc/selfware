@@ -923,6 +923,13 @@ impl PathValidator {
     /// fd-relative writes (see `open_parent_dir_fd`). The lexical path is
     /// validated first; then both the prospective and the final real
     /// directory locations are re-validated against this validator's policy.
+    ///
+    /// A target named `.git` is refused outright: as a FILE it is a gitdir
+    /// pointer (`gitdir: <dir>`, what a submodule or linked worktree has),
+    /// so writing one makes git take its config and hooks from whatever
+    /// directory the content names — a location the `.git/…` deny-globs
+    /// cannot see. File tools never create, replace or unlink a `.git`
+    /// entry; git does (worktree / submodule commands via the git tools).
     #[cfg(unix)]
     pub fn open_parent_dir(
         &self,
@@ -930,9 +937,15 @@ impl PathValidator {
         create: bool,
     ) -> Result<(std::fs::File, std::ffi::OsString)> {
         self.validate(path)?;
+        let target = self.absolute(path);
+        if target.file_name().is_some_and(|name| name == ".git") {
+            return Err(SelfwareError::Safety(SafetyError::BlockedPath {
+                path: path.to_string(),
+            }));
+        }
         #[cfg(test)]
         run_after_lexical_validate_hook();
-        open_parent_dir_fd(&self.absolute(path), create, &|real: &Path| {
+        open_parent_dir_fd(&target, create, &|real: &Path| {
             self.validate(&real.to_string_lossy())
         })
     }

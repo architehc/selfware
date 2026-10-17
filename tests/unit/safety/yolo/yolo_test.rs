@@ -592,6 +592,38 @@ fn test_container_run_volume_mount_tmp_allowed() {
     assert_eq!(decision, YoloDecision::AutoApprove);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_container_run_volume_mount_symlink_to_root_blocked() {
+    // A workspace symlink `data -> /` is the root mount the floor refuses,
+    // however it is spelled; workspace content stays allowed.
+    let config = YoloConfig::fully_autonomous().with_destructive_shell(true);
+    let manager = YoloManager::new(config);
+    let workspace = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/", workspace.path().join("data")).unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    let ws = workspace.path().canonicalize().unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(ws.clone());
+    crate::tools::workspace_root::sync_scope(root, || {
+        for spec in [
+            format!("{}/data:/host", ws.display()),
+            "./data:/host".into(),
+        ] {
+            let args = serde_json::json!({"image": "ubuntu", "volumes": [spec]});
+            let decision = manager.should_auto_approve("container_run", &args);
+            assert!(
+                matches!(decision, YoloDecision::Block(_)),
+                "{spec}: {decision:?}"
+            );
+        }
+        for spec in [format!("{}/src:/app", ws.display()), "./src:/app".into()] {
+            let args = serde_json::json!({"image": "ubuntu", "volumes": [spec]});
+            let decision = manager.should_auto_approve("container_run", &args);
+            assert_eq!(decision, YoloDecision::AutoApprove, "{spec}");
+        }
+    });
+}
+
 #[test]
 fn test_yolo_cp_operands_and_substitutions_blocked() {
     let config = YoloConfig::fully_autonomous();
@@ -899,6 +931,119 @@ fn headless_read_guard_checks_every_reader_not_a_short_list() {
         "rg -n x a.txt",
     ] {
         assert!(headless_pass(cmd, dir), "`{cmd}` should pass");
+    }
+}
+
+#[test]
+fn headless_read_guard_expands_globs_where_the_shell_does() {
+    // Operands are resolved from the directory the command runs in: the
+    // call's working directory moved by every `cd` before it. `cd sub;
+    // cat .e*` found no match at the root and read `sub/.env` unvetted.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/.env"), "KEY=1\n").unwrap();
+    std::fs::write(dir.join("sub/a.txt"), "x\n").unwrap();
+    for cmd in [
+        "cd sub; cat .e*",
+        "cd sub && cat *.e*",
+        "cd sub && head -1 .env",
+    ] {
+        assert!(!headless_pass(cmd, dir), "`{cmd}` must not pass");
+    }
+    for cmd in [
+        "cd sub && cat a.txt",
+        "cd sub; cat a*",
+        "cd sub && ls",
+        "cd sub && wc -l *.txt",
+    ] {
+        assert!(headless_pass(cmd, dir), "`{cmd}` should pass");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn headless_read_guard_vets_what_the_shell_opens_with_the_path_policy() {
+    // A committed symlink makes the directory a `cd` moves into, or a path
+    // under the call's `cwd`, lie outside the workspace while every name
+    // in the command looks local: `cd keys; cat id_*` with `keys ->
+    // ../../.ssh`, `cat out/notes.txt` with `cwd: "sub"` and `sub/out ->
+    // ../../..`. The `cd` target and every operand that exists under the
+    // shell's directory go through the path policy, which canonicalises.
+    let outside = tempfile::Builder::new()
+        .prefix("outside-ws")
+        .tempdir()
+        .unwrap();
+    std::fs::create_dir_all(outside.path().join("store")).unwrap();
+    std::fs::write(outside.path().join("store/id_rsa"), "-----BEGIN\n").unwrap();
+    std::fs::write(outside.path().join("store/data.txt"), "d\n").unwrap();
+    std::fs::write(outside.path().join("notes.txt"), "n\n").unwrap();
+    let tmp = tempfile::Builder::new().prefix("ws").tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("store"), dir.join("keys")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.join("sub/out")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("notes.txt"), dir.join("link.txt")).unwrap();
+    // The checker's path policy, reduced to what matters here: the
+    // canonical path (of the deepest existing ancestor) is inside the
+    // workspace.
+    let inside = dir.canonicalize().unwrap();
+    let policy = move |path: &std::path::Path| {
+        let existing = if path.exists() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        existing
+            .canonicalize()
+            .map(|c| c.starts_with(&inside))
+            .unwrap_or(false)
+    };
+    let verdict = |cmd: &str, cwd: &std::path::Path| {
+        let segments = crate::safety::shell_read::parse(cmd).expect("parses");
+        headless_read_shell_guard(
+            cmd,
+            &segments,
+            Some(cwd.to_str().unwrap()),
+            &default_denied(),
+            &[],
+            &policy,
+        )
+    };
+    for (cmd, cwd) in [
+        ("cd keys; cat id_*", dir),
+        ("cd keys; cat data.txt", dir),
+        ("cd sub; cat out/notes.txt", dir),
+        ("cat out/notes.txt", &dir.join("sub")),
+        ("cat data.txt", &dir.join("keys")),
+        ("cd sub && ls out", dir),
+        // The glob expands at the root: a `cd` in a pipeline stage moves
+        // only that stage.
+        ("cd sub | cat lin*", dir),
+        ("cd keys | ls", dir),
+    ] {
+        assert_eq!(
+            verdict(cmd, cwd),
+            HeadlessReadGuard::Fail,
+            "`{cmd}` in {} must not pass",
+            cwd.display()
+        );
+    }
+    for (cmd, cwd) in [
+        ("cd src && cat main.rs", dir),
+        ("cd src && head -n 1 ma*", dir),
+        ("cat main.rs", &dir.join("src")),
+        ("cd sub; ls", dir),
+        ("cat src/main.rs", dir),
+    ] {
+        assert_eq!(
+            verdict(cmd, cwd),
+            HeadlessReadGuard::Pass,
+            "`{cmd}` in {} should pass",
+            cwd.display()
+        );
     }
 }
 

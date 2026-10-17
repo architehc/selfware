@@ -73,6 +73,7 @@ impl McpClient {
             &config.command,
             &config.args,
             &config.env,
+            config.cwd.as_deref(),
         )
         .await
         .map(|t| t.with_framing(config.framing))

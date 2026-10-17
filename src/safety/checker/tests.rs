@@ -130,6 +130,52 @@ fn test_is_private_or_internal_public() {
     assert!(!is_private_or_internal(ip));
 }
 
+#[test]
+fn test_is_private_or_internal_embedded_ipv4() {
+    // IPv4-mapped and NAT64 well-known prefix (RFC 6052) literals are
+    // classified by the IPv4 address they carry, in both spellings.
+    for literal in [
+        "::ffff:10.0.0.5",
+        "::ffff:a9fe:a9fe",
+        "::ffff:192.0.2.1",
+        "64:ff9b::10.0.0.5",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::c000:c0",
+        "64:ff9b::",
+    ] {
+        let ip: std::net::IpAddr = literal.parse().unwrap();
+        assert!(is_private_or_internal(ip), "{literal}");
+    }
+    // A public IPv4 address stays public through either prefix (DNS64
+    // networks resolve ordinary sites into 64:ff9b::/96).
+    for literal in ["::ffff:8.8.8.8", "64:ff9b::8.8.8.8", "2606:4700::1111"] {
+        let ip: std::net::IpAddr = literal.parse().unwrap();
+        assert!(!is_private_or_internal(ip), "{literal}");
+    }
+}
+
+#[test]
+fn test_is_private_or_internal_special_ranges() {
+    for literal in [
+        "192.0.0.192",      // 192.0.0.0/24
+        "198.18.0.1",       // 198.18.0.0/15
+        "198.19.255.255",   // 198.18.0.0/15
+        "240.0.0.1",        // 240.0.0.0/4
+        "224.0.0.1",        // multicast
+        "168.63.129.16",    // Azure platform host services
+        "fec0::1",          // site-local
+        "ff02::1",          // multicast
+        "64:ff9b:1::a00:5", // local-use NAT64 (RFC 8215)
+    ] {
+        let ip: std::net::IpAddr = literal.parse().unwrap();
+        assert!(is_private_or_internal(ip), "{literal}");
+    }
+    for literal in ["192.0.1.1", "198.17.255.255", "198.20.0.1", "168.63.129.17"] {
+        let ip: std::net::IpAddr = literal.parse().unwrap();
+        assert!(!is_private_or_internal(ip), "{literal}");
+    }
+}
+
 // ── File operation dispatch ─────────────────────────────────────────────
 
 #[test]
@@ -2253,6 +2299,61 @@ fn test_container_run_allows_workspace_mount() {
     assert!(checker.check_tool_call(&rel).is_ok());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_container_run_blocks_symlink_to_system_mount() {
+    // The runtime follows a symlink in the bind source: a repository shipping
+    // `data -> /` used to get `<workspace>/data:/host` past the string
+    // blocklist that refuses `/:/host`. Judged by where it lands now — as a
+    // tool volume and as a raw `docker run -v` in a shell command alike.
+    let workspace = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/", workspace.path().join("data")).unwrap();
+    std::os::unix::fs::symlink("/etc", workspace.path().join("cfg")).unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    let checker =
+        SafetyChecker::with_working_dir(&SafetyConfig::default(), workspace.path().to_path_buf());
+    let ws = workspace.path().canonicalize().unwrap();
+    let ws = ws.display();
+    for spec in [
+        format!("{ws}/data:/host"),
+        "./data:/host".into(),
+        "cfg:/cfg".into(),
+    ] {
+        let args = serde_json::json!({"image": "alpine", "volumes": [spec]}).to_string();
+        let err = checker
+            .check_tool_call(&create_test_call("container_run", &args))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::errors::SelfwareError::Safety(
+                    crate::errors::SafetyError::ContainerSystemMount { .. }
+                )
+            ),
+            "{spec}: {err}"
+        );
+        let command = format!("docker run -v {spec} alpine id");
+        let shell = serde_json::json!({"command": command}).to_string();
+        assert!(checker
+            .check_tool_call(&create_test_call("shell_exec", &shell))
+            .is_err());
+    }
+    // Workspace content stays legal however it is reached.
+    for spec in [
+        format!("{ws}/src:/app"),
+        "./src:/app".into(),
+        "pgdata:/var/lib/pg".into(),
+    ] {
+        let args = serde_json::json!({"image": "alpine", "volumes": [spec]}).to_string();
+        assert!(
+            checker
+                .check_tool_call(&create_test_call("container_run", &args))
+                .is_ok(),
+            "{spec}"
+        );
+    }
+}
+
 #[test]
 fn test_shell_exec_blocks_env_wrapper_env_injection() {
     // `env LD_PRELOAD=… cmd` sets the variable for the child process.
@@ -3466,6 +3567,54 @@ fn test_shell_exec_body_read_only_in_workspace_reads_still_pass() {
         assert!(
             checker.check_tool_call(&shell_call(cmd)).is_ok(),
             "in-workspace read must pass: {cmd}"
+        );
+    }
+}
+
+// `~user/...` is expanded by the shell through the password database, not
+// below the workspace; it used to be vetted as the relative path
+// `<workspace>/~user/...` and pass the allow-list (`cat ~dev/notes.txt` ran
+// unprompted while `cat ~/notes.txt` was refused), and `..` after the
+// component cancelled it lexically (`cat ~sys/../etc/passwd`).
+#[test]
+fn test_shell_exec_tilde_user_operands_are_refused() {
+    let config = SafetyConfig::default(); // allowed_paths = ["./**"]
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "cat ~dev/private-notes.txt",
+        "head -n 2 ~sys/../etc/passwd",
+        "cat ~sys/../etc/hostname",
+        "cat ~dev/.net*",
+        "cat ~root",
+        // Not file verbs: the operand must still count as an explicit path.
+        "strings ~dev/private-notes.txt",
+        "cut -c1- ~dev/private-notes.txt",
+        "ls ~dev",
+        "cd ~dev/projects",
+        "tar -C ~dev -cf x.tar .",
+        // bash: `$PWD` / `$OLDPWD`
+        "cat ~+/../x",
+        "cat ~-/x",
+        "cp a.txt ~dev/.profile",
+    ] {
+        let result = checker.check_tool_call(&shell_call(cmd));
+        assert!(result.is_err(), "tilde-user operand must be refused: {cmd}");
+    }
+
+    // Denied patterns keep their distinct error for the raw spelling.
+    let result = checker.check_tool_call(&shell_call("cat ~dev/.ssh/id_rsa"));
+    assert!(
+        result.unwrap_err().to_string().contains("denied pattern"),
+        "expected a denied-pattern error for cat ~dev/.ssh/id_rsa"
+    );
+
+    // `~` and `~/` keep expanding to the operator's home; bare `~` outside a
+    // file verb and a workspace file literally named `~x` stay usable.
+    for cmd in ["echo ~", "ls -la ~", "cd ~ && pwd", "cat ./~dev", "cat a~b"] {
+        assert!(
+            checker.check_tool_call(&shell_call(cmd)).is_ok(),
+            "must still pass: {cmd}"
         );
     }
 }
@@ -4848,5 +4997,85 @@ fn denied_paths_hold_through_git_revision_and_pathspec_operands() {
         "awk -F= '/^KEY/ {print $2}' config.txt",
     ] {
         assert!(checker.check_shell_command(cmd).is_ok(), "{cmd}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_operands_resolve_from_the_call_cwd_and_each_cd() {
+    // Operands were vetted from the workspace root while the shell resolves
+    // them from the call's `cwd` moved by every `cd`. A committed symlink
+    // makes the two differ: with `keys -> <outside>/store` and `sub/out ->
+    // <outside>`, `cd keys; cat data.txt` and `cat out/notes.txt` under
+    // `cwd: "sub"` read outside files that `cat keys/data.txt` and `cat
+    // sub/out/notes.txt` are refused for. The `cd` target is a candidate
+    // too, so the symlink is refused before anything is read through it.
+    let outside = tempfile::Builder::new()
+        .prefix("outside-ws")
+        .tempdir()
+        .unwrap();
+    std::fs::create_dir_all(outside.path().join("store")).unwrap();
+    std::fs::write(outside.path().join("store/data.txt"), "d\n").unwrap();
+    std::fs::write(outside.path().join("notes.txt"), "n\n").unwrap();
+    let workspace = tempfile::Builder::new().prefix("ws").tempdir().unwrap();
+    let ws = workspace.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    std::fs::write(ws.join("README.md"), "# ws\n").unwrap();
+    std::fs::write(ws.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("store"), ws.join("keys")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws.join("sub/out")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("notes.txt"), ws.join("link.txt")).unwrap();
+    let checker = SafetyChecker::with_working_dir(&SafetyConfig::default(), ws.to_path_buf());
+    let call = |command: &str, cwd: Option<&str>| {
+        let mut args = serde_json::json!({ "command": command });
+        if let Some(cwd) = cwd {
+            args["cwd"] = serde_json::Value::String(cwd.to_string());
+        }
+        checker.check_tool_call(&create_test_call("shell_exec", &args.to_string()))
+    };
+    for (command, cwd) in [
+        ("cd keys; cat data.txt", None),
+        ("cd keys && cat data.txt", None),
+        ("cd sub && cat out/notes.txt", None),
+        ("cd sub; cd out; cat notes.txt", None),
+        ("cat out/notes.txt", Some("sub")),
+        ("cat data.txt", Some("keys")),
+        ("cd ..; cat notes.txt", None),
+        ("cd keys/.. && cat keys/data.txt", None),
+        // A `cd` that is a pipeline stage or backgrounded runs in a
+        // subshell: the next command still runs at the root.
+        ("cd sub | cat link.txt", None),
+        ("cd sub & cat link.txt", None),
+        ("cd keys | ls", None),
+        // The controls from the root, refused before and after.
+        ("cat keys/data.txt", None),
+        ("cat sub/out/notes.txt", None),
+        ("cat link.txt", None),
+    ] {
+        let verdict = call(command, cwd);
+        assert!(
+            matches!(
+                verdict,
+                Err(crate::errors::SelfwareError::Safety(
+                    crate::errors::SafetyError::PathNotAllowed { .. }
+                        | crate::errors::SafetyError::PathOutsideWorkspace { .. }
+                        | crate::errors::SafetyError::PathTraversal { .. }
+                ))
+            ),
+            "`{command}` (cwd {cwd:?}) must be refused by the path policy: {verdict:?}"
+        );
+    }
+    for (command, cwd) in [
+        ("cd src && cat main.rs", None),
+        ("cd src; cat ../README.md", None),
+        ("cat main.rs", Some("src")),
+        ("cat ../README.md", Some("src")),
+        ("cd sub && ls", None),
+        ("cd src && cargo build", None),
+        ("cd src | cat README.md", None),
+    ] {
+        let verdict = call(command, cwd);
+        assert!(verdict.is_ok(), "`{command}` (cwd {cwd:?}): {verdict:?}");
     }
 }

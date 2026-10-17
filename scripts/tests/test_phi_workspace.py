@@ -43,6 +43,8 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/workspace':
             return self.reply({'root': '/fixture/phi', 'name': 'Phi browser fixture', 'session_token': 'fixture-session', 'model': 'fixture-model', 'endpoint_host': 'fixture.local'})
+        if path == '/api/phi/policy':
+            return self.reply({'mode': 'advise', 'debt_gate_lines': 250, 'bulk_generation_lines': 500, 'capitulation_threshold': 2, 'interrupt_budget': 3, 'steward_quiet_ms': 12000, 'quiet_after_activity_ms': 4000, 'glance_cooldown_ms': 45000})
         if path == '/api/ide/files':
             return self.reply([{'path': 'src/lib.rs', 'is_dir': False}])
         if path == '/api/ide/document':

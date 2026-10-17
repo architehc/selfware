@@ -12,20 +12,6 @@ pub(super) struct AssistantStepResponse {
     /// These are emitted back as `role=tool` messages and DO get stored on
     /// the assistant history message's `tool_calls` field.
     pub native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
-    /// Tool calls parsed from `<tool>...</tool>` blocks in the assistant's
-    /// text content (sglang fallback / mixed-mode thinking models).
-    ///
-    /// CRITICAL: these MUST NOT be stored as `assistant.tool_calls` in the
-    /// conversation history — otherwise the resulting message is shaped
-    /// like a native FC call, but the dispatcher emits the result as
-    /// `<tool_result>` (role=user). Some endpoints reject the next turn
-    /// with "tool_calls without matching tool messages". They are carried
-    /// here as a side channel for the dispatch loop to pick up.
-    #[allow(dead_code)]
-    pub text_fallback_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
-    /// Characters of actual content (excludes think blocks).
-    #[allow(dead_code)]
-    pub content_chars: usize,
     /// Characters inside think/reasoning blocks.
     pub reasoning_chars: usize,
     /// Per-call metadata populated from the live HTTP / SSE layer.
@@ -97,16 +83,10 @@ impl Agent {
             let content_text = last_msg.content.text().to_string();
             let reasoning_clone = last_msg.reasoning_content.clone();
             let response = AssistantStepResponse {
-                content_chars: content_text.len(),
                 reasoning_chars: reasoning_clone.as_ref().map(|r| r.len()).unwrap_or(0),
                 content: content_text,
                 reasoning_content: reasoning_clone,
                 native_tool_calls,
-                // When replaying a stored assistant message, no synthetic
-                // tool_calls were ever stored on it (per the new invariant)
-                // so any text-format tool calls are still in `content` and
-                // will be re-parsed by `collect_tool_calls`.
-                text_fallback_tool_calls: None,
                 metadata: None,
             };
             self.log_turn_end_event(
@@ -655,12 +635,10 @@ impl Agent {
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
 
         let response = AssistantStepResponse {
-            content_chars: content.len(),
             reasoning_chars: reasoning.as_ref().map(|r| r.len()).unwrap_or(0),
             content,
             reasoning_content: reasoning,
             native_tool_calls,
-            text_fallback_tool_calls,
             metadata: chat_metadata,
         };
         self.log_turn_end_event(

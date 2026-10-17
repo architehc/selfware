@@ -139,6 +139,7 @@ impl CircuitBreaker {
         E: std::fmt::Display,
     {
         // Check current state
+        let mut acquired_half_open_slot = false;
         match self.current_state() {
             CircuitState::Open => {
                 if self.should_attempt_reset().await {
@@ -148,9 +149,6 @@ impl CircuitBreaker {
                         .is_ok()
                     {
                         *self.last_state_change.write().await = Instant::now();
-                        self.failure_count.store(0, Ordering::SeqCst);
-                        self.success_count.store(0, Ordering::SeqCst);
-                        self.half_open_requests.store(0, Ordering::SeqCst);
                         info!(
                             old_state = ?CircuitState::Open,
                             new_state = ?CircuitState::HalfOpen,
@@ -167,6 +165,7 @@ impl CircuitBreaker {
                         warn!("Half-open max requests reached");
                         return Err(CircuitBreakerError::CircuitOpen);
                     }
+                    acquired_half_open_slot = true;
                 } else {
                     warn!("Circuit breaker open, rejecting request");
                     return Err(CircuitBreakerError::CircuitOpen);
@@ -179,6 +178,7 @@ impl CircuitBreaker {
                     warn!("Half-open max requests reached");
                     return Err(CircuitBreakerError::CircuitOpen);
                 }
+                acquired_half_open_slot = true;
             }
             CircuitState::Closed => {}
         }
@@ -192,6 +192,8 @@ impl CircuitBreaker {
             Err(e) => {
                 if counts_toward_failure(&e) {
                     self.on_failure_with_reason(Some(format!("{e}"))).await;
+                } else if acquired_half_open_slot {
+                    self.half_open_requests.fetch_sub(1, Ordering::SeqCst);
                 }
                 Err(CircuitBreakerError::OperationFailed(e))
             }
@@ -210,6 +212,12 @@ impl CircuitBreaker {
             if success_count >= self.config.success_threshold {
                 info!("Circuit breaker closing after successful recovery");
                 self.transition_to(CircuitState::Closed).await;
+            } else {
+                let _ =
+                    self.half_open_requests
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                            Some(v.saturating_sub(1))
+                        });
             }
         } else {
             // Reset failure count in closed state
@@ -251,13 +259,14 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => 2,
         };
 
-        let old_state = self.state.swap(state_num, Ordering::SeqCst);
-        *self.last_state_change.write().await = Instant::now();
-
-        // Reset counters on state change
+        // Reset counters before publishing the new state so concurrent readers
+        // never observe the new state with stale counters.
         self.failure_count.store(0, Ordering::SeqCst);
         self.success_count.store(0, Ordering::SeqCst);
         self.half_open_requests.store(0, Ordering::SeqCst);
+
+        let old_state = self.state.swap(state_num, Ordering::SeqCst);
+        *self.last_state_change.write().await = Instant::now();
 
         info!(
             old_state = ?match old_state {

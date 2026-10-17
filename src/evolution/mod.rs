@@ -66,6 +66,14 @@ use std::path::PathBuf;
 /// how it behaves (P2 finding, 2026-09-21 review). The bare file entry matches
 /// at ANY depth via `is_protected`'s `/AGENTS.md` suffix check, so nested
 /// instruction files under `src/` or `docs/` are protected too.
+///
+/// The same holds for every other file name the prompt loaders pick up from
+/// the checkout: the `CLAUDE.md` / `.claude.md` workspace guidance files
+/// (`MemorySystem::discover_workspace_guidance`) and the `.selfware.md` memory
+/// files (`MemorySystem::discover`). All of them are walked from the working
+/// directory up to `$HOME` and injected into the system prompt of every later
+/// session, so a run that can leave one behind has rewritten its own
+/// instructions just as surely as by editing `AGENTS.md`.
 pub use crate::evolve::PROTECTED_PATHS;
 
 /// LLM endpoint configuration for hypothesis generation

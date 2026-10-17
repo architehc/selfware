@@ -29,6 +29,16 @@ impl LocalFirstCoordinator {
         self.response_cache.put(entry);
     }
 
+    /// Retrieve a cached response and record a hit/miss
+    pub fn get_response(&mut self, key: &str) -> Option<&str> {
+        self.response_cache.get(key)
+    }
+
+    /// Record a cache miss from an upstream cache layer
+    pub fn record_miss(&mut self) {
+        self.response_cache.record_miss();
+    }
+
     /// Get statistics
     pub fn stats(&self) -> LocalFirstStats {
         let cache_stats = self.response_cache.stats();
@@ -51,12 +61,13 @@ impl Default for LocalFirstCoordinator {
 pub struct LocalCache<T> {
     entries: HashMap<String, LocalCacheEntry<T>>,
     max_entries: usize,
+    hits: usize,
+    misses: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct LocalCacheEntry<T> {
     key: String,
-    #[allow(dead_code)]
     value: T,
     size_bytes: usize,
 }
@@ -67,6 +78,8 @@ impl LocalCache<String> {
         Self {
             entries: HashMap::new(),
             max_entries: 1000,
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -81,13 +94,34 @@ impl LocalCache<String> {
         self.entries.insert(entry.key.clone(), entry);
     }
 
+    /// Look up an entry by key and update hit/miss counters
+    pub fn get(&mut self, key: &str) -> Option<&str> {
+        if let Some(entry) = self.entries.get(key) {
+            self.hits += 1;
+            Some(entry.value.as_str())
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    pub fn record_miss(&mut self) {
+        self.misses += 1;
+    }
+
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
         let total_size_bytes: usize = self.entries.values().map(|e| e.size_bytes).sum();
+        let total_lookups = self.hits + self.misses;
+        let hit_rate = if total_lookups > 0 {
+            self.hits as f64 / total_lookups as f64
+        } else {
+            0.0
+        };
         CacheStats {
             entry_count: self.entries.len(),
             total_size_bytes,
-            hit_rate: 0.0, // Simplified - no tracking in minimal version
+            hit_rate,
         }
     }
 }

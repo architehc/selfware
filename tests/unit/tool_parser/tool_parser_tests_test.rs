@@ -2131,3 +2131,22 @@ fn deepseek_native_delimiter_and_dsml_tool_calls_parse() {
     assert_eq!(res2.text_content, "Checking now.");
     assert!(res2.rejections.is_empty(), "{:?}", res2.rejections);
 }
+
+#[test]
+fn truncated_json_in_xml_arguments_is_rejected_not_wrapped_as_input() {
+    let content = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"src/main.rs\", \"content\": \"unterminated</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(
+        result.tool_calls.is_empty(),
+        "truncated JSON in <arguments> must not execute with {{\"input\": ...}}: {result:?}"
+    );
+    assert_eq!(result.rejections.len(), 1, "{result:?}");
+}
+
+#[test]
+fn stray_quote_in_prose_does_not_invert_json_string_protection() {
+    let content = "The user wrote a stray \" quote on this line.\n<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"a.txt\", \"content\": \"foo name><bar>\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1, "{result:?}");
+    assert_eq!(result.tool_calls[0].arguments["content"], "foo name><bar>");
+}

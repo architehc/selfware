@@ -10,7 +10,7 @@ import { PhiState } from './phi_state.js';
 import { PhiExpressionVoice } from './phi_sound.js';
 import { PhiSteward, IdleWatcher } from './phi_steward.js';
 import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
-import { PhiActivity } from './phi_activity.js';
+import { PhiActivity, parsePolicy } from './phi_activity.js';
 
 const $ = id => document.getElementById(id);
 const make = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
@@ -47,6 +47,8 @@ export class PhiApp {
     this.idle = new IdleWatcher({ quietMs: 12000 });
     // Almost everything Phi knows is expressed as posture. Speaking is rationed.
     this.presence = new PhiPresence({ interruptBudget: 3 });
+    this.policy = null;
+    this.activityPosture = null;
     this.workspaceSignals = { gates: [], failingTests: [], deadCode: [], duplicates: [], recentFiles: [] };
     this.state = new PhiState({ storage: store, onChange: snapshot => {
       const posture = ambientPosture(snapshot);
@@ -70,7 +72,7 @@ export class PhiApp {
     this.orchestrator = new PhiAgentOrchestrator(this.rig, this.viseme, this.focus);
     this.companion = new PhiFrictionUI({ container: $('phi-friction-panel'), editor: $('code-buffer'), getToken: () => this.examples ? null : this.workspace.token });
     this.activity = new PhiActivity({ container: $('phi-activity-panel'), getToken: () => this.examples ? null : this.workspace.token,
-      onChange: (_snapshot, emotion) => { this.activityEmotion = emotion; this.restoreAmbientPose(); } });
+      onChange: (_snapshot, emotion, posture) => { this.activityEmotion = emotion; this.activityPosture = posture; this.restoreAmbientPose(); } });
     this.viseme.onStateChange = state => this.speechState(state);
     this.bindUI(); this.startLoop(); this.connect(); this.dock();
   }
@@ -93,6 +95,28 @@ export class PhiApp {
     if (this.destroyed || this.narrationOwnsPose()) return;
     this.rig.setEmotion(this.activityEmotion || ambientPosture(this.state.snapshot()).emotion);
   }
+  applyPolicy(rawPolicy) {
+    const policy = rawPolicy ? parsePolicy(rawPolicy) : null;
+    this.policy = policy;
+    this.activity?.setPolicy(policy);
+    if (policy) {
+      this.presence.budget = policy.interrupt_budget;
+      this.presence.quietAfterActivityMs = policy.quiet_after_activity_ms;
+      this.presence.glanceCooldownMs = policy.glance_cooldown_ms;
+      this.idle.quietMs = policy.steward_quiet_ms;
+    }
+    return policy;
+  }
+  async refreshPolicy() {
+    if (!this.workspace.token || this.examples || this.destroyed) return null;
+    try {
+      const raw = await this.workspace.request('/api/phi/policy');
+      if (this.destroyed || this.examples) return null;
+      return this.applyPolicy(raw);
+    } catch (_) {
+      return null;
+    }
+  }
   async connect() {
     if (this.dirty) { this.status('Save your edits before reconnecting.', true); return; }
     this.companion.disconnect();
@@ -101,6 +125,7 @@ export class PhiApp {
       const info = await this.workspace.connect(); this.files = await this.workspace.files(); this.examples = false;
       this.companion.connect();
       this.activity.connect();
+      void this.refreshPolicy();
       this.refreshSpeechCapabilities();
       $('workspace-name').textContent = info.name;
       $('model-info').textContent = `${info.model} · ${info.endpoint_host}`;
@@ -335,10 +360,10 @@ export class PhiApp {
 
   /* Called on a slow tick. Speaks at most once per idle period. */
   async considerNextSteps() {
-    if (this.destroyed || this.narrationOwnsPose() || this.observedAgentsRunning() || !this.idle.shouldSpeak()) return null;
+    if (this.destroyed || this.policy?.mode === 'observe' || this.narrationOwnsPose() || this.observedAgentsRunning() || !this.idle.shouldSpeak()) return null;
     await this.refreshWorkspaceSignals();
     // Captures and narration can change while the workspace request is pending.
-    if (this.destroyed || this.narrationOwnsPose() || this.observedAgentsRunning()) return null;
+    if (this.destroyed || this.policy?.mode === 'observe' || this.narrationOwnsPose() || this.observedAgentsRunning()) return null;
     const signals = this.buildStewardSignals();
     const proposals = this.steward.propose(signals);
     // With nothing to point at, Phi stays quiet rather than manufacturing a task.

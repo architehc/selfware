@@ -405,6 +405,10 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
             workdir,
             crate::safety::git_exec::GitScope::Internal,
         ))
+        .envs(crate::safety::git_exec::hardening_config_env(
+            workdir,
+            crate::safety::git_exec::GitScope::Internal,
+        ))
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["-C"])
         .arg(workdir)
@@ -415,6 +419,10 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
 
     let out = Command::new("git")
         .args(crate::safety::git_exec::hardening_args(
+            workdir,
+            crate::safety::git_exec::GitScope::Internal,
+        ))
+        .envs(crate::safety::git_exec::hardening_config_env(
             workdir,
             crate::safety::git_exec::GitScope::Internal,
         ))

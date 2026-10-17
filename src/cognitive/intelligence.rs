@@ -630,6 +630,13 @@ impl GitState {
     /// Update from git repository
     pub fn update(&mut self, repo_path: &Path) -> Result<()> {
         let repo = git2::Repository::open(repo_path)?;
+        // A repository whose config relocates its work tree (`core.worktree`)
+        // would list files outside the workspace.
+        crate::safety::git_exec::ensure_work_tree_is_checkout(
+            &repo,
+            repo_path,
+            crate::safety::git_exec::GitScope::Internal,
+        )?;
 
         // Get current branch
         if let Ok(head) = repo.head() {

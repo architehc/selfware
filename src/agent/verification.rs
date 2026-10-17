@@ -1858,7 +1858,7 @@ impl Agent {
     /// cannot attribute (no checkpoint, an unparseable record, a sequence
     /// bump with no matching call) count as code-affecting. Only a PROVEN
     /// doc-only mutation set disarms the gate.
-    fn has_code_affecting_mutation(&self) -> bool {
+    pub(super) fn has_code_affecting_mutation(&self) -> bool {
         let Some(cp) = self.current_checkpoint.as_ref() else {
             return self.mutation_sequence > 0 || self.has_written_any_file;
         };
@@ -2341,6 +2341,32 @@ impl Agent {
                         self.last_successful_verification_mutation_sequence, self.mutation_sequence
                     ));
                 }
+            }
+        }
+
+        // A failure the model's own check reported BEFORE the latest edit is
+        // stale, not resolved: the edit may or may not have fixed it, and a
+        // pass of a different check on the new tree (a `py_compile` after a
+        // red `unittest`) does not say. The ledger keeps it until the same
+        // check passes, so demand that re-run — the rescue performs it — or
+        // the run completes "verification: passed" naming a test command
+        // that still fails on the delivered tree. A stale post-edit gate
+        // failure is not demanded here: `recheck_stale_post_edit_failure`
+        // re-runs it on the final tree.
+        if self.mutation_sequence > 0 && self.has_code_affecting_mutation() {
+            if let Some(record) = self
+                .verification_failures
+                .stale_unresolved(&self.verification_task_root(), self.mutation_sequence)
+            {
+                let check = &record.check_id;
+                let edits = self.describe_code_affecting_edits();
+                return Some(format!(
+                    "StaleVerification: `{check}` failed at mutation #{} (after {edits}) and has \
+                     not been run again since the tree moved on to #{}, so the failure is not \
+                     known to be fixed; a pass of a different check does not cover it. \
+                     Rerun `{check}` after your last change and let it pass before completing.",
+                    record.mutation_sequence, self.mutation_sequence
+                ));
             }
         }
 
@@ -3938,7 +3964,8 @@ impl Agent {
         // cut-off and was re-sent identically three times (kvstore_nat).
         let spec = crate::api::client::SideCall::new("requirements_audit")
             .max_tokens(REQUIREMENTS_AUDIT_MAX_TOKENS)
-            .time_cap_secs(REQUIREMENTS_AUDIT_CAP_SECS);
+            .time_cap_secs(REQUIREMENTS_AUDIT_CAP_SECS)
+            .thinking_from(crate::config::TurnWorkload::Planning);
         let response = match self.client.side_chat(messages, spec).await {
             Ok(resp) => resp,
             Err(e) => {
@@ -4919,9 +4946,8 @@ const REQUIREMENTS_AUDIT_MIN_INSTRUCTION_CHARS: usize = 200;
 /// line (the prompt already truncates its inputs to 12k chars).
 const REQUIREMENTS_AUDIT_MAX_TOKENS: usize = 8192;
 
-/// Wall-time cap for the audit side call — well under the 300 s gateway
-/// cut-off that turned one audit into 4 x 300 s of 503s.
-const REQUIREMENTS_AUDIT_CAP_SECS: u64 = 180;
+/// Wall-time cap for the audit side call.
+const REQUIREMENTS_AUDIT_CAP_SECS: u64 = 300;
 
 /// Token budget for the changed-file evidence in the audit prompt, measured
 /// with `crate::token_count::estimate_content_tokens` (AGENTS.md rule 4).

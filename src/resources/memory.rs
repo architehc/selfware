@@ -85,10 +85,11 @@ impl MemoryManager {
 
     /// Get current memory usage
     pub async fn get_usage(&self) -> Result<MemoryUsage, ResourceError> {
-        use sysinfo::System;
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
-        let mut system = System::new_all();
-        system.refresh_all();
+        let system = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+        );
 
         let total = system.total_memory();
         let used = system.used_memory();

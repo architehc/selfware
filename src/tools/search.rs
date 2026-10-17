@@ -11,7 +11,7 @@ use tracing::instrument;
 use walkdir::WalkDir;
 
 use crate::config::SafetyConfig;
-use crate::tools::file::{resolve_safety_config, validate_tool_path};
+use crate::tools::file::{resolve_safety_config, validate_tool_path, MAX_SOURCE_READ_SIZE};
 #[cfg(test)]
 use crate::tools::grep_search::cached_regex;
 #[cfg(test)]
@@ -351,13 +351,9 @@ impl Tool for SymbolSearch {
                 // walker check would let a concurrent hard-link swap bypass
                 // the repository-discovery policy.
                 let content = match tokio::task::block_in_place(|| {
-                    use std::io::Read;
-
-                    let mut file =
-                        crate::safety::source_context::open_broad_discovery_regular(path)?;
-                    let mut content = String::new();
-                    file.read_to_string(&mut content)?;
-                    Ok::<_, std::io::Error>(content)
+                    let file = crate::safety::source_context::open_broad_discovery_regular(path)?;
+                    crate::tools::file::read_handle_to_string_capped(file, MAX_SOURCE_READ_SIZE)
+                        .map_err(std::io::Error::other)
                 }) {
                     Ok(content) => content,
                     Err(_) => continue,

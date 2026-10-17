@@ -1294,7 +1294,86 @@ fn read_file_content_at_revision_works_with_sanitized_env() {
         .current_dir(repo_root)
         .output();
 
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
+    let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
     let content =
-        read_file_content_at_revision(repo_root, "lib.rs", Some("HEAD")).expect("must resolve");
+        read_file_content_at_revision(repo_root, "lib.rs", Some(&head_sha)).expect("must resolve");
     assert_eq!(content, "fn hello() {}\n");
+}
+
+/// An attempts log in a clone is repository content. A `base_commit` that is not a
+/// full object id must never reach `git show` as an argument (`--format=…`,
+/// `--output=…`) nor name the snapshot directory (`HEAD^{/x/../..}`), and must not
+/// fall through to the working tree.
+#[test]
+fn test_investigate_citations_refuse_non_object_id_base_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    // The repo sits one level below the temp dir so an escape lands inside it.
+    let repo_root = &temp.path().join("repo");
+    std::fs::create_dir_all(repo_root).unwrap();
+
+    let run_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {:?} failed", args);
+        output
+    };
+    run_git(&["init"]);
+    run_git(&["config", "user.email", "evo@test"]);
+    run_git(&["config", "user.name", "Evo Test"]);
+    std::fs::write(repo_root.join("lib.rs"), "fn hello() {}\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init"]);
+
+    assert!(is_git_object_id(&"a".repeat(40)));
+    assert!(is_git_object_id(&"0".repeat(64)));
+    assert!(!is_git_object_id("HEAD"));
+    assert!(!is_git_object_id("deadbeef"));
+    assert!(!is_git_object_id("--format=%B#/../../../../.."));
+    assert!(!is_git_object_id("HEAD^{/x/../../../../y}"));
+
+    assert!(
+        read_file_content_at_revision(repo_root, "lib.rs", Some("HEAD")).is_none(),
+        "symbolic revision must not resolve, nor fall through to the working tree"
+    );
+    assert!(
+        read_file_content_at_revision(repo_root, "lib.rs", Some("--output=../escape")).is_none()
+    );
+
+    // Patch with an undocumented pub fn; the hostile base_commit either is a git
+    // option or walks up out of the snapshot directory.
+    let patch = "--- a/escape.rs\n+++ b/escape.rs\n@@ -0,0 +1 @@\n+pub fn helper() {}\n";
+    for hostile in [
+        "--format=%B#/../../../..",
+        "--output=../escape",
+        "HEAD^{/x/../../..}",
+    ] {
+        let (_findings, citations) =
+            scan_patch_for_opaque_structures(patch, repo_root, "att-hostile-base", Some(hostile));
+        assert_eq!(citations.len(), 1);
+        let citation = &citations[0];
+        assert_eq!(
+            citation.hyperlink,
+            format!("unavailable://git/{hostile}/escape.rs"),
+            "hostile base_commit must fail closed"
+        );
+        assert_eq!(citation.line_range, (0, 0));
+    }
+
+    assert!(
+        !repo_root.join(".selfware").join("snapshots").exists(),
+        "no snapshot directory may be created for a hostile base_commit"
+    );
+    assert!(
+        !temp.path().join("escape:escape.rs").exists(),
+        "git must not have written outside the repo"
+    );
 }

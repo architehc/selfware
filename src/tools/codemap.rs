@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -192,7 +191,8 @@ const UNREADABLE_FILE_FALLBACK_TOKENS: usize = 500;
 /// heuristics). Falls back to [`UNREADABLE_FILE_FALLBACK_TOKENS`] when the
 /// file cannot be read.
 fn measure_file_tokens(path: &Path) -> usize {
-    match std::fs::read_to_string(path) {
+    match crate::tools::file::read_to_string_capped(path, crate::tools::file::MAX_SOURCE_READ_SIZE)
+    {
         Ok(content) => crate::token_count::estimate_content_tokens(&content),
         Err(_) => UNREADABLE_FILE_FALLBACK_TOKENS,
     }
@@ -370,7 +370,11 @@ impl<'g> GraphOverlay<'g> {
         let content = if broad_discovery {
             read_broad_discovery_to_string(path)
         } else {
-            std::fs::read_to_string(path).ok()
+            crate::tools::file::read_to_string_capped(
+                path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .ok()
         };
         let tokens = content
             .as_deref()
@@ -382,10 +386,9 @@ impl<'g> GraphOverlay<'g> {
 }
 
 fn read_broad_discovery_to_string(path: &Path) -> Option<String> {
-    let mut file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
-    let mut content = String::new();
-    file.read_to_string(&mut content).ok()?;
-    Some(content)
+    let file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
+    crate::tools::file::read_handle_to_string_capped(file, crate::tools::file::MAX_SOURCE_READ_SIZE)
+        .ok()
 }
 
 fn is_regular_file_without_symlink(path: &Path) -> bool {
@@ -398,6 +401,30 @@ fn is_directory_without_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
         .unwrap_or(false)
+}
+
+/// Resolve `focus` as a normal-component subpath under `src_root`, rejecting
+/// absolute paths, `..` traversal, and any symlinked intermediate directory.
+fn resolve_focus_subpath(src_root: &Path, focus: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let normalized = focus.replace("::", "/");
+    let rel = Path::new(&normalized);
+    let mut current = src_root.to_path_buf();
+    let mut saw_normal = false;
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(seg) => {
+                if current.exists() && !is_directory_without_symlink(&current) {
+                    return None;
+                }
+                current.push(seg);
+                saw_normal = true;
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    saw_normal.then_some(current)
 }
 
 /// Build a lightweight code map for a directory, optionally focused on a module path.
@@ -414,7 +441,10 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
 
     let scan_dir = if let Some(focus_path) = focus {
         // Resolve focus as a subpath under root/src
-        let candidate = root.join("src").join(focus_path.replace("::", "/"));
+        let src_root = root.join("src");
+        let Some(candidate) = resolve_focus_subpath(&src_root, focus_path) else {
+            return nodes;
+        };
         if crate::safety::source_context::discovery_root_is_private(&candidate) {
             return nodes;
         }
@@ -435,7 +465,11 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
                 let (tokens, dependencies, live) = match &overlay {
                     Some(overlay) => overlay.tokens_and_deps(&rs_file, &rel, false),
                     None => {
-                        let content = std::fs::read_to_string(&rs_file).ok();
+                        let content = crate::tools::file::read_to_string_capped(
+                            &rs_file,
+                            crate::tools::file::MAX_SOURCE_READ_SIZE,
+                        )
+                        .ok();
                         (
                             content
                                 .as_deref()
@@ -663,6 +697,14 @@ impl Tool for CodeMapTool {
         // The first shared_graph_index call may parse the graph YAML — keep
         // it off the async hot path (subsequent calls are stat-only).
         let root = crate::tools::workspace_root::current_path();
+        if let Some(focus_path) = focus.as_deref() {
+            let candidate = root.join("src").join(focus_path.replace("::", "/"));
+            let rs_file = candidate.with_extension("rs");
+            let safety = crate::tools::file::resolve_safety_config(None);
+            for path in [candidate, rs_file] {
+                crate::tools::file::validate_tool_path(&path.to_string_lossy(), &safety)?;
+            }
+        }
         let focus_for_closure = focus.clone();
         let nodes = crate::tools::workspace_root::spawn_blocking(move || {
             build_code_map(&root, focus_for_closure.as_deref(), depth)
@@ -861,7 +903,7 @@ impl Tool for ContextActionTool {
                 if mod_candidate.is_file() {
                     mod_candidate
                 } else {
-                    PathBuf::from(target_str)
+                    candidate
                 }
             }
         } else {
@@ -872,6 +914,9 @@ impl Tool for ContextActionTool {
                 root.join(target_str)
             }
         };
+
+        let safety = crate::tools::file::resolve_safety_config(None);
+        crate::tools::file::validate_tool_path(&target_path.to_string_lossy(), &safety)?;
 
         let (base_tokens, token_source) = file_token_base(&root, &target_path);
         let estimate = estimate_action_cost_with_base(action, fusion, base_tokens);

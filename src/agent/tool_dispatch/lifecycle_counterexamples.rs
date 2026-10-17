@@ -404,6 +404,75 @@ mod agent_lifecycle {
         );
     }
 
+    /// The gap the staleness rule left open: the red suite above, then ONE
+    /// more write (a README is enough), then a green compile. The failure
+    /// was stale, so it no longer blocked; nothing re-ran it; the compile
+    /// pass was fresh; the run completed "verification: passed" naming a
+    /// test command that still failed on the delivered tree.
+    #[tokio::test]
+    async fn a_failing_suite_outdated_by_a_later_write_is_rerun_not_forgotten() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "calculator.py", "content": "broken\n" }),
+            true,
+        );
+        shell(&mut agent, "python3 -m unittest", false);
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "README.md", "content": "# notes\n" }),
+            true,
+        );
+        assert_eq!(
+            agent.mutation_sequence, 2,
+            "the README write outdates the failure"
+        );
+        shell(&mut agent, "python3 -m py_compile calculator.py", true);
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 2,
+            "the compile pass is credited at the current revision"
+        );
+
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(
+            refusal.as_deref().is_some_and(|r| {
+                r.contains("StaleVerification") && r.contains("python3 -m unittest")
+            }),
+            "a failure that predates the latest edit is not known to be fixed; the gate \
+             must demand the same check again, not accept a different one. Gate said {refusal:?}"
+        );
+        // The run summary reads the same ledger: with both runs on the
+        // checkpoint log it must not render "verification: passed" either.
+        let cp = agent.current_checkpoint.as_mut().unwrap();
+        for (command, success) in [
+            ("python3 -m unittest", false),
+            ("python3 -m py_compile calculator.py", true),
+        ] {
+            cp.log_tool_call(crate::checkpoint::ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: "shell_exec".into(),
+                arguments: json!({ "command": command }).to_string(),
+                result: Some("ok".into()),
+                success,
+                duration_ms: Some(1),
+            });
+        }
+        assert_eq!(
+            agent.credited_verification_summary(),
+            Some((false, 2)),
+            "the summary names the failed suite; it must not count it under a pass"
+        );
+
+        shell(&mut agent, "python3 -m unittest", true);
+        let after = verification_refusal(&mut agent).await;
+        assert!(
+            after.is_none(),
+            "the same check passing on the new tree resolves it, got {after:?}"
+        );
+    }
+
     /// A second failing check used to overwrite the first in a single slot.
     #[tokio::test]
     async fn two_different_failing_checks_are_both_retained() {

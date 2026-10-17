@@ -273,6 +273,9 @@ impl Node {
 /// Files and directories that must NEVER be modified by any self-improvement or evolution loop.
 pub const PROTECTED_PATHS: &[&str] = &[
     "AGENTS.md",
+    "CLAUDE.md",
+    ".claude.md",
+    ".selfware.md",
     "src/evolution/",
     "src/safety/",
     "src/evolve/",

@@ -476,14 +476,6 @@ fn read_line_raw() -> Result<LineInput> {
     loop {
         if event::poll(std::time::Duration::from_millis(5000))? {
             if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('c' | 'C'))
-                {
-                    write!(stdout, "\r\n")?;
-                    stdout.flush()?;
-                    crate::request_shutdown();
-                    return Err(crate::errors::SelfwareError::Interrupted.into());
-                }
                 if let Some(input) = handle_raw_key(key, &mut buf, &mut stdout)? {
                     return Ok(input);
                 }
@@ -850,13 +842,12 @@ pub fn run_interview(task: &str, cwd: &Path) -> Result<InterviewContext> {
     drop(out);
 
     // ---- Language ----
-    let should_ask_language = existing_lang.is_none() && hints.mentioned_languages.is_empty();
+    let should_ask_language = existing_lang.is_none() && hints.mentioned_languages.len() != 1;
     if should_ask_language {
-        let default = infer_language_default(&hints);
         match ask_multiple_choice(
             "What language should this be written in?",
             &language_options(),
-            default,
+            None,
         )? {
             Some(answer) => session.language = Some(answer),
             None => {
@@ -959,14 +950,6 @@ pub fn run_interview(task: &str, cwd: &Path) -> Result<InterviewContext> {
 // ---------------------------------------------------------------------------
 // Default inference helpers
 // ---------------------------------------------------------------------------
-
-fn infer_language_default(hints: &TaskHints) -> Option<char> {
-    if !hints.mentioned_languages.is_empty() {
-        return None; // already handled
-    }
-    // No strong signal — don't presume.
-    None
-}
 
 fn infer_project_type_default(hints: &TaskHints) -> Option<char> {
     if hints.suggests_web_api {

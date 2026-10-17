@@ -469,14 +469,13 @@ impl Agent {
                 if let Some(choice) = response.choices.first() {
                     let text = choice.message.content.clone();
                     if !text.is_empty() {
-                        let lesson = crate::cognitive::Lesson {
-                            category: crate::cognitive::LessonCategory::Discovery,
-                            content: format!("Reflection at step {}: {}", step, text),
-                            context: "".to_string(),
-                            tags: vec!["reflection".to_string()],
-                            timestamp: chrono::Utc::now(),
-                        };
-                        self.cognitive_state.episodic_memory.record_lesson(lesson);
+                        // The reflection is free text from a model that has
+                        // just read this workspace's files: it informs the
+                        // current task through working memory only. It is
+                        // not recorded as an episodic lesson, because those
+                        // are persisted to the user's global memory and
+                        // replayed in the system prompt of later sessions in
+                        // every repository.
                         self.cognitive_state
                             .working_memory
                             .add_fact(&format!("Reflection (Step {}): {}", step, text));

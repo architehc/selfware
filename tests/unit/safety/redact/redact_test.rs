@@ -488,6 +488,9 @@ fn every_builtin_secret_detector_has_redaction_coverage() {
     // does not mistake the test source for committed credentials.
     let gitlab_token = ["glpat", "A1b2C3d4E5f6G7h8I9j0"].join("-");
     let twilio_sid = format!("AC{}", "0123456789abcdef".repeat(2));
+    let f = fixtures();
+    let sas = format!("sp=r&sig={}", f.sas_signature);
+    let presigned = format!("X-Amz-Signature={}", f.presigned_signature);
     let cases = [
         (
             "AWS Access Key",
@@ -572,6 +575,26 @@ fn every_builtin_secret_detector_has_redaction_coverage() {
             "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv",
         ),
         ("Twilio SID", twilio_sid.as_str(), twilio_sid.as_str()),
+        (
+            "Azure SAS Signature",
+            sas.as_str(),
+            &sas["sp=r&sig=".len()..],
+        ),
+        (
+            "AWS Presigned URL Signature",
+            presigned.as_str(),
+            &presigned["X-Amz-Signature=".len()..],
+        ),
+        (
+            "DigitalOcean Token",
+            f.digitalocean.as_str(),
+            f.digitalocean.as_str(),
+        ),
+        (
+            "Google OAuth Client Secret",
+            f.google_client_secret.as_str(),
+            f.google_client_secret.as_str(),
+        ),
         (
             "Base64 Secret",
             "auth=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A",
@@ -727,6 +750,117 @@ fn model_redaction_replaces_only_secret_values_and_keeps_lines() {
     );
 }
 
+/// A PEM body delivered without its BEGIN line — a `line_range` read that
+/// starts inside the block, `tail`, grep context lines under another JSON
+/// key than the match, a diff hunk — is still a private key.
+#[test]
+fn model_redaction_catches_key_bodies_read_without_their_begin_line() {
+    let g = RedactionContext::Generic;
+    let body: Vec<String> = (0..4)
+        .map(|i| format!("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC{i}xZq8Xw3Lm9Np"))
+        .chain(["9Uhd2XyEz4IIw0=".to_string()])
+        .collect();
+    assert!(body[..4].iter().all(|l| l.len() == 64));
+    let marker = "[REDACTED:private_key]";
+
+    // file_read with line_range (numbered): every body line, the END line stays.
+    let sliced = body.join("\n") + "\n-----END PRIVATE KEY-----\n";
+    let numbered = crate::tools::line_numbers::number_lines(&sliced, 2);
+    let json = serde_json::json!({"content": numbered, "line_numbers": true}).to_string();
+    let out = redact_for_model(&json, g);
+    let value: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+    let lines: Vec<&str> = value["content"].as_str().unwrap().lines().collect();
+    assert_eq!(lines.len(), 6);
+    for (i, line) in lines[..5].iter().enumerate() {
+        assert_eq!(*line, format!("{}\t{marker}", i + 2));
+    }
+    assert_eq!(lines[5], "7\t-----END PRIVATE KEY-----");
+    assert_eq!(out.redacted, 5);
+
+    // Shell output (`tail -n 6 server.key`): plain text, no header.
+    let out = redact_for_model(&sliced, g);
+    assert_eq!(out.redacted, 5);
+    assert!(!out.content.contains(&body[0]));
+    assert!(!out.content.contains(&body[4]));
+    assert!(out.content.ends_with("-----END PRIVATE KEY-----\n"));
+
+    // grep_search: the BEGIN line is the match, the body is context.
+    let json = serde_json::json!({"matches": [{
+        "file": "keys/server.key", "line": 1, "column": 1,
+        "content": "-----BEGIN PRIVATE KEY-----",
+        "context_before": [],
+        "context_after": [body[0], body[1], body[2], body[3], body[4], "-----END PRIVATE KEY-----"],
+    }]})
+    .to_string();
+    let out = redact_for_model(&json, g);
+    let value: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+    let after = value["matches"][0]["context_after"].as_array().unwrap();
+    assert_eq!(after[..5], vec![serde_json::Value::from(marker); 5][..]);
+    assert_eq!(after[5], "-----END PRIVATE KEY-----");
+    assert_eq!(
+        value["matches"][0]["content"],
+        "-----BEGIN PRIVATE KEY-----"
+    );
+
+    // git_diff: a key in a YAML block scalar, marker then indentation.
+    let diff = format!(
+        "-  config: |\n-    -----BEGIN PRIVATE KEY-----\n-    {}\n-    {}\n-    -----END PRIVATE KEY-----\n",
+        body[0], body[4]
+    );
+    let out = redact_for_model(&diff, g);
+    assert_eq!(out.redacted, 2);
+    assert!(!out.content.contains(&body[0]));
+    assert!(out.content.contains("-    -----END PRIVATE KEY-----\n"));
+
+    // Not a key body: certificate and PuTTY public armor with their headers,
+    // a YAML wrapped base64 blob followed by `name: widget` / `replicas: 3`,
+    // a hex digest, a 64-wide rule, a shorter base64 line on its own.
+    let cert = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n{}\n-----END CERTIFICATE-----\n",
+        body[0], body[4]
+    );
+    let cert_tail = format!("{}\n{}\n-----END CERTIFICATE-----\n", body[0], body[4]);
+    let yaml_blob = format!(
+        "data: |\n  {}\n  {}\nname: widget\nreplicas: 3\nimage: nginx\n",
+        body[0], body[4]
+    );
+    let ppk = format!(
+        "PuTTY-User-Key-File-3: ssh-rsa\nEncryption: none\nComment: me\nPublic-Lines: 1\n{}\n",
+        body[1]
+    );
+    let ssh2 = format!(
+        "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"me\"\n{}\n---- END SSH2 PUBLIC KEY ----\n",
+        body[2]
+    );
+    let sha = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9\n";
+    let rule = format!("{}\n", "=".repeat(64));
+    let short = "MIIBog==\n";
+    for text in [
+        cert,
+        cert_tail,
+        yaml_blob,
+        ppk,
+        ssh2,
+        sha.into(),
+        rule,
+        short.into(),
+    ] {
+        let out = redact_for_model(&text, g);
+        assert_eq!(out.content, text);
+        assert_eq!(out.redacted, 0);
+    }
+    // The PuTTY private lines are still redacted behind public ones.
+    let ppk = format!(
+        "Public-Lines: 1\n{}\nPrivate-Lines: 1\n{}\nPrivate-MAC: 8f3a2b1c9d7e\n",
+        body[1], body[2]
+    );
+    let out = redact_for_model(&ppk, g);
+    assert_eq!(out.redacted, 1);
+    assert!(out.content.contains(&body[1]));
+    assert!(!out.content.contains(&body[2]));
+    assert!(out.content.ends_with("Private-MAC: 8f3a2b1c9d7e\n"));
+}
+
 #[test]
 fn every_builtin_secret_detector_has_model_redaction_coverage() {
     // Same independent fixtures as the log-redaction coverage test (built
@@ -734,6 +868,7 @@ fn every_builtin_secret_detector_has_model_redaction_coverage() {
     // until the model-facing redactor covers it too.
     let gitlab_token = ["glpat", "A1b2C3d4E5f6G7h8I9j0"].join("-");
     let twilio_sid = format!("AC{}", "0123456789abcdef".repeat(2));
+    let f = fixtures();
     let cases: Vec<(&str, String, String)> = vec![
         (
             "AWS Access Key",
@@ -825,6 +960,26 @@ fn every_builtin_secret_detector_has_model_redaction_coverage() {
         ),
         ("Twilio SID", twilio_sid.clone(), twilio_sid.clone()),
         (
+            "Azure SAS Signature",
+            format!("sp=r&sig={}", f.sas_signature),
+            f.sas_signature.clone(),
+        ),
+        (
+            "AWS Presigned URL Signature",
+            format!("X-Amz-Signature={}", f.presigned_signature),
+            f.presigned_signature.clone(),
+        ),
+        (
+            "DigitalOcean Token",
+            f.digitalocean.clone(),
+            f.digitalocean.clone(),
+        ),
+        (
+            "Google OAuth Client Secret",
+            f.google_client_secret.clone(),
+            f.google_client_secret.clone(),
+        ),
+        (
             "Base64 Secret",
             "auth=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A".into(),
             "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A".into(),
@@ -866,6 +1021,14 @@ struct SecretFixtures {
     xoxe: String,
     pypi: String,
     aws_secret: String,
+    /// A one-line base64 PEM of RSA-4096 size (> 4096 characters).
+    rsa4096_b64: String,
+    /// A percent-encoded base64 HMAC, as it sits in a SAS URL.
+    sas_signature: String,
+    /// The 64-hex `X-Amz-Signature=` of an S3 presigned URL.
+    presigned_signature: String,
+    digitalocean: String,
+    google_client_secret: String,
 }
 
 fn fixtures() -> SecretFixtures {
@@ -879,6 +1042,14 @@ fn fixtures() -> SecretFixtures {
         xoxe: ["xoxe.xoxp", "1", "Mi0yLTEyMzQ1Njc4OTAx"].join("-"),
         pypi: ["pypi", "AgEIcHlwaS5vcmcCJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAw"].join("-"),
         aws_secret: ["wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"].join("/"),
+        rsa4096_b64: format!(
+            "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUp{}",
+            "Zq8Xw3Lm9Np2Rt5Vb7Yc4".repeat(206)
+        ),
+        sas_signature: ["5n4V8CA3xiV8I7o6xzN2PgklmMEs0Eaw", "UEeboDC7jJY%3D"].concat(),
+        presigned_signature: "a4f8e2b19c7d3f5a".repeat(4),
+        digitalocean: ["dop", "v1", &"9a40eecb419cac2e".repeat(4)].join("_"),
+        google_client_secret: ["GOCSPX", "m7VP32QRMM3EuhQO39bSty7NlqtY"].join("-"),
     }
 }
 
@@ -994,6 +1165,12 @@ pub(crate) fn secret_corpus() -> Vec<(String, Vec<String>, RedactionContext)> {
             s(&["LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo=", "Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
             g,
         ),
+        // A base64 RSA-4096 PEM on one line is longer than 4096 characters.
+        (
+            format!("    client-key-data: {}\n", f.rsa4096_b64),
+            vec![f.rsa4096_b64.clone()],
+            g,
+        ),
         // PGP and PuTTY private keys.
         (pgp.into(), s(&["lQOYBF0Tx6gBCAC7ZkpxyZq8Xw3Lm9", "=Ab3C"]), g),
         (
@@ -1010,6 +1187,57 @@ pub(crate) fn secret_corpus() -> Vec<(String, Vec<String>, RedactionContext)> {
         (format!("hook secret {}", f.whsec), vec![f.whsec.clone()], g),
         (format!("slack app token {}", f.xapp), vec![f.xapp.clone()], g),
         (format!("rotated: {}", f.xoxe), vec![f.xoxe.clone()], g),
+        // Azure SAS: as a URL, as a `SharedAccessSignature=` connection
+        // string, and as an unquoted env value — a query string whose secret
+        // is the LAST parameter, so the key-driven span (which ends at the
+        // first `&key=`) covered only `?sv=…` and left `sig=` in place.
+        (
+            format!(
+                "azcopy copy db.bak \"https://acct.blob.core.windows.net/backups/db.bak?sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&se=2030-01-01T00:00:00Z&spr=https&sig={}\"",
+                f.sas_signature
+            ),
+            vec![f.sas_signature.clone()],
+            g,
+        ),
+        (
+            format!(
+                "AZURE_STORAGE_CONNECTION_STRING=BlobEndpoint=https://acct.blob.core.windows.net/;SharedAccessSignature=sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&sig={}",
+                f.sas_signature
+            ),
+            vec![f.sas_signature.clone()],
+            g,
+        ),
+        (
+            format!(
+                "AZURE_STORAGE_SAS_TOKEN=?sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&se=2030-01-01T00:00:00Z&spr=https&sig={}",
+                f.sas_signature
+            ),
+            vec![f.sas_signature.clone()],
+            g,
+        ),
+        // S3 presigned URL: the signature, not just the credential scope.
+        (
+            format!(
+                "https://bucket.s3.amazonaws.com/db.bak?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIA7H3M9Q2V6N8C4R5T%2F20260101%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Expires=3600&X-Amz-Signature={}",
+                f.presigned_signature
+            ),
+            vec![f.presigned_signature.clone()],
+            g,
+        ),
+        // Bare vendor tokens after a CLI flag and in prose (no key in sight).
+        (
+            format!("doctl auth init -t {}", f.digitalocean),
+            vec![f.digitalocean.clone()],
+            g,
+        ),
+        (
+            format!(
+                "Google sign-in on staging uses the client secret {} (rotated yearly).",
+                f.google_client_secret
+            ),
+            vec![f.google_client_secret.clone()],
+            g,
+        ),
         // mysql -p / --password=.
         ("mysql -u root -pSup3rS3cret9 appdb".into(), s(&["Sup3rS3cret9"]), g),
         ("mysqldump --password=Sup3rS3cret9 appdb".into(), s(&["Sup3rS3cret9"]), g),
@@ -1071,6 +1299,105 @@ pub(crate) fn secret_corpus() -> Vec<(String, Vec<String>, RedactionContext)> {
         (
             format!("AWS_SECRET_ACCESS_KEY = \"{}\"", f.aws_secret),
             vec![f.aws_secret.clone()],
+            g,
+        ),
+        // A secret bound to its name by a call, an index, an element, a
+        // name/value pair (on one line or the next) or whitespace.
+        (
+            "define( 'DB_PASSWORD', 'Sup3rS3cret9' );".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "os.environ[\"DB_PASSWORD\"] = \"Sup3rS3cret9\"".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "$config['password'] = 'hunter2secret';".into(),
+            s(&["hunter2secret"]),
+            g,
+        ),
+        (
+            "os.environ.setdefault(\"API_TOKEN\", \"Zq8Xw3Lm9Np2Rt5Vb7Yc4\")".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        (
+            "            'password' => env('DB_PASSWORD', 'Sup3rS3cret9'),".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "      <password>Sup3rS3cret9</password>".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "    <add key=\"ApiKey\" value=\"Zq8Xw3Lm9Np2Rt5Vb7Yc4\" />".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        (
+            "    <property name=\"password\" value=\"Sup3rS3cret9\"/>".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "        {\"name\": \"DB_PASSWORD\", \"value\": \"Sup3rS3cret9\"},".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "        env:\n        - name: DB_PASSWORD\n          value: Sup3rS3cret9\n        - name: API_KEY\n          value: \"Zq8Xw3Lm9Np2Rt5Vb7Yc4\"\n".into(),
+            s(&["Sup3rS3cret9", "Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        (
+            "variable \"db_password\" {\n  type    = string\n  default = \"Sup3rS3cret9\"\n}\n"
+                .into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "+        - name: DB_PASSWORD\n+          value: Sup3rS3cret9\n".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "ENV API_KEY Zq8Xw3Lm9Np2Rt5Vb7Yc4".into(),
+            s(&["Zq8Xw3Lm9Np2Rt5Vb7Yc4"]),
+            g,
+        ),
+        ("setenv DB_PASSWORD Sup3rS3cret9".into(), s(&["Sup3rS3cret9"]), g),
+        (
+            "machine api.example.com login deploy password Sup3rS3cret9".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "CREATE USER app WITH PASSWORD 'Sup3rS3cret9';".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "CREATE USER 'app'@'%' IDENTIFIED BY 'Sup3rS3cret9';".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "docker login -u deploy --password Sup3rS3cret9 registry.example.com".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "docker login -u deploy -p Sup3rS3cret9 registry.example.com".into(),
+            s(&["Sup3rS3cret9"]),
+            g,
+        ),
+        (
+            "sshpass -p 'Sup3rS3cret9' ssh deploy@app.example.com".into(),
+            s(&["Sup3rS3cret9"]),
             g,
         ),
     ]
@@ -1151,6 +1478,142 @@ fn model_redaction_keeps_the_key_and_the_rest_of_the_line() {
     }
 }
 
+/// A secret-named `name:` line binds the `value:` line that follows it, at
+/// its column or deeper; a `valueFrom` reference, a new list item or a less
+/// indented block drops the name, so a later `value:` is not touched.
+#[test]
+fn model_redaction_binds_a_name_line_to_its_value_line() {
+    let lines = [
+        "        env:",
+        "        - name: DB_PASSWORD",
+        "          value: Sup3rS3cret9",
+        "        - name: API_TOKEN",
+        "          valueFrom:",
+        "            secretKeyRef:",
+        "              name: db-secret",
+        "              key: token",
+        "        - name: LOG_LEVEL",
+        "          value: debug",
+        "      ports:",
+        "      - containerPort: 8080",
+        "      options:",
+        "        value: Zq8Xw3Lm9Np2Rt5Vb7Yc4",
+    ];
+    let manifest = lines.join("\n") + "\n";
+    let out = redact_for_model(&manifest, RedactionContext::Generic);
+    assert_eq!(out.redacted, 1, "{}", out.content);
+    assert_eq!(
+        out.content,
+        manifest.replace("value: Sup3rS3cret9", "value: [REDACTED:password]")
+    );
+    // grep delivers the two lines as separate `content` leaves.
+    let json = serde_json::json!({"matches": [
+        {"file": "k8s.yaml", "line": 18, "content": "        - name: DB_PASSWORD"},
+        {"file": "k8s.yaml", "line": 19, "content": "          value: Sup3rS3cret9"},
+    ]})
+    .to_string();
+    let out = redact_for_model(&json, RedactionContext::Generic);
+    assert!(!out.content.contains("Sup3rS3cret9"), "{}", out.content);
+    assert!(out.content.contains("value: [REDACTED:password]"));
+}
+
+/// The signature of a SAS / presigned URL is redacted wherever the
+/// parameter sits; the rest of the query string (and the key-driven marker
+/// an unquoted `SAS_TOKEN=?sv=…` value already got) stays.
+#[test]
+fn model_redaction_replaces_url_signatures_and_bare_vendor_tokens() {
+    let f = fixtures();
+    let cases = [
+        (
+            format!(
+                "AZURE_STORAGE_SAS_TOKEN=?sv=2022-11-02&ss=b&sp=rwdlac&sig={}",
+                f.sas_signature
+            ),
+            "AZURE_STORAGE_SAS_TOKEN=[REDACTED:token]&ss=b&sp=rwdlac&sig=[REDACTED:azure_sas]"
+                .to_string(),
+        ),
+        (
+            format!(
+                "SharedAccessSignature=sv=2022-11-02&sp=r&sig={}",
+                f.sas_signature
+            ),
+            "SharedAccessSignature=sv=2022-11-02&sp=r&sig=[REDACTED:azure_sas]".to_string(),
+        ),
+        (
+            format!(
+                "https://b.s3.amazonaws.com/k?X-Amz-Signature={}",
+                f.presigned_signature
+            ),
+            "https://b.s3.amazonaws.com/k?X-Amz-Signature=[REDACTED:aws_signature]".to_string(),
+        ),
+        (
+            format!("doctl auth init -t {}", f.digitalocean),
+            "doctl auth init -t [REDACTED:digitalocean_token]".to_string(),
+        ),
+        (
+            format!("client secret {} (rotated yearly)", f.google_client_secret),
+            "client secret [REDACTED:google_client_secret] (rotated yearly)".to_string(),
+        ),
+    ];
+    for (input, want) in cases {
+        let out = redact_for_model(&input, RedactionContext::Generic);
+        assert_eq!(out.content, want);
+        assert_eq!(
+            out.content,
+            redact_for_model(&want, RedactionContext::Generic).content
+        );
+    }
+    // Short `sig=` values are not a SAS (an HMAC-SHA256 is 44 chars).
+    let short = "https://example.com/cb?state=abc&sig=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0";
+    assert_eq!(
+        redact_for_model(short, RedactionContext::Generic).content,
+        short
+    );
+}
+
+/// A UTF-16 file (what PowerShell's `>` writes) read as lossy UTF-8 has a
+/// NUL after every character. Its secrets are redacted like the UTF-8
+/// twin's; lines without a secret keep their NULs.
+#[test]
+fn model_redaction_catches_secrets_in_nul_interleaved_text() {
+    let plain = "GITHUB_TOKEN=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\npassword: Sup3rS3cret9\nname: app\n";
+    let utf16le: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(plain.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    let utf16be: Vec<u8> = plain.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let cases = [
+        (
+            String::from_utf8_lossy(&utf16le).into_owned(),
+            "\u{FFFD}\u{FFFD}GITHUB_TOKEN=[REDACTED:github_token]\npassword: [REDACTED:password]\n\
+             \0n\0a\0m\0e\0:\0 \0a\0p\0p\0\n\0",
+        ),
+        (
+            String::from_utf8_lossy(&utf16be).into_owned(),
+            "GITHUB_TOKEN=[REDACTED:github_token]\npassword: [REDACTED:password]\n\
+             \0n\0a\0m\0e\0:\0 \0a\0p\0p\0\n",
+        ),
+    ];
+    for (input, want) in cases {
+        let out = redact_for_model(&input, RedactionContext::Generic);
+        assert_eq!(out.content, want);
+        assert_eq!(out.redacted, 2);
+        let again = redact_for_model(&out.content, RedactionContext::Generic);
+        assert_eq!(again.content, want);
+        assert_eq!(again.redacted, 0);
+        // The same text as a tool result's string leaf.
+        let json = serde_json::json!({ "path": "deploy.conf", "content": input }).to_string();
+        let out = redact_for_model(&json, RedactionContext::Generic);
+        assert_eq!(out.redacted, 2);
+        let value: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(value["content"], want);
+    }
+    // NULs in text without a secret change nothing.
+    let out = redact_for_model("n\0a\0m\0e\0:\0 \0a\0p\0p\0\n\0", RedactionContext::Generic);
+    assert_eq!(out.content, "n\0a\0m\0e\0:\0 \0a\0p\0p\0\n\0");
+    assert_eq!(out.redacted, 0);
+}
+
 /// Code and config text that must reach the model byte for byte — the
 /// 0.9.4 false-positive corpus plus lookalikes of the new shapes.
 const CODE_FALSE_POSITIVES: &[&str] = &[
@@ -1199,6 +1662,24 @@ const CODE_FALSE_POSITIVES: &[&str] = &[
     "    match token { Token::Ident(name) => name, _ => \"\" }",
     "    let key = cache_key(&path);",
     "sort_key: created_at",
+    "    query = f\"sv={sv}&sp=r&sig={quote(signature)}\"",
+    "url=\"$BASE?X-Amz-Expires=3600&X-Amz-Signature=$SIGNATURE\"",
+    "    token = os.environ.get(\"API_TOKEN\", \"\")",
+    "    parser.add_argument(\"--token\", \"-t\")",
+    "    fields = (\"username\", \"password\")",
+    "      <password>${env.NEXUS_PASSWORD}</password>",
+    "    <string name=\"password\">Password</string>",
+    "usage: deploy --password PASSWORD --token <token> --api-key KEY",
+    "docker login -u deploy --password-stdin registry.example.com",
+    "docker login -u deploy -p \"$REGISTRY_PASSWORD\" registry.example.com",
+    "ENV API_KEY_FILE /run/secrets/api_key",
+    "        - name: DB_PASSWORD",
+    "          valueFrom:",
+    "            secretKeyRef:",
+    "              name: db-credentials",
+    "              key: password",
+    "The password 'field' must not be empty.",
+    "    raise ValueError(\"invalid password 'too short' for user\")",
 ];
 
 #[test]

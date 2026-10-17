@@ -42,17 +42,40 @@ fn push_unique_target(targets: &mut Vec<String>, path: &str) {
     }
 }
 
+/// Strip an optional git `a/` or `b/` diff prefix and trailing timestamp field.
+fn clean_diff_header_path<'a>(raw: &'a str, prefix: &str) -> &'a str {
+    let p = raw.split('\t').next().unwrap_or("").trim();
+    p.strip_prefix(prefix).unwrap_or(p).trim()
+}
+
+/// Extract `(a_path, b_path)` from a `diff --git a/<old> b/<new>` header line.
+///
+/// Handles the standard `a/… b/…` form (splitting on the last `" b/"` occurrence)
+/// and `--no-prefix` headers whose two paths contain no spaces.
+fn parse_diff_git_header_paths(rest: &str) -> Option<(&str, &str)> {
+    let rest = rest.trim();
+    if let Some(a_rest) = rest.strip_prefix("a/") {
+        let (a_path, b_path) = a_rest.rsplit_once(" b/")?;
+        return Some((a_path.trim(), b_path.trim()));
+    }
+    let (a_path, b_path) = rest.split_once(' ')?;
+    let b_path = b_path.trim();
+    if b_path.contains(' ') {
+        return None;
+    }
+    Some((
+        a_path.strip_prefix("a/").unwrap_or(a_path),
+        b_path.strip_prefix("b/").unwrap_or(b_path),
+    ))
+}
+
 /// Reject diff header paths that use Git C-quoted syntax (e.g. `"b/\056git/config"`)
 /// or contain control characters.
 pub(crate) fn check_diff_header_safety(diff: &str) -> std::result::Result<(), String> {
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             let trimmed = rest.trim();
-            if trimmed.starts_with('"')
-                || trimmed.contains(" \"")
-                || trimmed.contains('"')
-                || rest.chars().any(|c| c.is_control())
-            {
+            if trimmed.contains('"') || rest.chars().any(|c| c.is_control()) {
                 return Err(format!(
                     "patch_apply rejects quoted or control-character diff header: {}",
                     line
@@ -65,9 +88,7 @@ pub(crate) fn check_diff_header_safety(diff: &str) -> std::result::Result<(), St
             .or_else(|| line.strip_prefix("copy to "))
         {
             let p = rest.split('\t').next().unwrap_or("").trim();
-            if p.starts_with('"')
-                || p.ends_with('"')
-                || p.contains('"')
+            if p.contains('"')
                 || rest.chars().any(|c| c.is_control() && c != '\t')
                 || p.chars().any(|c| c.is_control())
             {
@@ -81,13 +102,7 @@ pub(crate) fn check_diff_header_safety(diff: &str) -> std::result::Result<(), St
             .or_else(|| line.strip_prefix("+++ "))
         {
             let p = rest.split('\t').next().unwrap_or("").trim();
-            let stripped = p
-                .strip_prefix("a/")
-                .or_else(|| p.strip_prefix("b/"))
-                .unwrap_or(p);
-            if p.starts_with('"')
-                || stripped.starts_with('"')
-                || p.ends_with('"')
+            if p.contains('"')
                 || rest.chars().any(|c| c.is_control() && c != '\t')
                 || p.chars().any(|c| c.is_control())
             {
@@ -101,67 +116,62 @@ pub(crate) fn check_diff_header_safety(diff: &str) -> std::result::Result<(), St
     Ok(())
 }
 
+/// Parse a unified diff and return approximate stats and every path the patch
+/// reads from or writes to.
+///
+/// Header lines carry paths in four places, and `git apply` acts on all of them:
+/// - `--- a/<old>` / `+++ b/<new>` (hunk headers; deletions have `+++ /dev/null`)
+/// - `rename from <old>` / `rename to <new>` (pure renames have no `---`/`+++`)
+/// - `copy from <src>` / `copy to <dst>` (copies read `<src>` and write `<dst>`
+///   with no `---`/`+++`)
+/// - `diff --git a/<old> b/<new>` (mode-only or empty-file patches have no
+///   other path header at all)
+///
+/// Every one of those paths — source and destination alike — must pass
+/// `validate_tool_path`, or a `copy from .env` / `rename from .env` patch can
+/// move a `denied_paths` secret into an allowed filename for `file_read`.
 pub(crate) fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
-    let mut files = 0;
+    let mut git_files = 0;
+    let mut plus_files = 0;
     let mut insertions = 0;
     let mut deletions = 0;
     let mut targets = Vec::new();
-    let mut old_path: Option<String> = None;
+    let mut in_hunk = false;
 
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            let trimmed = rest.trim();
-            if let Some((left, right)) = trimmed.split_once(" b/") {
-                let p1 = left.trim().strip_prefix("a/").unwrap_or(left.trim());
-                let p2 = right.split('\t').next().unwrap_or("").trim();
-                push_unique_target(&mut targets, p1);
-                push_unique_target(&mut targets, p2);
-            } else if let Some((left, right)) = trimmed.split_once(' ') {
-                let p1 = left.trim().strip_prefix("a/").unwrap_or(left.trim());
-                let p2 = right.trim().strip_prefix("b/").unwrap_or(right.trim());
-                push_unique_target(&mut targets, p1);
-                push_unique_target(&mut targets, p2);
+            in_hunk = false;
+            git_files += 1;
+            if let Some((a_path, b_path)) = parse_diff_git_header_paths(rest) {
+                push_unique_target(&mut targets, a_path);
+                push_unique_target(&mut targets, b_path);
             }
-        } else if let Some(rest) = line
-            .strip_prefix("rename from ")
-            .or_else(|| line.strip_prefix("rename to "))
-            .or_else(|| line.strip_prefix("copy from "))
-            .or_else(|| line.strip_prefix("copy to "))
-        {
-            let p = rest.split('\t').next().unwrap_or("").trim();
-            push_unique_target(&mut targets, p);
         } else if let Some(rest) = line.strip_prefix("--- ") {
-            // Remember the old-file path; a following `+++ /dev/null` means
-            // this file is being deleted, and a rename/modify also touches the old path.
-            let p = rest.split('\t').next().unwrap_or("").trim();
-            let p = p.strip_prefix("a/").unwrap_or(p);
-            old_path = if p.is_empty() || p == "/dev/null" {
-                None
-            } else {
-                push_unique_target(&mut targets, p);
-                Some(p.to_string())
-            };
+            in_hunk = false;
+            push_unique_target(&mut targets, clean_diff_header_path(rest, "a/"));
         } else if let Some(rest) = line.strip_prefix("+++ ") {
-            files += 1;
-            let p = rest.split('\t').next().unwrap_or("").trim();
-            if p == "/dev/null" {
-                // File deletion: the old path is the operation's target.
-                if let Some(old) = old_path.take() {
-                    push_unique_target(&mut targets, &old);
-                }
-            } else {
-                // Extract path after "b/" or raw
-                let path = p.strip_prefix("b/").unwrap_or(p).trim();
-                push_unique_target(&mut targets, path);
+            in_hunk = false;
+            plus_files += 1;
+            push_unique_target(&mut targets, clean_diff_header_path(rest, "b/"));
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+        } else if !in_hunk {
+            if let Some(rest) = line
+                .strip_prefix("rename from ")
+                .or_else(|| line.strip_prefix("rename to "))
+                .or_else(|| line.strip_prefix("copy from "))
+                .or_else(|| line.strip_prefix("copy to "))
+            {
+                push_unique_target(&mut targets, clean_diff_header_path(rest, ""));
             }
-            old_path = None;
-        } else if line.starts_with('+') && !line.starts_with("+++") && !line.starts_with("@@") {
+        } else if line.starts_with('+') && !line.starts_with("+++") {
             insertions += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") && !line.starts_with("@@") {
+        } else if line.starts_with('-') && !line.starts_with("---") {
             deletions += 1;
         }
     }
 
+    let mut files = git_files.max(plus_files);
     if files == 0 && !targets.is_empty() {
         files = 1;
     }
@@ -268,6 +278,60 @@ fn strip_numbered_diff(diff: &str) -> Option<String> {
     changed.then_some(out)
 }
 
+/// Every path `git apply` would read or write for the diff in `patch_file`,
+/// taken from git's own parser rather than from a second scan of the text.
+async fn git_patch_paths(patch_file: &str) -> Result<Vec<String>> {
+    let mut paths: Vec<String> = Vec::new();
+    for reverse in [false, true] {
+        let mut args = vec!["apply", "--numstat", "-z"];
+        if reverse {
+            args.push("-R");
+        }
+        args.push(patch_file);
+        let out = git_apply_command(&args)
+            .output_grouped()
+            .await
+            .map_err(|e| anyhow!("failed to run git apply --numstat: {}", e))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git could not parse the diff: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let stdout = std::str::from_utf8(&out.stdout)
+            .map_err(|_| anyhow!("git apply --numstat reported a non-UTF-8 path"))?;
+        for record in stdout.split('\0').filter(|r| !r.is_empty()) {
+            let path = record
+                .splitn(3, '\t')
+                .nth(2)
+                .ok_or_else(|| anyhow!("unexpected git apply --numstat record: {:?}", record))?;
+            if !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    if paths.is_empty() {
+        anyhow::bail!("git apply --numstat named no files for the diff");
+    }
+    Ok(paths)
+}
+
+/// Reject absolute paths and parent-directory escapes, then run the safety
+/// validator on a path the diff touches.
+fn validate_patch_path(path: &str, safety: &crate::config::SafetyConfig) -> Result<()> {
+    if path.starts_with('/') {
+        anyhow::bail!("patch_apply rejects absolute paths: {}", path);
+    }
+    if path.contains("..") {
+        anyhow::bail!(
+            "patch_apply rejects paths with parent-directory escapes: {}",
+            path
+        );
+    }
+    crate::tools::file::validate_tool_path(path, safety)
+        .map_err(|e| anyhow!("patch_apply path validation failed for '{}': {}", path, e))
+}
+
 /// Build a sanitized, hardened `git apply` invocation: the tool applies
 /// project-controlled diffs, so the child must not inherit host credentials
 /// (see `safety::process_env`), and the repository's own config cannot run
@@ -340,27 +404,28 @@ impl Tool for PatchApply {
             );
         }
 
-        if let Err(msg) = check_diff_header_safety(diff) {
-            anyhow::bail!("{msg}");
-        }
-
         let (files, insertions, deletions, targets) = parse_diff_stats(diff);
 
-        // Validate all target paths through the safety validator
+        // Write diff to a temporary file
+        let mut temp = NamedTempFile::new()?;
+        temp.write_all(diff.as_bytes())?;
+        let temp_path = temp.path().to_path_buf();
+        let temp_path_str = temp_path.to_string_lossy().to_string();
+
+        // Validate all target paths through the safety validator: the
+        // `+++`/`---` names the text scan found, then — authoritatively —
+        // every name git's own parser reports for the file that will be
+        // applied (see `git_patch_paths`).
         let safety = crate::tools::file::resolve_safety_config(None);
         for path in &targets {
-            // Reject absolute paths and parent-directory escapes
-            if path.starts_with('/') {
-                anyhow::bail!("patch_apply rejects absolute paths: {}", path);
-            }
-            if path.contains("..") {
-                anyhow::bail!(
-                    "patch_apply rejects paths with parent-directory escapes: {}",
-                    path
-                );
-            }
-            crate::tools::file::validate_tool_path(path, &safety)
-                .map_err(|e| anyhow!("patch_apply path validation failed for '{}': {}", path, e))?;
+            validate_patch_path(path, &safety)?;
+        }
+        for path in git_patch_paths(&temp_path_str).await? {
+            validate_patch_path(&path, &safety)?;
+        }
+
+        if let Err(msg) = check_diff_header_safety(diff) {
+            anyhow::bail!("{msg}");
         }
 
         // Added lines copied from a DISPLAY of the file (a `[REDACTED:…]`
@@ -376,12 +441,6 @@ impl Tool for PatchApply {
                 &added,
             )?;
         }
-
-        // Write diff to a temporary file
-        let mut temp = NamedTempFile::new()?;
-        temp.write_all(diff.as_bytes())?;
-        let temp_path = temp.path().to_path_buf();
-        let temp_path_str = temp_path.to_string_lossy().to_string();
 
         // Try git apply --check first
         let check_output = git_apply_command(&["apply", "--check", &temp_path_str])
@@ -402,6 +461,9 @@ impl Tool for PatchApply {
                     .output_grouped()
                     .await;
                 if matches!(stripped_check, Ok(ref out) if out.status.success()) {
+                    for path in git_patch_paths(&t_path).await? {
+                        validate_patch_path(&path, &safety)?;
+                    }
                     numbered_temp = Some(t);
                 }
             }

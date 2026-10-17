@@ -7,6 +7,18 @@ Selfware is configured via TOML files. Config is loaded from (in order of priori
 3. `selfware.toml` in the current directory
 4. `~/.config/selfware/config.toml`
 
+The first file found is the one loaded, with one exception: a `selfware.toml`
+discovered in the current directory that you have not trusted (`selfware
+trust`) does not replace your `~/.config/selfware/config.toml` — the home
+config stays the base and the checkout file only overlays non-privileged keys
+(model, `context_length`, `[agent]` limits, `[ui]`, …). Its `endpoint` (when
+the home config sets an endpoint or `api_key`), `api_key`, `execution_mode`,
+`[safety]`, `[[hooks]]`, `[mcp]`, `[yolo]`, `[agent] post_edit_test_command` /
+`require_verification_before_completion` and profile endpoints / credentials
+are ignored with a warning, so a repository cannot withdraw your own deny
+globs, hooks or endpoint by shipping a config file. Trusting the repository
+restores the plain first-file-wins selection.
+
 ## Precedence Chain
 
 Once a config file is selected, individual *values* are resolved through a
@@ -209,7 +221,8 @@ allowed_paths = ["./**"]
 # safety defaults. Default (always in effect):
 #   ["**/.env", "**/.env.local", "**/.env.*", "**/*.env", "**/.ssh",
 #    "**/.ssh/**", "**/secrets", "**/secrets/**",
-#    "**/.git/hooks/**", "**/.git/config"]
+#    "**/.git/hooks/**", "**/.git/config", "**/.git/commondir",
+#    "**/.git/config.worktree", "**/.git/modules/**", "**/.git/worktrees/**"]
 denied_paths = [
     "**/vault/**",  # example: an extra deny-glob added to the defaults
 ]

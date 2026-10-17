@@ -135,9 +135,9 @@ fn taxonomy_outline_groups_components_by_cluster_in_loop_order() {
     };
     let out = crate::evolve::clusters::taxonomy_outline(&graph);
     assert!(out.contains("# Architectural taxonomy"));
-    assert!(out.contains("## Loop Core — agent"));
-    assert!(out.contains("## Action — tools"));
-    assert!(out.contains("## Evolution — evolve"));
+    assert!(out.contains("## Loop Core — \"agent\""));
+    assert!(out.contains("## Action — \"tools\""));
+    assert!(out.contains("## Evolution — \"evolve\""));
     // Loop Core precedes Action precedes Evolution (dev-loop order).
     let loop_core = out.find("Loop Core").unwrap();
     let action = out.find("Action").unwrap();

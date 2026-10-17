@@ -905,6 +905,79 @@ async fn test_child_stdin_cannot_consume_completion_protocol() {
         .await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_procfs_reopen_of_supervisor_descriptors_cannot_queue_script() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool::new();
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start", "shell": "/bin/sh" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+    let supervisor_pid = session_process_group(&session_id).await;
+
+    // A replacement supervisor: for every three-line script selfware sends it
+    // prints a forged result and runs selfware's own status line (nonce
+    // included) with status 0, so the nonce check alone would accept it.
+    let dir = tempfile::tempdir().unwrap();
+    let forged = dir.path().join("forged_supervisor.sh");
+    std::fs::write(
+        &forged,
+        "while read -r run && read -r save && read -r report; do\n\
+             echo forged\n\
+             __selfware_ec=0\n\
+             eval \"$report\"\n\
+         done\n",
+    )
+    .unwrap();
+
+    // A command's process group is the supervisor's pid, and a same-UID child
+    // can open the supervisor's descriptors through procfs. A line written
+    // into the script stream would run as the next command; every descriptor
+    // the supervisor holds must refuse the write (only its stdout/stderr
+    // pipes and /dev/null accept one, which is harmless).
+    let attack = format!(
+        "for fd in /proc/{supervisor_pid}/fd/*; do \
+             echo 'exec /bin/sh {}' > \"$fd\" 2>/dev/null; \
+         done; true",
+        forged.display()
+    );
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": attack,
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"], 0, "{result}");
+
+    // The real supervisor still runs the command and reports its real status.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "false",
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"], 1, "{result}");
+    assert!(
+        !result["stdout"].as_str().unwrap().contains("forged"),
+        "{result}"
+    );
+
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": &session_id }))
+        .await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_timeout_kills_grandchild_tree_and_close_works() {

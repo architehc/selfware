@@ -131,10 +131,41 @@ fn test_shell_verification_rejects_info_only_invocations() {
     assert!(!shell_command_is_verification("go test -h"));
     assert!(!shell_command_is_verification("cargo test --version"));
     assert!(!shell_command_is_verification("npm test -- --version"));
+    // `--help` / `--version` / `-h` end the run wherever they sit on the line:
+    // `cargo test --offline --help` printed usage and was credited, and the
+    // test-script fallback re-admitted `python3 -m unittest --help`, whose
+    // exit-0 pass cleared the runner's recorded failure (review finding).
+    assert!(!shell_command_is_verification("pytest --version -x tests/"));
+    assert!(!shell_command_is_verification(
+        "cargo test --offline --help"
+    ));
+    assert!(!shell_command_is_verification("cargo test --lib -- --help"));
+    assert!(!shell_command_is_verification("pytest -h -x tests/"));
+    assert!(!shell_command_is_verification("python3 -m unittest --help"));
+    assert!(!shell_command_is_verification("python3 -m unittest -h"));
+    assert!(!shell_command_is_verification(
+        "python3 tests/test_calc.py --help"
+    ));
+    assert!(!shell_command_is_verification(
+        "python3 -m unittest -v --help"
+    ));
+    assert!(!shell_command_is_verification(
+        "./tests/test_calc.py --help"
+    ));
+    // `-h` is a real option of javac (`-h <dir>` writes native headers).
+    assert!(shell_command_is_verification(
+        "javac -h build/include Foo.java"
+    ));
     // Real runs with actual targets/flags still count.
-    assert!(shell_command_is_verification("pytest --version -x tests/"));
     assert!(shell_command_is_verification("pytest -q"));
     assert!(shell_command_is_verification("go test ./..."));
+    assert!(shell_command_is_verification(
+        "python3 -m unittest discover -s tests"
+    ));
+    assert!(shell_command_is_verification(
+        "python3 tests/test_calc.py -v"
+    ));
+    assert!(shell_command_is_verification("cargo test --offline"));
 }
 
 #[test]
@@ -156,6 +187,15 @@ fn test_shell_verification_rejects_echoed_script_text() {
     assert!(shell_command_is_verification("./test_api.py"));
     assert!(shell_command_is_verification(
         "python3 -c \"assert add(2, 2) == 4\""
+    ));
+    // A shell has no assert statement: `sh -c`/`bash -c` code containing the
+    // word is not a test run (`: assert` is a no-op with an ignored
+    // argument next to a write).
+    assert!(!shell_command_is_verification(
+        "sh -c \"printf 'def add(a, b:\\n' > app.py; : assert\""
+    ));
+    assert!(!shell_command_is_verification(
+        "bash -c 'echo x > out.txt; : assert'"
     ));
 }
 
@@ -584,9 +624,6 @@ fn test_observational_includes_direct_test_script_runs() {
     // the gate, so a direct test-script run is observational (no mutation
     // bump) — exactly like `pytest` / `cargo test` already were.
     assert!(shell_command_is_observational("python3 test_calc.py"));
-    assert!(shell_command_is_observational(
-        "python3 -c \"assert x == 1\""
-    ));
     assert!(shell_command_is_observational("python3 -m unittest"));
     assert!(shell_command_is_observational(
         "python3 -m unittest test_calc.py"
@@ -611,6 +648,28 @@ fn test_observational_includes_direct_test_script_runs() {
     // still writes a file, and running the app is not observational.
     assert!(!shell_command_is_observational(
         "python3 -c \"open('f','w').write('x')\""
+    ));
+    // Inline code is arbitrary program text even when it contains an
+    // `assert`: the word vouches for nothing about what the rest does.
+    // Such a run may still earn verification credit, but it is a mutation
+    // (and never auto-approved as a read in headless auto-edit).
+    assert!(!shell_command_is_observational(
+        "python3 -c \"assert x == 1\""
+    ));
+    assert!(!shell_command_is_observational(
+        "python3 -c \"open('f','w').write('x'); assert True\""
+    ));
+    assert!(tool_call_is_mutating(
+        "shell_exec",
+        &serde_json::json!({"command": "python3 -c \"assert x == 1\""})
+    ));
+    // A shell has no assert statement: the word is an ignored argument of
+    // the `:` builtin and the quoted `>` is a write.
+    assert!(!shell_command_is_observational(
+        "sh -c \"printf 'def add(a, b:\\n' > app.py; : assert\""
+    ));
+    assert!(!shell_command_is_observational(
+        "bash -c 'echo x > out.txt; : assert'"
     ));
     assert!(!shell_command_is_observational(
         "python3 test_calc.py > out.txt"
@@ -1525,6 +1584,53 @@ async fn summarize_and_spill_redacts_secrets_on_disk() {
         on_disk.contains("[REDACTED:"),
         "spill file should contain the redaction marker"
     );
+}
+
+#[tokio::test]
+async fn log_tool_call_redacts_result_before_checkpoint_truncation() {
+    // A file_read of a config file carrying quoted `key = "value"` secrets is
+    // redacted for the model, but the bookkeeping copy was the raw result:
+    // the checkpoint's save-time pass then saw it as one escaped string cut
+    // to 1000 chars (no longer JSON), where the quoted values do not match.
+    let api_key = "zq7custom-value-00991234567";
+    let password = "hunter2secretvalue";
+    let url_password = "P4ssw0rd_secret";
+    let content = format!(
+        "export DEPLOY_API_KEY=\"{api_key}\"\npassword = \"{password}\"\n\
+         GIT_REMOTE=https://deploy:{url_password}@git.example.com/app.git\n{}",
+        "setting = value\n".repeat(80)
+    );
+    let raw = serde_json::json!({"content": content}).to_string();
+    assert!(
+        raw.len() > 1000,
+        "the result must outgrow the checkpoint cut"
+    );
+
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "log-redact".into(),
+        "Summarise the deployment".into(),
+    ));
+    agent.log_tool_call(
+        "file_read",
+        r#"{"path":"deploy.conf"}"#,
+        &raw,
+        true,
+        std::time::Instant::now(),
+        true,
+    );
+
+    let logged = agent.current_checkpoint.as_ref().unwrap().tool_calls[0]
+        .result
+        .clone()
+        .unwrap();
+    for secret in [api_key, password, url_password] {
+        assert!(!logged.contains(secret), "{secret} leaked: {logged}");
+    }
+    assert!(logged.contains("[REDACTED:"), "{logged}");
+    assert!(logged.chars().count() <= 1000, "{logged}");
 }
 
 #[test]
@@ -9114,6 +9220,66 @@ async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injecti
             .await
             .expect_err(&format!("`{cmd}` must stop headless Normal"));
         assert!(crate::errors::is_confirmation_error(&err), "{cmd}: {err:?}");
+    }
+
+    // The verdict covers the whole call, not only `command`: an `env` entry
+    // obeys the rule a leading `NAME=value` word obeys (SAFE_ENV, plain
+    // value), and a `pty_shell` `shell` picks the program every `send` runs.
+    for (tool, args) in [
+        ("shell_exec", r#"{"command":"git diff","env":{"LANG":"C"}}"#),
+        (
+            "shell_exec",
+            r#"{"command":"ls","env":{"LC_ALL":"C.UTF-8","NO_COLOR":"1"}}"#,
+        ),
+        ("shell_exec", r#"{"command":"ls","env":{}}"#),
+        ("pty_shell", r#"{"action":"start","command":"ls"}"#),
+    ] {
+        let approved = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .unwrap_or_else(|e| panic!("{args} must run headless in Normal mode: {e}"));
+        assert!(approved, "{args}");
+    }
+    for (tool, args) in [
+        (
+            "shell_exec",
+            r#"{"command":"git diff HEAD~1 HEAD","env":{"GIT_EXTERNAL_DIFF":"./tools/x.sh"}}"#,
+        ),
+        (
+            "shell_exec",
+            r#"{"command":"git status","env":{"GIT_DIR":"gitdir"}}"#,
+        ),
+        (
+            "shell_exec",
+            r#"{"command":"git diff","env":{"HOME":"fakehome"}}"#,
+        ),
+        (
+            "shell_exec",
+            r#"{"command":"rg foo","env":{"RIPGREP_CONFIG_PATH":"./tools/rgrc"}}"#,
+        ),
+        (
+            "shell_exec",
+            r#"{"command":"ls","env":{"LANG":"$(./tools/x.sh)"}}"#,
+        ),
+        ("shell_exec", r#"{"command":"ls","env":{"LANG":1}}"#),
+        ("shell_exec", r#"{"command":"ls","env":"LANG=C"}"#),
+        (
+            "pty_shell",
+            r#"{"action":"start","shell":"./tools/x.sh","command":"ls"}"#,
+        ),
+        (
+            "pty_shell",
+            r#"{"action":"start","shell":"/bin/bash","command":"ls"}"#,
+        ),
+    ] {
+        let err = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .expect_err(&format!("{args} must stop headless Normal"));
+        assert!(
+            crate::errors::is_confirmation_error(&err),
+            "{args}: {err:?}"
+        );
     }
 
     // The dedicated build/test tools lose their plain-verification allowance

@@ -11,7 +11,9 @@ use tracing::debug;
 
 use super::Tool;
 use crate::config::SafetyConfig;
-use crate::tools::file::{resolve_safety_config, validate_tool_path};
+use crate::tools::file::{
+    read_to_string_capped, resolve_safety_config, validate_tool_path, MAX_SOURCE_READ_SIZE,
+};
 
 /// Cyclomatic complexity threshold levels
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,7 +201,7 @@ impl Tool for CodeMetricsTool {
         validate_tool_path(file_path, &safety)?;
 
         // Read the file
-        let content = std::fs::read_to_string(file_path)
+        let content = read_to_string_capped(std::path::Path::new(file_path), MAX_SOURCE_READ_SIZE)
             .with_context(|| format!("Failed to read file: {}", file_path))?;
 
         // Use the introspection parser to get function information

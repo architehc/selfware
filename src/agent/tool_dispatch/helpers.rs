@@ -2270,11 +2270,19 @@ fn script_runner_status_is_authoritative(segments: &[(String, String)]) -> bool 
 }
 
 /// Does this single segment execute a test script, with the interpreter (or
-/// a direct `./test_x.py`-style path) as its first shell word?
+/// a direct `./test_x.py`-style path) as its first shell word? An info-only
+/// invocation never does: `python3 -m unittest --help` and `python3
+/// tests/test_x.py --help` print usage and exit 0 without running a test.
+/// The runner-prefix route already refused them, but this fallback
+/// re-admitted the same command and its pass cleared the runner's recorded
+/// failure (review finding).
 fn segment_runs_test_script(segment: &str) -> bool {
     let Some(word) = first_shell_word(segment) else {
         return false;
     };
+    if segment_has_info_flag(segment, true) {
+        return false;
+    }
     let basename = word.rsplit('/').next().unwrap_or(word);
     let is_interpreter = basename.starts_with("python")
         || basename.starts_with("pypy")
@@ -2283,9 +2291,31 @@ fn segment_runs_test_script(segment: &str) -> bool {
             "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
         );
     if is_interpreter {
-        return shell_command_runs_test_script(segment);
+        return shell_command_runs_test_script(segment)
+            || segment_runs_inline_assert(segment, basename);
     }
     (word.starts_with("./") || word.starts_with('/')) && Agent::gate_path_is_test(word)
+}
+
+/// Inline-code fallback for VERIFICATION credit only: an interpreter in
+/// command position whose `-c`/`-e`/`--eval` program text contains an
+/// `assert` (`python3 -c 'assert add(2, 2) == 4'`).
+///
+/// Deliberately SEPARATE from `shell_command_runs_test_script`, which also
+/// answers the observational classifier: inline code is arbitrary program
+/// text (`python3 -c "open('f','w').write('x'); assert True"` writes a
+/// file), so it must always count as a mutation and never run unapproved as
+/// a read. `sh`/`bash` have no assert statement — `sh -c "… > app.py; :
+/// assert"` is a write with an ignored word — so shells never qualify.
+fn segment_runs_inline_assert(segment: &str, basename: &str) -> bool {
+    if matches!(basename, "bash" | "sh") {
+        return false;
+    }
+    let mut words = segment.split_whitespace();
+    let has_inline_code = words
+        .by_ref()
+        .any(|word| matches!(word, "-c" | "-e" | "--eval"));
+    has_inline_code && words.any(|word| word.contains("assert"))
 }
 
 /// Fallbacks for DELIVERABLE scripts — the standalone-script-verification
@@ -2574,9 +2604,13 @@ fn segment_verification_prefix<'p>(segment: &str, prefixes: &[&'p str]) -> Optio
 
 /// Info-only runner invocations run no tests: `pytest --version`,
 /// `go test -h`, `cargo test --help` (external review finding —
-/// `pytest --version` earned verification credit). Everything after the
-/// matched runner prefix must be info flags for this to apply; a lone `--`
-/// separator is ignored (`npm test -- --version`).
+/// `pytest --version` earned verification credit). `--help` / `--version` /
+/// `-h` end the run wherever they sit on the line (`cargo test --offline
+/// --help` printed usage and was credited — review finding); the remaining
+/// info words only apply when nothing else follows the matched runner
+/// prefix, since `version` / `help` / `--list` also read as test filters and
+/// test-binary arguments. A lone `--` separator is ignored (`npm test --
+/// --version`).
 fn segment_is_info_only_invocation(segment: &str, prefix: &str) -> bool {
     const INFO_FLAGS: &[&str] = &[
         "--version",
@@ -2594,6 +2628,12 @@ fn segment_is_info_only_invocation(segment: &str, prefix: &str) -> bool {
         return false;
     };
     let rest = &segment[at + prefix.len()..];
+    // `javac -h <dir>` writes native headers and `bash -h` / `sh -h` toggle
+    // command hashing: `-h` is a real option there, not help.
+    let dash_h_is_help = !matches!(prefix, "javac" | "bash -n" | "sh -n");
+    if segment_has_info_flag(rest, dash_h_is_help) {
+        return true;
+    }
     let mut saw_info_flag = false;
     for tok in rest.split_whitespace() {
         if tok == "--" {
@@ -2606,6 +2646,20 @@ fn segment_is_info_only_invocation(segment: &str, prefix: &str) -> bool {
         }
     }
     saw_info_flag
+}
+
+/// Does `--help`, `--version` or (when `dash_h_is_help`) `-h` appear anywhere
+/// among the arguments? The program prints and exits before any test runs,
+/// whatever else is on the line (`cargo test --offline --help`, `pytest
+/// --version -x tests/`, `python3 tests/test_x.py --help`).
+fn segment_has_info_flag(args: &str, dash_h_is_help: bool) -> bool {
+    args.split_whitespace().any(|tok| match tok {
+        "--help" | "--version" | "-V" | "--collect-only" | "--co" | "--fixtures" | "--markers" => {
+            true
+        }
+        "-h" => dash_h_is_help,
+        _ => false,
+    })
 }
 
 /// True when the command's FIRST shell word (after optional `sudo` / `env` /
@@ -2651,14 +2705,15 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
             let mut iter = tokens[index + 1..].iter().peekable();
             while let Some(arg) = iter.next() {
                 if matches!(*arg, "-c" | "-e" | "--eval") {
-                    if command
-                        .find(*arg)
-                        .map(|at| command[at + arg.len()..].contains("assert"))
-                        .unwrap_or(false)
-                    {
-                        return true;
-                    }
-                    break;
+                    // Inline code is arbitrary program text, never a test
+                    // script: this predicate also answers the observational
+                    // classifier, and crediting `sh -c "… > app.py; : assert"`
+                    // as read-only let a write run unapproved in headless
+                    // auto-edit without advancing the mutation sequence.
+                    // Verification credit for `python3 -c 'assert …'` is
+                    // `segment_runs_inline_assert`'s, and that one is only
+                    // consulted by the verification classifier.
+                    return false;
                 }
                 if *arg == "-m" {
                     if let Some(mod_name) = iter.next() {

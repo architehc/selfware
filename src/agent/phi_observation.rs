@@ -150,6 +150,33 @@ impl Agent {
         else {
             return;
         };
+        let policy = crate::phi::policy::PhiPolicy::from_env();
+        let posture = crate::phi::policy::derive_fox_posture(
+            &self.evidence_ledger,
+            phase,
+            &policy,
+            crate::phi::policy::PresenceChannel::Ambient,
+        );
+        if policy.mode >= crate::phi::policy::PhiPolicyMode::Advise
+            && !matches!(phase, crate::phi::activity::ActivityPhase::Running)
+        {
+            let steward = crate::phi::policy::PhiSteward::new(policy.max_proposals);
+            let proposals = steward.propose(&self.evidence_ledger, &self.ledger_journal);
+            tracing::debug!(
+                emotion = ?posture.emotion,
+                debt_ratio = posture.debt_ratio,
+                note = ?posture.note,
+                proposals = proposals.len(),
+                "phi fox posture and steward proposals updated"
+            );
+        } else {
+            tracing::debug!(
+                emotion = ?posture.emotion,
+                debt_ratio = posture.debt_ratio,
+                note = ?posture.note,
+                "phi fox posture updated"
+            );
+        }
         let mut evidence = self.evidence_snapshot();
         let truncated = evidence.observations.len() > 256 || evidence.unattributed.len() > 256;
         // Keep the earliest evidence too: a later success must not erase an
@@ -205,10 +232,16 @@ impl Agent {
             return;
         }
         let workdir = crate::tools::workspace_root::current_path();
-        let dir = super::turn_artifacts::artifact_dir(&workdir);
-        if tokio::fs::create_dir_all(&dir).await.is_err() {
+        // Pinned like every other write under .selfware/: a checkout shipping
+        // `turns/evidence.jsonl` as a symlink must not get the line appended
+        // to the link's target.
+        let Ok(dir) = super::scratch_dir::ScratchDir::open(
+            &workdir,
+            &[super::turn_artifacts::TURNS_SUBDIR],
+            true,
+        ) else {
             return;
-        }
+        };
         let payload = serde_json::json!({
             "turn": self.loop_control.current_iteration(),
             "phase": "post_execution",
@@ -221,19 +254,10 @@ impl Agent {
         // Appended as JSONL rather than written to a per-turn filename: the
         // iteration counter is not the artifact sequence, so a filename keyed
         // on it silently overwrote a previous record whenever the two diverged.
-        let path = dir.join("evidence.jsonl");
         let Ok(line) = serde_json::to_string(&payload) else {
             return;
         };
-        use tokio::io::AsyncWriteExt;
-        if let Ok(mut file) = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-        {
-            let _ = file.write_all(format!("{line}\n").as_bytes()).await;
-        }
+        let _ = dir.append("evidence.jsonl", format!("{line}\n").as_bytes());
     }
 
     /// The ledger summary written into turn artifacts.

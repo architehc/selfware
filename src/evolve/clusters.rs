@@ -49,7 +49,11 @@ pub fn taxonomy_outline(graph: &Graph) -> String {
         out.push_str(&format!(
             "## {} — {}\n",
             cluster,
-            members.iter().cloned().collect::<Vec<_>>().join(", ")
+            members
+                .iter()
+                .map(|m| crate::safety::source_context::quote_untrusted_label(m))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     out.trim_end().to_string()

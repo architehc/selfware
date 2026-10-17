@@ -65,22 +65,28 @@ impl StorageEstimate {
 impl DiskManager {
     /// Create a new disk manager.
     ///
-    /// Resolves the state-directory paths (env overrides or `./checkpoints`,
-    /// `./logs`, `./models` defaults) but does NOT create them: directories
-    /// are created lazily at the point of first write (see `ensure_dir`),
-    /// so read-only commands never pollute the working directory.
+    /// Resolves the state-directory paths (env overrides or
+    /// `~/.selfware/{checkpoints,logs,models}` defaults) but does NOT create
+    /// them: directories are created lazily at the point of first write (see
+    /// `ensure_dir`), so read-only commands never pollute the working
+    /// directory and maintenance never mutates project `./logs` or
+    /// `./checkpoints` directories in CWD.
     pub async fn new(config: &DiskConfig) -> Result<Self, ResourceError> {
+        let base = dirs::home_dir()
+            .map(|h| h.join(".selfware"))
+            .unwrap_or_else(|| PathBuf::from(".selfware"));
+
         let checkpoints_path = std::env::var("SELFWARE_CHECKPOINT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./checkpoints"));
+            .unwrap_or_else(|_| base.join("checkpoints"));
 
         let logs_path = std::env::var("SELFWARE_LOG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./logs"));
+            .unwrap_or_else(|_| base.join("logs"));
 
         let models_path = std::env::var("SELFWARE_MODEL_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./models"));
+            .unwrap_or_else(|_| base.join("models"));
 
         info!(
             checkpoints = %checkpoints_path.display(),

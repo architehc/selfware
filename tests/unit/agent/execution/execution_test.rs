@@ -1084,7 +1084,7 @@ async fn existing_unread_file_first_write_still_discarded_and_names_accepted_pat
 
     let server = MockLlmServer::builder()
         .with_response(
-            "<tool>\n<name>file_write</name>\n<arguments>{\"path\":\"src/main.rs\",\"content\":\"fn main() { println!(\"hi\"); }\"}</arguments>\n</tool>",
+            "<tool>\n<name>file_write</name>\n<arguments>{\"path\":\"src/main.rs\",\"content\":\"fn main() { println!(\\\"hi\\\"); }\"}</arguments>\n</tool>",
         )
         .build()
         .await;

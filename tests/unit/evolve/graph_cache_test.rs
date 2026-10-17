@@ -175,3 +175,20 @@ fn loads_pre_v2_yaml_without_symbol_fields() {
     assert!(node.parent_id.is_none());
     assert!(node.line_range.is_none());
 }
+
+#[test]
+#[cfg(unix)]
+fn graph_that_is_not_a_regular_file_is_refused_before_reading() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = graph_path(temp.path());
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    // A checkout can commit the graph path as a symlink to a device on which
+    // an unbounded read never reaches EOF.
+    std::os::unix::fs::symlink("/dev/zero", &path).expect("symlink");
+    let mut slot = None;
+    let error = cached_or_load(&mut slot, &path).expect_err("device must be refused");
+    let message = error.to_string();
+    assert!(message.contains("not a regular file"), "got: {message}");
+    assert!(message.contains("selfware self-evolve"), "got: {message}");
+    assert!(slot.is_none());
+}

@@ -34,15 +34,19 @@ fn read_discovered_source(path: &Path) -> Option<String> {
     if crate::safety::source_context::path_contains_private_discovery_state(path) {
         return None;
     }
-    let mut file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
-    let mut buf = String::new();
-    std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
-    Some(buf)
+    let file = crate::safety::source_context::open_broad_discovery_regular(path).ok()?;
+    crate::tools::file::read_handle_to_string_capped(file, crate::tools::file::MAX_SOURCE_READ_SIZE)
+        .ok()
 }
 
 async fn read_query_source(path: &Path, discovered: bool) -> Option<String> {
     if !discovered {
-        return tokio::fs::read_to_string(path).await.ok();
+        return crate::tools::file::read_to_string_capped_async(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .ok();
     }
     let path = path.to_path_buf();
     crate::tools::workspace_root::spawn_blocking(move || read_discovered_source(&path))

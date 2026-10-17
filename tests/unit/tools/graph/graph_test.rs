@@ -732,7 +732,7 @@ fn graph_summary_note_renders_envelope_and_pointer() {
         "outline missing: {note}"
     );
     assert!(
-        note.contains("crate::beta (300)"),
+        note.contains("\"crate::beta\" (300)"),
         "hotspot rows missing: {note}"
     );
     assert!(

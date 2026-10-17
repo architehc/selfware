@@ -229,6 +229,37 @@ impl VerificationRecord {
         )
     }
 
+    /// Whether this is a model-run check that failed BEFORE the latest
+    /// mutation and has not passed since.
+    ///
+    /// A stale failure does not block (`blocks_completion`: it describes a
+    /// tree that no longer exists), but nothing says the edits fixed it
+    /// either, and a pass of a DIFFERENT check on the new tree does not
+    /// answer its question. Such a failure is not known to be resolved until
+    /// the same check runs again; the completion gate demands that re-run,
+    /// and the stale-verification rescue performs it. Only checks the model
+    /// ran itself (`RerunSpec::Tool`) are reported here: a stale post-edit
+    /// gate failure is re-run on the final tree by
+    /// `Agent::recheck_stale_post_edit_failure`.
+    pub fn awaits_rerun(&self, task_root: &Path, current_mutation_sequence: usize) -> bool {
+        if self.passed || !self.is_stale(current_mutation_sequence) {
+            return false;
+        }
+        if self.is_preexisting() {
+            return false;
+        }
+        if !matches!(
+            self.rerun,
+            Some(super::preexisting_failure::RerunSpec::Tool { .. })
+        ) {
+            return false;
+        }
+        !matches!(
+            self.relevance_to(task_root),
+            Relevance::OutOfScope | Relevance::NoRunner
+        )
+    }
+
     /// Whether this failure was shown to exist, with the same errors, before
     /// the task's first edit.
     pub fn is_preexisting(&self) -> bool {
@@ -451,6 +482,59 @@ mod tests {
             !earlier.blocks_completion(&py, 4),
             "a stale failure describes a tree that no longer exists"
         );
+    }
+
+    #[test]
+    fn a_stale_model_run_failure_awaits_a_rerun_until_the_same_check_passes() {
+        // Stale is not resolved: the edit that outdated the failure may not
+        // have fixed it, and nothing says so until the check runs again.
+        let (_tmp, _parent, py) = nested();
+        let mut failed = record("python3 -m unittest", Some(&py), &py, false, 1);
+        failed.rerun = Some(crate::agent::preexisting_failure::RerunSpec::Tool {
+            name: "shell_exec".to_string(),
+            args: r#"{"command":"python3 -m unittest"}"#.to_string(),
+        });
+        assert!(
+            !failed.awaits_rerun(&py, 1),
+            "at its own revision the failure is current and blocks instead"
+        );
+        assert!(failed.awaits_rerun(&py, 2));
+
+        let mut ledger = VerificationLedger::default();
+        ledger.record(failed.clone());
+        ledger.record(record(
+            "python3 -m py_compile app.py",
+            Some(&py),
+            &py,
+            true,
+            2,
+        ));
+        assert!(
+            ledger.blocking(&py, 2).is_none(),
+            "the staleness rule stands: a stale failure does not block"
+        );
+        assert_eq!(
+            ledger.stale_unresolved(&py, 2).map(|r| r.check_id.as_str()),
+            Some("python3 -m unittest"),
+            "a pass of a different check on the new tree does not resolve it"
+        );
+        ledger.record(record("python3 -m unittest", Some(&py), &py, true, 2));
+        assert!(
+            ledger.stale_unresolved(&py, 2).is_none(),
+            "the same check passing on the new tree does"
+        );
+
+        // A post-edit gate failure is re-run on the final tree by the gate's
+        // own recheck, not demanded through this path; a failure that cannot
+        // be re-run is not demanded either.
+        let mut gate = record("gate:test", Some(&py), &py, false, 1);
+        gate.rerun = Some(crate::agent::preexisting_failure::RerunSpec::PostEditGate {
+            paths: vec!["app.py".to_string()],
+            check_type: "test".to_string(),
+        });
+        assert!(!gate.awaits_rerun(&py, 2));
+        let unrunnable = record("python3 -m unittest", Some(&py), &py, false, 1);
+        assert!(!unrunnable.awaits_rerun(&py, 2));
     }
 
     #[test]
@@ -1304,6 +1388,20 @@ impl VerificationLedger {
         self.outstanding
             .iter()
             .find(|record| record.blocks_completion(task_root, current_mutation_sequence))
+    }
+
+    /// The first outstanding model-run failure that predates the latest
+    /// mutation and has not been run again since
+    /// ([`VerificationRecord::awaits_rerun`]). Not known to be fixed, so a
+    /// task rooted here is not known to be green.
+    pub fn stale_unresolved(
+        &self,
+        task_root: &Path,
+        current_mutation_sequence: usize,
+    ) -> Option<&VerificationRecord> {
+        self.outstanding
+            .iter()
+            .find(|record| record.awaits_rerun(task_root, current_mutation_sequence))
     }
 
     /// Failures that are real but concern a project outside this task — worth

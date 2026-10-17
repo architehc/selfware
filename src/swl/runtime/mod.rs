@@ -878,17 +878,9 @@ impl SwlRuntime {
         let tool_descriptions: Vec<String> = available_tools
             .iter()
             .filter_map(|tool_name| {
-                self.tool_registry.get(tool_name).map(|tool| {
-                    format!(
-                        r#"<tool name="{}">
-  <description>{}</description>
-  <parameters>{}</parameters>
-</tool>"#,
-                        tool.name(),
-                        tool.description(),
-                        tool.schema()
-                    )
-                })
+                self.tool_registry
+                    .get(tool_name)
+                    .map(crate::agent::result_envelope::tool_element)
             })
             .collect();
 

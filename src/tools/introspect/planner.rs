@@ -625,7 +625,11 @@ pub(super) async fn analyze_impact_with_safety(
     let mut tests_affected = Vec::new();
 
     // Get target file content
-    let _target_content = tokio::fs::read_to_string(target_file).await?;
+    let _target_content = crate::tools::file::read_to_string_capped_async(
+        target_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .await?;
     let target_name = target_file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

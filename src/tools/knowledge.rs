@@ -1082,8 +1082,11 @@ fn parse_symbol_kind(kind: &str) -> NodeType {
 async fn lsp_document_symbols(file_path: &str) -> Result<Vec<LSymbol>> {
     // For now, use a simple grep-based approach to find definitions
     // In a full implementation, this would call rust-analyzer or similar
-    let content =
-        std::fs::read_to_string(file_path).context(format!("Cannot read file: {}", file_path))?;
+    let content = crate::tools::file::read_to_string_capped(
+        std::path::Path::new(file_path),
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .context(format!("Cannot read file: {}", file_path))?;
 
     let mut symbols = Vec::new();
     let lines: Vec<&str> = content.lines().collect();

@@ -3443,14 +3443,16 @@ impl Agent {
                         } else {
                             let read_path = full_path.clone();
                             tokio::task::spawn_blocking(move || {
-                                let mut file =
+                                let file =
                                     crate::safety::source_context::open_broad_discovery_regular(
                                         &read_path,
                                     )
                                     .ok()?;
-                                let mut buf = String::new();
-                                std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
-                                Some(buf)
+                                crate::tools::file::read_handle_to_string_capped(
+                                    file,
+                                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                                )
+                                .ok()
                             })
                             .await
                             .ok()
@@ -3510,7 +3512,12 @@ impl Agent {
                 let root = super::current_project_root();
                 let full_path = root.join(path);
 
-                match tokio::fs::read_to_string(&full_path).await {
+                match crate::tools::file::read_to_string_capped_async(
+                    &full_path,
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                )
+                .await
+                {
                     Ok(content) => {
                         let content = self.sanitize_context_data(path, &content);
                         let skeleton = super::context_map::extract_rust_skeleton(path, &content);
@@ -3978,6 +3985,8 @@ impl Agent {
             cli_println!("   {}", style_confirm_line(line));
         }
         if let Some(why) = reason {
+            // The verdict quotes the call's arguments (TUI: same bound).
+            let why = crate::safety::confirm_view::sanitize_line(why, 600);
             cli_println!("   {} {}", "Why:".bright_yellow(), why);
         }
         if let Some(limit) = self.confirmation_timeout {
@@ -3998,6 +4007,11 @@ impl Agent {
         // `v` pages the full diff and asks the same question again — it is
         // never an answer (see `confirm_step`).
         let response = loop {
+            // Only a line typed at this question may answer it: a line queued
+            // in the tty before the prompt existed (typed at the model's prose
+            // while the run waited on the model) would otherwise be read as
+            // the answer the moment the question is printed.
+            super::execution::discard_pending_stdin();
             cli_prompt!("\x1b[0m\x1b[1m\x1b[97m{}\x1b[0m", question);
             let response = super::execution::read_line_pausing_esc_bounded(
                 &self.esc_paused,
@@ -4376,7 +4390,9 @@ impl Agent {
         // Check ToolCache for cacheable (read-only) tools
         let is_cacheable = crate::session::cache::is_cacheable(name);
         if is_cacheable {
+            let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
             if let Some(cached_value) = self.cache_manager.tool_cache.get(name, args).await {
+                let _ = self.cache_manager.local_first.get_response(&cache_key);
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&cached_value)?;
                 let summary =
@@ -4385,6 +4401,7 @@ impl Agent {
                 debug!("Cache hit for tool '{}' ({}ms)", name, elapsed);
                 return Ok((true, result_str, summary));
             }
+            self.cache_manager.local_first.record_miss();
         }
 
         // Invalidate cache entries when a mutating tool targets a specific path
@@ -4548,16 +4565,12 @@ impl Agent {
                 );
                 self.log_tool_call(name, args_str, &result_str, tool_success, start_time, true);
 
-                // Store successful cacheable results in ToolCache
+                // Store successful cacheable results in ToolCache and LocalFirstCoordinator
                 if is_cacheable && tool_success {
                     self.cache_manager
                         .tool_cache
                         .set(name, args, result.clone())
                         .await;
-                }
-
-                // Cache tool results in LocalFirstCoordinator
-                if tool_success {
                     let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
                     self.cache_manager.local_first.cache_response(
                         &cache_key,
@@ -5125,6 +5138,18 @@ impl Agent {
         truncate_result: bool,
     ) {
         let duration_ms = start_time.elapsed().as_millis() as u64;
+        // Redact BEFORE the result is persisted, while it is still the tool's
+        // own JSON: the session log and the checkpoint each redact again at
+        // save time, but by then they see one escaped string (`\"`, `\n`)
+        // cut to 1000 chars in the checkpoint, where a quoted `password =
+        // "…"` no longer matches. Same model-facing redactor as the copy the
+        // model reads (secret values only, lines and JSON structure intact),
+        // so the consumers that parse the logged result still can.
+        let redacted = crate::safety::redact::redact_for_model(
+            result,
+            crate::safety::redact::RedactionContext::Generic,
+        );
+        let result: &str = redacted.content.as_str();
         self.log_session_tool_call_event(
             tool_name,
             arguments,

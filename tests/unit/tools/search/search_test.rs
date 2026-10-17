@@ -540,3 +540,27 @@ async fn test_symbol_search_denied_child_excluded() {
         .any(|s| s["name"].as_str().unwrap().contains("visible_helper"));
     assert!(visible, "the allowed symbol must be present");
 }
+
+/// symbol_search reads every descendant `.rs` file whole; one committed
+/// oversized file must not cost the run its memory, so a file over
+/// `MAX_SOURCE_READ_SIZE` is skipped like an unreadable one (the rest of
+/// the tree is still searched).
+#[tokio::test]
+async fn test_symbol_search_skips_oversized_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "pub fn small_helper() {}\n").unwrap();
+    // Sparse: takes no disk, but is larger than the per-file read bound.
+    std::fs::File::create(dir.path().join("big.rs"))
+        .unwrap()
+        .set_len(MAX_SOURCE_READ_SIZE + 1)
+        .unwrap();
+
+    let tool = SymbolSearch::with_safety_config(permissive_safety_config());
+    let result = tool
+        .execute(json!({"name": "helper", "path": dir.path()}))
+        .await
+        .unwrap();
+    let symbols = result["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 1, "{symbols:?}");
+    assert_eq!(symbols[0]["name"], "small_helper");
+}

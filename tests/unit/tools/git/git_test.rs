@@ -436,6 +436,60 @@ async fn test_git_diff_rejects_flag_like_base() {
     );
 }
 
+/// A directory `path` limits nothing: the diff prints every tracked path
+/// git selects, so a denied one (a committed `.env`) is refused before it
+/// is printed, as `path: ".env"` is. A file `path` is literal, not a
+/// pattern. Once `.env` is out of the index and HEAD, a work-tree diff
+/// runs again; a diff against history still cannot.
+#[tokio::test]
+async fn test_git_diff_refuses_printing_a_denied_tracked_path() {
+    let (_guard, dir) = isolated_git_repo();
+    fn git(args: &[&str]) {
+        std::process::Command::new("git")
+            .args(args)
+            .status()
+            .unwrap();
+    }
+    std::fs::write(dir.path().join(".env"), "API_KEY=sk-live-0000\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "env"]);
+    std::fs::write(dir.path().join(".env"), "API_KEY=sk-live-0001\n").unwrap();
+    let tool = GitDiff::with_safety_config(crate::config::SafetyConfig::default());
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({ "path": "." }),
+        serde_json::json!({ "staged": true }),
+        serde_json::json!({ "base": "HEAD~1" }),
+    ] {
+        let err = tool
+            .execute(args.clone())
+            .await
+            .expect_err(&format!("{args} must be refused"));
+        assert!(err.to_string().contains("Safety error"), "{args}: {err}");
+        assert!(err.to_string().contains(".env"), "{args}: {err}");
+        assert!(!err.to_string().contains("sk-live"), "{args}: {err}");
+    }
+    let out = tool
+        .execute(serde_json::json!({ "path": "*nv" }))
+        .await
+        .expect("a pattern is a literal file name");
+    assert_eq!(out["has_changes"], false, "{out}");
+
+    git(&["rm", "-qf", ".env"]);
+    git(&["commit", "-qm", "drop"]);
+    std::fs::write(dir.path().join("f.txt"), "y").unwrap();
+    let out = tool
+        .execute(serde_json::json!({}))
+        .await
+        .expect("nothing denied left to print");
+    assert!(out["diff"].as_str().unwrap().contains("f.txt"), "{out}");
+    let err = tool
+        .execute(serde_json::json!({ "base": "HEAD~2" }))
+        .await
+        .expect_err("history still holds .env");
+    assert!(err.to_string().contains(".env"), "{err}");
+}
+
 #[tokio::test]
 async fn test_git_checkpoint_with_tag() {
     let _iso = isolated_git_repo();
@@ -941,4 +995,30 @@ fn push_timeout_result_never_claims_not_pushed_without_a_check() {
     let out = v["output"].as_str().unwrap();
     assert!(out.contains("may already have received the push"), "{out}");
     assert!(out.contains("git ls-remote timed out after 15s"), "{out}");
+}
+
+#[tokio::test]
+async fn git_diff_caps_large_output_instead_of_buffering_unbounded() {
+    let iso = isolated_git_repo();
+    let dir = iso.1.path();
+    std::fs::write(
+        dir.join("big.txt"),
+        "a".repeat(MAX_DIFF_OUTPUT_BYTES + 128 * 1024),
+    )
+    .unwrap();
+    let st = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["add", "big.txt"])
+        .status()
+        .unwrap();
+    assert!(st.success());
+
+    let p = dir.to_str().unwrap();
+    let res = GitDiff::new()
+        .execute(serde_json::json!({"path": p, "staged": true}))
+        .await
+        .unwrap();
+    assert_eq!(res["has_changes"], true);
+    assert_eq!(res["truncated"], true);
+    assert!(res["diff"].as_str().unwrap().len() <= MAX_DIFF_OUTPUT_BYTES + 1024);
 }

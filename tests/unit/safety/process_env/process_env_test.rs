@@ -379,11 +379,6 @@ fn no_new_unsanitized_spawns_in_src() {
             "operator model setup (OLLAMA_HOST/OLLAMA_MODELS)",
         ),
         (
-            "src/doctor.rs",
-            1,
-            "`selfware doctor` probes the user's real toolchain env",
-        ),
-        (
             "src/evolve/apply.rs",
             1,
             "selfware self-exec needs LLM credentials",
@@ -522,9 +517,11 @@ fn every_git_spawn_is_hardened() {
                 continue;
             }
             let end = (i + WINDOW).min(lines.len());
-            let hardened = lines[i..end]
-                .iter()
-                .any(|l| l.contains("sanitized_git") || l.contains("hardening_args"));
+            let hardened = lines[i..end].iter().any(|l| {
+                l.contains("sanitized_git")
+                    || l.contains("hardening_args")
+                    || (rel == "src/safety/git_exec.rs" && l.contains("always_on()"))
+            });
             if !hardened {
                 bare += 1;
             }
@@ -596,5 +593,53 @@ fn kill_on_drop_spawns_use_a_process_group() {
         "kill_on_drop alone leaves grandchildren running; use \
          crate::tools::process_guard:\n{}",
         violations.join("\n")
+    );
+}
+
+#[tokio::test]
+#[cfg(not(windows))]
+async fn pin_rustup_toolchain_sets_non_empty_toolchain_env() {
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    sanitize_command_env(&mut cmd);
+    pin_rustup_toolchain(&mut cmd);
+    let out = cmd
+        .args(["-c", "printf %s \"${RUSTUP_TOOLCHAIN-}\""])
+        .output()
+        .await
+        .expect("spawn sh");
+    let val = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !val.is_empty() && !val.contains('/'),
+        "RUSTUP_TOOLCHAIN must be pinned to a named toolchain, got {val:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn protect_process_env_blocks_child_procfs_environ_read() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let out = {
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ALLOW_DUMPABLE"]);
+        std::env::remove_var("SELFWARE_ALLOW_DUMPABLE");
+        protect_process_env();
+        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+        assert_eq!(
+            dumpable, 0,
+            "process must be non-dumpable after protect_process_env"
+        );
+
+        let ppid = std::process::id();
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        sanitize_command_env(&mut cmd);
+        cmd.arg("-c").arg(format!("cat /proc/{ppid}/environ"));
+        cmd.output().await.expect("spawn child")
+    };
+    assert!(
+        !out.status.success() && out.stdout.is_empty(),
+        "sanitized child must not read parent's /proc/<pid>/environ; status={:?}, stdout len={}",
+        out.status.code(),
+        out.stdout.len()
     );
 }

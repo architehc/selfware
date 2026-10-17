@@ -138,6 +138,22 @@ fn link_text(text: &str, linker: Option<&Linker>, open_links: &[(String, usize)]
     }
 }
 
+/// Model-authored text (prose, reasoning, tool names and arguments) as it
+/// may reach the terminal: control characters other than `\n` are shown
+/// escaped — the same rule the confirmation body follows
+/// ([`crate::safety::confirm_view::sanitize_line`]) — so a reply can never
+/// emit an escape sequence that repaints the screen or spoofs the prompt
+/// that follows it. Newlines are kept (the caller adapts them for a raw
+/// terminal); a CR ending a line is dropped like the renderer does.
+pub(crate) fn escape_controls(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            crate::safety::confirm_view::sanitize_line(line.trim_end_matches('\r'), usize::MAX)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Remove ANSI CSI sequences and OSC sequences (hyperlinks) — for tests and
 /// link-text comparison.
 pub(crate) fn strip_ansi(s: &str) -> String {
@@ -319,6 +335,10 @@ impl ProseRenderer {
     }
 
     fn line(&mut self, line: &str) -> String {
+        // The model's text is untrusted: escape its control characters
+        // before any styling, so only the renderer's own sequences reach
+        // the terminal.
+        let line = &escape_controls(line);
         let blank = line.trim().is_empty();
         if blank && !self.in_fence {
             // Collapse runs, drop leading blanks: at most ONE blank line,

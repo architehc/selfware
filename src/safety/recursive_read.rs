@@ -24,6 +24,13 @@
 //! - `git grep`: every entry except a `.git` directory, any case
 //!   (tracked-ness is not checked: an untracked `.env` still refuses).
 //!   Any other private discovery directory still refuses;
+//! - `git show`, `git log -p`, `git diff`, `git cat-file -p`, …: git
+//!   prints the content of every tracked path it selects — all of them
+//!   without a pathspec, and a pathspec is a pattern git matches its own
+//!   way (`'sec*'`, `*nv` reach `secrets/`, `.env`) — so the entries are
+//!   the paths git itself lists ([`GitPaths`]): the index and every ref's
+//!   tree for a work-tree diff, every path in any reachable commit for
+//!   the rest (a blob id names none);
 //! - `rg` with no flag that widens it: non-hidden entries, pruning only
 //!   directories the repository's top-level `.gitignore` names with a plain
 //!   pattern (and only when that file has no `!` re-include). `-u`,
@@ -32,9 +39,11 @@
 //!   ignore rules) widen it to every entry.
 //!
 //! Symlinks are followed only where the program follows them (`grep -R`,
-//! `rg -L`, `find -L`, …), and a symlink's target text is vetted either
-//! way. A root with more than [`MAX_ENTRIES`] entries is refused as
-//! unvettable.
+//! `rg -L`, `find -L`, `diff -r`, …), and a symlink's target text is
+//! vetted either way. A followed symlink must resolve inside the workspace
+//! (the path policy refuses the same file named through the link); one that
+//! leads out of it is refused whatever its target is called. A root with
+//! more than [`MAX_ENTRIES`] entries is refused as unvettable.
 
 use std::path::{Path, PathBuf};
 
@@ -53,6 +62,20 @@ enum Walk {
     RgDefault,
     /// ripgrep with ignore files off but hidden entries still skipped.
     NoHidden,
+    /// No walk: the tracked paths git lists for the root's repository.
+    Git(GitPaths),
+}
+
+/// What a content-printing git command can reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitPaths {
+    /// The index and every ref's tree: `git diff` with no revision (or
+    /// `HEAD`), `git status -v`.
+    Index,
+    /// Every path in the index or in any commit git can reach: `git log
+    /// -p`, `git show`, `git diff <rev>`, `git cat-file -p` — an object id
+    /// names no path, so nothing narrower is known.
+    History,
 }
 
 #[derive(Debug)]
@@ -360,16 +383,21 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
             let follow = has_short(args, 'f') || has_long(args, "follow");
             plan(Walk::All, follow, operands(args), true)
         }
-        "diff" | "colordiff" => (has_short(args, 'r') || has_long(args, "recursive"))
-            .then(|| plan(Walk::All, false, operands(args), false))
-            .flatten(),
+        // GNU diff compares directory operands and dereferences symlinks
+        // unless told not to.
+        "diff" | "colordiff" => {
+            let follow = !has_long(args, "no-dereference");
+            plan(Walk::All, follow, operands(args), false)
+        }
         "cp" | "rsync" | "scp" => {
             let recursive = has_short(args, 'r')
                 || has_short(args, 'R')
                 || (prog != "scp" && has_short(args, 'a'))
                 || has_long(args, "recursive")
                 || has_long(args, "archive");
-            let follow = has_short(args, 'L')
+            // `scp -r` follows every symlink it meets.
+            let follow = prog == "scp"
+                || has_short(args, 'L')
                 || has_long(args, "dereference")
                 || has_long(args, "copy-links");
             recursive
@@ -386,11 +414,16 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
                 .then(|| plan(Walk::All, follow, operands(args), false))
                 .flatten()
         }
+        // Info-ZIP archives what a symlink points to unless `-y` keeps it
+        // as a link.
         "zip" => (has_short(args, 'r') || has_long(args, "recurse-paths"))
-            .then(|| plan(Walk::All, false, operands(args), false))
+            .then(|| {
+                let follow = !has_short(args, 'y') && !has_long(args, "symlinks");
+                plan(Walk::All, follow, operands(args), false)
+            })
             .flatten(),
         "git" => {
-            // `git [-C dir] [-c k=v] grep …`
+            // `git [-C dir] [-c k=v] <subcommand> …`
             let mut i = 0;
             let mut chdir: Option<String> = None;
             while i < args.len() && args[i].starts_with('-') {
@@ -405,16 +438,38 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
                 }
                 i += 1;
             }
-            if args.get(i).map(String::as_str) != Some("grep") {
-                return None;
-            }
+            let sub = args.get(i)?;
             let rest = &args[i + 1..];
-            let mut roots = git_grep_operands(rest);
-            if let Some(dir) = chdir {
-                roots = roots.into_iter().map(|r| format!("{dir}/{r}")).collect();
-                roots.push(dir);
+            // Operands are relative to a `-C dir`, which is walked too.
+            let in_dir = |roots: Vec<String>| match &chdir {
+                Some(dir) => {
+                    let mut roots: Vec<String> =
+                        roots.into_iter().map(|r| format!("{dir}/{r}")).collect();
+                    roots.push(dir.clone());
+                    roots
+                }
+                None => roots,
+            };
+            match sub.as_str() {
+                "grep" => plan(
+                    Walk::SkipGitDir,
+                    false,
+                    in_dir(git_grep_operands(rest)),
+                    true,
+                ),
+                // `git diff --no-index a b` is a `diff -r` of the file system.
+                "diff" if rest.iter().any(|a| a == "--no-index") => {
+                    plan(Walk::All, false, in_dir(operands(rest)), false)
+                }
+                // Content printers: git lists the paths, the root is the
+                // repository — a pathspec narrows nothing here (`'sec*'
+                // README.md` would walk only `README.md`).
+                _ => {
+                    let scope = git_printed_paths(sub, rest)?;
+                    let root = chdir.unwrap_or_else(|| ".".to_string());
+                    plan(Walk::Git(scope), false, vec![root], false)
+                }
             }
-            plan(Walk::SkipGitDir, false, roots, true)
         }
         "find" => {
             let executes = args
@@ -435,6 +490,72 @@ fn plan_for(words: &[String], piped_xargs: bool, assignments: &[String]) -> Opti
                 .cloned()
                 .collect();
             plan(Walk::All, follow, roots, true)
+        }
+        _ => None,
+    }
+}
+
+/// What a git read subcommand prints the CONTENT of — `None` when it prints
+/// names, ids and messages only (`git log`, `git diff --stat`, `git
+/// ls-files`). Conservative: a patch option anywhere counts, whatever a
+/// later `--no-patch` undoes, and `git show` always prints something's
+/// content (a commit's patch, a blob — whatever the format options say).
+fn git_printed_paths(sub: &str, rest: &[String]) -> Option<GitPaths> {
+    let patch = has_short(rest, 'p')
+        || has_short(rest, 'u')
+        || has_short(rest, 'c')
+        || has_short(rest, 'U')
+        || has_long(rest, "patch")
+        || has_long(rest, "unified")
+        || has_long(rest, "patch-with-stat")
+        || has_long(rest, "patch-with-raw")
+        || has_long(rest, "binary")
+        || has_long(rest, "full-index")
+        || long_opts(rest).any(|o| o == "cc");
+    match sub {
+        "show" => Some(GitPaths::History),
+        "log" | "whatchanged" | "reflog" | "diff-tree" | "diff-index" | "diff-files" => {
+            patch.then_some(GitPaths::History)
+        }
+        "diff" => {
+            // A listing format replaces the patch unless an option adds it
+            // back (`--stat -p`).
+            let before_dd = || rest.iter().take_while(|a| *a != "--");
+            let listing = before_dd().any(|a| a == "-s")
+                || long_opts(rest).any(|o| {
+                    matches!(
+                        o,
+                        "stat"
+                            | "numstat"
+                            | "shortstat"
+                            | "dirstat"
+                            | "compact-summary"
+                            | "summary"
+                            | "raw"
+                            | "name-only"
+                            | "name-status"
+                            | "no-patch"
+                            | "quiet"
+                    )
+                });
+            if listing && !patch {
+                return None;
+            }
+            // With no revision (anything before `--` that is not an option)
+            // git compares the index and the work tree, `HEAD` at most.
+            let revision = before_dd().any(|a| !a.starts_with('-') && a != "HEAD");
+            Some(if revision {
+                GitPaths::History
+            } else {
+                GitPaths::Index
+            })
+        }
+        "status" => (has_short(rest, 'v') || has_long(rest, "verbose")).then_some(GitPaths::Index),
+        "cat-file" => {
+            let content = has_short(rest, 'p')
+                || long_opts(rest).any(|o| o.starts_with("batch") && o != "batch-check")
+                || rest.iter().any(|a| a == "blob");
+            content.then_some(GitPaths::History)
         }
         _ => None,
     }
@@ -577,6 +698,9 @@ fn vet_root(
     budget: &mut usize,
 ) -> Option<String> {
     let root_path = base.join(root);
+    if let Walk::Git(scope) = plan.walk {
+        return git_paths_violation(&root_path, root, scope, denied, true, budget);
+    }
     // Refuse before walking. Dropping a private root from `filter_entry`
     // yields nothing, so `grep -r KEY .claude` was allowed and a nested
     // `.env` was never seen. `is_dir()` is not consulted: a symlink root is
@@ -594,6 +718,9 @@ fn vet_root(
         None
     };
     let canonical_root = std::fs::canonicalize(&root_path).ok();
+    // The boundary the path policy vets operands against, symlinks
+    // resolved, so a followed link is judged by where it really leads.
+    let workspace = std::fs::canonicalize(crate::tools::workspace_root::current_path()).ok();
     let walk = walkdir::WalkDir::new(&root_path)
         .follow_links(plan.follow)
         .into_iter()
@@ -610,6 +737,8 @@ fn vet_root(
             let name = e.file_name();
             match plan.walk {
                 Walk::All => true,
+                // Never walked: vetted above from git's own listing.
+                Walk::Git(_) => true,
                 Walk::SkipGitDir => !is_git_dir_name(name),
                 Walk::NoHidden => !name.to_string_lossy().starts_with('.'),
                 Walk::RgDefault => {
@@ -652,6 +781,21 @@ fn vet_root(
             Err(_) => continue,
         };
         let rel = display_path(root, &root_path, entry.path());
+        // A symlink the program dereferences (every entry when it follows
+        // links; the root, which the walk always enters) takes the read
+        // wherever it points: the target must stay inside the workspace,
+        // whatever it is called — `cat` of the same file through the link
+        // is refused by the path policy. A dangling link reads nothing.
+        if entry.path_is_symlink() && (plan.follow || entry.depth() == 0) {
+            if let Ok(real) = std::fs::canonicalize(entry.path()) {
+                if !workspace.as_ref().is_some_and(|ws| real.starts_with(ws)) {
+                    return Some(format!(
+                        "`{}` would follow `{rel}` inside `{root}` out of the workspace",
+                        plan.program
+                    ));
+                }
+            }
+        }
         let is_dir = entry.file_type().is_dir();
         if entry.depth() > 0 && walk_entry_is_private_discovery(plan.walk, &entry) {
             return Some(format!(
@@ -698,6 +842,113 @@ fn vet_root(
         }
     }
     None
+}
+
+/// Why a content-printing git command run in `dir` (named `root` in the
+/// reason) would print a denied — and, when `sensitive`, a sensitive —
+/// tracked path: every path git lists for `scope` is vetted like a walked
+/// entry. Git failing to list them refuses the command too.
+fn git_paths_violation(
+    dir: &Path,
+    root: &str,
+    scope: GitPaths,
+    denied: &[String],
+    sensitive: bool,
+    budget: &mut usize,
+) -> Option<String> {
+    // Outside a repository git prints nothing tracked (it fails instead).
+    let top = repo_root_of(dir)?;
+    let paths = match git_listed_paths(dir, root, scope, budget) {
+        Ok(paths) => paths,
+        Err(why) => return Some(why),
+    };
+    for rel in paths {
+        if let Some(token) = sensitive_component(&rel, false).filter(|_| sensitive) {
+            return Some(format!(
+                "`git` would print `{rel}`, tracked in `{root}` (sensitive: {token})"
+            ));
+        }
+        let abs = top.join(&rel);
+        let abs = abs.to_string_lossy();
+        if let Some(glob) =
+            crate::safety::yolo::denied_glob_among(&[rel.as_str(), abs.as_ref()], denied)
+        {
+            return Some(format!(
+                "`git` would print `{rel}`, tracked in `{root}` (denied: {glob})"
+            ));
+        }
+    }
+    None
+}
+
+/// Why `git diff` run in `dir` (named `root` in the reason) would print a
+/// path matching `denied` (`scope`: what the call compares) — the
+/// `git_diff` tool's check, which like its `path` check applies the deny
+/// globs only.
+pub fn git_prints_denied_path(
+    dir: &Path,
+    root: &str,
+    scope: GitPaths,
+    denied: &[String],
+) -> Option<String> {
+    let mut budget = MAX_ENTRIES;
+    git_paths_violation(dir, root, scope, denied, false, &mut budget)
+}
+
+/// The distinct paths git lists for `scope` in `dir`'s repository, as `git
+/// rev-list --objects` prints them (relative to the top level; trees and
+/// blobs alike), counted against `budget`. `Err` names why they cannot be
+/// vetted: git failed (not a repository, …) or there are too many.
+fn git_listed_paths(
+    dir: &Path,
+    root: &str,
+    scope: GitPaths,
+    budget: &mut usize,
+) -> Result<Vec<String>, String> {
+    use std::io::BufRead;
+    let mut cmd =
+        crate::safety::git_exec::git_command(dir, crate::safety::git_exec::GitScope::Internal);
+    cmd.args(["rev-list", "--objects", "--indexed-objects"])
+        .args(match scope {
+            GitPaths::Index => ["--no-walk", "--all"],
+            GitPaths::History => ["--all", "--reflog"],
+        })
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let failed =
+        |detail: String| format!("`git` cannot list what it would print in `{root}`: {detail}");
+    let mut child = cmd.spawn().map_err(|e| failed(e.to_string()))?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(failed("no output".to_string()));
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for line in std::io::BufReader::new(stdout).split(b'\n') {
+        let Ok(line) = line else { break };
+        // `<id> <path>`; commits and the root tree have no path.
+        let Some(space) = line.iter().position(|b| *b == b' ') else {
+            continue;
+        };
+        let path = String::from_utf8_lossy(&line[space + 1..]).into_owned();
+        if path.is_empty() || !seen.insert(path.clone()) {
+            continue;
+        }
+        if *budget == 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "`git` would print more than {MAX_ENTRIES} tracked paths in `{root}`; too many to vet"
+            ));
+        }
+        *budget -= 1;
+        paths.push(path);
+    }
+    match child.wait() {
+        Ok(status) if status.success() => Ok(paths),
+        Ok(status) => Err(failed(status.to_string())),
+        Err(e) => Err(failed(e.to_string())),
+    }
 }
 
 /// `entry` as the command would name it: `root` + the part below it.

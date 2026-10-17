@@ -48,6 +48,12 @@ impl OntologyStore {
     }
 
     pub fn load(&self) -> Result<Graph> {
+        // Mirror `save`: a symlinked store is never written, so never read
+        // one either — a checkout can commit the path as a symlink to a
+        // device on which an unbounded read never returns.
+        if !std::fs::symlink_metadata(&self.path)?.file_type().is_file() {
+            anyhow::bail!("refusing to load symlinked or non-regular ontology store");
+        }
         let yaml = std::fs::read_to_string(&self.path)?;
         Ok(serde_yaml::from_str(&yaml)?)
     }

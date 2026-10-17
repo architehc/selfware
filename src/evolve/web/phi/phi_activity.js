@@ -4,11 +4,33 @@ export const MAX_ACTIVITY_AGENTS = 64;
 const STATUSES = new Set(['available', 'unavailable', 'incomplete']);
 const ROW_STATUSES = new Set(['available', 'stale', 'incomplete']);
 const PHASES = new Set(['running', 'completed', 'failed', 'partial', 'abandoned']);
+const POSTURE_EMOTIONS = new Set(['greeting', 'thinking', 'working', 'success', 'error', 'idle',
+  'curious', 'evolve', 'flow', 'guard', 'spark', 'sleep', 'skeptical', 'unimpressed']);
+const POSTURE_CHANNELS = new Set(['silent', 'ambient', 'glance', 'interrupt']);
+const POLICY_MODES = new Set(['observe', 'advise', 'mediate', 'enforce']);
 const COUNTS = ['outstanding', 'unreviewed_lines', 'untested_lines', 'unknown_size_obligations',
   'unattributed_mutations', 'possible_unrecorded_mutations', 'observed_runs', 'passed_runs', 'failed_runs', 'unknown_runs'];
 const count = value => Number.isSafeInteger(value) && value >= 0;
 const opaque = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
 const empty = reason => ({ status: 'unavailable', reason, agents: [], truncated: false, observed_at_ms: null });
+
+export function parsePolicy(payload) {
+  if (!payload || typeof payload !== 'object' || !POLICY_MODES.has(payload.mode) ||
+      !count(payload.debt_gate_lines) || !count(payload.bulk_generation_lines) ||
+      !count(payload.capitulation_threshold) || !count(payload.interrupt_budget) ||
+      !count(payload.steward_quiet_ms) || !count(payload.quiet_after_activity_ms) ||
+      !count(payload.glance_cooldown_ms)) throw new Error('invalid_phi_policy');
+  return {
+    mode: payload.mode,
+    debt_gate_lines: payload.debt_gate_lines,
+    bulk_generation_lines: payload.bulk_generation_lines,
+    capitulation_threshold: payload.capitulation_threshold,
+    interrupt_budget: payload.interrupt_budget,
+    steward_quiet_ms: payload.steward_quiet_ms,
+    quiet_after_activity_ms: payload.quiet_after_activity_ms,
+    glance_cooldown_ms: payload.glance_cooldown_ms
+  };
+}
 
 export function parseActivity(payload) {
   if (!payload || !STATUSES.has(payload.status) || !Array.isArray(payload.agents) ||
@@ -30,14 +52,38 @@ export function parseActivity(payload) {
         evidence.latest_run = row.evidence.latest_run;
       }
     }
+    let fox_posture = null;
+    if (row.fox_posture != null) {
+      const p = row.fox_posture;
+      if (typeof p !== 'object' || !POSTURE_EMOTIONS.has(p.emotion) ||
+          !Number.isFinite(p.debt_ratio) || p.debt_ratio < 0 || p.debt_ratio > 1 ||
+          !POSTURE_CHANNELS.has(p.channel) ||
+          (p.note != null && typeof p.note !== 'string')) throw new Error('invalid_activity_posture');
+      fox_posture = {
+        emotion: p.emotion,
+        note: typeof p.note === 'string' ? p.note.slice(0, 120) : null,
+        debt_ratio: p.debt_ratio,
+        channel: p.channel
+      };
+    }
     return { agent_id: row.agent_id, task_id: row.task_id, session_id: row.session_id,
       status: row.status, phase: row.phase, recorded_at_ms: row.recorded_at_ms, age_ms: row.age_ms,
-      evidence, reason: typeof row.reason === 'string' ? row.reason.slice(0, 120) : null };
+      evidence, fox_posture, reason: typeof row.reason === 'string' ? row.reason.slice(0, 120) : null };
   });
   if (payload.status === 'available' && !agents.length)
     throw new Error('invalid_available_activity');
   return { status: payload.status, reason: typeof payload.reason === 'string' ? payload.reason.slice(0, 120) : null,
     observed_at_ms: payload.observed_at_ms, agents, truncated: payload.truncated };
+}
+
+export function activityPosture(snapshot) {
+  if (!snapshot || snapshot.status === 'unavailable') return null;
+  const fresh = snapshot.agents.filter(row => row.status !== 'stale' && row.fox_posture);
+  if (!fresh.length) return null;
+  const rank = emotion => ({ error: 5, unimpressed: 4, skeptical: 3, guard: 3, working: 2, flow: 1 }[emotion] ?? 0);
+  return [...fresh].sort((a, b) =>
+    (rank(b.fox_posture.emotion) - rank(a.fox_posture.emotion)) ||
+    (b.fox_posture.debt_ratio - a.fox_posture.debt_ratio))[0].fox_posture;
 }
 
 export function activityMood(snapshot) {
@@ -88,9 +134,14 @@ export class PhiActivity {
     this.publish(empty(reason));
   }
 
+  setPolicy(policy) {
+    this.policy = policy ? parsePolicy(policy) : null;
+    this.render();
+  }
+
   publish(snapshot) {
     this.snapshot = snapshot; this.render();
-    try { this.onChange(snapshot, activityMood(snapshot)); } catch (_) { /* Observation cannot interrupt a task. */ }
+    try { this.onChange(snapshot, activityMood(snapshot), activityPosture(snapshot)); } catch (_) { /* Observation cannot interrupt a task. */ }
   }
 
   async poll(epoch) {
@@ -160,6 +211,7 @@ export class PhiActivity {
       const item = node('li', null, 'phi-activity-agent'); item.dataset.agentId = row.agent_id;
       item.dataset.sessionId = row.session_id; item.dataset.taskId = row.task_id;
       item.dataset.phase = row.phase; item.dataset.freshness = row.status;
+      if (row.fox_posture) item.dataset.foxEmotion = row.fox_posture.emotion;
       const heading = node('div', null, 'phi-activity-agent-heading');
       heading.append(node('span', `Agent ${row.agent_id.slice(0, 10)}`));
       heading.append(node('span', row.phase === 'completed' ? 'Task completed' : row.phase, 'phi-activity-phase'));
@@ -173,10 +225,19 @@ export class PhiActivity {
         if (e.unknown_size_obligations || e.unattributed_mutations || e.possible_unrecorded_mutations)
           item.append(node('p', `${e.unknown_size_obligations} obligations of unknown size · ${e.unattributed_mutations} unattributed mutations · ${e.possible_unrecorded_mutations} possible unrecorded mutations`, 'phi-activity-evidence'));
       } else item.append(node('p', 'Execution evidence unavailable.', 'phi-activity-evidence'));
+      if (row.fox_posture) {
+        const p = row.fox_posture;
+        item.append(node('p', `Fox posture: ${p.emotion}${p.note ? ' · ' + p.note : ''} · debt ${Math.round(p.debt_ratio * 100)}%`, 'deck-hint phi-activity-posture'));
+      }
       list.append(item);
     }
+    const children = [title, status, list];
+    if (this.policy) {
+      children.push(node('p', `Policy: ${this.policy.mode} · debt gate ${this.policy.debt_gate_lines} lines · interrupt budget ${this.policy.interrupt_budget}`, 'deck-hint phi-activity-policy'));
+    }
     const note = node('p', 'Captured observations only. A completed task or passing run does not establish that all required checks passed.', 'deck-hint');
-    this.container.replaceChildren(title, status, list, note);
+    children.push(note);
+    this.container.replaceChildren(...children);
     list.scrollTop = previousScroll;
     if (focusedIdentity) {
       const row = [...list.querySelectorAll('.phi-activity-agent')].find(item =>

@@ -183,6 +183,42 @@ async fn existing_web_dir_is_served_from_disk_dev_override() {
     assert_eq!(body, "disk only\n");
 }
 
+#[tokio::test]
+async fn project_under_analysis_never_supplies_the_ui() {
+    // The served project may ship its own `src/evolve/web/`; the UI must
+    // still come from the binary (its script would run in the server's
+    // origin with the session token). Only the operator's explicit
+    // `SELFWARE_EVOLVE_WEB_DIR` selects a disk checkout.
+    let root = tempfile::tempdir().unwrap();
+    let hostile = root.path().join("src/evolve/web");
+    std::fs::create_dir_all(&hostile).unwrap();
+    std::fs::write(hostile.join("index.html"), "hostile index\n").unwrap();
+    let graph = crate::evolve::Graph {
+        nodes: vec![],
+        edges: vec![],
+    };
+    let server = EvolveServer::for_project(graph, root.path()).unwrap();
+
+    let dev = tempfile::tempdir().unwrap();
+    std::fs::write(dev.path().join("index.html"), "dev index\n").unwrap();
+    let (default_router, dev_router) = {
+        let _env = crate::test_support::EnvGuard::capture(&[DEV_WEB_DIR_ENV]);
+        std::env::remove_var(DEV_WEB_DIR_ENV);
+        let default_router = server.router();
+        std::env::set_var(DEV_WEB_DIR_ENV, dev.path());
+        let dev_router = server.router();
+        (default_router, dev_router)
+    };
+
+    let (status, _, body) = get(default_router, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, include_str!("../../../src/evolve/web/index.html"));
+
+    let (status, _, body) = get(dev_router, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "dev index\n");
+}
+
 #[cfg(feature = "self-improvement")]
 #[test]
 fn test_commit_error_killswitch_maps_to_typed_conflict() {

@@ -33,7 +33,7 @@ mod validation;
 pub use agent::*;
 pub use api_key::{
     is_keyless_endpoint, is_local_endpoint, is_openrouter_endpoint, load_api_key_from_keyring,
-    save_api_key_to_keyring, set_api_key_for_endpoint,
+    redact_endpoint, save_api_key_to_keyring, set_api_key_for_endpoint,
 };
 pub use auto_config::*;
 pub use debug::DebugConfig;

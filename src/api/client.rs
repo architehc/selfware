@@ -1364,10 +1364,17 @@ impl ApiClient {
                 }
                 .into());
             }
+            let Some(step_down) = apply_reasoning_step_down(&mut body, &self.config.model) else {
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: None,
+                }
+                .into());
+            };
+            let step_desc = step_down.describe();
             let detail = format!(
                 "completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning \
-                 chars, finish_reason=length, empty answer); retrying once with \
-                 reasoning_effort=low"
+                 chars, finish_reason=length, empty answer); retrying once with {step_desc}"
             );
             warn!("{detail}");
             self.progress_emitter
@@ -1375,7 +1382,6 @@ impl ApiClient {
                     decision: "reasoning_budget_retry".to_string(),
                     detail,
                 });
-            body["reasoning_effort"] = serde_json::json!("low");
             discarded_usage = Some(resp.usage.clone());
             let retried = self.send_with_retry(&body).await?;
             coverage = coverage.intersect(retried.coverage);
@@ -1385,9 +1391,7 @@ impl ApiClient {
             if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
                 return Err(ApiError::ReasoningBudgetExhausted {
                     reasoning_chars,
-                    retry: Some(
-                        "retried once with reasoning_effort=low, also exhausted".to_string(),
-                    ),
+                    retry: Some(format!("retried once with {step_desc}, also exhausted")),
                 }
                 .into());
             }
@@ -2957,8 +2961,14 @@ impl ApiClient {
                 }
                 .into());
             }
+            if apply_reasoning_step_down(&mut body, &profile.model).is_none() {
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: None,
+                }
+                .into());
+            }
             let discarded = response.usage.clone();
-            body["reasoning_effort"] = serde_json::json!("low");
             response = self
                 .send_request_with_retry(
                     body,
@@ -3032,6 +3042,9 @@ impl ReasoningStepDown {
     /// Human-readable description for warnings, events and error messages.
     pub fn describe(&self) -> String {
         match self {
+            Self::Lowered { from, to } if from == "provider default" => {
+                format!("reasoning_effort={to} ({from} -> {to})")
+            }
             Self::Lowered { from, to } => format!("reasoning_effort {from} -> {to}"),
             Self::ThinkingDisabled => {
                 "thinking disabled (enable_thinking=false; no reasoning effort left to lower)"
@@ -3208,6 +3221,7 @@ fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
 
 pub fn detect_backend(endpoint: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
         .context("Failed to build blocking HTTP client")?;

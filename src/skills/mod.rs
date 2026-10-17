@@ -99,6 +99,12 @@ pub fn compute_metadata_hash(
 }
 
 /// External ledger of admitted skills, stored separately from the skill markdown files.
+///
+/// The ledger records the operator's admission decisions, so it must live where
+/// only the operator writes: under the home directory, keyed by the skills
+/// directory it covers. A ledger beside the skills themselves would be authored
+/// by whoever wrote that directory — in a checkout, the repository — and a
+/// repository could then admit its own skills in every fresh clone.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AdmissionLedger {
     #[serde(default)]
@@ -107,9 +113,67 @@ pub struct AdmissionLedger {
 
 impl AdmissionLedger {
     pub const FILE_NAME: &'static str = ".admitted_ledger.json";
+    /// Per-directory admission records, under `~/.selfware/`.
+    pub const ADMISSIONS_DIR: &'static str = "skill-admissions";
 
+    /// Whether `dir` is one of the user-global skill directories
+    /// (`~/.selfware/skills`, `~/.selfware/commands`). Those are the operator's
+    /// own state and never arrive with a checkout, so their ledger may stay in
+    /// place beside the skills.
+    pub fn is_user_global_dir(dir: &Path) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let Ok(canonical) = std::fs::canonicalize(dir) else {
+            return false;
+        };
+        [
+            home.join(".selfware").join("skills"),
+            home.join(".selfware").join("commands"),
+        ]
+        .iter()
+        .any(|d| std::fs::canonicalize(d).is_ok_and(|d| d == canonical))
+    }
+
+    /// Path of the ledger covering the skills directory `dir`:
+    /// `~/.selfware/skill-admissions/<sha256(canonical dir)>/.admitted_ledger.json`,
+    /// or `<dir>/.admitted_ledger.json` for a user-global directory.
+    ///
+    /// `dir` must exist; it is canonicalized so the record is bound to the real
+    /// directory, not to a symlink or a relative spelling of it.
+    pub fn ledger_path(dir: &Path) -> Result<PathBuf, String> {
+        let canonical = std::fs::canonicalize(dir)
+            .map_err(|e| format!("Cannot resolve skills directory {}: {e}", dir.display()))?;
+        if Self::is_user_global_dir(&canonical) {
+            return Ok(canonical.join(Self::FILE_NAME));
+        }
+        #[cfg(test)]
+        let home = {
+            static TEST_ADMISSIONS_HOME: std::sync::LazyLock<tempfile::TempDir> =
+                std::sync::LazyLock::new(|| tempfile::tempdir().expect("test admissions home"));
+            Some(TEST_ADMISSIONS_HOME.path().to_path_buf())
+        };
+        #[cfg(not(test))]
+        let home = dirs::home_dir();
+        let home = home.ok_or_else(|| {
+            "Cannot resolve home directory for the skill admission ledger".to_string()
+        })?;
+        let key = format!(
+            "{:x}",
+            sha2::Sha256::digest(canonical.to_string_lossy().as_bytes())
+        );
+        Ok(home
+            .join(".selfware")
+            .join(Self::ADMISSIONS_DIR)
+            .join(key)
+            .join(Self::FILE_NAME))
+    }
+
+    /// Load the operator's ledger for the skills directory `dir`.
+    ///
+    /// An `.admitted_ledger.json` inside a project directory itself is never consulted.
     pub fn load_from_dir(dir: &Path) -> Result<Self, String> {
-        let ledger_path = dir.join(Self::FILE_NAME);
+        let ledger_path = Self::ledger_path(dir)?;
         match ledger_path.symlink_metadata() {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
@@ -155,13 +219,22 @@ impl AdmissionLedger {
         }
     }
 
+    /// Persist the operator's ledger for the skills directory `dir`.
     pub fn save_to_dir(&self, dir: &Path) -> Result<(), String> {
-        let ledger_path = dir.join(Self::FILE_NAME);
-        if !ledger_path.starts_with(dir) {
-            return Err(format!(
-                "Admission ledger path escapes target directory: {}",
-                ledger_path.display()
-            ));
+        let ledger_path = Self::ledger_path(dir)?;
+        let ledger_dir = ledger_path
+            .parent()
+            .ok_or("Admission ledger path has no parent")?;
+        std::fs::create_dir_all(ledger_dir).map_err(|e| {
+            format!(
+                "Failed to create admission ledger directory {}: {e}",
+                ledger_dir.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(ledger_dir, std::fs::Permissions::from_mode(0o700));
         }
         if let Ok(meta) = ledger_path.symlink_metadata() {
             if meta.file_type().is_symlink() {
@@ -186,7 +259,7 @@ impl AdmissionLedger {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize admission ledger: {e}"))?;
 
-        let temp_path = dir.join(format!(".admitted_ledger.tmp.{}", uuid::Uuid::new_v4()));
+        let temp_path = ledger_dir.join(format!(".admitted_ledger.tmp.{}", uuid::Uuid::new_v4()));
         let write_res = (|| -> std::io::Result<()> {
             let mut open_opts = std::fs::OpenOptions::new();
             open_opts.write(true).create_new(true);
@@ -386,6 +459,8 @@ impl SkillRegistry {
             return;
         }
 
+        // The ledger is the operator's record under their home, never a file
+        // shipped in the directory being judged (see `AdmissionLedger`).
         let ledger = match AdmissionLedger::load_from_dir(dir) {
             Ok(l) => l,
             Err(e) => {
@@ -396,6 +471,19 @@ impl SkillRegistry {
                 return;
             }
         };
+        if !AdmissionLedger::is_user_global_dir(dir)
+            && dir
+                .join(AdmissionLedger::FILE_NAME)
+                .symlink_metadata()
+                .is_ok()
+        {
+            warn!(
+                "Ignoring {} shipped inside {}: admission records live under ~/.selfware/{} and are written only by `selfware skill admit`",
+                AdmissionLedger::FILE_NAME,
+                dir.display(),
+                AdmissionLedger::ADMISSIONS_DIR
+            );
+        }
 
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -421,7 +509,7 @@ impl SkillRegistry {
                     let actual_hash =
                         format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
 
-                    // Consult ledger by skill name OR file name
+                    // Consult the operator's ledger by skill name OR file name
                     let ledger_entry = ledger.entries.get(&skill.name).or_else(|| {
                         ledger
                             .entries
@@ -492,8 +580,9 @@ impl SkillRegistry {
                     } else {
                         // Project discovery directory is the untrusted class:
                         // ANY skill or command in this directory without an entry in
-                        // .admitted_ledger.json is rejected! A file cannot self-admit by
-                        // setting or omitting frontmatter flags (structural trust).
+                        // the operator's .admitted_ledger.json is rejected! A file cannot
+                        // self-admit by setting or omitting frontmatter flags, and a
+                        // checkout cannot self-admit by shipping a ledger (structural trust).
                         warn!(
                             "Ignoring unadmitted skill '{}' in {}: no entry in admission ledger",
                             skill.name,
@@ -683,7 +772,8 @@ impl SkillRegistry {
 
     /// Discover skills in the standard locations:
     /// - `~/.selfware/skills/` and `~/.selfware/commands/` (user-global)
-    /// - `./.selfware/skills/` and `./.selfware/commands/` (project-local, ledger-gated)
+    /// - `./.selfware/skills/` and `./.selfware/commands/` (project-local, gated by
+    ///   the operator's ledger under `~/.selfware/skill-admissions/`)
     ///
     /// (`commands/` is the Claude-Code-parity alias — same markdown +
     /// frontmatter format, not a second template system.)

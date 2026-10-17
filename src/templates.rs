@@ -705,12 +705,26 @@ pub fn load_qa_schema_profile(path: Option<&Path>, profile_name: &str) -> Result
         None => QA_SCHEMA_YAML.to_string(),
     };
 
+    let mut last_err: Option<serde_yaml::Error> = None;
     for document in serde_yaml::Deserializer::from_str(&content) {
-        if let Ok(config) = QaSchemaConfig::deserialize(document) {
-            if config.qa_profile.name == profile_name {
-                return Ok(config);
+        match QaSchemaConfig::deserialize(document) {
+            Ok(config) => {
+                if config.qa_profile.name == profile_name {
+                    return Ok(config);
+                }
+            }
+            Err(e) => {
+                last_err = Some(e);
             }
         }
+    }
+
+    if let Some(err) = last_err {
+        bail!(
+            "QA profile '{}' not found in schema (failed to parse YAML document: {})",
+            profile_name,
+            err
+        );
     }
 
     bail!(

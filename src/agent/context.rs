@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 /// label and `side_call:<purpose>` heartbeat phase).
 pub(crate) const CONTEXT_SUMMARY_PURPOSE: &str = "context_summary";
 /// Wall-time cap of that side call.
-pub(crate) const CONTEXT_SUMMARY_TIME_CAP_SECS: u64 = 90;
+pub(crate) const CONTEXT_SUMMARY_TIME_CAP_SECS: u64 = 180;
 
 /// Advance a tail start index past any leading `role == "tool"` messages and
 /// any leading XML tool-result user messages (`<tool_result>` markup) so the

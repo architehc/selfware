@@ -2384,3 +2384,27 @@ async fn file_read_line_range_refreshes_snapshot_after_external_modification() {
         "fn alpha() {}\nfn beta_updated() {}\n"
     );
 }
+
+/// The content-scanning tools load files whole through
+/// `read_to_string_capped`: a file over the limit is refused on the opened
+/// descriptor's size (the `file_read` error), one within it is read in full.
+#[test]
+fn read_to_string_capped_refuses_files_over_the_limit() {
+    let temp_dir = TempDir::new().unwrap();
+    let small = temp_dir.path().join("small.rs");
+    fs::write(&small, "fn a() {}\n").unwrap();
+    assert_eq!(read_to_string_capped(&small, 16).unwrap(), "fn a() {}\n");
+
+    // Sparse: the size is what matters, not the bytes on disk.
+    let big = temp_dir.path().join("big.rs");
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(MAX_SOURCE_READ_SIZE + 1)
+        .unwrap();
+    let err = read_to_string_capped(&big, MAX_SOURCE_READ_SIZE).unwrap_err();
+    assert!(
+        err.to_string().contains("File too large to read"),
+        "unexpected error: {err}"
+    );
+    assert!(read_to_string_capped(&small, 4).is_err());
+}

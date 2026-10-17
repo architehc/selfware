@@ -474,3 +474,39 @@ async fn run_stage_drop_kills_grandchild() {
         "dropped QA stage must kill child {child} and grandchild {grandchild}"
     );
 }
+
+/// A runner starts only the stages in its `QaStageSet`: with `test` off the
+/// Python runner must not invoke pytest/unittest at all (discovery imports
+/// every test module of the checkout), and must not report the stage either.
+#[tokio::test]
+async fn python_runner_skips_stages_outside_the_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("imported");
+    std::fs::write(
+        dir.path().join("test_marker.py"),
+        format!("open({:?}, 'w').close()\n", marker.to_string_lossy()),
+    )
+    .unwrap();
+    let stages = QaStageSet {
+        test: false,
+        ..QaStageSet::ALL
+    };
+    let results = run_python_qa(dir.path(), 10, stages).await;
+    assert!(!marker.exists(), "the test stage must not be started");
+    assert!(
+        results.iter().all(|r| r.stage != QaStage::Test),
+        "{results:?}"
+    );
+
+    let none = QaStageSet {
+        syntax: false,
+        format: false,
+        lint: false,
+        type_check: false,
+        test: false,
+        security: false,
+    };
+    assert!(run_python_qa(dir.path(), 10, none).await.is_empty());
+    assert!(run_node_qa(dir.path(), 10, none).await.is_empty());
+    assert!(run_go_qa(dir.path(), 10, none).await.is_empty());
+}

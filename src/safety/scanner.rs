@@ -338,6 +338,35 @@ impl SecretScanner {
                 r"AccountKey=[A-Za-z0-9+/=]{20,}",
                 SecuritySeverity::Critical,
             ),
+            // Azure shared access signatures: the `sig=` parameter of a SAS
+            // URL or of a `SharedAccessSignature=` connection string is a
+            // base64 HMAC-SHA256 (44 chars, longer once percent-encoded) and
+            // is the bearer credential; the other parameters are metadata.
+            SecretPattern::new(
+                "Azure SAS Signature",
+                r"(?i)\bsig=[A-Za-z0-9%+/=]{40,}",
+                SecuritySeverity::Medium,
+            ),
+            // S3 presigned URLs: `X-Amz-Signature=` + 64 hex (same shape as
+            // the Azure SAS — the URL is the credential until it expires)
+            SecretPattern::new(
+                "AWS Presigned URL Signature",
+                r"(?i)\bX-Amz-Signature=[0-9a-f]{64}",
+                SecuritySeverity::Medium,
+            ),
+            // DigitalOcean personal access (dop_), OAuth (doo_) and refresh
+            // (dor_) tokens: prefix + 64 hex
+            SecretPattern::new(
+                "DigitalOcean Token",
+                r"\bdo[opr]_v1_[0-9a-f]{64}\b",
+                SecuritySeverity::Medium,
+            ),
+            // Google OAuth client secrets (GOCSPX- + 28 chars)
+            SecretPattern::new(
+                "Google OAuth Client Secret",
+                r"\bGOCSPX-[A-Za-z0-9_\-]{28,}",
+                SecuritySeverity::Medium,
+            ),
             // Twilio Account SIDs (AC + 32 hex)
             SecretPattern::new("Twilio SID", r"AC[0-9a-f]{32}", SecuritySeverity::High),
             // Generic high-entropy base64 strings

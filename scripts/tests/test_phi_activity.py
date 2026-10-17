@@ -25,7 +25,7 @@ class ActivityContracts(unittest.TestCase):
         if not shutil.which('node'):
             self.skipTest('Node is required')
         source = ("import assert from 'node:assert/strict';\n"
-                  f"import {{parseActivity, activityMood, PhiActivity}} from {json.dumps(MODULE.as_uri())};\n"
+                  f"import {{parseActivity, parsePolicy, activityMood, activityPosture, PhiActivity}} from {json.dumps(MODULE.as_uri())};\n"
                   + JS_FIXTURE + body)
         result = subprocess.run(['node', '--input-type=module', '-'], input=source,
                                 text=True, capture_output=True, timeout=15)
@@ -80,6 +80,24 @@ for(const change of [{status:'unknown'},{observed_at_ms:null},{agents:Array(65).
   {agents:[row('a',{evidence:{...evidence,observed_runs:12}})]},{agents:[]}]) {
   assert.throws(()=>parseActivity(capture(undefined,change)));
 }
+""")
+
+    def test_fox_posture_and_policy_contracts(self):
+        self.node("""
+const parsed=parseActivity(capture([
+  row('a',{fox_posture:{emotion:'working',note:null,debt_ratio:0.1,channel:'ambient'}}),
+  row('b',{fox_posture:{emotion:'skeptical',note:'more written than read',debt_ratio:0.55,channel:'ambient'}})
+]));
+assert.equal(parsed.agents[0].fox_posture.emotion,'working');
+assert.equal(activityPosture(parsed).emotion,'skeptical');
+assert.equal(activityPosture(parsed).note,'more written than read');
+assert.throws(()=>parseActivity(capture([row('a',{fox_posture:{emotion:'not_real',note:null,debt_ratio:0.5,channel:'ambient'}})])));
+assert.throws(()=>parseActivity(capture([row('a',{fox_posture:{emotion:'working',note:null,debt_ratio:1.5,channel:'ambient'}})])));
+const pol=parsePolicy({mode:'advise',debt_gate_lines:250,bulk_generation_lines:500,capitulation_threshold:2,
+  interrupt_budget:3,steward_quiet_ms:12000,quiet_after_activity_ms:4000,glance_cooldown_ms:45000});
+assert.equal(pol.mode,'advise');assert.equal(pol.debt_gate_lines,250);
+assert.throws(()=>parsePolicy({mode:'invalid',debt_gate_lines:250,bulk_generation_lines:500,capitulation_threshold:2,
+  interrupt_budget:3,steward_quiet_ms:12000,quiet_after_activity_ms:4000,glance_cooldown_ms:45000}));
 """)
 
     def test_late_response_cannot_repopulate_disconnected_workspace(self):

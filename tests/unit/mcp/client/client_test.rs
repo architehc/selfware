@@ -87,6 +87,7 @@ fn sh_server(name: &str, script: &str, init_timeout_secs: u64) -> McpServerConfi
         command: "sh".to_string(),
         args: vec!["-c".to_string(), script.to_string()],
         env: Default::default(),
+        cwd: None,
         init_timeout_secs,
         framing: Default::default(),
     }

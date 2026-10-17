@@ -77,7 +77,14 @@ pub struct PtySession {
     /// cleanup (see [`PtySession::kill_process_group`]).
     #[cfg(unix)]
     pgid: Option<u32>,
-    /// Writer to the child's stdin.
+    /// Writer to the child's stdin. On unix this is the trusted supervisor's
+    /// script stream: a socket rather than a pipe, because a same-UID command
+    /// can reopen a pipe for writing through `/proc/<pid>/fd` and queue its
+    /// own script (including a replacement supervisor) behind the running
+    /// command, while `open()` on a socket fails with `ENXIO`.
+    #[cfg(unix)]
+    stdin: tokio::net::UnixStream,
+    #[cfg(not(unix))]
     stdin: tokio::process::ChildStdin,
     /// Buffered reader for the child's stdout.
     stdout: BufReader<tokio::process::ChildStdout>,
@@ -129,8 +136,26 @@ impl PtySession {
         // Clear inherited credentials immediately after construction so both
         // cfg-specific spawn paths use the shared child-environment policy.
         crate::safety::process_env::sanitize_command_env(&mut cmd);
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
+        // The supervisor reads its per-command scripts (nonce included) from
+        // stdin, so that stream needs the same property as the completion
+        // channel below: a socket cannot be reopened through procfs, a pipe
+        // can. The reader end stays blocking for the child; the writer end
+        // is registered with tokio after spawn.
+        #[cfg(unix)]
+        let script_writer = {
+            let (reader, writer) = std::os::unix::net::UnixStream::pair()
+                .context("Failed to create PTY script channel")?;
+            writer
+                .set_nonblocking(true)
+                .context("Failed to configure PTY script channel")?;
+            cmd.stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                reader,
+            )));
+            writer
+        };
+        #[cfg(not(unix))]
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
@@ -190,6 +215,10 @@ impl PtySession {
         #[cfg(unix)]
         drop(control_writer);
 
+        #[cfg(unix)]
+        let stdin = tokio::net::UnixStream::from_std(script_writer)
+            .context("Failed to register PTY script channel")?;
+        #[cfg(not(unix))]
         let stdin = child
             .stdin
             .take()
@@ -329,10 +358,11 @@ impl PtySession {
         } else {
             format!("{} -c {}", shell_quote(&self.shell_path), shell_quote(cmd))
         };
-        // Bind the completion message to this command. Even on systems where
-        // a same-UID child can reopen another process's descriptors through
-        // procfs, it cannot guess a nonce that exists only in the trusted
-        // supervisor's pending script.
+        // Bind the completion message to this command. The nonce exists only
+        // in the trusted supervisor's pending script, and that script travels
+        // over a socket (see `new`), so a same-UID child cannot reopen the
+        // stream through procfs to read the nonce or to queue script of its
+        // own behind the running command.
         let control_nonce = Uuid::new_v4().simple().to_string();
         let full_cmd = format!(
             "cd -- {} && {} </dev/null 3>&-\n__selfware_ec=$?\nprintf '%s:%s\\n' {} \"$__selfware_ec\" >&3\n",
@@ -1406,6 +1436,15 @@ impl Tool for PtyShellTool {
             other => bail!("Unknown pty_shell action: {}", other),
         }
     }
+}
+
+/// Best-effort synchronous read of a live PTY session's current working
+/// directory, for pre-dispatch path and headless-read vetting (`shell_call_cwd`).
+pub fn session_cwd_blocking(session_id: &str) -> Option<String> {
+    let sessions = SESSIONS.try_read().ok()?;
+    let shared = sessions.get(session_id)?;
+    let session = shared.try_lock().ok()?;
+    Some(session.cwd.to_string_lossy().into_owned())
 }
 
 impl PtyShellTool {

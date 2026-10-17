@@ -264,7 +264,13 @@ Phase: {:?}
                 .as_deref()
                 .unwrap_or("Not verified"),
             self.working_memory.open_questions.join("\n- "),
-            self.episodic_memory.recent_lessons(3).join("\n- "),
+            self.episodic_memory
+                .sanitized_recent_lessons_for_workspace(
+                    3,
+                    &crate::tools::workspace_root::current_path(),
+                    true,
+                )
+                .join("\n- "),
         )
     }
 }
@@ -534,6 +540,63 @@ impl EpisodicMemory {
             .collect()
     }
 
+    /// Recent lessons scoped to `workspace` (or untagged global lessons) and
+    /// sanitized through redaction, trust-gating, and special-token stripping.
+    pub fn sanitized_recent_lessons_for_workspace(
+        &self,
+        n: usize,
+        workspace: &std::path::Path,
+        trust_gate_enabled: bool,
+    ) -> Vec<String> {
+        let ws_tag = format!("workspace:{}", workspace.display());
+        self.lessons
+            .iter()
+            .rev()
+            .filter(|l| {
+                let mut has_ws_tag = false;
+                let mut matches_ws = false;
+                for t in &l.tags {
+                    if t.starts_with("workspace:") {
+                        has_ws_tag = true;
+                        if t == &ws_tag {
+                            matches_ws = true;
+                        }
+                    }
+                }
+                !has_ws_tag || matches_ws
+            })
+            .filter_map(|l| {
+                let formatted = format!("[{:?}] {}", l.category, l.content);
+                let redacted = crate::safety::redact::redact_for_model(
+                    &formatted,
+                    crate::safety::redact::RedactionContext::Generic,
+                )
+                .content;
+                let gate = crate::safety::source_context::trust_gate_tool_result(
+                    "episodic_lesson",
+                    "{}",
+                    &redacted,
+                    trust_gate_enabled,
+                );
+                if gate.sanitized > 0 {
+                    tracing::warn!(
+                        "Dropped a global lesson from prompt/summary: trust gate found {:?}",
+                        gate.kinds
+                    );
+                    return None;
+                }
+                Some(
+                    crate::agent::result_envelope::strip_special_token_openers(&gate.content)
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .take(200)
+                        .collect(),
+                )
+            })
+            .take(n)
+            .collect()
+    }
+
     /// Find relevant lessons for a context
     pub fn find_relevant(&self, context: &str) -> Vec<&Lesson> {
         let context_lower = context.to_lowercase();
@@ -550,22 +613,24 @@ impl EpisodicMemory {
 
     /// Quick lesson: what worked
     pub fn what_worked(&mut self, context: &str, description: &str) {
+        let ws = crate::tools::workspace_root::current_path();
         self.record_lesson(Lesson {
             category: LessonCategory::Success,
             content: description.to_string(),
             context: context.to_string(),
-            tags: vec![],
+            tags: vec![format!("workspace:{}", ws.display())],
             timestamp: Utc::now(),
         });
     }
 
     /// Quick lesson: what failed
     pub fn what_failed(&mut self, context: &str, description: &str) {
+        let ws = crate::tools::workspace_root::current_path();
         self.record_lesson(Lesson {
             category: LessonCategory::Failure,
             content: description.to_string(),
             context: context.to_string(),
-            tags: vec![],
+            tags: vec![format!("workspace:{}", ws.display())],
             timestamp: Utc::now(),
         });
     }

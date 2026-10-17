@@ -185,6 +185,58 @@ fn parse_reports_why_a_command_is_not_a_read() {
 }
 
 #[test]
+fn assignment_rule_is_one_for_words_and_env_entries() {
+    // The rule a leading `NAME=value` word obeys is the one a call's `env`
+    // map entry obeys (`Agent::headless_normal_auto_approve`).
+    for (name, value) in [("LANG", "C"), ("LC_ALL", "C.UTF-8"), ("NO_COLOR", "1")] {
+        assert!(assignment_is_safe(name, value), "{name}={value}");
+        assert!(is_read_command(&format!("{name}={value} ls")));
+    }
+    for (name, value) in [
+        ("GIT_EXTERNAL_DIFF", "./tools/x.sh"),
+        ("GIT_DIR", "gitdir"),
+        ("HOME", "fakehome"),
+        ("RIPGREP_CONFIG_PATH", "./tools/rgrc"),
+        ("LANG", "$(id)"),
+        ("TERM", "../../x"),
+    ] {
+        assert!(!assignment_is_safe(name, value), "{name}={value}");
+        assert!(!is_read_command(&format!("{name}={value} ls")));
+    }
+}
+
+#[test]
+fn structured_env_is_held_to_the_inline_assignment_rule() {
+    use serde_json::json;
+    // `{"GIT_EXTERNAL_DIFF": "./x"}` next to `git diff` is
+    // `GIT_EXTERNAL_DIFF=./x git diff`, which `parse` refuses.
+    assert!(env_arg_is_safe(None));
+    assert!(env_arg_is_safe(Some(&json!(null))));
+    assert!(env_arg_is_safe(Some(&json!({}))));
+    assert!(env_arg_is_safe(Some(
+        &json!({"LC_ALL": "C", "NO_COLOR": "1"})
+    )));
+    assert!(!env_arg_is_safe(Some(
+        &json!({"GIT_EXTERNAL_DIFF": "./tools/x.sh"})
+    )));
+    assert!(!env_arg_is_safe(Some(
+        &json!({"NO_COLOR": "1", "PAGER": "sh"})
+    )));
+    assert!(
+        !env_arg_is_safe(Some(&json!({"TERM": "../../x"}))),
+        "values must be plain"
+    );
+    assert!(
+        !env_arg_is_safe(Some(&json!({"TERM": 1}))),
+        "values must be strings"
+    );
+    assert!(
+        !env_arg_is_safe(Some(&json!(["TERM=dumb"]))),
+        "the map must be an object"
+    );
+}
+
+#[test]
 fn parse_splits_segments_and_keeps_inputs() {
     let segs = parse("LC_ALL=C sort < in.txt | uniq -c; ls 2>&1").unwrap();
     assert_eq!(segs.len(), 3);
@@ -192,6 +244,15 @@ fn parse_splits_segments_and_keeps_inputs() {
     assert_eq!(segs[0].inputs, vec!["in.txt".to_string()]);
     assert_eq!(segs[1].words[0].text, "uniq");
     assert_eq!(segs[2].words.len(), 1, "2>&1 is not an argument");
+}
+
+#[test]
+fn parse_marks_pipeline_stages_and_background_commands_as_subshells() {
+    // A `cd` there does not move the segments after it; one separated by
+    // `;`, `&&`, `||` or a newline does.
+    let segs = parse("cd src | cat x; cd sub && ls || pwd\ncd docs & cat y").unwrap();
+    let subshells: Vec<bool> = segs.iter().map(|s| s.subshell).collect();
+    assert_eq!(subshells, vec![true, true, false, false, false, true, true]);
 }
 
 #[test]

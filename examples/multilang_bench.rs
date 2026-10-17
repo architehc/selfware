@@ -164,12 +164,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
+        .unwrap_or_else(|_| "https://llm.selfware.design/v1".to_string());
+    let model =
+        std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "deepseek-v4.1-flash".to_string());
     let concurrent: usize = std::env::var("SELFWARE_CONCURRENT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(12);
+        .unwrap_or(4);
 
     let config = HarnessConfig {
         endpoint: endpoint.clone(),
@@ -177,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
         max_concurrent: concurrent,
         max_tokens: 2048,
         temperature: 0.3,
-        timeout_secs: 120,
+        timeout_secs: 600,
         max_retries: 3,
         retry_delay_ms: 500,
         output_dir: "bench_results/multilang".into(),

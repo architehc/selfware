@@ -54,6 +54,16 @@ pub(crate) fn reset_safety_config_for_tests() {
 
 /// Maximum file size for reads (50 MB) to prevent OOM from accidentally reading huge files.
 const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
+/// Maximum file size (10 MB) the content-scanning tools load whole through
+/// [`read_to_string_capped`]: symbol_search, code_metrics, the built-in
+/// grep_search walker, code_map, code_introspect/code_query/code_plan,
+/// localize_issue, knowledge_auto_extract, the lsp_* tools and the
+/// context_* loaders. They run without confirmation and most of them walk
+/// the whole tree, so one oversized committed source file must not cost the
+/// run its memory (`file_read` is bounded by `MAX_READ_SIZE`; this is
+/// ripgrep's `--max-filesize 10M` on the grep_search rg path, lower because
+/// these tools also tokenize or split what they read).
+pub(crate) const MAX_SOURCE_READ_SIZE: u64 = 10 * 1024 * 1024;
 /// Maximum file size for writes (10 MB) to prevent accidentally writing huge files.
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -218,6 +228,37 @@ fn read_checked_handle(mut file: std::fs::File, limit: Option<u64>) -> Result<(S
     file.read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     Ok((text, bytes))
+}
+
+/// Read an already-opened file handle into a `String`, refusing a file larger
+/// than `limit` (checked on the descriptor's size and bounded while reading).
+pub(crate) fn read_handle_to_string_capped(file: std::fs::File, limit: u64) -> Result<String> {
+    use std::io::Read;
+    let size = file.metadata()?.len();
+    if size > limit {
+        return Err(ToolError::FileTooLarge { size, limit }.into());
+    }
+    let mut text = String::new();
+    file.take(limit).read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// `std::fs::read_to_string` with the bound `file_read` applies: refuse a
+/// file larger than `limit` (checked on the opened descriptor's size, then
+/// enforced again while reading so a file growing under the read is cut
+/// off rather than loaded whole). For the tools that read source content
+/// whole after their own path check; see [`MAX_SOURCE_READ_SIZE`].
+pub(crate) fn read_to_string_capped(path: &Path, limit: u64) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    read_handle_to_string_capped(file, limit)
+}
+
+/// Async counterpart of [`read_to_string_capped`] for the tools that read
+/// on the runtime (`tokio::fs::read_to_string` call sites).
+pub(crate) async fn read_to_string_capped_async(path: &Path, limit: u64) -> Result<String> {
+    let path = path.to_path_buf();
+    crate::tools::workspace_root::spawn_blocking(move || read_to_string_capped(&path, limit))
+        .await?
 }
 
 /// Descriptor-checked file read: validate, open once, re-validate the
@@ -1461,6 +1502,7 @@ async fn read_line_slice(
     let mut lossy = false;
     let mut reached_eof = false;
     let mut buf: Vec<u8> = Vec::new();
+    let mut key_state = crate::safety::redact::KeyBlockState::default();
     loop {
         buf.clear();
         let n = reader.read_until(b'\n', &mut buf).await?;
@@ -1469,17 +1511,18 @@ async fn read_line_slice(
             break;
         }
         lineno += 1;
-        if lineno >= start && lineno <= effective_end {
-            if std::str::from_utf8(&buf).is_err() {
-                lossy = true;
-            }
-            let mut line = String::from_utf8_lossy(&buf).into_owned();
-            if line.ends_with('\n') {
+        if lineno >= start && lineno <= effective_end && std::str::from_utf8(&buf).is_err() {
+            lossy = true;
+        }
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
                 line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
             }
+        }
+        let line = crate::safety::redact::redact_file_key_blocks_in_line(&line, &mut key_state);
+        if lineno >= start && lineno <= effective_end {
             selected.push(line);
         }
         if lineno >= effective_end {

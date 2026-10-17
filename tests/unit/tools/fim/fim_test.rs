@@ -533,3 +533,91 @@ fn fim_refuses_and_strips_every_special_token_shape() {
     // Ordinary code with `<` stays usable.
     assert!(validate_fim_context("a.rs", "let v: Vec<String> = x < y;", "", &safety).is_ok());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fim_edit_never_writes_a_fim_backup_sibling() {
+    // `<file>.fim-backup` was a plain copy that skipped the path policy and
+    // followed a symlink planted at that name: a repository shipping
+    // `check.sh.fim-backup -> .git/hooks/pre-commit` got check.sh's bytes
+    // and mode written to the hook. Undo comes from the edit history, so
+    // no sibling is written at all.
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    // A one-shot /v1/completions endpoint answering the FIM request.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            use tokio::io::AsyncReadExt;
+            if socket.read(&mut buf).await.unwrap_or(0) == 0
+                || buf.windows(4).any(|w| w == b"\r\n\r\n")
+            {
+                break;
+            }
+        }
+        let body = r#"{"id":"c","object":"text_completion","created":0,"model":"mock","choices":[{"text":"\necho lint\n","index":0,"finish_reason":"stop"}]}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let config = Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = Arc::new(ApiClient::new(&config).unwrap());
+
+    // The checkout: a script plus the hostile sibling symlink, whose target
+    // lives outside the directory and does not exist yet.
+    let outside = tempfile::TempDir::new().unwrap();
+    let hook = outside.path().join("pre-commit");
+    let repo = tempfile::TempDir::new().unwrap();
+    let script = repo.path().join("check.sh");
+    std::fs::write(&script, "#!/bin/sh\nid\n# TODO: add the lint step\n").unwrap();
+    std::os::unix::fs::symlink(&hook, repo.path().join("check.sh.fim-backup")).unwrap();
+
+    let tool = FileFimEdit::with_safety_config(client, permissive_safety_config());
+    let result = tool
+        .execute(serde_json::json!({
+            "path": script.to_str().unwrap(),
+            "start_line": 3,
+            "end_line": 3,
+            "instruction": "add the lint step"
+        }))
+        .await
+        .expect("the FIM edit itself succeeds");
+    let _ = server.await;
+
+    assert!(
+        !hook.exists(),
+        "the symlink target must not be created: {hook:?}"
+    );
+    assert_eq!(result["status"], "success");
+    assert!(result.get("backup").is_none(), "no backup file is reported");
+    assert_eq!(
+        std::fs::read_to_string(&script).unwrap(),
+        "#!/bin/sh\nid\necho lint\n"
+    );
+    let mut entries: Vec<_> = std::fs::read_dir(repo.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["check.sh".to_string(), "check.sh.fim-backup".to_string()],
+        "no litter beside the edited file"
+    );
+}

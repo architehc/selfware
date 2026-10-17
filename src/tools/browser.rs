@@ -203,7 +203,28 @@ async fn playwright_runtime_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Chromium switches that keep every transport of a page behind the guarded
+/// proxy. Shared by the Chrome CLI and the one-shot Playwright launches; the
+/// page_control bridge (`scripts/playwright-bridge.js`) carries the same list.
+const CHROMIUM_PROXY_ARGS: &[&str] = &[
+    // Chromium bypasses loopback proxies by default; disable that implicit
+    // exception so localhost subresources reach the guarded proxy too.
+    "--proxy-bypass-list=<-loopback>",
+    // QUIC uses UDP and would bypass an HTTP CONNECT proxy.
+    "--disable-quic",
+    // WebRTC ICE (STUN/TURN) also uses UDP sockets the proxy never sees. Under
+    // the default IP-handling policy a page can have the host send datagrams
+    // straight to private, link-local or loopback addresses; this policy only
+    // allows WebRTC traffic that goes through the proxy.
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+];
+
 fn playwright_launch_prelude(extra_args: &str, proxy_url: &str) -> String {
+    let proxy_args = CHROMIUM_PROXY_ARGS
+        .iter()
+        .map(|arg| format!("'{}'", escape_js_string(arg)))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         r#"
 const fs = require('fs');
@@ -216,7 +237,7 @@ try {{
 const executablePath = process.env.SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const launchOptions = {{
     headless: true,
-    args: {},
+    args: [{}, ...{}],
     proxy: {{ server: '{}' }},
 }};
 if (executablePath && fs.existsSync(executablePath)) {{
@@ -224,6 +245,7 @@ if (executablePath && fs.existsSync(executablePath)) {{
 }}
 const browser = await pw.chromium.launch(launchOptions);
 "#,
+        proxy_args,
         extra_args,
         escape_js_string(proxy_url)
     )
@@ -231,11 +253,7 @@ const browser = await pw.chromium.launch(launchOptions);
 
 fn configure_chromium_proxy(cmd: &mut Command, proxy: &GuardedProxy) {
     cmd.arg(format!("--proxy-server={}", proxy.url()))
-        // Chromium bypasses loopback proxies by default; disable that implicit
-        // exception so localhost subresources reach the guarded proxy too.
-        .arg("--proxy-bypass-list=<-loopback>")
-        // QUIC uses UDP and would bypass an HTTP CONNECT proxy.
-        .arg("--disable-quic");
+        .args(CHROMIUM_PROXY_ARGS);
 }
 
 async fn guarded_proxy_for_target(target: &PinnedTarget) -> Result<GuardedProxy> {
@@ -1373,18 +1391,11 @@ fn is_trusted_local_browser_host(host: &str) -> bool {
     crate::tools::net_policy::is_trusted_local_network_host(host)
 }
 
+/// Same classifier as the URL check, the redirect check and the pinned DNS
+/// resolver, so the browser pin cannot admit an address (NAT64, CGNAT,
+/// IPv4-mapped) that the other layers refuse.
 fn is_private_network_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-        }
-    }
+    crate::tools::net_policy::is_private_or_internal_ip(ip)
 }
 
 static LINK_HREF_REGEX: LazyLock<Regex> =

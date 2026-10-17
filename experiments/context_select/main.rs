@@ -49,9 +49,10 @@ struct Doc {
     skeleton: String,
     /// Token cost of the skeleton.
     skel_tokens: usize,
-    /// 0-based line indices where top-level items start (block boundaries for excerpts).
-    /// Always begins with 0 (the file head: imports / module docs).
-    boundaries: Vec<usize>,
+    /// Total line count of the file.
+    line_count: usize,
+    /// Pre-split item blocks `(start_line, end_line, text, lower_text, cached_tokens)`.
+    blocks: Vec<(usize, usize, String, String, std::sync::OnceLock<usize>)>,
 }
 
 /// Every `SkeletonItem` variant carries a 1-based source line; pull it out uniformly.
@@ -104,7 +105,8 @@ fn build_corpus(root: &Path) -> Result<Vec<Doc>> {
 
             // Block boundaries for excerpt extraction: item start lines (1-based) → 0-based,
             // deduped and sorted, with the file head (0) prepended.
-            let line_count = content.lines().count();
+            let lines: Vec<&str> = content.lines().collect();
+            let line_count = lines.len();
             let mut boundaries: Vec<usize> = skel
                 .items
                 .iter()
@@ -114,13 +116,26 @@ fn build_corpus(root: &Path) -> Result<Vec<Doc>> {
             boundaries.sort_unstable();
             boundaries.dedup();
 
+            let mut blocks = Vec::new();
+            for i in 0..boundaries.len() {
+                let start = boundaries[i];
+                let end = boundaries.get(i + 1).copied().unwrap_or(line_count);
+                if start >= end {
+                    continue;
+                }
+                let text = lines[start..end].join("\n");
+                let lower = text.to_lowercase();
+                blocks.push((start, end, text, lower, std::sync::OnceLock::new()));
+            }
+
             docs.push(Doc {
                 path: rel,
                 content,
                 full_tokens,
                 skeleton,
                 skel_tokens,
-                boundaries,
+                line_count,
+                blocks,
             });
         }
     }
@@ -147,13 +162,12 @@ fn query_terms(query: &str) -> Vec<String> {
     terms
 }
 
-/// Count query-term occurrences in `text` (case-insensitive substring hits).
+/// Count query-term occurrences in `lower_text` (already lowercased).
 /// A simple, non-degenerate relevance signal at the block level.
-fn block_score(text: &str, terms: &[String]) -> usize {
-    let lower = text.to_lowercase();
+fn block_score(lower_text: &str, terms: &[String]) -> usize {
     terms
         .iter()
-        .map(|t| lower.matches(t.as_str()).count())
+        .map(|t| lower_text.matches(t.as_str()).count())
         .sum()
 }
 
@@ -163,33 +177,17 @@ fn block_score(text: &str, terms: &[String]) -> usize {
 /// relevant or none fits. This is the automatic extraction of the most interesting
 /// parts of a file — real code, but far cheaper than the whole file.
 fn extract_relevant_spans(doc: &Doc, query: &str, cap_tokens: usize) -> Option<(String, usize)> {
-    let lines: Vec<&str> = doc.content.lines().collect();
-    if lines.is_empty() || cap_tokens == 0 {
-        return None;
-    }
-
-    // Build (start,end) blocks from boundaries.
-    let mut blocks: Vec<(usize, usize, String)> = Vec::new();
-    let bounds = &doc.boundaries;
-    for i in 0..bounds.len() {
-        let start = bounds[i];
-        let end = bounds.get(i + 1).copied().unwrap_or(lines.len());
-        if start >= end {
-            continue;
-        }
-        let text = lines[start..end].join("\n");
-        blocks.push((start, end, text));
-    }
-    if blocks.is_empty() {
+    if doc.blocks.is_empty() || cap_tokens == 0 {
         return None;
     }
 
     // Rank blocks by query term-frequency; keep only blocks that actually match.
     let terms = query_terms(query);
-    let mut scored: Vec<(usize, usize)> = blocks
+    let mut scored: Vec<(usize, usize)> = doc
+        .blocks
         .iter()
         .enumerate()
-        .map(|(i, (_, _, text))| (i, block_score(text, &terms)))
+        .map(|(i, (_, _, _, lower, _))| (i, block_score(lower, &terms)))
         .filter(|(_, s)| *s > 0)
         .collect();
     if scored.is_empty() {
@@ -202,7 +200,11 @@ fn extract_relevant_spans(doc: &Doc, query: &str, cap_tokens: usize) -> Option<(
     let mut chosen: Vec<usize> = Vec::new();
     let mut used = 0usize;
     for (idx, _) in &scored {
-        let bt = estimate_content_tokens(&blocks[*idx].2);
+        if used >= cap_tokens {
+            break;
+        }
+        let (_, _, text, _, tok_cache) = &doc.blocks[*idx];
+        let bt = *tok_cache.get_or_init(|| estimate_content_tokens(text));
         if used + bt <= cap_tokens {
             used += bt;
             chosen.push(*idx);
@@ -217,7 +219,7 @@ fn extract_relevant_spans(doc: &Doc, query: &str, cap_tokens: usize) -> Option<(
     let mut out = format!("// {} (relevant excerpt)\n", doc.path);
     let mut prev_end: Option<usize> = None;
     for &idx in &chosen {
-        let (start, end, text) = &blocks[idx];
+        let (start, end, text, _, _) = &doc.blocks[idx];
         if let Some(pe) = prev_end {
             if *start > pe {
                 out.push_str(&format!("// ... ({} lines elided) ...\n", start - pe));
@@ -230,8 +232,11 @@ fn extract_relevant_spans(doc: &Doc, query: &str, cap_tokens: usize) -> Option<(
         prev_end = Some(*end);
     }
     if let Some(pe) = prev_end {
-        if pe < lines.len() {
-            out.push_str(&format!("// ... ({} lines elided) ...\n", lines.len() - pe));
+        if pe < doc.line_count {
+            out.push_str(&format!(
+                "// ... ({} lines elided) ...\n",
+                doc.line_count - pe
+            ));
         }
     }
     let tokens = estimate_content_tokens(&out);
@@ -310,23 +315,59 @@ impl Selection {
 
     /// Concatenate the selection into a single prompt-ready context string.
     fn render(&self, corpus: &[Doc]) -> String {
+        fn sanitize_code(s: &str) -> String {
+            let mut encoded = s.to_string();
+            for tag in [
+                "tool_result",
+                "tool_results",
+                "tool_use",
+                "tool",
+                "function_calls",
+                "function_call",
+                "skipped",
+            ] {
+                encoded = selfware::cognitive::memory_system::neutralize_data_tag(&encoded, tag);
+            }
+            encoded
+                .replace("\n## ", "\n// ## ")
+                .replace(
+                    "Summarize the following conversation",
+                    "Summarize_the_following_conversation",
+                )
+                .replace(
+                    "Summarize these previous interactions",
+                    "Summarize_these_previous_interactions",
+                )
+                .replace(
+                    "End with a section `FILES READ:`",
+                    "End_with_a_section_FILES_READ",
+                )
+                .replace(
+                    "You are a context summarizer",
+                    "You_are_a_context_summarizer",
+                )
+                .replace(
+                    "Create a comprehensive but concise summary",
+                    "Create_a_comprehensive_but_concise_summary",
+                )
+        }
         let mut out = String::new();
         for pick in &self.picks {
             let doc = corpus.iter().find(|d| d.path == pick.path).unwrap();
             match pick.level {
                 Level::Full => {
                     out.push_str(&format!("// ===== FULL: {} =====\n", doc.path));
-                    out.push_str(&doc.content);
+                    out.push_str(&sanitize_code(&doc.content));
                     out.push('\n');
                 }
                 Level::Excerpt => {
                     out.push_str(&format!("// ===== EXCERPT: {} =====\n", doc.path));
-                    out.push_str(pick.excerpt.as_deref().unwrap_or(""));
+                    out.push_str(&sanitize_code(pick.excerpt.as_deref().unwrap_or("")));
                     out.push('\n');
                 }
                 Level::Skeleton => {
                     out.push_str(&format!("// ===== SKELETON: {} =====\n", doc.path));
-                    out.push_str(&doc.skeleton);
+                    out.push_str(&sanitize_code(&doc.skeleton));
                     out.push('\n');
                 }
             }
@@ -475,7 +516,8 @@ fn build_context(
             let per_file_cap = (budget / 6).max(1200);
             for doc in &order {
                 let remaining = budget.saturating_sub(used);
-                if remaining == 0 {
+                // Minimum excerpt framing (`// path (relevant excerpt)\n` + 1 block) needs >= 32 tokens.
+                if remaining < 32 {
                     break;
                 }
                 let cap = per_file_cap.min(remaining).min(doc.full_tokens.max(1));
@@ -568,7 +610,7 @@ fn problems() -> Vec<Problem> {
             id: "episodic-pattern-detect",
             query: "detect_patterns in episodic memory groups errors by the first five words \
                     which is brittle; cluster episodes semantically instead",
-            gold: &["src/cognitive/episodic.rs"],
+            gold: &["src/self_healing/mod.rs", "src/cognitive/state.rs"],
         },
     ]
 }
@@ -751,7 +793,11 @@ async fn main() -> Result<()> {
 
     let mut index = BM25Index::new();
     for doc in &corpus {
-        index.add(doc.path.clone(), doc.content.clone());
+        let path_terms = doc.path.replace(['/', '.'], " ");
+        index.add(
+            doc.path.clone(),
+            format!("{path_terms}\n{path_terms}\n{}", doc.content),
+        );
     }
 
     let probs = problems();
@@ -891,8 +937,19 @@ async fn run_e2e(
     use selfware::api::{ApiClient, Message, ThinkingMode};
     use selfware::config::Config;
 
-    let config = Config::load(Some("selfware.toml"))
-        .context("loading selfware.toml (needs SELFWARE_API_KEY for OpenRouter)")?;
+    let mut config = Config::load(None)
+        .context("loading selfware config (selfware.toml or ~/.config/selfware/config.toml)")?;
+    if let Some(extra) = config.extra_body.as_mut() {
+        if let Some(kwargs) = extra
+            .get_mut("chat_template_kwargs")
+            .and_then(|v| v.as_object_mut())
+        {
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+        }
+    }
     let client = ApiClient::new(&config).context("building API client")?;
 
     println!(

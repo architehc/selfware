@@ -6,7 +6,9 @@
 
 use crate::config::SafetyConfig;
 use crate::safety::process_env::SanitizedEnvExt;
-use crate::tools::file::{resolve_safety_config, validate_tool_path};
+use crate::tools::file::{
+    read_handle_to_string_capped, resolve_safety_config, validate_tool_path, MAX_SOURCE_READ_SIZE,
+};
 use crate::tools::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,7 +17,6 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -343,7 +344,7 @@ fn run_ripgrep(
     // Read files to extract context lines.
     // ------------------------------------------------------------------
     let mut matches = Vec::with_capacity(window.len());
-    let mut files_read: HashMap<String, Vec<String>> = HashMap::new();
+    let mut files_read: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
 
     for raw in window {
         if !files_read.contains_key(&raw.file) {
@@ -356,52 +357,53 @@ fn run_ripgrep(
             } else {
                 match safety {
                     Some(s) => {
-                        let mut validated = match crate::tools::file::open_checked_regular_with_path(
+                        let validated = match crate::tools::file::open_checked_regular_with_path(
                             &raw.file, s,
                         ) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
-                        let mut content = String::new();
-                        if validated.file.read_to_string(&mut content).is_err() {
-                            continue;
+                        match read_handle_to_string_capped(validated.file, MAX_SOURCE_READ_SIZE) {
+                            Ok(c) => c,
+                            Err(_) => continue,
                         }
-                        content
                     }
                     None => {
-                        let mut file =
-                            match crate::safety::source_context::open_broad_discovery_regular(
-                                Path::new(&raw.file),
-                            ) {
-                                Ok(f) => f,
-                                Err(_) => continue,
-                            };
-                        let mut content = String::new();
-                        if file.read_to_string(&mut content).is_err() {
-                            continue;
+                        let file = match crate::safety::source_context::open_broad_discovery_regular(
+                            Path::new(&raw.file),
+                        ) {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
+                        match read_handle_to_string_capped(file, MAX_SOURCE_READ_SIZE) {
+                            Ok(c) => c,
+                            Err(_) => continue,
                         }
-                        content
                     }
                 }
             };
-            files_read.insert(
-                raw.file.clone(),
-                content.lines().map(str::to_string).collect(),
-            );
+            let raw_lines: Vec<String> = content.lines().map(str::to_string).collect();
+            let mut key_state = crate::safety::redact::KeyBlockState::default();
+            let redacted_lines: Vec<String> = raw_lines
+                .iter()
+                .map(|l| crate::safety::redact::redact_file_key_blocks_in_line(l, &mut key_state))
+                .collect();
+            files_read.insert(raw.file.clone(), (raw_lines, redacted_lines));
         }
-        let Some(lines) = files_read.get(&raw.file) else {
+        let Some((raw_lines, lines)) = files_read.get(&raw.file) else {
             continue;
         };
 
         let line_idx = raw.line.saturating_sub(1) as usize;
-        let Some(current_line) = lines.get(line_idx) else {
+        let Some(current_raw_line) = raw_lines.get(line_idx) else {
             continue;
         };
         // Bind rg's subprocess output back to the checked descriptor. If the
         // path changed between rg's read and ours, omit the stale result.
-        if current_line != raw.content.trim_end_matches('\r') {
+        if current_raw_line != raw.content.trim_end_matches('\r') {
             continue;
         }
+        let current_line = &lines[line_idx];
         let start = line_idx.saturating_sub(context_lines);
         let end = (line_idx + context_lines + 1).min(lines.len());
 
@@ -757,21 +759,17 @@ fn run_builtin_grep(
             if exact_file {
                 match safety {
                     Some(s) => {
-                        let mut validated = crate::tools::file::open_checked_regular_with_path(
+                        let validated = crate::tools::file::open_checked_regular_with_path(
                             &file_path.to_string_lossy(),
                             s,
                         )?;
-                        let mut content = String::new();
-                        validated.file.read_to_string(&mut content)?;
-                        Ok(content)
+                        read_handle_to_string_capped(validated.file, MAX_SOURCE_READ_SIZE)
                     }
                     None => {
-                        let mut file = crate::safety::source_context::open_broad_discovery_regular(
+                        let file = crate::safety::source_context::open_broad_discovery_regular(
                             &file_path,
                         )?;
-                        let mut content = String::new();
-                        file.read_to_string(&mut content)?;
-                        Ok(content)
+                        read_handle_to_string_capped(file, MAX_SOURCE_READ_SIZE)
                     }
                 }
             } else {
@@ -785,6 +783,11 @@ fn run_builtin_grep(
         };
 
         let lines: Vec<&str> = content.lines().collect();
+        let mut key_state = crate::safety::redact::KeyBlockState::default();
+        let redacted_lines: Vec<String> = lines
+            .iter()
+            .map(|l| crate::safety::redact::redact_file_key_blocks_in_line(l, &mut key_state))
+            .collect();
 
         for (line_num, line) in lines.iter().enumerate() {
             if let Some(m) = regex.find(line) {
@@ -796,18 +799,12 @@ fn run_builtin_grep(
 
                 if matches.len() < max_matches {
                     let start = line_num.saturating_sub(context_lines);
-                    let end = (line_num + context_lines + 1).min(lines.len());
+                    let end = (line_num + context_lines + 1).min(redacted_lines.len());
 
-                    let context_before: Vec<String> = lines[start..line_num]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    let context_before: Vec<String> = redacted_lines[start..line_num].to_vec();
 
-                    let context_after: Vec<String> = if line_num + 1 < lines.len() {
-                        lines[(line_num + 1)..end]
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect()
+                    let context_after: Vec<String> = if line_num + 1 < redacted_lines.len() {
+                        redacted_lines[(line_num + 1)..end].to_vec()
                     } else {
                         vec![]
                     };
@@ -816,7 +813,7 @@ fn run_builtin_grep(
                         file: file_path.to_string_lossy().to_string(),
                         line: (line_num + 1) as u32,
                         column: (m.start() + 1) as u32,
-                        content: line.to_string(),
+                        content: redacted_lines[line_num].clone(),
                         context_before,
                         context_after,
                     });

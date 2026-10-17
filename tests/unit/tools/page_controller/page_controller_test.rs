@@ -363,6 +363,9 @@ fn embedded_bridge_intercepts_all_network_requests() {
     assert!(EMBEDDED_BRIDGE_JS.contains("!isWorkspaceFileUrl(parsed.href)"));
     assert!(EMBEDDED_BRIDGE_JS.contains("dns.lookup"));
     assert!(EMBEDDED_BRIDGE_JS.contains("SELFWARE_BROWSER_PROXY"));
+    assert!(EMBEDDED_BRIDGE_JS.contains("'--disable-quic'"));
+    let webrtc = "'--force-webrtc-ip-handling-policy=disable_non_proxied_udp'";
+    assert!(EMBEDDED_BRIDGE_JS.contains(webrtc));
     assert!(EMBEDDED_BRIDGE_JS.contains("allowedLocalOrigins"));
     assert!(EMBEDDED_BRIDGE_JS.contains("page.routeWebSocket"));
     assert!(EMBEDDED_BRIDGE_JS.contains("browserContext.routeWebSocket"));

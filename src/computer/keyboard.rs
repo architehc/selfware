@@ -415,6 +415,13 @@ impl KeyboardController {
             bail!("Keyboard action rate limit exceeded");
         }
 
+        if is_blocked_combo(key) {
+            bail!(
+                "Key '{}' is blocked for safety. Blocked combos cannot be executed.",
+                key
+            );
+        }
+
         let mapped = map_key_name(key);
         debug!("Key press: {} (mapped: {})", key, mapped);
 

@@ -25,11 +25,16 @@ pub struct SymbolDecl {
 /// files and symbols whose span can't be located are skipped (a false
 /// negative, never a guess).
 pub fn extract_pub_symbols(content: &str) -> Vec<SymbolDecl> {
-    let Ok(file) = syn::parse_file(content) else {
+    let parser = super::ast::AstAnalyzer::new();
+    let Ok(items) = parser.top_level_items_with_depth::<syn::Item>(
+        content,
+        &["function_item", "struct_item", "enum_item", "trait_item"],
+        super::ast::MAX_SYN_BODY_DEPTH,
+    ) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for item in file.items {
+    for item in items {
         let (name, kind, vis) = match &item {
             syn::Item::Fn(item_fn) => (item_fn.sig.ident.to_string(), "fn", &item_fn.vis),
             syn::Item::Struct(item_struct) => {

@@ -641,15 +641,15 @@ fn match_profile_picks_deepseek_v4_for_all_colibri_aliases() {
     ] {
         let p = match_profile(alias).unwrap_or_else(|| panic!("should match {alias}"));
         assert_eq!(p.name, "deepseek-v4", "alias {alias}");
-        assert_eq!(p.context_length, Some(163_840));
-        assert_eq!(p.max_tokens, Some(32_768));
-        assert_eq!(p.max_call_secs, Some(2_400));
-        assert_eq!(p.max_streams, Some(4));
-        assert_eq!(p.max_global, Some(12));
+        assert_eq!(p.context_length, Some(262_144));
+        assert_eq!(p.max_tokens, Some(65_536));
+        assert_eq!(p.max_call_secs, Some(3_600));
+        assert_eq!(p.max_streams, Some(8));
+        assert_eq!(p.max_global, Some(16));
         let quotas = p.workload_quotas.expect("workload quotas set");
         assert_eq!(quotas.planning.enable_thinking, Some(false));
-        assert_eq!(quotas.planning.max_tokens, Some(12_288));
+        assert_eq!(quotas.planning.max_tokens, Some(16_384));
         assert_eq!(quotas.synthesis.enable_thinking, Some(true));
-        assert_eq!(quotas.synthesis.max_tokens, Some(24_576));
+        assert_eq!(quotas.synthesis.max_tokens, Some(49_152));
     }
 }

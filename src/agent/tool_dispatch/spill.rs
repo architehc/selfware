@@ -1,3 +1,4 @@
+use crate::agent::scratch_dir::ScratchDir;
 use serde_json::Value;
 use tracing::warn;
 
@@ -132,6 +133,9 @@ pub(crate) const MAX_TOOL_RESULT_TOKENS: usize = 50_000;
 /// Directory where oversized raw tool results are spilled to disk.
 pub(crate) const TOOL_RESULTS_DIR: &str = ".selfware/tool_results";
 
+/// [`TOOL_RESULTS_DIR`] relative to the project-local `.selfware/`.
+const TOOL_RESULTS_SUBDIR: &str = "tool_results";
+
 /// Summarize an oversized tool result and save raw data to disk.
 ///
 /// Returns a structured summary string that includes:
@@ -161,19 +165,22 @@ pub(crate) async fn summarize_and_spill(
     // Save the redacted result to disk, under the agent's workspace root
     // (an entered worktree), not the process cwd. The model is told the
     // workspace-relative path, which file_read resolves against the same root.
-    let spill_rel = std::path::Path::new(TOOL_RESULTS_DIR);
-    let spill_dir_buf = crate::tools::workspace_root::anchor_path(spill_rel);
-    let spill_dir = spill_dir_buf.as_path();
-    let _ = tokio::fs::create_dir_all(spill_dir).await;
-    // Keep the agent's scratch out of the user's repo: drop a .gitignore into
-    // the project-local .selfware/ (the spill dir's parent).
-    if let Some(selfware_dir) = spill_dir.parent() {
-        crate::agent::turn_artifacts::ensure_selfware_gitignore(selfware_dir);
-    }
+    // The checkout may ship `.selfware/tool_results` as a symlink; the write
+    // is pinned to the real directory so it can't land outside the workspace.
+    let workdir = crate::tools::workspace_root::current_path();
     let spill_name = spill_file_name(tool_name, call_id);
-    let spill_file = spill_dir.join(&spill_name);
-    let spill_path = spill_rel.join(&spill_name).display().to_string();
-    if let Err(e) = tokio::fs::write(&spill_file, raw).await {
+    let spill_path = std::path::Path::new(TOOL_RESULTS_DIR)
+        .join(&spill_name)
+        .display()
+        .to_string();
+    let spill_dir = ScratchDir::open(&workdir, &[TOOL_RESULTS_SUBDIR], true);
+    let written = spill_dir.and_then(|dir| {
+        // Keep the agent's scratch out of the user's repo: drop a .gitignore
+        // into the project-local .selfware/.
+        crate::agent::turn_artifacts::ensure_selfware_gitignore(&workdir);
+        dir.write(&spill_name, raw.as_bytes())
+    });
+    if let Err(e) = written {
         warn!("Failed to spill tool result to {}: {}", spill_path, e);
         // Fall back to aggressive truncation if disk write fails
         let truncated: String = raw.chars().take(20_000).collect();

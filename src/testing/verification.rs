@@ -1102,13 +1102,30 @@ impl VerificationGate {
             }
         }
 
-        // Multi-language QA: dispatch to language_qa runners for non-Rust files
+        // Multi-language QA: dispatch to language_qa runners for non-Rust files.
+        // Each stage is opt-in under the same flag as its Rust counterpart
+        // above: the runners execute programs the CHECKOUT controls (test
+        // discovery imports every test module, `npm test` runs the package.json
+        // script, `node_modules/.bin/*` ships with the repository), and the
+        // agent's `fast()` gate is "type check only" — it must not run the
+        // project's test suite after a file write the operator approved as a
+        // write.
         let has_non_rust = files_by_lang.keys().any(|l| *l != RepoLanguage::Rust);
         if has_non_rust {
-            use crate::testing::language_qa::{run_go_qa, run_node_qa, run_python_qa, QaLanguage};
+            use crate::testing::language_qa::{
+                run_go_qa, run_node_qa, run_python_qa, QaLanguage, QaStageSet,
+            };
 
             let detected_lang = QaLanguage::detect(&self.project_root);
             let timeout = self.config.check_timeout_secs;
+            let stages = QaStageSet {
+                syntax: self.config.check_on_edit,
+                type_check: self.config.check_on_edit,
+                format: self.config.format_on_edit,
+                lint: self.config.lint_on_edit,
+                test: self.config.test_on_edit,
+                security: self.config.lint_on_edit,
+            };
 
             let has_python = files_by_lang.contains_key(&RepoLanguage::Python);
             let has_js = files_by_lang.contains_key(&RepoLanguage::JavaScript)
@@ -1117,10 +1134,12 @@ impl VerificationGate {
 
             let qa_results = match detected_lang {
                 QaLanguage::Python if has_python => {
-                    run_python_qa(&self.project_root, timeout).await
+                    run_python_qa(&self.project_root, timeout, stages).await
                 }
-                QaLanguage::Node if has_js => run_node_qa(&self.project_root, timeout).await,
-                QaLanguage::Go if has_go => run_go_qa(&self.project_root, timeout).await,
+                QaLanguage::Node if has_js => {
+                    run_node_qa(&self.project_root, timeout, stages).await
+                }
+                QaLanguage::Go if has_go => run_go_qa(&self.project_root, timeout, stages).await,
                 _ => Vec::new(),
             };
 

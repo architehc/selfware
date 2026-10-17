@@ -14,6 +14,25 @@ fn test_default_denied_paths_includes_git_hooks_and_config() {
 }
 
 #[test]
+fn test_default_denied_paths_cover_every_git_dir_config_location() {
+    // `core.fsmonitor` / `core.hooksPath` are read from more files than
+    // `.git/config`: a submodule's or linked worktree's own git dir, the
+    // git dir a `commondir` file redirects to, and `config.worktree`.
+    let denied = default_denied_paths();
+    for pattern in [
+        "**/.git/commondir",
+        "**/.git/config.worktree",
+        "**/.git/modules/**",
+        "**/.git/worktrees/**",
+    ] {
+        assert!(
+            denied.contains(&pattern.to_string()),
+            "default_denied_paths must deny {pattern}"
+        );
+    }
+}
+
+#[test]
 fn test_union_with_default_denied_paths_adds_without_removing() {
     // The stale 3-entry list old generated configs emitted.
     let merged = union_with_default_denied_paths(vec![

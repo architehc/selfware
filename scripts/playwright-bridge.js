@@ -56,7 +56,14 @@ async function ensureBrowser() {
     process.env.SELFWARE_CHROME_EXECUTABLE_PATH;
   const launchOptions = {
     headless: true,
-    args: ['--disable-quic', '--proxy-bypass-list=<-loopback>'],
+    // Keep in step with CHROMIUM_PROXY_ARGS in src/tools/browser.rs. QUIC and
+    // WebRTC ICE (STUN/TURN) use UDP that an HTTP proxy never sees, so QUIC is
+    // off and WebRTC may only use the proxy.
+    args: [
+      '--disable-quic',
+      '--proxy-bypass-list=<-loopback>',
+      '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+    ],
   };
   if (process.env.SELFWARE_BROWSER_PROXY) {
     launchOptions.proxy = { server: process.env.SELFWARE_BROWSER_PROXY };
@@ -185,23 +192,33 @@ function mappedIpv4Address(address) {
   address = normalizeHost(address);
   if (!net.isIPv6(address)) return null;
 
-  // WHATWG URL parsing canonicalizes dotted IPv4-mapped literals such as
+  // WHATWG URL parsing canonicalizes dotted IPv4-in-IPv6 literals such as
   // `::ffff:169.254.169.254` to `::ffff:a9fe:a9fe`. Canonicalize every IPv6
-  // input the same way, then reconstruct the embedded IPv4 bytes. Merely
-  // stripping `::ffff:` leaves two hexadecimal hextets that net.isIPv4()
-  // does not recognize.
+  // input the same way, then reconstruct the embedded IPv4 bytes from all
+  // transition/translation prefixes: IPv4-mapped (`::ffff:x:y`),
+  // IPv4-compatible (`::x:y`), SIIT (`::ffff:0:x:y`), Well-Known/Local-Use
+  // NAT64 (`64:ff9b::x:y`, `64:ff9b:1:…:x:y`), and 6to4 (`2002:x:y::`).
   let canonical;
   try {
     canonical = normalizeHost(new URL(`http://[${address}]/`).hostname);
   } catch (_) {
     return null;
   }
-  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
-  if (!match) return null;
+  if (canonical === '::' || canonical === '::1') return null;
 
-  const high = Number.parseInt(match[1], 16);
-  const low = Number.parseInt(match[2], 16);
-  return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+  const toDotted = (hiHex, loHex) => {
+    const high = Number.parseInt(hiHex, 16);
+    const low = Number.parseInt(loHex, 16);
+    return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+  };
+
+  let m = /^(?:::ffff:(?:0:)?|::|64:ff9b::|64:ff9b:1:(?:[0-9a-f]{1,4}:){0,3}:?)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
+  if (m) return toDotted(m[1], m[2]);
+
+  m = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})(?::|$)/.exec(canonical);
+  if (m) return toDotted(m[1], m[2]);
+
+  return null;
 }
 
 function isPrivateAddress(address) {
@@ -213,7 +230,11 @@ function isPrivateAddress(address) {
       (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
       (octets[0] === 169 && octets[1] === 254) ||
       (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-      (octets[0] === 192 && octets[1] === 168) || octets[0] >= 224;
+      (octets[0] === 192 && octets[1] === 0 && octets[2] === 2) ||
+      (octets[0] === 192 && octets[1] === 168) ||
+      (octets[0] === 198 && octets[1] === 51 && octets[2] === 100) ||
+      (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
+      octets[0] >= 224;
   }
   if (net.isIPv6(address)) {
     return address === '::' || address === '::1' ||

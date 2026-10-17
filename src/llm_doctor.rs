@@ -74,6 +74,7 @@ struct DetectionResult {
 #[derive(Debug)]
 struct ConnectionTestResult {
     latency: Duration,
+    queue_wait_ms: Option<u64>,
     tokens_per_second: Option<f64>,
     tool_calling_works: Option<bool>,
 }
@@ -444,20 +445,26 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     let conn_result = connection_test(&endpoint, &model_name, config).await;
     match &conn_result {
         Ok(res) => {
+            let total_ms = res.latency.as_millis() as u64;
+            let detail = match res.queue_wait_ms {
+                Some(q) if q > 0 => format!(
+                    "{}ms ({}ms inference + {}ms queue wait)",
+                    total_ms,
+                    total_ms.saturating_sub(q),
+                    q
+                ),
+                _ => format!("{}ms", total_ms),
+            };
             report.connection_test = Some(DoctorCheckResult {
                 name: "connection test".to_string(),
                 status: CheckOutcome::Pass,
-                detail: format!("{}ms", res.latency.as_millis()),
+                detail: detail.clone(),
                 fix_hint: None,
             });
-            report.latency_ms = Some(res.latency.as_millis() as u64);
+            report.latency_ms = Some(total_ms);
             report.tokens_per_second = res.tokens_per_second;
             report.tool_calling_works = res.tool_calling_works;
-            println!(
-                "  {} Response latency: {:.0}ms",
-                ">>".green(),
-                res.latency.as_millis()
-            );
+            println!("  {} Response latency: {}", ">>".green(), detail);
             if let Some(tps) = res.tokens_per_second {
                 println!(
                     "  {} Estimated throughput: {:.1} tokens/s",
@@ -521,12 +528,13 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     // streamed tool calling)
     println!("{}", "Step 7: Capabilities Matrix".bold().underline());
     let caps = probe_capabilities(&endpoint, &model_name, config, thinking_support).await;
-    let tools_status = match (
-        conn_result.as_ref().ok().and_then(|r| r.tool_calling_works),
-        caps.tools,
-    ) {
-        (Some(true), _) | (_, Some(true)) => DoctorCheckStatus::Ok,
-        (Some(false), _) | (_, Some(false)) => DoctorCheckStatus::Warning,
+    let tools_status = match conn_result
+        .as_ref()
+        .ok()
+        .and_then(|r| r.tool_calling_works)
+        .or(caps.tools)
+    {
+        Some(true) => DoctorCheckStatus::Ok,
         _ => DoctorCheckStatus::Warning,
     };
     let tools_detail = match tools_status {
@@ -759,7 +767,7 @@ pub(crate) enum VisionProbeOutcome {
 /// Capability probe results.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Capabilities {
-    /// Tool calling worked when probed (None = not probed).
+    /// Tool calling worked (populated from Step 5 or fallback probe).
     pub tools: Option<bool>,
     /// Streaming returned at least one SSE chunk (None = not probed).
     pub streaming: Option<bool>,
@@ -871,21 +879,14 @@ pub(crate) struct VisionTarget<'a> {
 }
 
 fn endpoints_share_host(a: &str, b: &str) -> bool {
-    let host_a = a
-        .split("://")
-        .nth(1)
-        .unwrap_or(a)
-        .split('/')
-        .next()
-        .unwrap_or("");
-    let host_b = b
-        .split("://")
-        .nth(1)
-        .unwrap_or(b)
-        .split('/')
-        .next()
-        .unwrap_or("");
-    !host_a.is_empty() && host_a.eq_ignore_ascii_case(host_b)
+    let (Ok(url_a), Ok(url_b)) = (url::Url::parse(a), url::Url::parse(b)) else {
+        return false;
+    };
+    let (Some(host_a), Some(host_b)) = (url_a.host_str(), url_b.host_str()) else {
+        return false;
+    };
+    host_a.eq_ignore_ascii_case(host_b)
+        && url_a.port_or_known_default() == url_b.port_or_known_default()
 }
 
 pub(crate) fn resolve_vision_target<'a>(
@@ -931,7 +932,11 @@ pub(crate) fn resolve_vision_target<'a>(
 /// transport error means it cannot consume it.
 async fn probe_thinking_support(endpoint: &str, model: &str, config: &Config) -> Option<bool> {
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder().timeout(probe_timeout).build() {
+    let client = match Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(probe_timeout)
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return None,
     };
@@ -953,11 +958,48 @@ async fn probe_thinking_support(endpoint: &str, model: &str, config: &Config) ->
         if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
             req = req.bearer_auth(k);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(&url)
+            );
         }
     }
     match req.send().await {
-        Ok(resp) => Some(resp.status().is_success()),
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<Value>().await {
+                let reasoning_tokens = json
+                    .get("usage")
+                    .and_then(|u| {
+                        u.get("reasoning_tokens")
+                            .and_then(|v| v.as_u64())
+                            .or_else(|| {
+                                u.get("completion_tokens_details")
+                                    .and_then(|d| d.get("reasoning_tokens"))
+                                    .and_then(|v| v.as_u64())
+                            })
+                    })
+                    .unwrap_or(0);
+                let ignored_disable = reasoning_tokens > 0
+                    || json
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .is_some_and(|choice| {
+                            choice
+                                .get("reasoning_content")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|s| !s.trim().is_empty())
+                                || choice
+                                    .get("message")
+                                    .and_then(|m| m.get("reasoning_content"))
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|s| !s.trim().is_empty())
+                        });
+                Some(!ignored_disable)
+            } else {
+                Some(true)
+            }
+        }
+        Ok(_) => Some(false),
         Err(_) => Some(false),
     }
 }
@@ -976,7 +1018,11 @@ async fn probe_capabilities(
     // Steps 3/6 so the recommendations and the matrix agree.
 
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder().timeout(probe_timeout).build() {
+    let client = match Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(probe_timeout)
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return caps,
     };
@@ -999,14 +1045,23 @@ async fn probe_capabilities(
         if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
             req = req.bearer_auth(k);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(&url)
+            );
         }
     }
     caps.streaming = match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             let text = resp.text().await.unwrap_or_default();
-            // Look for SSE chunk markers.
-            Some(text.contains("data:") && text.contains("\n"))
+            let has_sse_error = text.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix("data:")
+                    .and_then(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .is_some_and(|v| v.get("error").is_some())
+            });
+            // Look for SSE chunk markers without an embedded error event.
+            Some(text.contains("data:") && text.contains("\n") && !has_sse_error)
         }
         Ok(_) => Some(false),
         Err(_) => Some(false),
@@ -1126,7 +1181,11 @@ async fn probe_streaming_tool_call(
     config: &Config,
 ) -> StreamingToolCallProbe {
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder().timeout(probe_timeout).build() {
+    let client = match Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(probe_timeout)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             return StreamingToolCallProbe {
@@ -1168,7 +1227,7 @@ async fn probe_streaming_tool_call(
                 }
             }
         ],
-        "max_tokens": 128,
+        "max_tokens": 1024,
         "temperature": 0.0,
         "stream": true
     });
@@ -1183,6 +1242,12 @@ async fn probe_streaming_tool_call(
             detail: format!("probe payload rejected by config: {e}"),
         };
     }
+    if let Some(kwargs) = body
+        .get_mut("chat_template_kwargs")
+        .and_then(|v| v.as_object_mut())
+    {
+        kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
+    }
 
     let mut req = client.post(&url).json(&body);
     if let Some(ref key) = api_key {
@@ -1190,7 +1255,10 @@ async fn probe_streaming_tool_call(
         if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
             req = req.bearer_auth(key);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(&url)
+            );
         }
     }
 
@@ -1338,7 +1406,10 @@ async fn probe_vision_conditioning(
             if crate::config::api_key::assert_credential_endpoint_safe(url, true).is_ok() {
                 req = req.bearer_auth(k);
             } else {
-                eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+                eprintln!(
+                    "  ⚠ not sending API key to unsafe endpoint {}",
+                    crate::config::redact_endpoint(url)
+                );
             }
         }
         req
@@ -1422,7 +1493,8 @@ async fn probe_vision_conditioning(
 /// Heuristic: does the model name suggest vision-language capabilities?
 pub(crate) fn looks_multimodal(model: &str) -> bool {
     let l = model.to_lowercase();
-    l.contains("vl")
+    let l_no_vllm = l.replace("vllm", "");
+    l_no_vllm.contains("vl")
         || l.contains("vision")
         || l.contains("llava")
         || l.contains("multimodal")
@@ -1482,7 +1554,11 @@ async fn fetch_server_info(endpoint: &str, api_key: Option<&str>) -> Option<Serv
     let base_no_v1 = base.trim_end_matches("/v1");
     let url = format!("{}/get_server_info", base_no_v1);
 
-    let client = Client::builder().timeout(HTTP_TIMEOUT).build().ok()?;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .ok()?;
     let mut req = client.get(&url);
     if let Some(key) = api_key {
         if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
@@ -1627,7 +1703,10 @@ fn server_capacity_checks(
 // ── Step 1 implementation ────────────────────────────────────────────────────
 
 async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<DetectionResult> {
-    let client = Client::builder().timeout(HTTP_TIMEOUT).build()?;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(HTTP_TIMEOUT)
+        .build()?;
 
     // Strip trailing /v1 for base URL probes
     let base = endpoint.trim_end_matches('/');
@@ -1640,7 +1719,10 @@ async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<Detecti
         if crate::config::api_key::assert_credential_endpoint_safe(&models_url, true).is_ok() {
             req = req.bearer_auth(key);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {models_url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(&models_url)
+            );
         }
     }
     let resp = req
@@ -1867,10 +1949,11 @@ fn analyse_model(det: &DetectionResult, config: &Config) {
     let configured_model = config.model.as_str();
 
     // Try to find the configured model in the list
-    let matching = det
-        .models
-        .iter()
-        .find(|m| m.id == configured_model || m.id.contains(configured_model));
+    let matching = det.models.iter().find(|m| {
+        m.id == configured_model
+            || m.id.contains(configured_model)
+            || configured_model.contains(&m.id)
+    });
 
     let is_qwen35 = is_qwen35_model(configured_model);
 
@@ -2281,10 +2364,7 @@ fn assess_capabilities(model_name: &str) {
             "Tool calling (function use)",
             assessment.quality != "Limited" && assessment.quality != "Unknown",
         ),
-        (
-            "Visual processing",
-            lower.contains("122b") || lower.contains("vision") || lower.contains("vl"),
-        ),
+        ("Visual processing", looks_multimodal(&lower)),
         ("Long-context tasks (>32K)", !is_model_small(&lower)),
     ];
 
@@ -2335,7 +2415,10 @@ async fn connection_test(
     config: &Config,
 ) -> Result<ConnectionTestResult> {
     let probe_timeout = connection_test_timeout(config);
-    let client = Client::builder().timeout(probe_timeout).build()?;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(probe_timeout)
+        .build()?;
 
     let base = endpoint.trim_end_matches('/');
     let completions_url = format!("{}/chat/completions", base);
@@ -2350,7 +2433,7 @@ async fn connection_test(
             {"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": "Say 'hello' and nothing else."}
         ],
-        "max_tokens": 16,
+        "max_tokens": 1024,
         "temperature": 0.0
     });
     merge_extra_body(
@@ -2359,6 +2442,12 @@ async fn connection_test(
         "llm doctor completion probe",
         Some(&config.endpoint),
     )?;
+    if let Some(kwargs) = request_body
+        .get_mut("chat_template_kwargs")
+        .and_then(|v| v.as_object_mut())
+    {
+        kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
+    }
 
     let start = Instant::now();
 
@@ -2368,7 +2457,10 @@ async fn connection_test(
         if crate::config::api_key::assert_credential_endpoint_safe(&completions_url, true).is_ok() {
             req = req.bearer_auth(key);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {completions_url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(&completions_url)
+            );
         }
     }
 
@@ -2385,8 +2477,22 @@ async fn connection_test(
         anyhow::bail!("Completion request returned HTTP {}: {}", status, body);
     }
 
+    let queue_wait_ms = resp
+        .headers()
+        .get("x-colibri-queue-wait-ms")
+        .or_else(|| resp.headers().get("x-queue-wait-ms"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&q| q > 0);
+
     let body: Value = resp.json().await?;
-    let tokens_per_second = extract_tokens_per_second(&body, latency);
+    let infer_duration = match queue_wait_ms {
+        Some(q) => latency
+            .saturating_sub(Duration::from_millis(q))
+            .max(Duration::from_millis(1)),
+        None => latency,
+    };
+    let tokens_per_second = extract_tokens_per_second(&body, infer_duration);
 
     // Test tool calling
     let tool_calling_works =
@@ -2394,6 +2500,7 @@ async fn connection_test(
 
     Ok(ConnectionTestResult {
         latency,
+        queue_wait_ms,
         tokens_per_second,
         tool_calling_works,
     })
@@ -2449,7 +2556,7 @@ async fn test_tool_calling(
                 }
             }
         ],
-        "max_tokens": 128,
+        "max_tokens": 1024,
         "temperature": 0.0
     });
     merge_extra_body(
@@ -2458,6 +2565,12 @@ async fn test_tool_calling(
         "llm doctor tool-calling probe",
         Some(&config.endpoint),
     )?;
+    if let Some(kwargs) = request_body
+        .get_mut("chat_template_kwargs")
+        .and_then(|v| v.as_object_mut())
+    {
+        kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
+    }
 
     let mut req = client
         .post(completions_url)
@@ -2468,7 +2581,10 @@ async fn test_tool_calling(
         if crate::config::api_key::assert_credential_endpoint_safe(completions_url, true).is_ok() {
             req = req.bearer_auth(key);
         } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {completions_url}");
+            eprintln!(
+                "  ⚠ not sending API key to unsafe endpoint {}",
+                crate::config::redact_endpoint(completions_url)
+            );
         }
     }
 
@@ -2536,7 +2652,7 @@ fn print_recommendations(
     let model_info = det
         .models
         .iter()
-        .find(|m| m.id == model_name || m.id.contains(model_name));
+        .find(|m| m.id == model_name || m.id.contains(model_name) || model_name.contains(&m.id));
 
     let ctx_str = model_info
         .and_then(|m| m.max_model_len)
@@ -2634,9 +2750,8 @@ fn print_recommendations(
                     },
                 }
             }
-            if model_name.to_lowercase().contains("vision")
-                || model_name.to_lowercase().contains("vl")
-            {
+            let model_lower_no_vllm = model_name.to_lowercase().replace("vllm", "");
+            if model_lower_no_vllm.contains("vision") || model_lower_no_vllm.contains("vl") {
                 checks.push((
                     CheckStatus::Info,
                     format!("{SERVER_OPERATOR} for visual tasks, add --served-model-name"),

@@ -21,6 +21,30 @@ fn fixture() -> tempfile::TempDir {
     tmp
 }
 
+/// The fixture as a repository with everything committed. `None` when git
+/// is unavailable.
+fn git_fixture() -> Option<tempfile::TempDir> {
+    let tmp = fixture();
+    if !git(tmp.path(), &["init", "-q"]) {
+        return None;
+    }
+    assert!(git(tmp.path(), &["add", "-A"]));
+    assert!(git(tmp.path(), &["commit", "-qm", "all"]));
+    Some(tmp)
+}
+
+fn git(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn violation(cmd: &str, base: &Path) -> Option<String> {
     recursive_read_violation(&lenient_commands(cmd), base, &denied())
 }
@@ -102,6 +126,99 @@ fn recursive_readers_of_clean_roots_pass() {
     assert_eq!(strict_violation("grep -rn fn src", d), None);
 }
 
+/// `git show`, `git log -p`, `git diff`, … print every tracked path git
+/// selects, named or not (`'sec*'` is a pattern git matches its own way),
+/// so they are vetted by what git lists: the index and the ref tips for a
+/// work-tree diff, the whole reachable history for the rest. Listing
+/// forms (`git log`, `git diff --stat`) print no content and pass.
+#[test]
+fn git_content_printers_are_vetted_by_what_git_lists() {
+    let Some(tmp) = git_fixture() else {
+        eprintln!("git unavailable; skipping");
+        return;
+    };
+    let d = tmp.path();
+    for cmd in [
+        "git show",
+        "git show HEAD --stat",
+        "git show -s --format=%H HEAD",
+        "git log -p",
+        "git log -p -- 'sec*'",
+        "git log -p -- '*nv'",
+        "git log -1 -u -- src",
+        "git log --cc",
+        "git log -U3",
+        "git log --patch-with-stat",
+        "git log --binary",
+        "git diff",
+        "git diff HEAD",
+        "git diff --cached",
+        "git diff HEAD~1 -- src",
+        "git diff --stat -p",
+        "git diff --stat -U3 HEAD~1",
+        "git diff --stat --patch-with-stat HEAD~1",
+        "git diff -- README.md 'sec*'",
+        "git whatchanged -p",
+        "git diff-tree -p HEAD",
+        "git cat-file -p 0123abcd",
+        "git cat-file blob 0123abcd",
+        "git status -v",
+        "git --no-pager show",
+        "git diff --no-index docs .",
+        "cd src && git show",
+    ] {
+        assert!(violation(cmd, d).is_some(), "`{cmd}` must be refused");
+    }
+    for cmd in ["git show", "git log -p -- 'sec*'", "git diff"] {
+        assert!(
+            strict_violation(cmd, d).is_some(),
+            "`{cmd}` must be refused"
+        );
+    }
+    let why = violation("git show", d).unwrap();
+    assert!(why.contains("`git` would print `"), "{why}");
+    for cmd in [
+        "git log",
+        "git log --oneline -5",
+        "git log --stat -- .",
+        "git diff --stat",
+        "git diff --name-only HEAD",
+        "git diff -s",
+        "git status",
+        "git ls-files",
+        "git cat-file -t HEAD",
+        "git diff --no-index src docs",
+    ] {
+        assert_eq!(violation(cmd, d), None, "`{cmd}` should pass");
+    }
+
+    // Once the files are gone from the index and the tips, a work-tree
+    // diff cannot print them; history commands still can.
+    assert!(git(d, &["rm", "-rq", ".env", "secrets", ".ssh"]));
+    assert!(git(d, &["commit", "-qm", "drop"]));
+    for cmd in [
+        "git diff",
+        "git diff HEAD",
+        "git diff --cached",
+        "git status -v",
+    ] {
+        assert_eq!(violation(cmd, d), None, "`{cmd}` should pass");
+    }
+    for cmd in [
+        "git show",
+        "git log -p",
+        "git diff HEAD~1",
+        "git show HEAD~1",
+    ] {
+        assert!(violation(cmd, d).is_some(), "`{cmd}` must be refused");
+    }
+
+    // Outside a repository git prints nothing tracked.
+    let plain = fixture();
+    assert_eq!(violation("git show", plain.path()), None);
+    assert_eq!(violation("git log -p", plain.path()), None);
+}
+
 /// ripgrep's default walk skips hidden entries, so `.env` / `.ssh` alone
 /// do not refuse it; a `.gitignore`d directory is pruned only on a plain
 /// pattern and only when nothing is re-included.
@@ -149,6 +266,55 @@ fn symlinks_are_vetted_by_target() {
     std::os::unix::fs::symlink(d.join(".ssh/id_rsa"), d.join("docs/notes.txt")).unwrap();
     assert!(violation("grep -r x docs", d).is_some());
     assert!(violation("grep -R x docs", d).is_some());
+}
+
+/// A followed symlink is judged by where it really leads: one that leaves
+/// the workspace is refused however ordinary its target's name, one that
+/// stays inside is not. Readers that do not dereference links pass.
+#[cfg(unix)]
+#[test]
+fn followed_symlinks_must_stay_inside_the_workspace() {
+    use crate::tools::workspace_root::{sync_scope, WorkspaceRoot};
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("notes")).unwrap();
+    std::fs::write(outside.path().join("notes/todo.txt"), "canary\n").unwrap();
+    std::fs::write(outside.path().join("plain.txt"), "canary\n").unwrap();
+    let tmp = fixture();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("backup")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("notes"), d.join("docs/notes")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.join("backup/home")).unwrap();
+    std::os::unix::fs::symlink(d.join("src"), d.join("docs/src")).unwrap();
+    let root = WorkspaceRoot::fixed(d);
+    sync_scope(root, || {
+        for cmd in [
+            "grep -R x docs",
+            "grep -r x docs/notes",
+            "rg -L x docs",
+            "find -L docs -type f -exec cat {} +",
+            "diff -rN backup src",
+            "diff -r docs src",
+            "diff docs src",
+            "zip -r out.zip backup",
+            "scp -r backup host:",
+        ] {
+            let why = violation(cmd, d).unwrap_or_else(|| panic!("`{cmd}` must be refused"));
+            assert!(why.contains("out of the workspace"), "{cmd}: {why}");
+        }
+        for cmd in [
+            "grep -r x docs",
+            "rg x docs",
+            "diff -r --no-dereference backup src",
+            "zip -ry out.zip backup",
+            "cp -r backup /tmp/out-never-created",
+            "tar -cf - backup",
+        ] {
+            assert_eq!(violation(cmd, d), None, "`{cmd}` should pass");
+        }
+        std::fs::remove_file(d.join("docs/notes")).unwrap();
+        assert_eq!(violation("grep -R x docs", d), None, "links inside pass");
+        assert_eq!(violation("diff -r docs src", d), None);
+    });
 }
 
 #[cfg(any(unix, windows))]

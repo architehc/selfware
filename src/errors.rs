@@ -813,6 +813,7 @@ impl RunEnd {
             if is_shutdown_api_error(cause) {
                 return match crate::shutdown_reason() {
                     Some(crate::ShutdownReason::SignalTerminate) => RunEnd::Terminated,
+                    Some(crate::ShutdownReason::Timeout) => RunEnd::Failed,
                     _ => RunEnd::Interrupted,
                 };
             }

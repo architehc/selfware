@@ -28,7 +28,7 @@ use selfware::api::{ApiClient, StreamChunk, ThinkingMode};
 use selfware::config::{AgentConfig, Config, RedactedString};
 
 const DEFAULT_ENDPOINT: &str = "https://llm.selfware.design/v1";
-const DEFAULT_MODEL: &str = "qwen38-flash-next";
+const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 const PER_TEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn endpoint() -> String {

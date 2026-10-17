@@ -99,6 +99,24 @@ impl Tool for HttpRequest {
         const MAX_TIMEOUT_SECS: u64 = 300;
         args.timeout_secs = args.timeout_secs.min(MAX_TIMEOUT_SECS);
 
+        // Enforce outbound credential-shape check inside the tool itself so
+        // direct callers (and header names, not only values) are covered even
+        // when SafetyChecker::check_tool_call was not on the path.
+        if crate::safety::checker::validation::contains_outbound_credential_shape(&args.url)
+            || args
+                .body
+                .as_deref()
+                .is_some_and(crate::safety::checker::validation::contains_outbound_credential_shape)
+            || args.headers.iter().any(|(k, v)| {
+                crate::safety::checker::validation::contains_outbound_credential_shape(k)
+                    || crate::safety::checker::validation::contains_outbound_credential_shape(v)
+            })
+        {
+            anyhow::bail!(
+                "Outbound HTTP request blocked: request carries a known credential prefix"
+            );
+        }
+
         // Validate URL
         let url = reqwest::Url::parse(&args.url).context("Invalid URL")?;
 
@@ -308,6 +326,11 @@ fn reject_outbound_credential_shapes(
         }
     }
     for (name, value) in headers {
+        if contains_outbound_credential_shape(name) {
+            anyhow::bail!(
+                "Refusing outbound request: credential-shaped value in header name {name}"
+            );
+        }
         if contains_outbound_credential_shape(value) {
             anyhow::bail!("Refusing outbound request: credential-shaped value in header {name}");
         }

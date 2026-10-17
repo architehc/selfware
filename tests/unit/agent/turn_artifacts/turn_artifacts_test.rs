@@ -7,14 +7,14 @@ fn ensure_selfware_gitignore_writes_wildcard_once() {
     let selfware = tmp.path().join(".selfware");
     std::fs::create_dir_all(&selfware).unwrap();
 
-    ensure_selfware_gitignore(&selfware);
+    ensure_selfware_gitignore(tmp.path());
     let gi = selfware.join(".gitignore");
     assert!(gi.is_file(), "gitignore should be created");
     assert!(std::fs::read_to_string(&gi).unwrap().contains('*'));
 
     // Idempotent + non-clobbering: an existing file is left untouched.
     std::fs::write(&gi, "custom\n").unwrap();
-    ensure_selfware_gitignore(&selfware);
+    ensure_selfware_gitignore(tmp.path());
     assert_eq!(std::fs::read_to_string(&gi).unwrap(), "custom\n");
 }
 
@@ -22,8 +22,24 @@ fn ensure_selfware_gitignore_writes_wildcard_once() {
 fn ensure_selfware_gitignore_noop_when_dir_absent() {
     let tmp = tempfile::TempDir::new().unwrap();
     let missing = tmp.path().join(".selfware");
-    ensure_selfware_gitignore(&missing); // must not create the dir
+    ensure_selfware_gitignore(tmp.path()); // must not create the dir
     assert!(!missing.exists());
+}
+
+/// A checkout can ship `.selfware/.gitignore` as a dangling symlink; the
+/// helper must not create the link's target.
+#[cfg(unix)]
+#[test]
+fn ensure_selfware_gitignore_does_not_follow_dangling_symlink() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let selfware = tmp.path().join(".selfware");
+    std::fs::create_dir_all(&selfware).unwrap();
+    let target = tmp.path().join("planted");
+    std::os::unix::fs::symlink(&target, selfware.join(".gitignore")).unwrap();
+
+    ensure_selfware_gitignore(tmp.path());
+    assert!(!target.exists(), "symlink target must not be created");
+    assert!(selfware.join(".gitignore").is_symlink());
 }
 
 fn sample_artifact() -> TurnArtifact {
@@ -495,6 +511,44 @@ fn decision_kinds_serialize_to_what_happened() {
             text: "done".into()
         }
     );
+}
+
+/// `.selfware/turns` shipped as a symlink (here to a directory outside the
+/// workspace): nothing may be written through it.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_artifact_refuses_symlinked_turns_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workdir = tmp.path().join("ws");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(workdir.join(".selfware")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, artifact_dir(&workdir)).unwrap();
+
+    write_artifact(&workdir, &sample_artifact()).await;
+    assert!(
+        std::fs::read_dir(&outside).unwrap().next().is_none(),
+        "no artifact may land behind the symlink"
+    );
+}
+
+/// A dangling `turn_0001.json` symlink counts as a taken slot, and the next
+/// slot is written to the real directory, never through the link.
+#[cfg(unix)]
+#[tokio::test]
+async fn next_free_step_treats_dangling_symlink_as_taken() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = artifact_dir(tmp.path());
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = tmp.path().join("planted_turn.json");
+    std::os::unix::fs::symlink(&target, artifact_path(&dir, 1)).unwrap();
+
+    assert_eq!(next_free_step(tmp.path(), 1), 2);
+    let mut artifact = sample_artifact();
+    artifact.step = next_free_step(tmp.path(), 1);
+    write_artifact(tmp.path(), &artifact).await;
+    assert!(artifact_path(&dir, 2).is_file());
+    assert!(!target.exists(), "symlink target must not be created");
 }
 
 #[test]

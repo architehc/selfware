@@ -124,6 +124,80 @@ async fn test_deletion_with_parent_escape_rejected() {
     );
 }
 
+// ── Paths git finds that the `---`/`+++` scan does not ──
+
+/// `git apply` names files in more places than the `+++` lines and decodes
+/// them differently; the path policy must apply to git's list, both to the
+/// file it writes and to the one it reads. `.env` is in the default
+/// denied_paths, so each of these must be refused and must name `.env`.
+#[tokio::test]
+async fn test_denied_path_reached_through_git_only_header_forms_rejected() {
+    let (_dir, repo) = patch_repo_with(".env", "DB_PASSWORD=x\n");
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let diffs = [
+        // C-quoted header names (`\056` is `.`).
+        "--- \"a/\\056env\"\n+++ \"b/\\056env\"\n@@ -1 +1 @@\n-DB_PASSWORD=x\n+DB_PASSWORD=y\n",
+        // Copy header only: no `---`/`+++` lines at all.
+        "diff --git a/.env b/leak.txt\nsimilarity index 100%\ncopy from .env\ncopy to leak.txt\n",
+        // Rename header only.
+        "diff --git a/.env b/leak.txt\nsimilarity index 100%\nrename from .env\nrename to leak.txt\n",
+        // Implicit rename: differing names without a rename header; git
+        // reads `.env`, writes `leak.txt` and removes `.env`.
+        "diff --git a/.env b/leak.txt\n--- a/.env\n+++ b/leak.txt\n@@ -2,0 +2,1 @@\n+x\n",
+        // git prefers the shorter name when one is a prefix of the other.
+        "--- a/.env\n+++ b/.envx\n@@ -1 +1 @@\n-DB_PASSWORD=x\n+DB_PASSWORD=y\n",
+        // Mode change only.
+        "diff --git a/.env b/.env\nold mode 100644\nnew mode 100755\n",
+    ];
+    for diff in diffs {
+        let result = PatchApply
+            .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+            .await;
+        let err = result.expect_err("diff touching a denied path must be rejected");
+        assert!(
+            err.to_string().contains(".env"),
+            "error should name the rejected path for {diff:?}: {err}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".env")).unwrap(),
+        "DB_PASSWORD=x\n"
+    );
+    assert!(!repo.join("leak.txt").exists());
+}
+
+#[tokio::test]
+async fn test_unparseable_diff_rejected_before_apply() {
+    let (_dir, repo) = patch_repo_with("f.txt", "x\n");
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let result = PatchApply
+        .execute(serde_json::json!({"diff": "not a diff\n"}))
+        .await;
+    let err = result.expect_err("a diff git cannot parse must be refused");
+    assert!(
+        err.to_string().contains("could not parse"),
+        "unexpected error: {err}"
+    );
+}
+
+/// A rename of an allowed file still applies: both of its names pass.
+#[tokio::test]
+async fn test_rename_of_allowed_file_still_applies() {
+    let (_dir, repo) = patch_repo_with("old.txt", "hello\n");
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let diff =
+        "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n";
+    PatchApply
+        .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+        .await
+        .expect("rename between allowed paths must apply");
+    assert!(!repo.join("old.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("new.txt")).unwrap(),
+        "hello\n"
+    );
+}
+
 // ── Symlink (mode 120000) rejection (pass-3) ──
 
 #[test]

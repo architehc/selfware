@@ -1057,3 +1057,34 @@ async fn workspace_stagnation_is_fatal_and_classified_as_read_loop() {
         mode.advice
     );
 }
+
+#[tokio::test]
+async fn unrecognized_failed_reason_is_unknown_not_max_iterations() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(1);
+    agent.test_set_total_tool_calls(5);
+
+    let mode = FailureMode::classify(
+        &agent,
+        RunOutcome::Failed {
+            reason: "API returned status 404: endpoint offline".to_string(),
+        },
+    );
+    assert_eq!(mode.kind, FailureKind::Unknown);
+    assert_eq!(mode.kind.tag(), "UNKNOWN");
+    assert!(
+        mode.evidence.contains("API returned status 404"),
+        "evidence should include the actual stop reason: {}",
+        mode.evidence
+    );
+    assert!(
+        !mode.evidence.contains("max_iterations reached"),
+        "evidence must not falsely claim max_iterations was reached: {}",
+        mode.evidence
+    );
+    assert!(
+        mode.advice.contains("do NOT raise max_iterations"),
+        "advice must not tell the user to raise max_iterations: {}",
+        mode.advice
+    );
+}

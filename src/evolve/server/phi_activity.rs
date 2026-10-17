@@ -39,6 +39,16 @@ impl Phase {
             Self::Abandoned => "abandoned",
         }
     }
+
+    fn to_activity_phase(&self) -> crate::phi::activity::ActivityPhase {
+        match self {
+            Self::Running => crate::phi::activity::ActivityPhase::Running,
+            Self::Completed => crate::phi::activity::ActivityPhase::Completed,
+            Self::Failed => crate::phi::activity::ActivityPhase::Failed,
+            Self::Partial => crate::phi::activity::ActivityPhase::Partial,
+            Self::Abandoned => crate::phi::activity::ActivityPhase::Abandoned,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -56,7 +66,18 @@ struct Capture {
 }
 
 pub(super) fn routes() -> Router<Arc<EvolveServer>> {
-    Router::new().route("/api/phi/activity", get(activity))
+    Router::new()
+        .route("/api/phi/activity", get(activity))
+        .route("/api/phi/policy", get(policy))
+}
+
+async fn policy(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let current = crate::phi::policy::PhiPolicy::from_env();
+    Ok(Json(serde_json::to_value(current).unwrap_or_default()))
 }
 
 async fn activity(
@@ -282,6 +303,7 @@ fn summarize(capture: Capture, now: u64) -> Value {
     let age = now.saturating_sub(capture.recorded_at_ms);
     let mut status = "available";
     let mut reason = None;
+    let mut posture_counts = (0usize, 0usize, 0usize, 0usize, 0usize);
     let evidence = capture.evidence.map(|e| {
         let runs: Vec<_> = e
             .observations
@@ -314,6 +336,13 @@ fn summarize(capture: Capture, now: u64) -> Value {
                 _ => None,
             })
         };
+        posture_counts = (
+            e.outstanding,
+            e.unreviewed_lines,
+            e.untested_lines,
+            e.unknown_size_obligations,
+            passed,
+        );
         json!({"outstanding":e.outstanding,"unreviewed_lines":e.unreviewed_lines,
             "untested_lines":e.untested_lines,"unknown_size_obligations":e.unknown_size_obligations,
             "unattributed_mutations":e.unattributed.len(),
@@ -333,10 +362,21 @@ fn summarize(capture: Capture, now: u64) -> Value {
         status = "incomplete";
         reason = Some("capture_in_future");
     }
+    let policy = crate::phi::policy::PhiPolicy::from_env();
+    let fox_posture = crate::phi::policy::derive_fox_posture_from_counts(
+        posture_counts.0,
+        posture_counts.1,
+        posture_counts.2,
+        posture_counts.3,
+        posture_counts.4,
+        capture.phase.to_activity_phase(),
+        &policy,
+        crate::phi::policy::PresenceChannel::Ambient,
+    );
     json!({"agent_id":opaque(&format!("{}\0{}", capture.session_id, capture.agent_id)),"task_id":opaque(&capture.task_id),
         "session_id":opaque(&capture.session_id),"status":status,"reason":reason,
         "recorded_at_ms":capture.recorded_at_ms,"age_ms":age,
-        "phase":capture.phase.label(),"evidence":evidence})
+        "phase":capture.phase.label(),"evidence":evidence,"fox_posture":fox_posture})
 }
 
 #[cfg(all(test, unix))]
@@ -595,5 +635,50 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .count();
         assert_eq!(post_read_count, MAX_SCAN + 5);
+    }
+
+    #[tokio::test]
+    async fn policy_endpoint_and_fox_posture_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let server = EvolveServer::for_project(
+            crate::evolve::Graph {
+                nodes: vec![],
+                edges: vec![],
+            },
+            root.path(),
+        )
+        .unwrap();
+
+        let unauth = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/phi/policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), 401);
+
+        let auth = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/phi/policy")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(auth.status(), 200);
+        let bytes = to_bytes(auth.into_body(), 64 * 1024).await.unwrap();
+        let policy_json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(policy_json["mode"], "observe_only");
+
+        write(root.path(), 0, &capture(root.path(), 0, 1000));
+        let body = read_activity(root.path(), 1100);
+        assert_eq!(body["agents"][0]["fox_posture"]["emotion"], "error");
     }
 }

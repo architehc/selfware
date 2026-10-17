@@ -3576,3 +3576,40 @@ async fn run_reaped_drop_kills_grandchild() {
         "dropped check must kill child {child} and grandchild {grandchild}"
     );
 }
+
+/// The post-edit gate runs with `fast()` ("type check only"), yet the
+/// language-QA dispatch used to run every stage of the runner — including
+/// test discovery, which imports every `test_*.py` module body of the
+/// checkout — after a file write, with `test_on_edit` off. A test module that
+/// records its import must stay unimported, and no test check may appear.
+#[tokio::test]
+async fn fast_gate_does_not_run_python_test_discovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("test_module_was_imported");
+    std::fs::write(tmp.path().join("requirements.txt"), "").unwrap();
+    std::fs::write(
+        tmp.path().join("test_pwn.py"),
+        format!("open({:?}, 'w').close()\n", marker.to_string_lossy()),
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("hello.py"), "print(1)\n").unwrap();
+
+    let mut gate = VerificationGate::new(tmp.path(), VerificationConfig::fast());
+    let report = gate
+        .verify_change(&["hello.py".to_string()], "file_write:hello.py")
+        .await
+        .unwrap();
+
+    assert!(
+        !marker.exists(),
+        "test_on_edit is off: the checkout's test modules must not be imported"
+    );
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.check_type == CheckType::Test),
+        "no test stage may run or report: {:?}",
+        report.checks
+    );
+}

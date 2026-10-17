@@ -33,7 +33,7 @@ use std::path::{Component, Path};
 
 use crate::evolve::graph::{
     classify_repository_paths, is_tooling_module_path, repository_file_census_walk, rust_use_paths,
-    RepositoryFileClass,
+    RepositoryFileClass, MAX_SOURCE_BYTES,
 };
 
 /// What "most central" means, verbatim in every rendering.
@@ -44,8 +44,10 @@ pub const CENTRALITY_METRIC: &str =
 pub const TOP_N: usize = 10;
 
 /// Files above this size are counted by bytes only (never opened in full,
-/// never code for the review): generated dumps and data blobs.
-const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+/// never code for the review): generated dumps and data blobs. The evolve
+/// graph's test partition, which re-reads the Rust files by path, keeps to
+/// the same limit.
+const MAX_TEXT_BYTES: u64 = MAX_SOURCE_BYTES;
 
 /// Bytes sniffed for a NUL to call a file binary.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
@@ -641,7 +643,14 @@ impl RepoInventory {
                 }
             ));
         }
-        out.join("\n")
+        // File names are repository content and this text goes to the
+        // operator's terminal: show their control characters (ESC, BEL, …)
+        // as `\u{..}`, the way the approval prompt does, instead of letting
+        // a crafted name drive the terminal.
+        out.iter()
+            .map(|line| crate::safety::confirm_view::sanitize_line(line, usize::MAX))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The compact form injected into the model's context at review start,
@@ -1443,14 +1452,31 @@ fn rust_edges(
         .filter_map(|(i, c)| c.name.clone().map(|n| (n, i)))
         .collect();
 
+    // Longest known prefix of a use path (the empty key is the crate root).
+    // Built left to right and cut off at the crate's longest module id, so
+    // a megabyte-long `use` line from the fallback line scanner costs one
+    // pass, not a re-join per segment. Segments may be empty (`::std`), so
+    // the separator goes in after every segment, not only non-empty ones.
+    let longest_module: Vec<usize> = crates
+        .iter()
+        .map(|c| c.modules.keys().map(String::len).max().unwrap_or(0))
+        .collect();
     let resolve = |ci: usize, parts: &[String]| -> Option<usize> {
-        let mut candidate = parts.to_vec();
-        loop {
-            if let Some(&idx) = crates[ci].modules.get(&candidate.join("::")) {
-                return Some(idx);
+        let mut prefix = String::new();
+        let mut longest_match = crates[ci].modules.get("").copied();
+        for (n, part) in parts.iter().enumerate() {
+            if n > 0 {
+                prefix.push_str("::");
             }
-            candidate.pop()?;
+            prefix.push_str(part);
+            if prefix.len() > longest_module[ci] {
+                break;
+            }
+            if let Some(&idx) = crates[ci].modules.get(&prefix) {
+                longest_match = Some(idx);
+            }
         }
+        longest_match
     };
 
     let mut edges = Vec::new();
@@ -1552,15 +1578,28 @@ fn python_edges(files: &[InventoryFile], contents: &[Option<String>]) -> Vec<(us
     if modules.is_empty() {
         return Vec::new();
     }
+    // Longest known prefix of a dotted import. Built left to right in one
+    // pass and cut off at the longest module name: an import line is
+    // untrusted and may be megabytes long, so the work must be bounded by
+    // the repository's own names, not by the line (re-joining the remaining
+    // path for every component was quadratic in the line).
+    let longest_module = modules.keys().map(String::len).max().unwrap_or(0);
     let resolve_longest = |dotted: &str| -> Option<usize> {
-        let mut parts: Vec<&str> = dotted.split('.').filter(|p| !p.is_empty()).collect();
-        while !parts.is_empty() {
-            if let Some(&i) = modules.get(&parts.join(".")) {
-                return Some(i);
+        let mut prefix = String::new();
+        let mut longest_match = None;
+        for part in dotted.split('.').filter(|p| !p.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('.');
             }
-            parts.pop();
+            prefix.push_str(part);
+            if prefix.len() > longest_module {
+                break;
+            }
+            if let Some(&i) = modules.get(&prefix) {
+                longest_match = Some(i);
+            }
         }
-        None
+        longest_match
     };
     let mut edges = Vec::new();
     for (i, f) in files.iter().enumerate() {
@@ -1602,19 +1641,29 @@ fn python_edges(files: &[InventoryFile], contents: &[Option<String>]) -> Vec<(us
                     .collect::<Vec<_>>()
                     .join(".");
                 let mut resolved = false;
-                for name in c[3].split(',') {
-                    let name = name.split_whitespace().next().unwrap_or_default();
-                    if name.is_empty() || name == "*" {
-                        continue;
-                    }
-                    let sub = if target_module.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{target_module}.{name}")
-                    };
-                    if let Some(&t) = modules.get(&sub) {
-                        edges.push((i, t));
-                        resolved = true;
+                if target_module.len() <= longest_module {
+                    for name in c[3].split(',') {
+                        let name = name.split_whitespace().next().unwrap_or_default();
+                        if name.is_empty() || name == "*" {
+                            continue;
+                        }
+                        let sub_len = if target_module.is_empty() {
+                            name.len()
+                        } else {
+                            target_module.len() + 1 + name.len()
+                        };
+                        if sub_len > longest_module {
+                            continue;
+                        }
+                        let sub = if target_module.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{target_module}.{name}")
+                        };
+                        if let Some(&t) = modules.get(&sub) {
+                            edges.push((i, t));
+                            resolved = true;
+                        }
                     }
                 }
                 if !resolved && !target_module.is_empty() {
@@ -2129,6 +2178,30 @@ mod tests {
         assert!(scoped.unreadable.is_empty());
     }
 
+    /// A code file over `MAX_TEXT_BYTES` is "never opened in full": the test
+    /// partition must not read and `syn`-parse it by path behind the size
+    /// rule (the tree costs ~130 bytes per byte of source), so the
+    /// `#[cfg(test)] mod` it declares contributes no edge.
+    #[test]
+    fn oversized_code_files_are_not_parsed_for_the_test_partition() {
+        let dir = rust_fixture();
+        let mut big = String::from("#[cfg(test)]\n#[path = \"a.rs\"]\nmod a;\n");
+        while big.len() as u64 <= MAX_TEXT_BYTES {
+            big.push_str("// padding so the file is over the limit\n");
+        }
+        write(dir.path(), "src/big.rs", &big);
+        let inv = RepoInventory::scan(dir.path()).unwrap();
+        assert!(
+            inv.unreadable
+                .iter()
+                .any(|u| u.starts_with("src/big.rs (over ")),
+            "{:?}",
+            inv.unreadable
+        );
+        let role = |p: &str| inv.files.iter().find(|f| f.path == p).unwrap().role;
+        assert_eq!(role("src/a.rs"), FileRole::Production);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn hard_linked_code_files_are_named_unreadable_not_ingested() {
@@ -2240,6 +2313,37 @@ mod tests {
         assert!(inv.entry_points.contains(&"cmd/app/main.go".to_string()));
     }
 
+    /// A dotted import with far more components than any module name
+    /// (megabytes of `import a.a.a…` in one line) resolves to its longest
+    /// known prefix in one pass; re-joining per component was quadratic.
+    #[test]
+    fn long_import_paths_resolve_in_linear_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "a.py", "x = 1\n");
+        write(r, "a/b.py", "y = 2\n");
+        let dotted = vec!["a"; 200_000].join(".");
+        write(r, "app.py", &format!("import {dotted}\n"));
+        write(r, "cli.py", &format!("from a.b.{dotted} import z\n"));
+        write(r, "Cargo.toml", "[package]\nname = \"demo\"\n");
+        write(r, "src/lib.rs", "pub mod m;\n");
+        write(r, "src/m.rs", "pub fn f() {}\n");
+        let segments = vec!["m"; 200_000].join("::");
+        // A syntax error sends the file to the line scanner.
+        write(r, "src/user.rs", &format!("fn (\nuse crate::{segments};\n"));
+        let started = std::time::Instant::now();
+        let inv = RepoInventory::scan(r).unwrap();
+        let deg = |p: &str| inv.files.iter().find(|f| f.path == p).unwrap().in_degree;
+        assert_eq!(deg("a.py"), 1, "import a.a.a… resolves to a");
+        assert_eq!(deg("a/b.py"), 1, "from a.b.a.a… import resolves to a.b");
+        assert_eq!(deg("src/m.rs"), 1, "crate::m::m… resolves to m");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "inventory scan took {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn gitignore_is_applied_inside_a_git_work_tree() {
         let dir = tempfile::tempdir().unwrap();
@@ -2323,6 +2427,34 @@ mod tests {
         let text = inv.render_text(Some(&plan));
         assert!(text.contains("most central (import in-degree"));
         assert!(text.contains("reading plan: 1. src/lib.rs [entry]"));
+    }
+
+    #[test]
+    fn render_text_shows_control_characters_in_file_names() {
+        let dir = tempfile::tempdir().unwrap();
+        // Set window title, erase screen, set a scroll region.
+        let hostile = "a\u{1b}]0;PWNED\u{7}\u{1b}[2J\u{1b}[1;2rb.py";
+        write(dir.path(), hostile, "x = 1\n");
+        let inv = RepoInventory::scan(dir.path()).unwrap();
+        let plan = inv.review_plan(ReviewScope::whole_repository());
+        assert!(
+            plan.plan.iter().any(|e| e.path == hostile),
+            "{:?}",
+            plan.plan
+        );
+        let text = inv.render_text(Some(&plan));
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("a\\u{1b}]0;PWNED\\u{7}\\u{1b}[2J\\u{1b}[1;2rb.py"),
+            "{text}"
+        );
+        // The model-facing form and the plan itself keep the name verbatim.
+        assert!(inv
+            .render_compact(&plan, 10_000)
+            .contains("\\u001b]0;PWNED"));
     }
 
     #[test]

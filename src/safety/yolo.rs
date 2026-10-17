@@ -931,10 +931,26 @@ fn extract_path(args: &serde_json::Value) -> Option<String> {
 fn check_volume_mount(mount: &str) -> Option<String> {
     let host_path = mount.split(':').next().unwrap_or("");
     let expanded = expand_home(host_path);
+    if volume_host_path_is_dangerous(&expanded) {
+        return Some(format!("Volume mount '{}' is not allowed", mount));
+    }
+    // The runtime follows a symlink in the bind source: judge the path by
+    // where it lands too, so `<workspace>/data -> /` is refused like `/`.
+    if let Some(resolved) =
+        crate::safety::checker::validation::resolve_volume_host_path_outside_workspace(&expanded)
+    {
+        if volume_host_path_is_dangerous(&resolved) {
+            return Some(format!("Volume mount '{}' is not allowed", mount));
+        }
+    }
+    None
+}
 
+/// The YOLO volume blocklist on one form of a host path (spelled or resolved).
+fn volume_host_path_is_dangerous(expanded: &str) -> bool {
     // Block SSH directory mounts (including ~/.ssh and relative .ssh)
     if expanded.contains("/.ssh") || expanded == ".ssh" || expanded.starts_with(".ssh/") {
-        return Some(format!("Volume mount '{}' is not allowed", mount));
+        return true;
     }
 
     // Block dangerous system mounts
@@ -942,15 +958,10 @@ fn check_volume_mount(mount: &str) -> Option<String> {
         "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64", "/opt",
         "/run",
     ];
-    for dm in &dangerous_mounts {
-        if expanded == *dm
+    dangerous_mounts.iter().any(|dm| {
+        expanded == *dm
             || (expanded.starts_with(dm) && expanded.as_bytes().get(dm.len()) == Some(&b'/'))
-        {
-            return Some(format!("Volume mount '{}' is not allowed", mount));
-        }
-    }
-
-    None
+    })
 }
 
 /// Pre-compiled regexes for destructive command detection.
@@ -1246,8 +1257,16 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
 /// a read, so each of its operands is read (0.9.5 review, M5 — `jq -R .
 /// .env`, `cut -c1- .env`, `git show HEAD:.env` passed the reader-gated
 /// checks). Glob operands (`cat *`, `cat .e*`) are expanded against the
-/// call's working directory first and every match is checked, so a
+/// directory the command runs in first and every match is checked, so a
 /// pattern cannot stand in for a denied name.
+///
+/// Every operand is resolved the way the shell resolves it: from the
+/// call's working directory moved by each `cd` before it. The `cd` target
+/// and every operand or glob match that exists under that directory must
+/// pass `path_allowed` (the checker's path policy, which canonicalises):
+/// the path policy alone vets operands from the workspace root, so with a
+/// committed symlink `keys -> ../../.ssh`, `cd keys; cat id_*` read the
+/// operator's key while `cat keys/id_*` was refused.
 /// (Test convenience; production uses [`headless_read_shell_guard`].)
 #[cfg(test)]
 pub(crate) fn headless_read_shell_guard_pass(
@@ -1257,7 +1276,7 @@ pub(crate) fn headless_read_shell_guard_pass(
     denied_paths: &[String],
     protected_paths: &[String],
 ) -> bool {
-    headless_read_shell_guard(cmd, segments, cwd, denied_paths, protected_paths)
+    headless_read_shell_guard(cmd, segments, cwd, denied_paths, protected_paths, &|_| true)
         == HeadlessReadGuard::Pass
 }
 
@@ -1283,9 +1302,16 @@ pub(crate) fn headless_read_shell_guard(
     cwd: Option<&str>,
     denied_paths: &[String],
     protected_paths: &[String],
+    path_allowed: &dyn Fn(&std::path::Path) -> bool,
 ) -> HeadlessReadGuard {
-    let Ok(base) = headless_read_operands_pass(cmd, segments, cwd, denied_paths, protected_paths)
-    else {
+    let Ok(base) = headless_read_operands_pass(
+        cmd,
+        segments,
+        cwd,
+        denied_paths,
+        protected_paths,
+        path_allowed,
+    ) else {
         return HeadlessReadGuard::Fail;
     };
     let commands: Vec<crate::safety::recursive_read::Command> = segments
@@ -1298,14 +1324,15 @@ pub(crate) fn headless_read_shell_guard(
     }
 }
 
-/// Every headless read check except the recursive walk; `Ok(base dir)`
-/// when they pass.
+/// Every headless read check except the recursive walk; `Ok(start dir)`
+/// — the call's working directory, before any `cd` — when they pass.
 fn headless_read_operands_pass(
     cmd: &str,
     segments: &[crate::safety::shell_read::Segment],
     cwd: Option<&str>,
     denied_paths: &[String],
     protected_paths: &[String],
+    path_allowed: &dyn Fn(&std::path::Path) -> bool,
 ) -> Result<std::path::PathBuf, ()> {
     if !headless_auto_edit_shell_guard_pass(cmd, denied_paths, protected_paths)
         || sensitive_token_in(cmd).is_some()
@@ -1313,7 +1340,7 @@ fn headless_read_operands_pass(
     {
         return Err(());
     }
-    let base = match cwd {
+    let start = match cwd {
         Some(d) if std::path::Path::new(d).is_absolute() => std::path::PathBuf::from(d),
         Some(d) => match std::env::current_dir() {
             Ok(c) => c.join(d),
@@ -1324,10 +1351,32 @@ fn headless_read_operands_pass(
             Err(_) => return Err(()),
         },
     };
-    let mut operands: Vec<String> = Vec::new();
+    // Each operand is kept with the directory the shell resolves it from.
+    let mut base = start.clone();
+    let mut operands: Vec<(std::path::PathBuf, String)> = Vec::new();
     for seg in segments {
+        if let Some(("cd", args)) = seg.program() {
+            // The rest of the chain runs in the target, which the parsed
+            // read classifier keeps relative and `..`-free but may be a
+            // symlink out of the workspace: the path policy decides. A
+            // `cd` in a pipeline stage moves only that stage; a `cd` to a
+            // directory that does not exist fails closed so `cd nope; ...`
+            // cannot move the guard away from the directory the shell
+            // stays in.
+            let target = match args.first() {
+                Some(dir) => base.join(&dir.text),
+                None => base.clone(),
+            };
+            if !target.is_dir() || !path_allowed(&target) {
+                return Err(());
+            }
+            if !seg.subshell {
+                base = target;
+            }
+            continue;
+        }
         for op in seg.path_operands() {
-            operands.push(op);
+            operands.push((base.clone(), op));
         }
         for w in &seg.words {
             if w.glob {
@@ -1358,35 +1407,45 @@ fn headless_read_operands_pass(
                     }
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if pattern.matches_with(&name, options) {
-                        operands.push(if dir_part.is_empty() {
+                        let matched = if dir_part.is_empty() {
                             name
                         } else {
                             format!("{dir_part}/{name}")
-                        });
+                        };
+                        operands.push((base.clone(), matched));
                     }
                 }
             }
         }
     }
-    for op in &operands {
+    for (base, op) in &operands {
         if sensitive_token_in(op).is_some() {
             return Err(());
         }
         let trimmed = op.trim_start_matches("./");
         // Per component too: `secrets/x` (from `cat secrets/*`) has no
         // leading `/secrets/` for the substring list to see.
-        let is_dir = base.join(trimmed).is_dir();
+        let resolved = base.join(trimmed);
+        let is_dir = resolved.is_dir();
         if crate::safety::recursive_read::sensitive_component(trimmed, is_dir).is_some() {
             return Err(());
         }
         if denied_among(&[trimmed], denied_paths).is_some() {
             return Err(());
         }
+        // What exists under the shell's directory is what the read opens
+        // (a glob match, a file behind a symlinked directory): the path
+        // policy canonicalises it. Words that name nothing on disk are
+        // patterns, flags and arguments, not reads.
+        if resolved.symlink_metadata().is_ok() && !path_allowed(&resolved) {
+            return Err(());
+        }
     }
     // A recursive reader (`grep -r`, `rg`, `git grep`, `diff -r`, …) reads
     // every file below its operands, not only the operands: the caller
-    // walks those roots next ([`headless_read_shell_guard`]).
-    Ok(base)
+    // walks those roots next ([`headless_read_shell_guard`]), following
+    // `cd` itself from the start directory.
+    Ok(start)
 }
 
 /// Guard heuristics that a shell command must pass before the headless

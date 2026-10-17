@@ -253,7 +253,12 @@ has no command or process substitution (`$(…)`, backticks, `<(…)`), no
 environment assignment that steers a program (`GIT_EXTERNAL_DIFF=…`,
 `PAGER=…`; only locale/colour/terminal variables are allowed), no redirection
 that writes a file, and never names a denied or credential path through any
-reader (`jq . .env`, `git show HEAD:.env`). A `git` read runs only in a
+reader (`jq . .env`, `git show HEAD:.env`). A read that would reach such a
+path without naming it — a recursive search (`grep -r KEY .` next to
+`.env`) or a git command that prints file content (`git show`, `git log
+-p`, `git diff` in a repository that tracks, or once committed, `.env`) —
+is answered with a tool error instead and the run goes on; listing forms
+(`git log`, `git diff --stat`) still run. A `git` read runs only in a
 repository whose own `.git/config` names no program (fsmonitor, textconv,
 filters, pager) or that you trusted with `selfware trust`. If you set
 `safety.require_confirmation` yourself and list `shell_exec`, every shell

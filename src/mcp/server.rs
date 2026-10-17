@@ -263,6 +263,52 @@ fn mcp_tool_call_is_write(tool: &dyn crate::tools::Tool, args: &serde_json::Valu
     }
 }
 
+/// The text of a tools/call result as the client receives it: any tool that
+/// copies workspace text into its result can carry a secret — the same leak
+/// resources/read had before round 6: a client could `file_read`
+/// selfware.toml and receive the raw api_key. A per-tool allowlist
+/// (file_read, grep_search, git_diff) missed symbol_search (whole
+/// declaration lines), npm_scripts (package.json commands) and context_pack
+/// signatures, so EVERY result goes through the model-facing redactor, as
+/// sanitize_tool_context does for the agent loop; a result without a secret
+/// value (lsp_*, glob_find, directory_tree …) comes back byte for byte.
+/// Secret VALUES only, lines intact, each marked inline: the client's model
+/// reads (and edits against) this content, so the log redactor's rewrites
+/// of ordinary code must not reach it.
+///
+/// An inline screenshot (`base64_png` from screen_capture / computer_screen
+/// with inline=true) is image bytes, not workspace text: it is detached
+/// before redaction, as the agent loop does, so the token-shape patterns
+/// cannot corrupt it, and put back so the result keeps its shape.
+fn redact_tool_result(mut result: Value) -> String {
+    let base64_png = result
+        .as_object_mut()
+        .and_then(|obj| obj.remove("base64_png"));
+
+    let text = match result.as_str() {
+        Some(s) => s.to_string(),
+        None => serde_json::to_string_pretty(&result).unwrap_or_default(),
+    };
+
+    let redaction = crate::safety::redact::redact_for_model(
+        &text,
+        crate::safety::redact::RedactionContext::Generic,
+    );
+    let mut text = if redaction.redacted > 0 {
+        crate::safety::source_context::with_redaction_note(&redaction.content, redaction.redacted)
+    } else {
+        redaction.content
+    };
+
+    if let Some(png) = base64_png {
+        if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&text) {
+            map.insert("base64_png".to_string(), png);
+            text = serde_json::to_string_pretty(&map).unwrap_or(text);
+        }
+    }
+    text
+}
+
 /// Whether the `method` argument of an http_request is a read-only verb.
 /// Absent or unparsable method defaults to GET (the tool's schema default);
 /// the comparison is case-insensitive (the tool uppercases the method).
@@ -674,38 +720,9 @@ impl McpServer {
 
         match result {
             Ok(result) => {
-                // Convert tool result to MCP content format.
-                let text = match result.as_str() {
-                    Some(s) => s.to_string(),
-                    None => serde_json::to_string_pretty(&result).unwrap_or_default(),
-                };
-
-                // Content-serving tools return raw file/diff text — the same
-                // leak resources/read had before round 6: a client could
-                // `file_read` selfware.toml and receive the raw api_key.
-                // Redact secrets before the content leaves the process.
-                // Structural tools (lsp_*, glob_find, directory_tree) return
-                // locations/paths, not file content, and stay untouched.
-                const CONTENT_SERVING_TOOLS: &[&str] = &["file_read", "grep_search", "git_diff"];
-                // Secret VALUES only, lines intact, each marked inline: the
-                // client's model reads (and edits against) this content, so
-                // the log redactor's rewrites of ordinary code must not reach it.
-                let text = if CONTENT_SERVING_TOOLS.contains(&tool_name) {
-                    let redaction = crate::safety::redact::redact_for_model(
-                        &text,
-                        crate::safety::redact::RedactionContext::Generic,
-                    );
-                    if redaction.redacted > 0 {
-                        crate::safety::source_context::with_redaction_note(
-                            &redaction.content,
-                            redaction.redacted,
-                        )
-                    } else {
-                        redaction.content
-                    }
-                } else {
-                    text
-                };
+                // Convert tool result to MCP content format, secrets
+                // redacted before the content leaves the process.
+                let text = redact_tool_result(result);
 
                 let response = serde_json::json!({
                     "content": [
@@ -1061,7 +1078,10 @@ impl McpServer {
             );
         }
 
-        match std::fs::read_to_string(&canonical) {
+        match crate::tools::file::read_to_string_capped(
+            &canonical,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             Ok(content) => {
                 let mime = if relative_path.ends_with(".json") {
                     "application/json"

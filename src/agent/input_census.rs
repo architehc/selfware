@@ -505,8 +505,11 @@ pub(crate) fn leak_check_identifiers(
         for ident in suspicious_identifiers {
             if content.contains(ident.as_str()) {
                 hits.push(format!(
-                    "{} contains `{ident}` (an input-side identifier that must not leak into outputs)",
-                    path.display()
+                    "{} contains {} (an input-side identifier that must not leak into outputs)",
+                    crate::safety::source_context::quote_untrusted_label(
+                        &path.display().to_string()
+                    ),
+                    crate::safety::source_context::quote_untrusted_label(ident),
                 ));
             }
         }
@@ -629,13 +632,17 @@ impl InputCensus {
         );
         for entry in &self.key_paths {
             out.push_str("- ");
-            out.push_str(entry);
+            out.push_str(&crate::safety::source_context::quote_untrusted_label(entry));
             out.push('\n');
         }
         if !self.suspicious_identifiers.is_empty() {
             out.push_str(&format!(
                 "Sensitive identifiers (must not leak into output artifacts): {}\n",
-                self.suspicious_identifiers.join(", ")
+                self.suspicious_identifiers
+                    .iter()
+                    .map(|id| crate::safety::source_context::quote_untrusted_label(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if self.truncated {

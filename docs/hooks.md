@@ -40,6 +40,8 @@ The `command` string supports these placeholders:
 | `{path}` | Affected file path (if the tool has a `path` argument) |
 | `{tool}` | Tool name (e.g., `"file_write"`) |
 
+Values are quoted for the shell context the placeholder stands in, so a file name is always plain data: `cargo fmt -- {path}` gets a single-quoted word per path, and inside `"..."` (`git commit -m "edited {path}"`) or `'...'` the value is escaped for that quote. A placeholder inside backticks or a here-document cannot be quoted safely and makes the hook fail instead of running (use `$(...)`).
+
 ## Hook Behavior
 
 - **PostToolUse hooks**: Run after the tool succeeds. Errors (non-zero exit, timeout, failure to start) are logged but do not block the agent.

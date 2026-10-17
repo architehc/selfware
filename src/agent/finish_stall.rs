@@ -557,14 +557,21 @@ impl super::Agent {
 
     /// Whether the tree is verified green right now: a mutation happened,
     /// a credited pass covers the current tree (the completion gate's own
-    /// freshness), and no in-scope failure blocks it.
+    /// freshness), no in-scope failure blocks it, and no model-run failure
+    /// from before the latest edit is still waiting to be re-run.
     pub(super) fn finish_stall_tree_green(&self) -> bool {
+        let task_root = self.verification_task_root();
         self.mutation_sequence > 0
             && self.verification_pass_covers_current_tree()
             && self
                 .verification_failures
-                .blocking(&self.verification_task_root(), self.mutation_sequence)
+                .blocking(&task_root, self.mutation_sequence)
                 .is_none()
+            && !(self.has_code_affecting_mutation()
+                && self
+                    .verification_failures
+                    .stale_unresolved(&task_root, self.mutation_sequence)
+                    .is_some())
     }
 
     /// Screen one answered call of the open model turn. Returns the refusal

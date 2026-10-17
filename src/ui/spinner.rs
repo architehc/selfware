@@ -73,7 +73,10 @@ pub fn stop_icon(kind: StopKind, color: bool) -> String {
     }
 }
 
-/// A terminal spinner that animates on a single line
+/// A terminal spinner that animates on a single line.
+///
+/// Messages may quote model-authored text (a tool's arguments, a safety
+/// verdict about them): they are printed with control characters escaped.
 pub struct TerminalSpinner {
     stop_signal: Arc<AtomicBool>,
     message_tx: watch::Sender<String>,
@@ -102,7 +105,7 @@ impl TerminalSpinner {
         }
 
         let stop_signal = Arc::new(AtomicBool::new(false));
-        let (message_tx, message_rx) = watch::channel(message.to_string());
+        let (message_tx, message_rx) = watch::channel(output::live::escape_controls(message));
         let stop = stop_signal.clone();
         let start = Instant::now();
 
@@ -139,7 +142,7 @@ impl TerminalSpinner {
 
     /// Update the spinner message
     pub fn set_message(&self, msg: &str) {
-        let _ = self.message_tx.send(msg.to_string());
+        let _ = self.message_tx.send(output::live::escape_controls(msg));
     }
 
     /// Stop the spinner with the icon for `kind`.
@@ -187,7 +190,12 @@ impl TerminalSpinner {
         {
             let elapsed = self.start_time.elapsed().as_secs_f64();
             print!("\r\x1b[2K");
-            println!("  {} {} ({:.1}s)", icon, message, elapsed);
+            println!(
+                "  {} {} ({:.1}s)",
+                icon,
+                output::live::escape_controls(message),
+                elapsed
+            );
             io::stdout().flush().ok();
         }
     }
