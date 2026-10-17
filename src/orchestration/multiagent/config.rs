@@ -9,7 +9,7 @@ use super::types::MAX_CONCURRENT_AGENTS;
 /// Failure policy for multi-agent execution
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MultiAgentFailurePolicy {
-    /// Continue even if some agents fail (default)
+    /// Continue even if some agents fail (default in `MultiAgentConfig`)
     BestEffort,
     /// Abort all remaining tasks if any agent fails
     #[default]

@@ -406,18 +406,6 @@ impl MultiAgentChat {
             tokio::time::timeout(timeout, client.chat(messages, None, ThinkingMode::Disabled))
                 .await;
 
-        // Settle the budget reservation: drop the pessimistic estimate and
-        // record actual provider-reported usage, when we got a response.
-        // (A timed-out call may still have been billed by the provider, but
-        // we only account what we can see.)
-        budget.settle(
-            reservation,
-            match &result {
-                Ok(Ok(response)) => Some(&response.usage),
-                _ => None,
-            },
-        );
-
         let duration = start.elapsed();
 
         let agent_result = match result {
@@ -427,6 +415,17 @@ impl MultiAgentChat {
                     .first()
                     .map(|c| c.message.content.text().to_string())
                     .unwrap_or_default();
+
+                // Settle the budget reservation: drop the pessimistic estimate and
+                // record actual provider-reported usage, falling back to measured
+                // prompt + completion tokens when the provider reports 0 total_tokens
+                // (Rule 4: measured, not estimated).
+                let fallback_tokens = if response.usage.total_tokens > 0 {
+                    response.usage.total_tokens
+                } else {
+                    prompt_tokens + crate::token_count::estimate_content_tokens(&content)
+                };
+                budget.settle(reservation, Some(&response.usage), fallback_tokens);
 
                 AgentResult {
                     agent_id,
@@ -440,6 +439,7 @@ impl MultiAgentChat {
                 }
             }
             Ok(Err(e)) => {
+                budget.settle(reservation, None, 0);
                 if let Some(ref tx) = event_tx {
                     let _ = tx.try_send(MultiAgentEvent::AgentFailed {
                         agent_id,
@@ -458,6 +458,7 @@ impl MultiAgentChat {
                 }
             }
             Err(_) => {
+                budget.settle(reservation, None, 0);
                 let error = "Request timed out".to_string();
                 if let Some(ref tx) = event_tx {
                     let _ = tx.try_send(MultiAgentEvent::AgentFailed {
@@ -611,6 +612,9 @@ struct BudgetTracker {
     actual_cost: f64,
     /// Pessimistic reservations held by in-flight calls.
     reserved_tokens: usize,
+    /// Set when `--max-cost-usd` is active and a completed call returns no
+    /// provider cost, preventing subsequent waves from bypassing the cost cap.
+    unmetered_cost: bool,
 }
 
 /// Per-run spend guard passed to every agent task.
@@ -646,6 +650,12 @@ impl BudgetGuard {
             }
         }
         if let Some(max) = self.limits.max_cost_usd {
+            if tracker.unmetered_cost {
+                return Err(format!(
+                    "skipped to stay within --max-cost-usd=${max}: \
+                     provider did not report usage cost"
+                ));
+            }
             if tracker.actual_cost >= max {
                 return Err(format!(
                     "skipped to stay within --max-cost-usd=${max}: \
@@ -660,13 +670,19 @@ impl BudgetGuard {
 
     /// Settle a finished (or abandoned) call: release its reservation and
     /// record actual provider-reported usage, when available.
-    fn settle(&self, reserved: usize, usage: Option<&Usage>) {
+    fn settle(&self, reserved: usize, usage: Option<&Usage>, fallback_tokens: usize) {
         let mut tracker = self.tracker.lock().unwrap();
         tracker.reserved_tokens = tracker.reserved_tokens.saturating_sub(reserved);
         if let Some(usage) = usage {
-            tracker.actual_tokens += usage.total_tokens;
+            tracker.actual_tokens += if usage.total_tokens > 0 {
+                usage.total_tokens
+            } else {
+                fallback_tokens
+            };
             if let Some(cost) = usage.cost {
                 tracker.actual_cost += cost;
+            } else if self.limits.max_cost_usd.is_some() {
+                tracker.unmetered_cost = true;
             }
         }
     }

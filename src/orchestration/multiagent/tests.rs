@@ -1006,3 +1006,40 @@ async fn test_run_task_timeout_records_failure() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_run_task_unmetered_cost_blocks_subsequent_calls() {
+    let server = MockLlmServer::builder().build().await;
+    let mut config = mock_fanout_config(format!("{}/v1", server.url()));
+    // MockLlmServer does not report `usage.cost`. With concurrency=1, the first
+    // agent completes with `usage.cost == None`, and subsequent agents must be
+    // skipped rather than running unboundedly under `--max-cost-usd`.
+    config.agent.max_cost_usd = Some(1.0);
+    let agent_config = MultiAgentConfig::default().with_concurrency(1);
+    let chat = MultiAgentChat::new(&config, agent_config).unwrap();
+
+    let results = chat.run_task("say hi").await.unwrap();
+
+    assert_eq!(results.len(), 4);
+    let successes: Vec<_> = results.iter().filter(|r| r.success).collect();
+    let skipped: Vec<_> = results.iter().filter(|r| !r.success).collect();
+    assert_eq!(
+        successes.len(),
+        1,
+        "only first wave may run without cost reporting"
+    );
+    assert_eq!(skipped.len(), 3, "subsequent agents must be skipped");
+    for s in skipped {
+        let err = s.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("--max-cost-usd") && err.contains("provider did not report usage cost"),
+            "unexpected skip error: {err}"
+        );
+    }
+
+    server.stop().await;
+}

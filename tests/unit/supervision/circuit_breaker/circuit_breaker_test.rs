@@ -269,3 +269,50 @@ async fn test_classifier_transient_failures_open_circuit() {
 
     assert_eq!(cb.current_state(), CircuitState::Open);
 }
+
+#[tokio::test]
+async fn test_half_open_cancelled_future_releases_slot_and_late_open_success_ignored() {
+    let cb = CircuitBreaker::new(CircuitBreakerConfig {
+        failure_threshold: 2,
+        success_threshold: 2,
+        reset_timeout: Duration::from_millis(40),
+        half_open_max_requests: 1,
+    });
+
+    // Trip the breaker
+    for _ in 0..2 {
+        let _: Result<i32, _> = cb
+            .call(|| async { Err::<i32, String>("fail".into()) })
+            .await;
+    }
+    assert_eq!(cb.current_state(), CircuitState::Open);
+
+    // A late success while Open must not pre-populate success_count for HalfOpen
+    cb.on_success().await;
+    assert_eq!(cb.metrics().success_count, 0);
+
+    // Wait for reset timeout so next call enters HalfOpen
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Start a slow HalfOpen call and cancel (drop) it mid-flight
+    let timed_out = tokio::time::timeout(
+        Duration::from_millis(15),
+        cb.call(|| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<i32, String>(1)
+        }),
+    )
+    .await;
+    assert!(timed_out.is_err(), "call should time out and drop future");
+    assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+    // Because HalfOpenSlotGuard released the slot on drop, a subsequent call must succeed
+    let first: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(1) }).await;
+    assert!(first.is_ok());
+    // Still HalfOpen after 1 real success (late Open success was ignored, threshold is 2)
+    assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+    let second: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(2) }).await;
+    assert!(second.is_ok());
+    assert_eq!(cb.current_state(), CircuitState::Closed);
+}

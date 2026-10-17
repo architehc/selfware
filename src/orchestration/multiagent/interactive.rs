@@ -341,6 +341,9 @@ impl MultiAgentChat {
                     "devops" => Some(AgentRole::DevOps),
                     "security" => Some(AgentRole::Security),
                     "performance" => Some(AgentRole::Performance),
+                    "visual_critic" | "visual-critic" | "visualcritic" => {
+                        Some(AgentRole::VisualCritic)
+                    }
                     "general" => Some(AgentRole::General),
                     _ => None,
                 };
@@ -357,7 +360,7 @@ impl MultiAgentChat {
                     });
                     println!("Added Agent-{}-{}", id, role.name());
                 } else {
-                    println!("Unknown role. Available: architect, coder, tester, reviewer, documenter, devops, security, performance, general");
+                    println!("Unknown role. Available: architect, coder, tester, reviewer, documenter, devops, security, performance, visual_critic, general");
                 }
                 continue;
             }

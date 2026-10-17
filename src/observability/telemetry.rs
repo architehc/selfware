@@ -421,19 +421,19 @@ pub fn record_workflow_llm_call(
         "model" => model.to_string()
     );
     metrics::counter!(
-        "selfware_workflow_prompt_tokens_total",
+        "selfware_workflow_llm_prompt_tokens_total",
         prompt_tokens,
         "workflow" => workflow_name.to_string(),
         "model" => model.to_string()
     );
     metrics::counter!(
-        "selfware_workflow_completion_tokens_total",
+        "selfware_workflow_llm_completion_tokens_total",
         completion_tokens,
         "workflow" => workflow_name.to_string(),
         "model" => model.to_string()
     );
     metrics::counter!(
-        "selfware_workflow_total_tokens_total",
+        "selfware_workflow_llm_total_tokens_total",
         total_tokens,
         "workflow" => workflow_name.to_string(),
         "model" => model.to_string()

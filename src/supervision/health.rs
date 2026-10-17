@@ -78,13 +78,54 @@ fn set_last_heartbeat_ms_for_test(ms: u64) {
     LAST_HEARTBEAT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub async fn handle_health_connection(mut stream: tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Drain up to 4 KiB of incoming HTTP request headers (until `\r\n\r\n` or
+    // EOF) within a short timeout so closing the socket after writing the
+    // response does not trigger a TCP RST when unread request bytes remain in
+    // the kernel receive buffer.
+    let mut buf = [0u8; 1024];
+    let mut read_total = 0usize;
+    let mut tail = Vec::with_capacity(64);
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        while read_total < 4096 {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    read_total += n;
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.windows(4).any(|w| w == b"\r\n\r\n")
+                        || tail.windows(2).any(|w| w == b"\n\n")
+                    {
+                        break;
+                    }
+                    if tail.len() > 8 {
+                        let keep_from = tail.len() - 4;
+                        tail.drain(..keep_from);
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let healthy = GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed) && heartbeat_healthy();
+    let response = if healthy {
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 8\r\n\r\nhealthy\n"
+    } else {
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 10\r\n\r\nunhealthy\n"
+    };
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
 /// Start a minimal HTTP health endpoint on the given port.
 ///
 /// Returns **200** with body `healthy\n` when the supervised component is
 /// healthy, or **503** with body `unhealthy\n` when it is not.  This is
 /// designed for Docker HEALTHCHECK and Kubernetes liveness probes.
 pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     let addr = format!("127.0.0.1:{}", port);
@@ -92,16 +133,8 @@ pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
     tracing::info!("Health endpoint listening on {}", addr);
 
     loop {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let healthy =
-                GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed) && heartbeat_healthy();
-            let response = if healthy {
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nhealthy\n"
-            } else {
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nunhealthy\n"
-            };
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.shutdown().await;
+        if let Ok((stream, _)) = listener.accept().await {
+            handle_health_connection(stream).await;
         }
     }
 }

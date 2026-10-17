@@ -67,10 +67,12 @@ pub fn create_solid_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
 
 /// Render a text block as a simple monochrome PNG (white text on black).
 ///
-/// Each character is represented as a 6x10 pixel block.
+/// Each character is rendered using a deterministic 5x7 bitmap glyph scaled to
+/// `(char_width, char_height)` so distinct characters produce distinct pixel
+/// patterns suitable for VLM visual benchmarks.
 pub fn text_to_png(text: &str, char_width: u32, char_height: u32) -> Vec<u8> {
     let lines: Vec<&str> = text.lines().collect();
-    let max_cols = lines.iter().map(|l| l.len()).max().unwrap_or(0) as u32;
+    let max_cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u32;
     let num_rows = lines.len() as u32;
 
     let width = max_cols * char_width;
@@ -80,25 +82,38 @@ pub fn text_to_png(text: &str, char_width: u32, char_height: u32) -> Vec<u8> {
         return create_solid_png(1, 1, [0, 0, 0, 255]);
     }
 
-    // Simple rendering: non-space chars become white pixels in their cell
     let mut pixels = vec![0u8; (width * height * 4) as usize];
+    for px in pixels.chunks_exact_mut(4) {
+        px[3] = 255; // Opaque black background
+    }
+
+    let inner_w = char_width.saturating_sub(1).max(1);
+    let inner_h = char_height.saturating_sub(2).max(1);
+    let pad_y = if char_height >= 3 { 1 } else { 0 };
 
     for (row, line) in lines.iter().enumerate() {
         for (col, ch) in line.chars().enumerate() {
-            if ch != ' ' {
-                let base_x = col as u32 * char_width;
-                let base_y = row as u32 * char_height;
-                // Fill the character cell with white
-                for dy in 1..char_height.saturating_sub(1) {
-                    for dx in 1..char_width.saturating_sub(1) {
+            if ch == ' ' {
+                continue;
+            }
+            let glyph = glyph_5x7(ch);
+            let base_x = col as u32 * char_width;
+            let base_y = row as u32 * char_height + pad_y;
+
+            for dy in 0..inner_h {
+                let gy = ((dy * 7) / inner_h).min(6) as usize;
+                let row_bits = glyph[gy];
+                for dx in 0..inner_w {
+                    let gx = ((dx * 5) / inner_w).min(4);
+                    if (row_bits >> (4 - gx)) & 1 == 1 {
                         let px = base_x + dx;
                         let py = base_y + dy;
                         if px < width && py < height {
                             let idx = ((py * width + px) * 4) as usize;
-                            pixels[idx] = 255; // R
-                            pixels[idx + 1] = 255; // G
-                            pixels[idx + 2] = 255; // B
-                            pixels[idx + 3] = 255; // A
+                            pixels[idx] = 255;
+                            pixels[idx + 1] = 255;
+                            pixels[idx + 2] = 255;
+                            pixels[idx + 3] = 255;
                         }
                     }
                 }
@@ -107,6 +122,188 @@ pub fn text_to_png(text: &str, char_width: u32, char_height: u32) -> Vec<u8> {
     }
 
     encode_rgba_png(width, height, &pixels)
+}
+
+/// Deterministic 5x7 bitmap glyph (each byte holds 5 bits in positions 4..=0).
+fn glyph_5x7(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+        ],
+        'D' => [
+            0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' | '0' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' | '5' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' | '2' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b10010, 0b10010, 0b10010, 0b11111, 0b00010, 0b00010, 0b00010,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        '-' | '─' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '|' | '│' => [
+            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        '┌' => [
+            0b00000, 0b00000, 0b00000, 0b00111, 0b00100, 0b00100, 0b00100,
+        ],
+        '┐' => [
+            0b00000, 0b00000, 0b00000, 0b11100, 0b00100, 0b00100, 0b00100,
+        ],
+        '└' => [
+            0b00100, 0b00100, 0b00100, 0b00111, 0b00000, 0b00000, 0b00000,
+        ],
+        '┘' => [
+            0b00100, 0b00100, 0b00100, 0b11100, 0b00000, 0b00000, 0b00000,
+        ],
+        '├' => [
+            0b00100, 0b00100, 0b00100, 0b00111, 0b00100, 0b00100, 0b00100,
+        ],
+        '┤' => [
+            0b00100, 0b00100, 0b00100, 0b11100, 0b00100, 0b00100, 0b00100,
+        ],
+        '┬' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00100, 0b00100, 0b00100,
+        ],
+        '┴' => [
+            0b00100, 0b00100, 0b00100, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '+' | '┼' => [
+            0b00100, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00100,
+        ],
+        '█' => [
+            0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111,
+        ],
+        '░' => [
+            0b10101, 0b01010, 0b10101, 0b01010, 0b10101, 0b01010, 0b10101,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100,
+        ],
+        ':' => [
+            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+        ],
+        '/' => [
+            0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000,
+        ],
+        '[' => [
+            0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110,
+        ],
+        ']' => [
+            0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110,
+        ],
+        '✓' => [
+            0b00000, 0b00001, 0b00010, 0b10100, 0b01000, 0b00000, 0b00000,
+        ],
+        '✗' => [
+            0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b00000, 0b00000,
+        ],
+        '●' | '•' => [
+            0b00000, 0b01110, 0b11111, 0b11111, 0b01110, 0b00000, 0b00000,
+        ],
+        '⚠' | '!' => [
+            0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100, 0b00000,
+        ],
+        other => {
+            // Deterministic hash-derived glyph for any other character so distinct
+            // codepoints still render distinct patterns.
+            let mut rows = [0u8; 7];
+            let code = other as u32;
+            for (i, row) in rows.iter_mut().enumerate() {
+                let mixed = code.wrapping_mul(31).wrapping_add((i as u32 + 1) * 17);
+                *row = ((mixed & 0b11111) as u8) | 0b00100;
+            }
+            rows
+        }
+    }
 }
 
 /// Encode raw RGBA pixel data as a PNG.

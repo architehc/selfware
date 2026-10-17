@@ -183,17 +183,40 @@ impl CircuitBreaker {
             CircuitState::Closed => {}
         }
 
+        // Guard the half-open slot so even if `operation().await` is cancelled
+        // (future dropped by a caller timeout or select!), the slot is released
+        // and cannot permanently wedge the circuit in HalfOpen.
+        struct HalfOpenSlotGuard<'a> {
+            cb: &'a CircuitBreaker,
+            active: bool,
+        }
+        impl Drop for HalfOpenSlotGuard<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = self.cb.half_open_requests.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |v| Some(v.saturating_sub(1)),
+                    );
+                }
+            }
+        }
+        let mut slot_guard = HalfOpenSlotGuard {
+            cb: self,
+            active: acquired_half_open_slot,
+        };
+
         // Execute operation
         match operation().await {
             Ok(result) => {
+                slot_guard.active = false;
                 self.on_success().await;
                 Ok(result)
             }
             Err(e) => {
                 if counts_toward_failure(&e) {
+                    slot_guard.active = false;
                     self.on_failure_with_reason(Some(format!("{e}"))).await;
-                } else if acquired_half_open_slot {
-                    self.half_open_requests.fetch_sub(1, Ordering::SeqCst);
                 }
                 Err(CircuitBreakerError::OperationFailed(e))
             }
@@ -202,26 +225,35 @@ impl CircuitBreaker {
 
     /// Handle successful operation
     pub async fn on_success(&self) {
-        let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
         if let Ok(mut guard) = self.last_failure_reason.write() {
             *guard = None;
         }
-        debug!(success_count = success_count, "Operation succeeded");
 
-        if self.current_state() == CircuitState::HalfOpen {
-            if success_count >= self.config.success_threshold {
-                info!("Circuit breaker closing after successful recovery");
-                self.transition_to(CircuitState::Closed).await;
-            } else {
-                let _ =
-                    self.half_open_requests
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                            Some(v.saturating_sub(1))
-                        });
+        match self.current_state() {
+            CircuitState::HalfOpen => {
+                let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
+                debug!(success_count = success_count, "Operation succeeded");
+                if success_count >= self.config.success_threshold {
+                    info!("Circuit breaker closing after successful recovery");
+                    self.transition_to(CircuitState::Closed).await;
+                } else {
+                    let _ = self.half_open_requests.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |v| Some(v.saturating_sub(1)),
+                    );
+                }
             }
-        } else {
-            // Reset failure count in closed state
-            self.failure_count.store(0, Ordering::SeqCst);
+            CircuitState::Closed => {
+                let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
+                debug!(success_count = success_count, "Operation succeeded");
+                // Reset failure count in closed state
+                self.failure_count.store(0, Ordering::SeqCst);
+            }
+            CircuitState::Open => {
+                // Ignore late completions from before the circuit opened so
+                // they do not pre-populate `success_count` for HalfOpen.
+            }
         }
     }
 

@@ -81,3 +81,18 @@ fn test_deflate_compress_decompresses_to_original() {
     assert_eq!(compressed[0], 0x78); // zlib header
     assert!(compressed.len() > data.len()); // stored blocks are larger
 }
+
+#[test]
+fn test_text_to_png_distinct_glyphs_produce_distinct_images() {
+    let png_a = text_to_png("AAAA\nBBBB", 6, 10);
+    let png_b = text_to_png("1234\n5678", 6, 10);
+    let png_box = text_to_png("┌──┐\n└──┘", 6, 10);
+    assert_ne!(
+        png_a, png_b,
+        "distinct alphanumeric strings must render distinct PNG bitmaps"
+    );
+    assert_ne!(
+        png_a, png_box,
+        "box-drawing glyphs must render distinct PNG bitmaps"
+    );
+}
