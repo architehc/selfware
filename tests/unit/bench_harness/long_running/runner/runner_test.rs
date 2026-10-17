@@ -46,3 +46,28 @@ fn go_test_counts_per_test_lines() {
     let out = "--- PASS: TestA (0.00s)\n--- FAIL: TestB (0.00s)\n--- PASS: TestC (0.00s)\n";
     assert_eq!(parse_test_counts(&ProjectType::Go, out), (2, 1));
 }
+
+#[test]
+fn check_output_succeeded_requires_zero_exit_and_accepts_stderr_finished() {
+    // Cargo writes "Finished `dev` profile ..." to stderr, not stdout.
+    assert!(check_output_succeeded(
+        &ProjectType::Rust,
+        true,
+        "",
+        "    Checking foo v0.1.0\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s\n"
+    ));
+    assert!(check_output_succeeded(
+        &ProjectType::Template,
+        true,
+        "",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s\n"
+    ));
+    // Non-zero exit must never be reported as compiling even when stderr lacks "error".
+    assert!(!check_output_succeeded(
+        &ProjectType::Rust,
+        false,
+        "",
+        "Killed by signal 9\n"
+    ));
+    assert!(!check_output_succeeded(&ProjectType::Go, false, "", ""));
+}

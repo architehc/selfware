@@ -1,5 +1,6 @@
 //! Project types and scaffolding for long-running tests.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -88,16 +89,19 @@ edition = "2021"
 
     // Initialize git
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["init", "-q"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["add", "-A"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["commit", "-q", "-m", "init"])
         .current_dir(dir)
         .output();
@@ -111,6 +115,7 @@ pub fn scaffold_python(dir: &Path) -> std::io::Result<()> {
 
     // Initialize git
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["init", "-q"])
         .current_dir(dir)
         .output();
@@ -134,16 +139,19 @@ go 1.21
 
     // Initialize git
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["init", "-q"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["add", "-A"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["commit", "-q", "-m", "init"])
         .current_dir(dir)
         .output();
@@ -171,16 +179,19 @@ pub fn scaffold_template(template: &str, templates_dir: &Path, dir: &Path) -> st
 
     // Initialize git
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["init", "-q"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["add", "-A"])
         .current_dir(dir)
         .output();
 
     let _ = Command::new("git")
+        .sanitized_env()
         .args(["commit", "-q", "-m", "init"])
         .current_dir(dir)
         .output();

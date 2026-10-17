@@ -745,6 +745,40 @@ async fn spawned_server_is_a_session_owned_resource_released_on_kill() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn drop_keeps_resource_registered_when_child_lock_is_busy() {
+    use crate::resources::ResourceRegistry;
+    let dir = tempfile::tempdir().unwrap();
+    let conn = LspServerConnection::spawn(
+        "sh",
+        &["-c".to_string(), "sleep 30".to_string()],
+        dir.path(),
+        Language::Rust,
+    )
+    .await
+    .expect("spawn sh");
+    let id = conn.resource_id.clone().expect("registered");
+    let child_arc = Arc::clone(&conn.child);
+    let mut guard = child_arc.lock().await;
+    drop(conn);
+
+    // Since Drop could not lock and reap the child, the ResourceRegistry entry
+    // must remain unreleased so session teardown can reap it.
+    assert!(
+        !ResourceRegistry::global()
+            .get(&id)
+            .expect("entry")
+            .state
+            .is_released(),
+        "unreaped LSP child must remain active in ResourceRegistry on Drop"
+    );
+
+    let _ = guard.kill().await;
+    let _ = guard.wait().await;
+    ResourceRegistry::global().release(&id, "test cleanup");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn kill_now_stops_language_server_descendants() {
     use crate::resources::driver::{probe_pid, process_start_time};
     use crate::resources::Probe;

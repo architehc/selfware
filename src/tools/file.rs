@@ -53,7 +53,7 @@ pub(crate) fn reset_safety_config_for_tests() {
 }
 
 /// Maximum file size for reads (50 MB) to prevent OOM from accidentally reading huge files.
-const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
 /// Maximum file size (10 MB) the content-scanning tools load whole through
 /// [`read_to_string_capped`]: symbol_search, code_metrics, the built-in
 /// grep_search walker, code_map, code_introspect/code_query/code_plan,
@@ -150,9 +150,9 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     let metadata = std::fs::metadata(&key)
         .or_else(|_| std::fs::metadata(path))
         .ok()?;
-    if !metadata.is_file() {
-        // A FIFO/device swapped in after the read would hang or stream
-        // forever below; a changed file type is a change.
+    if !metadata.is_file() || metadata.len() > MAX_READ_SIZE {
+        // A FIFO/device swapped in after the read, or a file grown past the
+        // read cap, must not be loaded into memory below.
         return Some(true);
     }
     let current_mtime = metadata
@@ -215,17 +215,28 @@ pub(crate) fn open_checked_regular_with_path(
 }
 
 /// Read all bytes from an already-checked handle, refusing anything larger
-/// than `limit` (checked against the descriptor's own size, not the path's).
+/// than `limit` (checked against the descriptor's own size and bounded while
+/// reading so a file growing mid-read cannot exceed `limit`).
 fn read_checked_handle(mut file: std::fs::File, limit: Option<u64>) -> Result<(String, Vec<u8>)> {
     use std::io::Read;
+    let mut bytes = Vec::new();
     if let Some(limit) = limit {
         let size = file.metadata()?.len();
         if size > limit {
             return Err(ToolError::FileTooLarge { size, limit }.into());
         }
+        file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+        let read_size = bytes.len() as u64;
+        if read_size > limit {
+            return Err(ToolError::FileTooLarge {
+                size: read_size,
+                limit,
+            }
+            .into());
+        }
+    } else {
+        file.read_to_end(&mut bytes)?;
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     Ok((text, bytes))
 }
@@ -636,7 +647,7 @@ impl Tool for FileWrite {
         // says the prefixes are real content.
         if !args.allow_numbered_lines && is_numbered_text(&args.content) {
             let existing_is_numbered = if path.exists() {
-                read_file_checked(&args.path, &safety, None)
+                read_file_checked(&args.path, &safety, Some(MAX_READ_SIZE))
                     .await
                     .map(|(text, _)| is_numbered_text(&text))
                     .unwrap_or(false)
@@ -683,7 +694,7 @@ impl Tool for FileWrite {
         // does exist is read through the descriptor-checked path, which
         // also refuses FIFOs/devices/directories instead of blocking on them.
         let existing = if path.exists() {
-            Some(read_file_checked(&args.path, &safety, None).await?)
+            Some(read_file_checked(&args.path, &safety, Some(MAX_READ_SIZE)).await?)
         } else {
             None
         };
@@ -779,7 +790,8 @@ impl Tool for FileEdit {
             .into());
         }
 
-        let (content, original_bytes) = read_file_checked(&args.path, &safety, None).await?;
+        let (content, original_bytes) =
+            read_file_checked(&args.path, &safety, Some(MAX_READ_SIZE)).await?;
         ensure_valid_utf8(&original_bytes, &args.path, "file_edit")?;
         let line_ending = detect_line_ending(&content);
 
@@ -1027,7 +1039,8 @@ impl Tool for FileMultiEdit {
         let mut file_line_endings: HashMap<String, &'static str> = HashMap::new();
 
         for (path, edits) in edits_by_file.iter_mut() {
-            let (content, original_bytes) = read_file_checked(path, &safety, None).await?;
+            let (content, original_bytes) =
+                read_file_checked(path, &safety, Some(MAX_READ_SIZE)).await?;
             ensure_valid_utf8(&original_bytes, path, "file_multi_edit")?;
             file_line_endings.insert(path.clone(), detect_line_ending(&content));
 
@@ -1707,6 +1720,7 @@ pub(crate) fn denumber_edit(content: &str, old: &str, new: &str) -> Option<(Stri
 ///
 /// No policy re-check: for callers outside this module that validated with
 /// their own config. File tools use [`write_atomic_checked`].
+#[allow(dead_code)]
 pub(crate) async fn write_atomic(path: &Path, content: &str) -> Result<()> {
     write_all_atomic(&[(path.to_path_buf(), content.to_string())]).await
 }
@@ -1730,6 +1744,7 @@ pub(crate) async fn write_atomic_checked(
 /// On Unix all I/O is fd-relative to the pinned parent directory (see
 /// [`write_all_atomic_checked`]); without a config, the directory's location
 /// is not re-validated.
+#[allow(dead_code)]
 pub(crate) async fn write_all_atomic(files: &[(PathBuf, String)]) -> Result<()> {
     let files_owned: Vec<(PathBuf, String)> = files.to_vec();
     crate::tools::workspace_root::spawn_blocking(move || write_all_blocking(&files_owned, None))

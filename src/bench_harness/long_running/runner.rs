@@ -201,23 +201,17 @@ impl LongRunningRunner {
             return false;
         }
 
-        let output = Command::new(cmd_parts[0])
-            .args(&cmd_parts[1..])
+        let mut cmd = Command::new(cmd_parts[0]);
+        apply_env_allowlist(&mut cmd);
+        cmd.args(&cmd_parts[1..])
             .current_dir(work_dir)
-            .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware")
-            .output();
+            .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware");
 
-        match output {
+        match cmd.output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-
-                match project_type {
-                    ProjectType::Rust => stdout.contains("Finished") || !stderr.contains("error"),
-                    ProjectType::Python => output.status.success(),
-                    ProjectType::Go => stdout.contains("ok") || !stderr.contains("build failed"),
-                    ProjectType::Template => stdout.contains("Finished"),
-                }
+                check_output_succeeded(project_type, output.status.success(), &stdout, &stderr)
             }
             Err(_) => false,
         }
@@ -230,13 +224,13 @@ impl LongRunningRunner {
             return (0, 0);
         }
 
-        let output = Command::new(cmd_parts[0])
-            .args(&cmd_parts[1..])
+        let mut cmd = Command::new(cmd_parts[0]);
+        apply_env_allowlist(&mut cmd);
+        cmd.args(&cmd_parts[1..])
             .current_dir(work_dir)
-            .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware")
-            .output();
+            .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware");
 
-        match output {
+        match cmd.output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -298,6 +292,31 @@ impl LongRunningRunner {
     }
 }
 
+/// Evaluate whether a compile/check command succeeded.
+///
+/// Requires a zero exit status (`status_success == true`); Cargo writes its
+/// `Finished` banner to `stderr`, not `stdout`, and a non-zero exit must never
+/// be reported as compiling simply because `stderr` lacked the word `"error"`.
+pub(crate) fn check_output_succeeded(
+    project_type: &ProjectType,
+    status_success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> bool {
+    if !status_success {
+        return false;
+    }
+    match project_type {
+        ProjectType::Rust | ProjectType::Template => {
+            stdout.contains("Finished")
+                || stderr.contains("Finished")
+                || (!stderr.contains("error[") && !stderr.contains("error:"))
+        }
+        ProjectType::Python => true,
+        ProjectType::Go => !stderr.contains("build failed"),
+    }
+}
+
 /// Find the selfware binary.
 fn find_selfware_binary() -> Result<PathBuf, String> {
     // Check common locations
@@ -316,7 +335,9 @@ fn find_selfware_binary() -> Result<PathBuf, String> {
     }
 
     // Try which
-    if let Ok(output) = Command::new("which").arg("selfware").output() {
+    let mut cmd = Command::new("which");
+    apply_env_allowlist(&mut cmd);
+    if let Ok(output) = cmd.arg("selfware").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {

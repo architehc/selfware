@@ -1,6 +1,6 @@
 //! Shell execution tool - runs shell commands with timeout and safety checks.
 
-use crate::tools::file::{is_file_stale, write_atomic};
+use crate::tools::file::is_file_stale;
 use crate::tools::Tool;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -191,7 +191,12 @@ async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Re
         );
     }
 
-    let (content, _) = crate::tools::file::read_file_checked(file, &safety, None).await?;
+    let (content, _) = crate::tools::file::read_file_checked(
+        file,
+        &safety,
+        Some(crate::tools::file::MAX_READ_SIZE),
+    )
+    .await?;
 
     let (new_content, replacements) = if sub.global {
         let count = content.matches(&sub.old_str).count();
@@ -230,10 +235,15 @@ async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Re
                 crate::tools::file::validate_tool_path(&backup_path, &safety)
                     .map_err(|e| anyhow::anyhow!("sed backup path validation failed: {}", e))?;
                 check_write(&backup_path, &content)?;
-                write_atomic(Path::new(&backup_path), &content).await?;
+                crate::tools::file::write_atomic_checked(
+                    Path::new(&backup_path),
+                    &content,
+                    &safety,
+                )
+                .await?;
             }
         }
-        write_atomic(Path::new(file), &new_content).await?;
+        crate::tools::file::write_atomic_checked(Path::new(file), &new_content, &safety).await?;
         crate::tools::file::clear_file_snapshot(file);
     }
     // A no-match substitution is NOT an error: real sed exits 0 and leaves the

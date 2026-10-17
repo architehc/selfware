@@ -195,7 +195,8 @@ impl Tool for FileFimEdit {
             ));
         }
 
-        let (content, _) = read_file_checked(path, &safety, None).await?;
+        let (content, _) =
+            read_file_checked(path, &safety, Some(crate::tools::file::MAX_READ_SIZE)).await?;
         let line_ending = detect_line_ending(&content);
         let lines: Vec<&str> = content.lines().collect();
 

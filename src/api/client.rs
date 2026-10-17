@@ -2970,13 +2970,14 @@ impl ApiClient {
                 }
                 .into());
             }
-            if apply_reasoning_step_down(&mut body, &profile.model).is_none() {
+            let Some(step_down) = apply_reasoning_step_down(&mut body, &profile.model) else {
                 return Err(ApiError::ReasoningBudgetExhausted {
                     reasoning_chars,
                     retry: None,
                 }
                 .into());
-            }
+            };
+            let step_desc = step_down.describe();
             let discarded = response.usage.clone();
             response = self
                 .send_request_with_retry(
@@ -2990,9 +2991,7 @@ impl ApiClient {
             if let Some(reasoning_chars) = reasoning_budget_exhausted(&response) {
                 return Err(ApiError::ReasoningBudgetExhausted {
                     reasoning_chars,
-                    retry: Some(
-                        "retried once with reasoning_effort=low, also exhausted".to_string(),
-                    ),
+                    retry: Some(format!("retried once with {step_desc}, also exhausted")),
                 }
                 .into());
             }

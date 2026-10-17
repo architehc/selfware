@@ -2408,3 +2408,31 @@ fn read_to_string_capped_refuses_files_over_the_limit() {
     );
     assert!(read_to_string_capped(&small, 4).is_err());
 }
+
+#[test]
+fn read_checked_handle_and_stale_guard_enforce_size_caps() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("tracked.txt");
+    fs::write(&path, "hello world\n").unwrap();
+    let path_str = path.to_str().unwrap();
+
+    record_file_snapshot(path_str, "hello world\n");
+    assert_eq!(is_file_stale(path_str), Some(false));
+
+    let handle = fs::File::open(&path).unwrap();
+    let err = read_checked_handle(handle, Some(4)).unwrap_err();
+    assert!(
+        err.to_string().contains("File too large to read"),
+        "unexpected error: {err}"
+    );
+
+    // Growing the file past MAX_READ_SIZE marks it stale without reading 50MB+ into memory.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_READ_SIZE + 1)
+        .unwrap();
+    assert_eq!(is_file_stale(path_str), Some(true));
+    clear_file_snapshot(path_str);
+}
