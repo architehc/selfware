@@ -27,21 +27,21 @@ class TestPhiCompanion(unittest.TestCase):
     def test_list_models(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({
-            "data": [{"id": "qwen38-flash-next", "max_model_len": 1000000}]
+            "data": [{"id": "deepseek-v4.1-flash", "max_model_len": 262144}]
         }).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
         models = pc.list_models("https://mock.endpoint/v1")
         self.assertEqual(len(models), 1)
-        self.assertEqual(models[0]["id"], "qwen38-flash-next")
-        self.assertEqual(models[0]["max_model_len"], 1000000)
+        self.assertEqual(models[0]["id"], "deepseek-v4.1-flash")
+        self.assertEqual(models[0]["max_model_len"], 262144)
 
     @patch("urllib.request.urlopen")
     def test_generate_companion_quip(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({
-            "model": "qwen38-flash-next",
+            "model": "deepseek-v4.1-flash",
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -56,7 +56,7 @@ class TestPhiCompanion(unittest.TestCase):
 
         res = pc.generate_companion_quip(
             "https://mock.endpoint/v1",
-            "qwen38-flash-next",
+            "deepseek-v4.1-flash",
             "phantom_api"
         )
         self.assertEqual(res["scenario"], "phantom_api")

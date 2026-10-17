@@ -633,7 +633,7 @@ fn config_show_prints_the_scaled_call_cap_with_its_provenance() {
     // a larger user max_tokens scales it.
     std::fs::write(
         &cfg_path,
-        "model = \"qwen38-flash-next\"\nmax_tokens = 65536\n",
+        "endpoint = \"http://localhost:8000/v1\"\nmodel = \"qwen38-flash-next\"\nmax_tokens = 65536\n",
     )
     .unwrap();
     let cfg = Config::load(Some(cfg_path.to_str().unwrap())).unwrap();

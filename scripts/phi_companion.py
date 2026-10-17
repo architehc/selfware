@@ -2,7 +2,7 @@
 """phi_companion.py — Run Phi Cognitive Companion against live LLM endpoints.
 
 Queries sovereign endpoints (default: https://llm.selfware.design/v1) using
-the 1M-context reasoning model `qwen38-flash-next` to generate sharp, peer-level
+the reasoning model `deepseek-v4.1-flash` to generate sharp, peer-level
 empathetic developer interventions for:
   1. Phantom API & Hallucination Trap
   2. Circular Agent Spin (Regression Loops)

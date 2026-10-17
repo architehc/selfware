@@ -37,6 +37,7 @@ pub use api_key::{
 };
 pub use auto_config::*;
 pub use debug::DebugConfig;
+pub(crate) use loader::normalize_legacy_model_override;
 pub use model::*;
 pub use model_profiles::{
     apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile, AppliedFields,

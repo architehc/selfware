@@ -1325,6 +1325,11 @@ impl Agent {
         // clean start while the telemetry disagreed.
         self.ledger_unattributed.clear();
         self.ledger_journal.clear();
+        let phi_policy = crate::phi::policy::PhiPolicy::from_env();
+        self.phi_presence = crate::phi::policy::PhiPresence::new(&phi_policy);
+        self.phi_mediator = crate::phi::policy::PhiMediator::new(phi_policy);
+        self.phi_capitulations = 0;
+        self.phi_last_mediation_turn = 0;
         self.clear_failed_tool_attempts();
         self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();

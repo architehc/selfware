@@ -1527,7 +1527,7 @@ bash system_tests/projecte2e/run_full_sab.sh
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SELFWARE_ENDPOINT` | LLM API endpoint | `http://localhost:8000/v1` (or configured endpoint) |
-| `SELFWARE_MODEL` | Model name | `qwen38-flash-next` |
+| `SELFWARE_MODEL` | Model name | `deepseek-v4.1-flash` |
 | `SELFWARE_API_KEY` | API key (if required) | None |
 | `SELFWARE_MAX_TOKENS` | Max tokens per response | `65536` |
 | `SELFWARE_TEMPERATURE` | Sampling temperature | `1.0` |

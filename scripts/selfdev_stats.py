@@ -84,6 +84,7 @@ def endpoint_of(job_dir: Path) -> str:
     model_labels = [
         ("z-ai/glm", "glm/openrouter"),
         ("google/gemini", "gemini/openrouter"),
+        ("deepseek-v4.1-flash", "flash/design"),
         ("qwen38-flash-next", "flash/design"),
         ("qwen38-unc", "unc/lan8000"),
         ("qwen38-next", "ablit/31000"),
@@ -346,7 +347,7 @@ def report(now: float) -> str:
         MODEL_LABELS = {
             "ablit/31000": "qwen38-unc-27B",
             "unc/lan8000": "qwen38-heretic",
-            "flash/design": "qwen38-flash-next",
+            "flash/design": "deepseek-v4.1-flash",
         }
         out.append("LIVE RATES (tok/s in/out by endpoint)")
         hdr2 = f"{'endpoint':<16}{'model':<20}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS) + f"  {'last':>9}" 

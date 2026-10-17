@@ -950,6 +950,14 @@ pub struct Agent {
     /// Everything observed that the ledger cannot itself represent: commands
     /// run, their outcomes, and uncertainty about what they touched.
     pub(crate) ledger_journal: Vec<crate::phi::observer::ObservationRecord>,
+    /// Policy-driven Fox Digital Twin mediator for outbound loop constraints and inbound annotations.
+    pub(crate) phi_mediator: crate::phi::policy::PhiMediator,
+    /// Attention-economy router for Fox Digital Twin posture and Steward proposals.
+    pub(crate) phi_presence: crate::phi::policy::PhiPresence,
+    /// Count of unsourced sycophantic reversals observed in the active task.
+    pub(crate) phi_capitulations: usize,
+    /// Last turn index on which Phi outbound mediation injected loop constraints.
+    pub(crate) phi_last_mediation_turn: usize,
     client: ApiClient,
     tools: ToolRegistry,
     memory: AgentMemory,
@@ -2076,12 +2084,19 @@ To call a tool, use this EXACT XML structure:
         #[cfg(feature = "resilience")]
         let credential_origin_endpoint = config.endpoint.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let initial_phi_policy = crate::phi::policy::PhiPolicy::from_env();
+        let phi_presence = crate::phi::policy::PhiPresence::new(&initial_phi_policy);
+        let phi_mediator = crate::phi::policy::PhiMediator::new(initial_phi_policy);
         let agent = Self {
             phi_activity,
             phi_activity_terminal_task: None,
             evidence_ledger: crate::phi::ledger::Ledger::new(),
             ledger_unattributed: Vec::new(),
             ledger_journal: Vec::new(),
+            phi_mediator,
+            phi_presence,
+            phi_capitulations: 0,
+            phi_last_mediation_turn: 0,
             client,
             tools,
             memory,

@@ -96,6 +96,9 @@ assert.throws(()=>parseActivity(capture([row('a',{fox_posture:{emotion:'working'
 const pol=parsePolicy({mode:'advise',debt_gate_lines:250,bulk_generation_lines:500,capitulation_threshold:2,
   interrupt_budget:3,steward_quiet_ms:12000,quiet_after_activity_ms:4000,glance_cooldown_ms:45000});
 assert.equal(pol.mode,'advise');assert.equal(pol.debt_gate_lines,250);
+const rustPol=parsePolicy({mode:'observe_only',debt_gate_lines:160,scope_line_limit:400,capitulation_threshold:2,
+  interrupt_budget:3,steward_quiet_ms:12000,quiet_after_activity_ms:4000,glance_cooldown_ms:45000});
+assert.equal(rustPol.mode,'observe');assert.equal(rustPol.bulk_generation_lines,400);
 assert.throws(()=>parsePolicy({mode:'invalid',debt_gate_lines:250,bulk_generation_lines:500,capitulation_threshold:2,
   interrupt_budget:3,steward_quiet_ms:12000,quiet_after_activity_ms:4000,glance_cooldown_ms:45000}));
 """)

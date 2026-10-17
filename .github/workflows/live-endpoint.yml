@@ -34,7 +34,7 @@ env:
 
 jobs:
   live:
-    name: Live endpoint (qwen38-flash-next)
+    name: Live endpoint (deepseek-v4.1-flash)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -59,7 +59,7 @@ jobs:
       - name: System tests against the endpoint
         env:
           SELFWARE_TEST_ENDPOINT: ${{ env.SELFWARE_ENDPOINT }}
-          SELFWARE_TEST_MODEL: qwen38-flash-next
+          SELFWARE_TEST_MODEL: deepseek-v4.1-flash
           SELFWARE_API_KEY: EMPTY
           SELFWARE_REQUIRE_TEST_ENDPOINT: "1"
         run: cargo test --features system-tests --test e2e_system_test -- --nocapture

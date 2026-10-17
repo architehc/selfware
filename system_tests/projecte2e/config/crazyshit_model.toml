@@ -1,7 +1,7 @@
 # Selfware E2E Configuration for Remote Qwen3 Endpoint
 
 endpoint = "https://llm.selfware.design/v1"
-model = "qwen38-flash-next"
+model = "deepseek-v4.1-flash"
 max_tokens = 65536
 temperature = 0.2
 

@@ -3764,6 +3764,32 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
     assert!(kwargs.get("reasoning_effort").is_none());
 }
 
+#[test]
+fn test_llm_selfware_design_overrides_qwen38_flash_next_to_deepseek_v4() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://llm.selfware.design/v1"
+        model = "qwen38-flash-next"
+        "#,
+        "legacy_qwen38_override.toml",
+    );
+    let mut config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    assert_eq!(config.matched_profile.as_deref(), Some("deepseek-v4"));
+    assert_eq!(config.context_length, 262_144);
+    assert_eq!(config.max_tokens, 65_536);
+    assert_eq!(
+        config.resolve_model(None).unwrap().model,
+        "deepseek-v4.1-flash"
+    );
+
+    // CLI `--model qwen38-flash-next` against llm.selfware.design is also overridden.
+    config.apply_cli_model_override("qwen38-flash-next".to_string());
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    assert_eq!(config.matched_profile.as_deref(), Some("deepseek-v4"));
+}
+
 /// Classifier and redaction share one secret predicate: every value the
 /// classifier calls a credential is gone from the redacted JSON view that
 /// MCP clients / `config show` see.

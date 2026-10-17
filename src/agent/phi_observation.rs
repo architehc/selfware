@@ -146,37 +146,71 @@ impl Agent {
         if self.config.agent.disable_turn_artifacts {
             return;
         }
-        let (Some(capture), Some(checkpoint)) = (&self.phi_activity, &self.current_checkpoint)
-        else {
-            return;
-        };
-        let policy = crate::phi::policy::PhiPolicy::from_env();
-        let posture = crate::phi::policy::derive_fox_posture(
-            &self.evidence_ledger,
-            phase,
-            &policy,
-            crate::phi::policy::PresenceChannel::Ambient,
-        );
-        if policy.mode >= crate::phi::policy::PhiPolicyMode::Advise
-            && !matches!(phase, crate::phi::activity::ActivityPhase::Running)
-        {
+        if std::env::var("SELFWARE_PHI_MODE").is_ok() {
+            self.phi_mediator.policy.mode = crate::phi::policy::PhiPolicy::from_env().mode;
+        }
+        let policy = self.phi_mediator.policy.clone();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let is_running = matches!(phase, crate::phi::activity::ActivityPhase::Running);
+        self.phi_presence.set_busy(is_running);
+        if is_running {
+            self.phi_presence.note_activity(now_ms);
+        }
+
+        let mut channel = crate::phi::policy::PresenceChannel::Ambient;
+        if policy.mode >= crate::phi::policy::PhiPolicyMode::Advise && !is_running {
             let steward = crate::phi::policy::PhiSteward::new(policy.max_proposals);
             let proposals = steward.propose(&self.evidence_ledger, &self.ledger_journal);
+            if let Some(top) = proposals.first() {
+                let severity = match top.kind {
+                    crate::phi::policy::ProposalKind::Repair
+                    | crate::phi::policy::ProposalKind::Verify => {
+                        crate::phi::policy::SignalSeverity::High
+                    }
+                    crate::phi::policy::ProposalKind::Repay => {
+                        crate::phi::policy::SignalSeverity::Medium
+                    }
+                    _ => crate::phi::policy::SignalSeverity::Low,
+                };
+                channel = self.phi_presence.route(&top.id, severity, now_ms);
+            }
+            let posture = crate::phi::policy::derive_fox_posture(
+                &self.evidence_ledger,
+                phase,
+                &policy,
+                channel,
+            );
             tracing::debug!(
                 emotion = ?posture.emotion,
                 debt_ratio = posture.debt_ratio,
+                channel = ?posture.channel,
                 note = ?posture.note,
                 proposals = proposals.len(),
                 "phi fox posture and steward proposals updated"
             );
         } else {
+            let posture = crate::phi::policy::derive_fox_posture(
+                &self.evidence_ledger,
+                phase,
+                &policy,
+                channel,
+            );
             tracing::debug!(
                 emotion = ?posture.emotion,
                 debt_ratio = posture.debt_ratio,
+                channel = ?posture.channel,
                 note = ?posture.note,
                 "phi fox posture updated"
             );
         }
+
+        let (Some(capture), Some(checkpoint)) = (&self.phi_activity, &self.current_checkpoint)
+        else {
+            return;
+        };
         let mut evidence = self.evidence_snapshot();
         let truncated = evidence.observations.len() > 256 || evidence.unattributed.len() > 256;
         // Keep the earliest evidence too: a later success must not erase an
@@ -206,6 +240,84 @@ impl Agent {
                     };
             }
             Err(error) => tracing::warn!(%error, "Phi activity receipt could not be written"),
+        }
+    }
+
+    /// Evaluate inbound model response annotations (`Capitulation`, `UnsourcedClaim`,
+    /// `ScopeCreep`) and, when `SELFWARE_PHI_MODE=mediate` or `enforce`, inject
+    /// explicit `[Phi — loop constraints]` before the next turn.
+    pub(super) fn apply_phi_turn_mediation(&mut self, response_text: &str) {
+        if std::env::var("SELFWARE_PHI_MODE").is_ok() {
+            self.phi_mediator.policy.mode = crate::phi::policy::PhiPolicy::from_env().mode;
+        }
+        let policy = self.phi_mediator.policy.clone();
+
+        let after_pushback =
+            self.messages.iter().rev().take(4).any(|m| {
+                m.role == "user" && m.content.text().contains("<selfware_system_directive>")
+            });
+        let generated_lines = response_text.lines().count();
+        let annotations =
+            self.phi_mediator
+                .evaluate_inbound(response_text, after_pushback, generated_lines);
+        if annotations
+            .iter()
+            .any(|a| a.kind == crate::phi::policy::AnnotationKind::Capitulation)
+        {
+            self.phi_capitulations = self.phi_capitulations.saturating_add(1);
+        }
+        if policy.mode >= crate::phi::policy::PhiPolicyMode::Advise && !annotations.is_empty() {
+            tracing::info!(
+                annotations = ?annotations,
+                capitulations = self.phi_capitulations,
+                "phi inbound annotations recorded"
+            );
+        }
+
+        if policy.mode < crate::phi::policy::PhiPolicyMode::Mediate {
+            return;
+        }
+        let turn = self
+            .loop_control
+            .turns_run()
+            .max(self.loop_control.current_iteration())
+            .max(1);
+        if turn <= self.phi_last_mediation_turn {
+            return;
+        }
+        let mediation =
+            self.phi_mediator
+                .evaluate_outbound("", &self.evidence_ledger, self.phi_capitulations);
+        let mut lines: Vec<String> = mediation
+            .augmentations
+            .iter()
+            .map(|aug| format!("- ({:?}) {}: {}", aug.kind, aug.reason, aug.text))
+            .collect();
+        if policy.mode >= crate::phi::policy::PhiPolicyMode::Enforce {
+            if let Some(gate) = &mediation.gate {
+                lines.push(format!(
+                    "- (Gate {}) {}: {} Read and verify the modified files before generating further changes.",
+                    gate.id, gate.reason, gate.question
+                ));
+                self.phi_mediator.override_gate(&gate.id);
+            }
+        }
+        if !lines.is_empty() {
+            self.phi_last_mediation_turn = turn;
+            let directive = format!(
+                "<selfware_system_directive>\n\
+                 [Phi — loop constraints]\n\
+                 {}\n\
+                 </selfware_system_directive>",
+                lines.join("\n")
+            );
+            tracing::info!(
+                turn,
+                constraints = lines.len(),
+                "phi loop constraints injected"
+            );
+            self.messages
+                .push(crate::api::types::Message::user(directive));
         }
     }
 
@@ -242,6 +354,15 @@ impl Agent {
         ) else {
             return;
         };
+        let policy = crate::phi::policy::PhiPolicy::from_env();
+        let fox_posture = crate::phi::policy::derive_fox_posture(
+            &self.evidence_ledger,
+            crate::phi::activity::ActivityPhase::Running,
+            &policy,
+            crate::phi::policy::PresenceChannel::Ambient,
+        );
+        let steward_proposals = crate::phi::policy::PhiSteward::new(policy.max_proposals)
+            .propose(&self.evidence_ledger, &self.ledger_journal);
         let payload = serde_json::json!({
             "turn": self.loop_control.current_iteration(),
             "phase": "post_execution",
@@ -250,6 +371,9 @@ impl Agent {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
             "evidence": self.evidence_snapshot(),
+            "fox_posture": fox_posture,
+            "steward_proposals": steward_proposals,
+            "phi_capitulations": self.phi_capitulations,
         });
         // Appended as JSONL rather than written to a per-turn filename: the
         // iteration counter is not the artifact sequence, so a filename keyed
@@ -423,5 +547,46 @@ mod phi_observation_tests {
                  before it observes"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn phi_turn_mediation_records_capitulation_and_injects_loop_constraints() {
+        let root = tempfile::tempdir().unwrap();
+        let mut agent = activity_agent(root.path()).await;
+        agent.phi_mediator.policy.mode = crate::phi::policy::PhiPolicyMode::Enforce;
+        agent.phi_mediator.policy.unreviewed_evidence_threshold = 2;
+        agent.phi_mediator.policy.debt_narrow_scope_lines = 40;
+        agent.phi_mediator.policy.debt_gate_lines = 80;
+        agent.phi_mediator.policy.capitulation_threshold = 1;
+
+        agent.evidence_ledger.record_change(
+            std::path::PathBuf::from("src/a.rs"),
+            Some(50),
+            1,
+            1000,
+        );
+        agent.evidence_ledger.record_change(
+            std::path::PathBuf::from("src/b.rs"),
+            Some(50),
+            1,
+            1001,
+        );
+        agent.messages.push(crate::api::types::Message::user(
+            "<selfware_system_directive>\nCheck your edits.\n</selfware_system_directive>"
+                .to_string(),
+        ));
+        agent.loop_control.record_turn();
+
+        let before_len = agent.messages.len();
+        agent.apply_phi_turn_mediation("You're absolutely right, my mistake — that should work.");
+        assert_eq!(agent.phi_capitulations, 1);
+        assert_eq!(agent.messages.len(), before_len + 1);
+        let injected = agent.messages.last().unwrap().content.text();
+        assert!(injected.contains("[Phi — loop constraints]"));
+        assert!(injected.contains("DemandDisproof"));
+        assert!(injected.contains("RequireEvidence"));
+        assert!(injected.contains("NarrowScope"));
+        assert!(injected.contains("Gate gate:debt"));
     }
 }

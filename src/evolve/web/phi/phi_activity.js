@@ -7,7 +7,7 @@ const PHASES = new Set(['running', 'completed', 'failed', 'partial', 'abandoned'
 const POSTURE_EMOTIONS = new Set(['greeting', 'thinking', 'working', 'success', 'error', 'idle',
   'curious', 'evolve', 'flow', 'guard', 'spark', 'sleep', 'skeptical', 'unimpressed']);
 const POSTURE_CHANNELS = new Set(['silent', 'ambient', 'glance', 'interrupt']);
-const POLICY_MODES = new Set(['observe', 'advise', 'mediate', 'enforce']);
+const POLICY_MODES = new Set(['observe', 'observe_only', 'advise', 'mediate', 'enforce']);
 const COUNTS = ['outstanding', 'unreviewed_lines', 'untested_lines', 'unknown_size_obligations',
   'unattributed_mutations', 'possible_unrecorded_mutations', 'observed_runs', 'passed_runs', 'failed_runs', 'unknown_runs'];
 const count = value => Number.isSafeInteger(value) && value >= 0;
@@ -15,18 +15,20 @@ const opaque = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.te
 const empty = reason => ({ status: 'unavailable', reason, agents: [], truncated: false, observed_at_ms: null });
 
 export function parsePolicy(payload) {
+  const bulkLines = payload?.bulk_generation_lines ?? payload?.scope_line_limit;
+  const stewardQuiet = payload?.steward_quiet_ms;
   if (!payload || typeof payload !== 'object' || !POLICY_MODES.has(payload.mode) ||
-      !count(payload.debt_gate_lines) || !count(payload.bulk_generation_lines) ||
+      !count(payload.debt_gate_lines) || !count(bulkLines) ||
       !count(payload.capitulation_threshold) || !count(payload.interrupt_budget) ||
-      !count(payload.steward_quiet_ms) || !count(payload.quiet_after_activity_ms) ||
+      !count(stewardQuiet) || !count(payload.quiet_after_activity_ms) ||
       !count(payload.glance_cooldown_ms)) throw new Error('invalid_phi_policy');
   return {
-    mode: payload.mode,
+    mode: payload.mode === 'observe_only' ? 'observe' : payload.mode,
     debt_gate_lines: payload.debt_gate_lines,
-    bulk_generation_lines: payload.bulk_generation_lines,
+    bulk_generation_lines: bulkLines,
     capitulation_threshold: payload.capitulation_threshold,
     interrupt_budget: payload.interrupt_budget,
-    steward_quiet_ms: payload.steward_quiet_ms,
+    steward_quiet_ms: stewardQuiet,
     quiet_after_activity_ms: payload.quiet_after_activity_ms,
     glance_cooldown_ms: payload.glance_cooldown_ms
   };

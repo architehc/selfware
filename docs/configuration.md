@@ -105,7 +105,7 @@ over the fallback.
 endpoint = "http://localhost:8000/v1"
 
 # Model identifier sent to the API
-# Default: "qwen38-flash-next"
+# Default: "deepseek-v4.1-flash"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 
 # Maximum tokens in the model response

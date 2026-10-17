@@ -11,6 +11,7 @@ import { PhiExpressionVoice } from './phi_sound.js';
 import { PhiSteward, IdleWatcher } from './phi_steward.js';
 import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
 import { PhiActivity, parsePolicy } from './phi_activity.js';
+import { PhiMediator } from './phi_mediator.js';
 
 const $ = id => document.getElementById(id);
 const make = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
@@ -44,6 +45,7 @@ export class PhiApp {
     // Phi as steward: when Selfware finishes and waits, it says what the last
     // stretch left unpaid — once per idle period, and only ever with evidence.
     this.steward = new PhiSteward();
+    this.mediator = new PhiMediator();
     this.idle = new IdleWatcher({ quietMs: 12000 });
     // Almost everything Phi knows is expressed as posture. Speaking is rationed.
     this.presence = new PhiPresence({ interruptBudget: 3 });
@@ -104,6 +106,7 @@ export class PhiApp {
       this.presence.quietAfterActivityMs = policy.quiet_after_activity_ms;
       this.presence.glanceCooldownMs = policy.glance_cooldown_ms;
       this.idle.quietMs = policy.steward_quiet_ms;
+      this.mediator.scopeLineLimit = policy.bulk_generation_lines;
     }
     return policy;
   }
@@ -549,7 +552,12 @@ export class PhiApp {
     this.state.record('tool_call'); this.rig.setEmotion('analytical'); $('generation-status').textContent = 'Sending the saved source to your reading agent…';
     let acceptedJob = null;
     try {
-      const question = $('reading-question').value.trim() || 'Explain the important flow and suggest useful improvements.';
+      const rawQuestion = $('reading-question').value.trim() || 'Explain the important flow and suggest useful improvements.';
+      let question = rawQuestion;
+      if (this.policy?.mode === 'mediate' || this.policy?.mode === 'enforce') {
+        const mediated = this.mediator.outbound(rawQuestion, this.buildStewardSignals());
+        question = this.mediator.compose(mediated.prompt, mediated.augmentations);
+      }
       const job = await this.workspace.startReading(this.document, question);
       acceptedJob = job;
       onAccepted?.(job);

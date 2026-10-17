@@ -846,12 +846,21 @@ impl ApiClient {
             );
         }
 
+        let mut normalized_config = config.clone();
+        crate::config::normalize_legacy_model_override(
+            &normalized_config.endpoint,
+            &mut normalized_config.model,
+        );
+        for profile in normalized_config.models.values_mut() {
+            crate::config::normalize_legacy_model_override(&profile.endpoint, &mut profile.model);
+        }
+
         Ok(Self {
             client,
             stream_client,
-            base_url: config.endpoint.clone(),
-            config: config.clone(),
-            retry_config: RetryConfig::from_settings(&config.retry),
+            base_url: normalized_config.endpoint.clone(),
+            retry_config: RetryConfig::from_settings(&normalized_config.retry),
+            config: normalized_config,
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             progress_emitter: Arc::new(crate::agent::progress::NoopProgressEmitter),
             wall_budget_start: Arc::new(std::sync::Mutex::new(None)),

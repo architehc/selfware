@@ -64,14 +64,28 @@ pub struct PhiPolicy {
     pub capitulation_threshold: usize,
     /// Generated line count in a single turn that flags `ScopeCreep`.
     pub scope_line_limit: usize,
+    /// Generated line count threshold exposed to the `/phi/` web companion (`bulk_generation_lines`).
+    #[serde(default = "default_bulk_generation_lines")]
+    pub bulk_generation_lines: usize,
     /// Maximum number of `Interrupt` cards Phi may spend per session unless refunded.
     pub interrupt_budget: usize,
+    /// Idle quiet window (ms) before the web Steward speaks (`steward_quiet_ms`).
+    #[serde(default = "default_steward_quiet_ms")]
+    pub steward_quiet_ms: u64,
     /// Minimum quiet window (ms) after user/agent activity before `Glance` or `Interrupt`.
     pub quiet_after_activity_ms: u64,
     /// Minimum cooldown (ms) between spoken utterances (`Glance` or `Interrupt`).
     pub glance_cooldown_ms: u64,
     /// Maximum number of ranked proposals returned by [`PhiSteward`].
     pub max_proposals: usize,
+}
+
+fn default_bulk_generation_lines() -> usize {
+    400
+}
+
+fn default_steward_quiet_ms() -> u64 {
+    12_000
 }
 
 impl Default for PhiPolicy {
@@ -83,7 +97,9 @@ impl Default for PhiPolicy {
             debt_gate_lines: 160,
             capitulation_threshold: 2,
             scope_line_limit: 400,
+            bulk_generation_lines: default_bulk_generation_lines(),
             interrupt_budget: 3,
+            steward_quiet_ms: default_steward_quiet_ms(),
             quiet_after_activity_ms: 4_000,
             glance_cooldown_ms: 45_000,
             max_proposals: 4,

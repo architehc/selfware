@@ -981,6 +981,10 @@ impl Config {
             config.model = model;
             sources.set("model", ConfigSource::EnvVar("SELFWARE_MODEL".into()));
         }
+        normalize_legacy_model_override(&config.endpoint, &mut config.model);
+        for profile in config.models.values_mut() {
+            normalize_legacy_model_override(&profile.endpoint, &mut profile.model);
+        }
 
         // --- API key resolution hierarchy ---
         // 1. Environment variable (highest priority, never persisted to disk):
@@ -1656,6 +1660,7 @@ impl Config {
         let token_budget_was_explicit = is_user_explicit(&self.sources, "agent.token_budget");
 
         self.model = model;
+        normalize_legacy_model_override(&self.endpoint, &mut self.model);
         self.sources
             .set("model", ConfigSource::CliArg("--model".into()));
         self.matched_profile = None;
@@ -1804,6 +1809,10 @@ impl Config {
     pub fn validate_generated_toml(content: &str) -> Result<()> {
         let mut cfg: Config =
             toml::from_str(content).context("generated config does not match the Config schema")?;
+        normalize_legacy_model_override(&cfg.endpoint, &mut cfg.model);
+        for profile in cfg.models.values_mut() {
+            normalize_legacy_model_override(&profile.endpoint, &mut profile.model);
+        }
         let user_explicit = UserExplicitFields::from_toml(content);
         if let Some(profile) = match_profile(&cfg.model) {
             apply_profile(&mut cfg, &profile, &user_explicit);
@@ -1860,6 +1869,22 @@ impl Config {
 
         // Initialize output module with current settings
         crate::output::init(self.compact_mode, self.verbose_mode, self.show_tokens);
+    }
+}
+
+/// Automatically override legacy `qwen38-flash-next` model settings to
+/// `deepseek-v4.1-flash` when targeting `llm.selfware.design`.
+pub(crate) fn normalize_legacy_model_override(endpoint: &str, model: &mut String) -> bool {
+    if endpoint
+        .to_ascii_lowercase()
+        .contains("llm.selfware.design")
+        && (model.eq_ignore_ascii_case("qwen38-flash-next")
+            || model.eq_ignore_ascii_case("qwen/qwen3.8-flash-next"))
+    {
+        *model = super::default_model();
+        true
+    } else {
+        false
     }
 }
 

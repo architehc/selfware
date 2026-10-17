@@ -2047,6 +2047,7 @@ impl Agent {
             .await;
         self.write_post_execution_evidence().await;
         batch_result?;
+        self.apply_phi_turn_mediation(&content);
 
         // Check if the response contains code alongside tool calls.
         // Models often output file_read tool calls AND code text in the same
