@@ -1940,10 +1940,19 @@ impl Agent {
         });
         self.update_read_only_step_tracking(&tool_calls, has_write_tool);
         // The turn that reads these results runs under this batch's workload
-        // quota (reads only → mechanical; anything else → edit).
+        // quota (reads only → mechanical; anything else → edit). Ignore
+        // unregistered tool names when registered calls are present so a
+        // hallucinated read helper alongside a valid read does not misclassify
+        // the next turn as Edit.
+        let any_registered = tool_calls
+            .iter()
+            .any(|(name, _, _)| self.tools.get(name).is_some() || name == "tool_search");
         self.pending_turn_workload = Some(super::turn_workload::workload_after_tool_batch(
             tool_calls
                 .iter()
+                .filter(|(name, _, _)| {
+                    !any_registered || self.tools.get(name).is_some() || name == "tool_search"
+                })
                 .map(|(name, args, _)| (name.as_str(), args.as_str())),
         ));
 

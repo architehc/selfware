@@ -276,7 +276,7 @@ async fn verify_tool(
 
     let mut last_err = None;
     let mut resp_opt = None;
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         match http.post(url).bearer_auth(api_key).json(&body).send().await {
             Ok(r) if r.status().is_success() || r.status().is_client_error() => {
                 resp_opt = Some(r);
@@ -289,61 +289,49 @@ async fn verify_tool(
                 last_err = Some(format!("HTTP error: {e}"));
             }
         }
-        if attempt == 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
         }
     }
-    let resp = match resp_opt {
-        Some(r) => r,
-        None => {
-            return Outcome {
-                tool: spec.name.clone(),
-                passed: false,
-                detail: last_err.unwrap_or_else(|| "HTTP error".to_string()),
-                provider: None,
+
+    let mut v: Value = json!({});
+    let mut provider: Option<String> = None;
+    let mut extracted = None;
+
+    if let Some(resp) = resp_opt {
+        match resp.json::<Value>().await {
+            Ok(parsed) => {
+                if let Some(err) = parsed.get("error") {
+                    last_err = Some(format!("api error: {err}"));
+                } else {
+                    provider = parsed
+                        .get("provider")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
+                    match extract_tool_call_from_response(&parsed, &spec.name) {
+                        Ok(res) => extracted = res,
+                        Err(detail) => {
+                            return Outcome {
+                                tool: spec.name.clone(),
+                                passed: false,
+                                detail,
+                                provider,
+                            }
+                        }
+                    }
+                    v = parsed;
+                }
+            }
+            Err(e) => {
+                last_err = Some(format!("bad JSON response: {e}"));
             }
         }
-    };
-
-    let mut v: Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            return Outcome {
-                tool: spec.name.clone(),
-                passed: false,
-                detail: format!("bad JSON response: {e}"),
-                provider: None,
-            }
-        }
-    };
-
-    if let Some(err) = v.get("error") {
-        return Outcome {
-            tool: spec.name.clone(),
-            passed: false,
-            detail: format!("api error: {}", err),
-            provider: None,
-        };
     }
 
-    let mut provider = v.get("provider").and_then(|p| p.as_str()).map(String::from);
-
-    let mut extracted = match extract_tool_call_from_response(&v, &spec.name) {
-        Ok(res) => res,
-        Err(detail) => {
-            return Outcome {
-                tool: spec.name.clone(),
-                passed: false,
-                detail,
-                provider,
-            }
-        }
-    };
-
-    // If forced tool_choice returned an empty response (common on SGLang when
-    // a schema combines multiple optional enum+default fields like `code_introspect`),
-    // retry once with the minimal required-fields schema while still validating
-    // the returned arguments against the full `spec.schema`.
+    // If forced tool_choice returned an empty response or a 5xx from SGLang's
+    // constrained-decoding schema compiler on complex optional fields, retry
+    // with the minimal required-fields schema while still validating the
+    // returned arguments against the full `spec.schema`.
     if extracted.is_none() {
         let min_tool_def = json!({
             "type": "function",
@@ -398,6 +386,17 @@ async fn verify_tool(
                     }
                 }
             }
+        }
+    }
+
+    if extracted.is_none() {
+        if let Some(err) = last_err {
+            return Outcome {
+                tool: spec.name.clone(),
+                passed: false,
+                detail: err,
+                provider,
+            };
         }
     }
 
@@ -463,28 +462,48 @@ fn truncate(s: &str, n: usize) -> String {
 // ---------------------------------------------------------------------------
 
 struct Args {
+    offset: usize,
     limit: Option<usize>,
+    prefix: Option<String>,
     only_tool: Option<String>,
+    concurrency: usize,
     config: Option<String>,
     json_out: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
+        offset: 0,
         limit: None,
+        prefix: None,
         only_tool: None,
+        concurrency: CONCURRENCY,
         config: None,
         json_out: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--offset" => a.offset = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--limit" => a.limit = it.next().and_then(|v| v.parse().ok()),
+            "--prefix" => a.prefix = it.next(),
             "--tool" => a.only_tool = it.next(),
+            "--concurrency" => {
+                // Forced `tool_choice` compiles a distinct JSON grammar per tool on
+                // SGLang/Colibri; >2 concurrent grammar compilations can exhaust or
+                // wedge the engine.
+                a.concurrency = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(CONCURRENCY)
+                    .clamp(1, 2)
+            }
             "--config" => a.config = it.next(),
             "--json" => a.json_out = it.next().map(PathBuf::from),
             "-h" | "--help" => {
-                println!("tool_verify [--limit N] [--tool NAME] [--config FILE] [--json FILE]");
+                println!(
+                    "tool_verify [--offset N] [--limit N] [--prefix STR] [--tool NAME] [--concurrency N] [--config FILE] [--json FILE]"
+                );
                 std::process::exit(0);
             }
             _ => {}
@@ -509,6 +528,12 @@ async fn main() -> Result<()> {
     let mut specs = all_tools();
     if let Some(name) = &args.only_tool {
         specs.retain(|s| &s.name == name);
+    }
+    if let Some(prefix) = &args.prefix {
+        specs.retain(|s| s.name.starts_with(prefix));
+    }
+    if args.offset > 0 {
+        specs = specs.into_iter().skip(args.offset).collect();
     }
     if let Some(limit) = args.limit {
         specs.truncate(limit);
@@ -537,7 +562,7 @@ async fn main() -> Result<()> {
             let extra_body = &extra_body;
             async move { verify_tool(http, url, api_key, model, extra_body, spec).await }
         })
-        .buffer_unordered(CONCURRENCY)
+        .buffer_unordered(args.concurrency)
         .collect()
         .await;
 

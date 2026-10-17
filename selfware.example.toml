@@ -7,15 +7,18 @@
 # (These are the only hard run-bounding levers; there is no TOML equivalent and
 # they reset on resume, so re-pass them each launch.)
 
-# Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
-endpoint = "http://127.0.0.1:8000/v1"
-model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
-max_tokens = 98304
-context_length = 1010000
+# Default endpoint and model (calibrated via the built-in deepseek-v4 profile;
+# or point at a local vLLM/SGLang server such as http://127.0.0.1:8000/v1).
+endpoint = "https://llm.selfware.design/v1"
+api_key = "EMPTY"
+model = "deepseek-v4.1-flash"
+max_tokens = 65536
+context_length = 262144
 
-[extra_body]
-# Disable thinking for tool-heavy workflows
-chat_template_kwargs = { enable_thinking = false }
+# Optional: override per-workload thinking or completion caps:
+# [workloads.planning]
+# enable_thinking = false
+# max_tokens = 16384
 
 [safety]
 # Scope filesystem access to the project directory by default. Only widen this

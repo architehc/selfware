@@ -5833,6 +5833,28 @@ async fn unregistered_tool_error_is_model_actionable_not_developer_language() {
         },
     ));
     assert!(generic.starts_with("Safety check failed:"), "{generic}");
+
+    // Unregistered tool with a near-match offers edit-distance suggestions and
+    // does NOT falsely claim the path is outside allowed directories.
+    let near = agent.model_facing_safety_error(&crate::errors::SelfwareError::Safety(
+        crate::errors::SafetyError::UnregisteredTool {
+            tool: "grep_search_name".to_string(),
+        },
+    ));
+    assert!(near.contains("Did you mean:"), "{near}");
+    let feedback = agent.tool_error_feedback("grep_search_name", &near);
+    assert!(
+        feedback.contains("reason=\"argument_error\""),
+        "unregistered tool must be classified as argument_error, not safety_violation: {feedback}"
+    );
+    assert!(
+        !feedback.contains("outside allowed directories"),
+        "unregistered tool recovery must not claim path is outside allowed directories: {feedback}"
+    );
+    assert!(
+        feedback.contains("is not a valid tool name"),
+        "unregistered tool recovery must explain the tool name is invalid: {feedback}"
+    );
     server.stop().await;
 }
 

@@ -705,6 +705,28 @@ Try ONE of these alternatives:\
             );
         }
 
+        // Unregistered / unknown tool errors (checked before "safety check" so
+        // "Safety check failed: tool '...' does not exist" does not falsely
+        // claim the path is outside allowed directories).
+        if (error_lower.contains("tool '") && error_lower.contains("does not exist"))
+            || error_lower.contains("unknown tool")
+        {
+            let suggestions = self.tools.search_suggestions(tool_name, 3);
+            let suggestion_line = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(" Closest registered tools: {}.", suggestions.join(", "))
+            };
+            return format!(
+                "The tool '{}' is not a valid tool name.{} \
+Try ONE of these alternatives:\
+1. Call one of the listed Available tools by its exact name (e.g. file_read, grep_search, glob_find, directory_tree)\
+2. Use tool_search with a keyword to discover and activate deferred tools\
+\nDo NOT call '{}' again.",
+                tool_name, suggestion_line, tool_name
+            );
+        }
+
         // Path traversal / safety errors
         if error_lower.contains("path traversal") || error_lower.contains("safety check") {
             return format!(

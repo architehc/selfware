@@ -5061,9 +5061,14 @@ impl Agent {
                 String::new()
             };
             let hint = if tool == "call" {
-                " Note: 'call' is not a tool name; use an exact tool name like 'file_read', 'file_edit', or 'shell_exec'."
+                " Note: 'call' is not a tool name; use an exact tool name like 'file_read', 'file_edit', or 'shell_exec'.".to_string()
             } else {
-                ""
+                let suggestions = self.tools.search_suggestions(tool, 3);
+                if suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Did you mean: {}?", suggestions.join(", "))
+                }
             };
             return format!(
                 "Safety check failed: tool '{tool}' does not exist.{hint} Available tools: {}{suffix}. \

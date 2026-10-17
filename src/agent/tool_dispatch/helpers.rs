@@ -31,7 +31,11 @@ impl ToolErrorKind {
     /// Uses keyword heuristics to categorize error messages.
     pub fn classify(error: &str) -> Self {
         let error_lower = error.to_lowercase();
-        if error_lower.contains("safety") || error_lower.contains("blocked") {
+        if (error_lower.contains("tool '") && error_lower.contains("does not exist"))
+            || error_lower.contains("unknown tool")
+        {
+            Self::ArgumentError
+        } else if error_lower.contains("safety") || error_lower.contains("blocked") {
             Self::SafetyViolation
         } else if error_lower.contains("not found") || error_lower.contains("no such file") {
             Self::ResourceNotFound
