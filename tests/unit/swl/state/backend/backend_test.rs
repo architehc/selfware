@@ -2,10 +2,11 @@ use super::*;
 
 #[test]
 fn test_file_backend_path() {
-    let backend = FileBackend::new(PathBuf::from("/tmp/state")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path().to_path_buf()).unwrap();
     assert_eq!(
         backend.state_file_path("my_workflow"),
-        PathBuf::from("/tmp/state/my_workflow.json")
+        dir.path().join("my_workflow.json")
     );
 }
 
@@ -95,4 +96,28 @@ async fn test_file_backend_load_nonexistent() {
 
     let loaded = backend.load("nonexistent").await.unwrap();
     assert!(loaded.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_file_backend_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(temp_dir.path().to_path_buf()).unwrap();
+
+    let outside = temp_dir.path().join("outside.txt");
+    std::fs::write(&outside, r#"{"secret":"value"}"#).unwrap();
+    let link = temp_dir.path().join("symflow.json");
+    symlink(&outside, &link).unwrap();
+
+    assert!(!backend.exists("symflow").await);
+    assert!(!backend
+        .list()
+        .await
+        .unwrap()
+        .contains(&"symflow".to_string()));
+    assert!(backend.load("symflow").await.is_err());
+    assert!(backend.delete("symflow").await.is_err());
+    assert!(outside.exists(), "symlink target must not be deleted");
 }

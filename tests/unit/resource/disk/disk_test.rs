@@ -328,3 +328,37 @@ async fn test_compress_file_writes_on_demand() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_compress_file_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let checkpoints = root.path().join("checkpoints");
+    std::fs::create_dir_all(&checkpoints).unwrap();
+
+    let outside = root.path().join("outside_secret.json");
+    std::fs::write(&outside, b"{\"secret\":true}").unwrap();
+    let link = checkpoints.join("sym_task.json");
+    symlink(&outside, &link).unwrap();
+
+    let config = DiskConfig::default();
+    let dm = DiskManager::with_paths(
+        &config,
+        checkpoints.clone(),
+        root.path().join("logs"),
+        root.path().join("models"),
+    );
+
+    let err = dm.compress_file(&link).await.unwrap_err();
+    assert!(
+        err.to_string().contains("symlink or non-regular file"),
+        "expected symlink rejection, got: {err}"
+    );
+    assert!(outside.exists(), "outside file must remain untouched");
+    assert!(
+        !checkpoints.join("sym_task.chk.zst").exists(),
+        "no compressed file should be created for a symlink"
+    );
+}

@@ -1793,15 +1793,22 @@ fn ensure_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result
     Ok(())
 }
 
+/// Maximum allowed size of a persisted checkpoint or delta log file (64 MiB).
+pub(crate) const MAX_CHECKPOINT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Open a persisted checkpoint artifact without following a final symlink,
 /// then validate the opened handle rather than trusting a prior path lookup.
-fn open_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<fs::File> {
+pub(crate) fn open_regular_checkpoint_file(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<fs::File> {
+    ensure_regular_checkpoint_file(path, label)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -1811,20 +1818,37 @@ fn open_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<f
     let file = options
         .open(path)
         .with_context(|| format!("Failed to securely open {label} {:?}", path))?;
-    if !file.metadata()?.file_type().is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
         bail!(
             "refusing {label} that is a symlink or non-regular file: {:?}",
+            path
+        );
+    }
+    if metadata.len() > MAX_CHECKPOINT_FILE_BYTES {
+        bail!(
+            "refusing oversized {label} ({} bytes > {} byte limit): {:?}",
+            metadata.len(),
+            MAX_CHECKPOINT_FILE_BYTES,
             path
         );
     }
     Ok(file)
 }
 
-fn read_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<String> {
-    let mut file = open_regular_checkpoint_file(path, label)?;
+pub(crate) fn read_regular_checkpoint_file(path: &std::path::Path, label: &str) -> Result<String> {
+    let file = open_regular_checkpoint_file(path, label)?;
     let mut content = String::new();
-    file.read_to_string(&mut content)
+    file.take(MAX_CHECKPOINT_FILE_BYTES + 1)
+        .read_to_string(&mut content)
         .with_context(|| format!("Failed to read {label} {:?}", path))?;
+    if content.len() as u64 > MAX_CHECKPOINT_FILE_BYTES {
+        bail!(
+            "refusing oversized {label} (exceeded {} byte limit): {:?}",
+            MAX_CHECKPOINT_FILE_BYTES,
+            path
+        );
+    }
     Ok(content)
 }
 
@@ -1844,7 +1868,7 @@ fn ensure_checkpoint_identity(
     Ok(())
 }
 
-fn ensure_private_checkpoint_dir(path: &std::path::Path) -> Result<()> {
+pub(crate) fn ensure_private_checkpoint_dir(path: &std::path::Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => bail!(
@@ -2338,11 +2362,18 @@ impl CheckpointManager {
         // would never be pruned.
         let mut json_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for entry in entries.flatten() {
+            if !entry
+                .file_type()
+                .map(|t| t.is_file() && !t.is_symlink())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let path = entry.path();
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if let Some(task) = name.strip_suffix(".json.bak") {
                 let primary = self.checkpoints_dir.join(format!("{task}.json"));
-                if !primary.exists() {
+                if fs::symlink_metadata(&primary).is_err() {
                     let mtime = entry
                         .metadata()
                         .and_then(|m| m.modified())
@@ -2397,7 +2428,7 @@ impl CheckpointManager {
 
             // Delete matching delta log.
             let delta_path = self.checkpoints_dir.join(format!("{}.delta.jsonl", stem));
-            if delta_path.exists() {
+            if fs::symlink_metadata(&delta_path).is_ok() {
                 if let Err(e) = fs::remove_file(&delta_path) {
                     tracing::warn!(
                         "prune_old_checkpoints: failed to delete delta {:?}: {}",
@@ -2409,7 +2440,7 @@ impl CheckpointManager {
 
             // Delete matching backup.
             let bak_path = path.with_extension("json.bak");
-            if bak_path.exists() {
+            if fs::symlink_metadata(&bak_path).is_ok() {
                 if let Err(e) = fs::remove_file(&bak_path) {
                     tracing::warn!(
                         "prune_old_checkpoints: failed to delete backup {:?}: {}",
@@ -2437,7 +2468,11 @@ impl CheckpointManager {
         };
         let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !entry
+                .file_type()
+                .map(|t| t.is_dir() && !t.is_symlink())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let mtime = entry
@@ -2510,8 +2545,11 @@ impl CheckpointManager {
                         )
                     })?;
                 let backup_result = (|| -> Result<()> {
-                    let mut primary = open_regular_checkpoint_file(&path, "checkpoint")?;
-                    std::io::copy(&mut primary, &mut backup_file)?;
+                    let primary = open_regular_checkpoint_file(&path, "checkpoint")?;
+                    std::io::copy(
+                        &mut primary.take(MAX_CHECKPOINT_FILE_BYTES),
+                        &mut backup_file,
+                    )?;
                     backup_file.sync_all()?;
                     drop(backup_file);
                     replace_atomically(&backup_tmp, &backup_path)?;

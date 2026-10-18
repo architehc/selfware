@@ -90,8 +90,8 @@ pub struct FileBackend {
 impl FileBackend {
     /// Create a new file backend with the specified base directory
     pub fn new(base_dir: PathBuf) -> Result<Self> {
-        // Ensure the directory exists
-        std::fs::create_dir_all(&base_dir).map_err(|e| {
+        // Ensure the directory exists and is a private non-symlink directory
+        crate::session::checkpoint::ensure_private_checkpoint_dir(&base_dir).map_err(|e| {
             SelfwareError::Internal(format!(
                 "Failed to create state directory '{}': {}",
                 base_dir.display(),
@@ -130,18 +130,30 @@ impl StateBackend for FileBackend {
     async fn load(&self, workflow_name: &str) -> Result<HashMap<String, Value>> {
         let path = self.state_file_path(workflow_name);
 
-        if !path.exists() {
-            debug!("No existing state file for workflow: {}", workflow_name);
-            return Ok(HashMap::new());
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!("No existing state file for workflow: {}", workflow_name);
+                return Ok(HashMap::new());
+            }
+            Err(e) => {
+                return Err(SelfwareError::Internal(format!(
+                    "Failed to inspect state file '{}': {}",
+                    path.display(),
+                    e
+                )));
+            }
+            Ok(_) => {}
         }
 
-        let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-            SelfwareError::Internal(format!(
-                "Failed to read state file '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let content =
+            crate::session::checkpoint::read_regular_checkpoint_file(&path, "workflow state file")
+                .map_err(|e| {
+                    SelfwareError::Internal(format!(
+                        "Failed to read state file '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
 
         if content.trim().is_empty() {
             return Ok(HashMap::new());
@@ -185,26 +197,44 @@ impl StateBackend for FileBackend {
     async fn delete(&self, workflow_name: &str) -> Result<()> {
         let path = self.state_file_path(workflow_name);
 
-        if path.exists() {
-            tokio::fs::remove_file(&path).await.map_err(|e| {
-                SelfwareError::Internal(format!(
-                    "Failed to delete state file '{}': {}",
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(SelfwareError::Internal(format!(
+                    "Failed to inspect state file '{}': {}",
                     path.display(),
                     e
-                ))
-            })?;
-            debug!(
-                "Deleted state for '{}' from {}",
-                workflow_name,
-                path.display()
-            );
+                )));
+            }
+            Ok(meta) if meta.file_type().is_symlink() || !meta.file_type().is_file() => {
+                return Err(SelfwareError::Internal(format!(
+                    "Refusing to delete state file that is a symlink or non-regular file: '{}'",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
         }
+
+        tokio::fs::remove_file(&path).await.map_err(|e| {
+            SelfwareError::Internal(format!(
+                "Failed to delete state file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        debug!(
+            "Deleted state for '{}' from {}",
+            workflow_name,
+            path.display()
+        );
 
         Ok(())
     }
 
     async fn exists(&self, workflow_name: &str) -> bool {
-        self.state_file_path(workflow_name).exists()
+        std::fs::symlink_metadata(self.state_file_path(workflow_name))
+            .map(|m| m.file_type().is_file() && !m.file_type().is_symlink())
+            .unwrap_or(false)
     }
 
     async fn list(&self) -> Result<Vec<String>> {
@@ -221,6 +251,12 @@ impl StateBackend for FileBackend {
         while let Some(entry) = entries.next_entry().await.map_err(|e| {
             SelfwareError::Internal(format!("Failed to read directory entry: {}", e))
         })? {
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if !ft.is_file() || ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {

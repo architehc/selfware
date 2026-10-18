@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 /// user's working directory with empty `checkpoints/`, `logs/`, `models/`
 /// dirs. Creation happens here instead, only when something actually writes.
 async fn ensure_dir(path: &Path) -> Result<(), ResourceError> {
-    fs::create_dir_all(path).await.map_err(|e| {
+    crate::session::checkpoint::ensure_private_checkpoint_dir(path).map_err(|e| {
         ResourceError::DiskExhausted(format!(
             "Failed to create directory {}: {}",
             path.display(),
@@ -208,6 +208,12 @@ impl DiskManager {
             let cutoff = std::time::SystemTime::now() - Duration::from_secs(7 * 24 * 3600);
 
             while let Ok(Some(entry)) = entries.next_entry().await {
+                let Ok(file_type) = entry.file_type().await else {
+                    continue;
+                };
+                if !file_type.is_file() || file_type.is_symlink() {
+                    continue;
+                }
                 if let Ok(metadata) = entry.metadata().await {
                     if let Ok(modified) = metadata.modified() {
                         if modified < cutoff {
@@ -236,10 +242,17 @@ impl DiskManager {
 
         if let Ok(mut entries) = fs::read_dir(&self.checkpoints_path).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
+                let Ok(file_type) = entry.file_type().await else {
+                    continue;
+                };
+                if !file_type.is_file() || file_type.is_symlink() {
+                    continue;
+                }
                 let path = entry.path();
 
-                // Skip already compressed files
-                if path.extension().map(|e| e == "zst").unwrap_or(false) {
+                // Skip already compressed files, advisory locks, and temp files
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "zst" || ext == "lock" || ext == "tmp" {
                     continue;
                 }
 
@@ -264,9 +277,22 @@ impl DiskManager {
 
     /// Compress a single file
     async fn compress_file(&self, path: &PathBuf) -> Result<(), ResourceError> {
-        let data = fs::read(path)
-            .await
+        use std::io::Read;
+
+        let file =
+            crate::session::checkpoint::open_regular_checkpoint_file(path, "checkpoint file")
+                .map_err(|e| ResourceError::DiskExhausted(format!("Failed to read file: {}", e)))?;
+        let mut data = Vec::new();
+        file.take(crate::session::checkpoint::MAX_CHECKPOINT_FILE_BYTES + 1)
+            .read_to_end(&mut data)
             .map_err(|e| ResourceError::DiskExhausted(format!("Failed to read file: {}", e)))?;
+        if data.len() as u64 > crate::session::checkpoint::MAX_CHECKPOINT_FILE_BYTES {
+            return Err(ResourceError::DiskExhausted(format!(
+                "Refusing to compress oversized checkpoint file (exceeded {} byte limit): {}",
+                crate::session::checkpoint::MAX_CHECKPOINT_FILE_BYTES,
+                path.display()
+            )));
+        }
 
         let compressed = zstd::encode_all(&data[..], 6)
             .map_err(|e| ResourceError::DiskExhausted(format!("Failed to compress: {}", e)))?;
@@ -281,9 +307,9 @@ impl DiskManager {
             ensure_dir(parent).await?;
         }
 
-        fs::write(&new_path, &compressed).await.map_err(|e| {
-            ResourceError::DiskExhausted(format!("Failed to write compressed file: {}", e))
-        })?;
+        crate::session::checkpoint::write_bytes_atomically(&new_path, &compressed, 0o600).map_err(
+            |e| ResourceError::DiskExhausted(format!("Failed to write compressed file: {}", e)),
+        )?;
 
         fs::remove_file(path).await.map_err(|e| {
             ResourceError::DiskExhausted(format!("Failed to remove original file: {}", e))
@@ -347,7 +373,7 @@ impl DiskManager {
         }
 
         // Calculate actual directory size
-        let size = self.calculate_dir_size(&self.models_path);
+        let size = self.calculate_dir_size(&self.models_path, 0);
 
         let size = if size == 0 && !self.models_path.exists() {
             warn!(
@@ -377,7 +403,11 @@ impl DiskManager {
     /// Symlinks are skipped to avoid cycles and double-counting across mount
     /// points.  Errors on individual entries are silently skipped so that a
     /// single unreadable file does not abort the entire traversal.
-    fn calculate_dir_size(&self, path: &PathBuf) -> u64 {
+    fn calculate_dir_size(&self, path: &PathBuf, depth: usize) -> u64 {
+        const MAX_MODELS_DIR_DEPTH: usize = 32;
+        if depth > MAX_MODELS_DIR_DEPTH {
+            return 0;
+        }
         let mut total = 0u64;
 
         let entries = match std::fs::read_dir(path) {
@@ -401,7 +431,7 @@ impl DiskManager {
                     total += metadata.len();
                 }
             } else if file_type.is_dir() {
-                total += self.calculate_dir_size(&entry.path());
+                total += self.calculate_dir_size(&entry.path(), depth + 1);
             }
         }
 

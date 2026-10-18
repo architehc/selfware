@@ -99,12 +99,14 @@ impl CheckpointStore {
     /// Load the checkpoint of `run_id`.
     pub fn load(&self, run_id: &str) -> Result<WorkflowCheckpoint> {
         let path = self.path_for(run_id)?;
-        let raw = std::fs::read_to_string(&path).with_context(|| {
-            format!(
-                "no checkpoint for workflow run '{run_id}' (looked for {})",
-                path.display()
-            )
-        })?;
+        let raw =
+            crate::session::checkpoint::read_regular_checkpoint_file(&path, "workflow checkpoint")
+                .with_context(|| {
+                    format!(
+                        "no checkpoint for workflow run '{run_id}' (looked for {})",
+                        path.display()
+                    )
+                })?;
         let checkpoint: WorkflowCheckpoint = serde_json::from_str(&raw)
             .with_context(|| format!("corrupt workflow checkpoint {}", path.display()))?;
         if checkpoint.version != CHECKPOINT_FORMAT_VERSION {
@@ -130,7 +132,7 @@ impl CheckpointStore {
     /// owner-only (0600).
     pub fn save(&self, checkpoint: &WorkflowCheckpoint) -> Result<PathBuf> {
         let path = self.path_for(&checkpoint.run_id)?;
-        std::fs::create_dir_all(&self.dir)
+        crate::session::checkpoint::ensure_private_checkpoint_dir(&self.dir)
             .with_context(|| format!("cannot create {}", self.dir.display()))?;
         let json = serde_json::to_vec_pretty(checkpoint)?;
         crate::session::checkpoint::write_bytes_atomically(&path, &json, 0o600)

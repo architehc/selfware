@@ -1163,8 +1163,12 @@ fn test_is_sglang_serving_deployment_ports() {
     assert!(!is_sglang_serving_deployment("http://localhost:8080/v1"));
 }
 
+static SGLANG_CACHE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 #[test]
 fn test_sglang_capability_cache() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.blocking_lock();
     clear_sglang_capability_cache();
     let ep = "http://custom-proxy.internal:9999/v1";
     assert_eq!(get_sglang_capability(ep), None);
@@ -1213,6 +1217,7 @@ async fn start_validation_mock_server(
 
 #[tokio::test]
 async fn test_non_sglang_server_on_common_port_accepts_xhigh() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
     let generic_response = r#"{"version": "1.0.0", "status": "ok"}"#.to_string();
     let (endpoint, _task) = start_validation_mock_server(vec![(200, generic_response, None)]).await;
@@ -1230,6 +1235,7 @@ async fn test_non_sglang_server_on_common_port_accepts_xhigh() {
 
 #[tokio::test]
 async fn test_sglang_server_on_common_port_rejects_xhigh() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
     let sglang_response = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#.to_string();
     let (endpoint, _task) = start_validation_mock_server(vec![(200, sglang_response, None)]).await;
@@ -1250,6 +1256,7 @@ async fn test_sglang_server_on_common_port_rejects_xhigh() {
 
 #[tokio::test]
 async fn test_probe_timeout_preserves_unknown_and_retries() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
     let sglang_body = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#.to_string();
     // Request 1: 700ms delay causes reqwest 500ms timeout.
@@ -1286,6 +1293,7 @@ async fn test_probe_timeout_preserves_unknown_and_retries() {
 
 #[tokio::test]
 async fn test_probe_transient_failures_and_conclusive_404() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
     // 500 server error and 401 auth challenge must NOT cache false (transient/unknown)
     // 404 route missing IS conclusive non-SGLang
@@ -1323,20 +1331,23 @@ async fn test_probe_transient_failures_and_conclusive_404() {
 
 #[tokio::test]
 async fn test_is_sglang_backend_non_blocking_inside_tokio() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
+    let endpoint = "http://192.0.2.1:8081";
     let start = std::time::Instant::now();
     // In an async context, is_sglang_backend must return immediately without blocking worker threads
-    let is_sg = is_sglang_backend("http://192.0.2.1:8080"); // 192.0.2.1 is TEST-NET-1 (non-routable blackhole)
+    let is_sg = is_sglang_backend(endpoint); // 192.0.2.1 is TEST-NET-1 (non-routable blackhole)
     assert!(start.elapsed() < std::time::Duration::from_millis(50));
     assert!(!is_sg);
     // Transient/unprobed endpoint must not have negative result cached
-    assert_eq!(get_sglang_capability("http://192.0.2.1:8080"), None);
+    assert_eq!(get_sglang_capability(endpoint), None);
 }
 
 #[tokio::test]
 async fn test_check_sglang_backend_tri_state() {
+    let _guard = SGLANG_CACHE_TEST_LOCK.lock().await;
     clear_sglang_capability_cache();
-    let endpoint = "http://192.0.2.1:8080";
+    let endpoint = "http://192.0.2.1:8082";
     // Cold unprobed endpoint inside tokio: returns None (unknown)
     assert_eq!(check_sglang_backend(endpoint), None);
     assert!(!is_sglang_backend(endpoint));

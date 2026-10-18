@@ -351,3 +351,24 @@ async fn checkpoint_files_are_owner_only() {
     assert_eq!(mode, 0o600);
     assert!(path.starts_with(dir.path().join(".selfware").join("workflows")));
 }
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_store_rejects_symlinked_checkpoint_and_dir() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::for_workspace(dir.path());
+    std::fs::create_dir_all(store.dir()).unwrap();
+
+    let outside = dir.path().join("outside.json");
+    std::fs::write(&outside, "{}").unwrap();
+    let link = store.dir().join("symrun.json");
+    symlink(&outside, &link).unwrap();
+
+    let err = store.load("symrun").unwrap_err();
+    assert!(
+        format!("{err:#}").contains("symlink or non-regular file"),
+        "expected symlink rejection, got: {err:#}"
+    );
+}
