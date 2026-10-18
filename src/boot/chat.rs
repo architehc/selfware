@@ -24,6 +24,9 @@ Rules:\n\
 - If a DOCUMENTATION SNIPPET is provided, prefer it over your own knowledge; if you don't know, say so.";
 
 const MAX_SNIPPET_CHARS: usize = 1200;
+const MAX_DOC_DEPTH: usize = 8;
+const MAX_DOC_FILES: usize = 256;
+const MAX_DOC_FILE_BYTES: u64 = 1024 * 1024;
 const SETUP_GUIDE: &str = include_str!("setup_guide.md");
 
 /// Tiny stopword list — enough to keep "how do I" from dominating the score.
@@ -50,20 +53,26 @@ pub fn retrieve_bundled_snippet(question: &str) -> Option<String> {
     select_snippet([SETUP_GUIDE], question)
 }
 
-fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
-    if crate::safety::source_context::discovery_root_is_private(dir) {
+fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > MAX_DOC_DEPTH
+        || out.len() >= MAX_DOC_FILES
+        || crate::safety::source_context::discovery_root_is_private(dir)
+    {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if out.len() >= MAX_DOC_FILES {
+            break;
+        }
         let path = entry.path();
         let Ok(kind) = entry.file_type() else {
             continue;
         };
         if kind.is_dir() {
-            collect_markdown(&path, out);
+            collect_markdown(&path, depth + 1, out);
         } else if kind.is_file()
             && path.extension().and_then(|e| e.to_str()) == Some("md")
             && crate::safety::source_context::broad_discovery_file_is_safe(&path)
@@ -79,14 +88,19 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
 /// itself uses bundled documentation instead.
 pub fn retrieve_snippet(docs_dir: &Path, question: &str) -> Option<String> {
     let mut files = Vec::new();
-    collect_markdown(docs_dir, &mut files);
+    collect_markdown(docs_dir, 0, &mut files);
     let documents: Vec<String> = files
         .into_iter()
         .filter_map(|file| {
-            let mut opened =
-                crate::safety::source_context::open_broad_discovery_regular(&file).ok()?;
+            let opened = crate::safety::source_context::open_broad_discovery_regular(&file).ok()?;
             let mut content = String::new();
-            opened.read_to_string(&mut content).ok()?;
+            let bytes_read = opened
+                .take(MAX_DOC_FILE_BYTES + 1)
+                .read_to_string(&mut content)
+                .ok()?;
+            if bytes_read as u64 > MAX_DOC_FILE_BYTES {
+                return None;
+            }
             Some(content)
         })
         .collect();

@@ -135,3 +135,11 @@ fn build_messages_without_snippet_uses_plain_grounding() {
     let system = body["messages"][0]["content"].as_str().unwrap();
     assert_eq!(system, GROUNDING_PROMPT);
 }
+
+#[test]
+fn retrieve_snippet_skips_oversized_markdown_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let huge = format!("endpoint context_length {}", "x".repeat(1024 * 1024 + 64));
+    std::fs::write(dir.path().join("huge.md"), huge).unwrap();
+    assert!(retrieve_snippet(dir.path(), "endpoint context_length").is_none());
+}

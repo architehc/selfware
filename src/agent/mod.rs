@@ -2439,6 +2439,7 @@ To call a tool, use this EXACT XML structure:
                         return Ok(false);
                     }
                     let old_endpoint = self.config.endpoint.clone();
+                    let redacted_target = crate::config::redact_endpoint(target);
                     let profiles: Vec<_> = self
                         .config
                         .models
@@ -2453,23 +2454,42 @@ To call a tool, use this EXACT XML structure:
                         [] if crate::config::is_local_endpoint(target) => {
                             let model = std::env::var("SELFWARE_LOCAL_MODEL").ok()
                                 .filter(|value| !value.trim().is_empty())
-                                .ok_or_else(|| anyhow::anyhow!("Endpoint fallback needs a complete [models.fallback] profile for '{target}', or SELFWARE_LOCAL_MODEL for a local server; the current provider's model and credentials cannot be reused"))?;
+                                .ok_or_else(|| anyhow::anyhow!("Endpoint fallback needs a complete [models.fallback] profile for '{redacted_target}', or SELFWARE_LOCAL_MODEL for a local server; the current provider's model and credentials cannot be reused"))?;
                             let defaults = crate::config::Config::default();
+                            let matched = crate::config::match_profile(&model);
+                            let context_length = matched
+                                .as_ref()
+                                .and_then(|p| p.context_length)
+                                .unwrap_or(crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH);
+                            let max_tokens = matched
+                                .as_ref()
+                                .and_then(|p| p.max_tokens)
+                                .unwrap_or(8192);
+                            let temperature = matched
+                                .as_ref()
+                                .and_then(|p| p.temperature)
+                                .unwrap_or(defaults.temperature);
+                            let native_function_calling =
+                                matched.and_then(|p| p.native_function_calling);
                             crate::config::ModelProfile {
-                                endpoint: target.clone(), model,
-                                api_key: std::env::var("SELFWARE_LOCAL_API_KEY").ok().filter(|value| !value.is_empty()).map(crate::config::RedactedString::new),
-                                max_tokens: defaults.max_tokens,
-                                temperature: defaults.temperature,
-                                context_length: defaults.context_length,
+                                endpoint: target.clone(),
+                                model,
+                                api_key: std::env::var("SELFWARE_LOCAL_API_KEY")
+                                    .ok()
+                                    .filter(|value| !value.is_empty())
+                                    .map(crate::config::RedactedString::new),
+                                max_tokens,
+                                temperature,
+                                context_length,
                                 modalities: vec!["text".to_string()],
                                 extra_body: None,
-                                native_function_calling: None,
+                                native_function_calling,
                                 max_retries: None,
                                 response_timeout_floor_secs: None,
                             }
                         }
-                        [] => anyhow::bail!("Endpoint fallback needs a complete [models.fallback] profile for '{target}'"),
-                        _ => anyhow::bail!("Endpoint fallback is ambiguous: multiple model profiles use '{target}'; select a single fallback profile"),
+                        [] => anyhow::bail!("Endpoint fallback needs a complete [models.fallback] profile for '{redacted_target}'"),
+                        _ => anyhow::bail!("Endpoint fallback is ambiguous: multiple model profiles use '{redacted_target}'; select a single fallback profile"),
                     };
                     let mut config = self.config.clone();
                     config.endpoint = profile.endpoint.clone();
@@ -2482,17 +2502,11 @@ To call a tool, use this EXACT XML structure:
                     config.agent.native_function_calling = profile
                         .effective_native_function_calling(config.agent.native_function_calling);
                     config.models.insert("default".to_string(), profile);
-                    let client = self.client.rebuild(&config)?;
-                    self.config = config;
-                    self.install_api_client(client);
-                    crate::token_count::set_configured_model(&self.config.model);
-                    // Re-propagate the progress emitter so HTTP round-trip events
-                    // continue to land on the same channel after the rebuild.
-                    self.client
-                        .with_progress_emitter(Arc::clone(&self.progress_emitter));
+                    self.install_config(config)?;
                     warn!(
                         "Recovery tree switched endpoint from '{}' to '{}'",
-                        old_endpoint, target
+                        crate::config::redact_endpoint(&old_endpoint),
+                        redacted_target
                     );
                     info!("Endpoint fallback applied — caller should retry");
                     Ok(true)
@@ -2561,11 +2575,7 @@ To call a tool, use this EXACT XML structure:
                         profile.api_key = config.api_key.clone();
                     }
                 }
-                let client = self.client.rebuild(&config)?;
-                self.config = config;
-                self.install_api_client(client);
-                self.client
-                    .with_progress_emitter(Arc::clone(&self.progress_emitter));
+                self.install_config(config)?;
                 info!("Credentials reloaded and API client rebuilt — caller should retry");
                 Ok(true)
             }
@@ -3946,11 +3956,24 @@ To call a tool, use this EXACT XML structure:
 
     /// Replace the session configuration and rebuild the API client from it
     /// (the usage ledger, wall-budget anchor and progress emitter carry
-    /// over), so limits the client enforces itself follow the change.
+    /// over), so limits the client enforces itself and the context window
+    /// budgets follow the change.
     pub(crate) fn install_config(&mut self, config: Config) -> Result<()> {
+        let (max_context_tokens, _) = config.derive_context_budget()?;
+        let content_ratio = config.effective_context_content_ratio();
         let client = self.client.rebuild(&config)?;
+        self.max_context_tokens = max_context_tokens;
+        self.compressor
+            .set_token_budget(max_context_tokens, content_ratio);
+        self.context_map.update_budget(
+            max_context_tokens,
+            content_ratio,
+            config.agent.context_compression_ratio,
+            config.agent.context_thinking_ratio,
+        );
         self.config = config;
         self.install_api_client(client);
+        crate::token_count::set_configured_model(&self.config.model);
         self.client
             .with_progress_emitter(std::sync::Arc::clone(&self.progress_emitter));
         Ok(())

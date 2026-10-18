@@ -86,7 +86,7 @@ pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> 
             "Refusing to send the API key to endpoint '{}': it would go over plaintext HTTP to a \
              remote host or via an embedded-credential URL. Use https:// or a local endpoint \
              (localhost / 127.0.0.1).",
-            endpoint
+            redact_endpoint(endpoint)
         );
     }
     Ok(())
@@ -175,7 +175,12 @@ pub fn endpoint_has_userinfo(endpoint: &str) -> bool {
 /// endpoint URL before printing it in diagnostics or logs.
 pub fn redact_endpoint(endpoint: &str) -> String {
     if let Ok(mut url) = url::Url::parse(endpoint) {
-        if !url.username().is_empty() || url.password().is_some() {
+        let has_userinfo = !url.username().is_empty() || url.password().is_some();
+        let has_query = url.query().is_some();
+        if !has_userinfo && !has_query {
+            return endpoint.to_string();
+        }
+        if has_userinfo {
             let _ = url.set_username("REDACTED");
             let _ = url.set_password(None);
         }

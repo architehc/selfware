@@ -3290,9 +3290,10 @@ impl Agent {
                         };
                         let outcome = crate::self_healing::RecoveryTree::with_defaults()
                             .resolve(&signal, &ctx);
-                        if let crate::self_healing::ResolutionOutcome::Resolved(directive) = outcome
+                        if let crate::self_healing::ResolutionOutcome::Resolved(ref directive) =
+                            outcome
                         {
-                            match self.apply_recovery_action(&directive).await {
+                            match self.apply_recovery_action(directive).await {
                                 Ok(true) => {
                                     tracing::info!(
                                         "Recovery tree resolved failure (kind={:?}) — retrying execution",
@@ -3304,9 +3305,26 @@ impl Agent {
                                     })?;
                                     continue;
                                 }
-                                Ok(false) | Err(_) => {
-                                    // Action not handled or failed to apply —
-                                    // fall through to existing nudge/advice.
+                                Ok(false) => {
+                                    if !self.rigor_mode {
+                                        tracing::warn!(
+                                            "Auto-recovery action was not applicable (kind={:?}) — entering rigor mode",
+                                            kind
+                                        );
+                                        self.rigor_mode = true;
+                                        self.rigor_directive_injected = false;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Auto-recovery action failed to apply (kind={:?}): {} — entering rigor mode",
+                                        kind,
+                                        e
+                                    );
+                                    if !self.rigor_mode {
+                                        self.rigor_mode = true;
+                                        self.rigor_directive_injected = false;
+                                    }
                                 }
                             }
                         } else if Self::should_enter_rigor(&outcome) {

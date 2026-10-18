@@ -421,7 +421,7 @@ fn redacted_view<T: Serialize>(section: &T) -> serde_json::Value {
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &redact_endpoint(&self.endpoint))
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)

@@ -845,22 +845,44 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
         }),
     }
 
-    // Endpoint URL parses
+    // Endpoint URL parses and uses an HTTP(S) scheme with a host.
+    let redacted_endpoint = crate::config::redact_endpoint(&config.endpoint);
     match url::Url::parse(&config.endpoint) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {
+            out.push(DoctorCheck {
+                name: "endpoint URL".to_string(),
+                category: Category::Configuration,
+                status: CheckStatus::Ok,
+                version: None,
+                message: format!(
+                    "{} (host: {})",
+                    redacted_endpoint,
+                    u.host_str().unwrap_or("?")
+                ),
+                fix_hint: None,
+            });
+        }
         Ok(u) => out.push(DoctorCheck {
             name: "endpoint URL".to_string(),
             category: Category::Configuration,
-            status: CheckStatus::Ok,
+            status: CheckStatus::Missing,
             version: None,
-            message: format!("{} (host: {})", u, u.host_str().unwrap_or("?")),
-            fix_hint: None,
+            message: format!(
+                "unsupported endpoint `{}` (scheme `{}` must be http or https with a host)",
+                redacted_endpoint,
+                u.scheme()
+            ),
+            fix_hint: Some(
+                "Set a valid http(s) URL in selfware.toml `endpoint = \"http://127.0.0.1:8000/v1\"`."
+                    .to_string(),
+            ),
         }),
         Err(e) => out.push(DoctorCheck {
             name: "endpoint URL".to_string(),
             category: Category::Configuration,
             status: CheckStatus::Missing,
             version: None,
-            message: format!("invalid endpoint `{}` ({})", config.endpoint, e),
+            message: format!("invalid endpoint `{}` ({})", redacted_endpoint, e),
             fix_hint: Some(
                 "Set a valid URL in selfware.toml `endpoint = \"http://127.0.0.1:8000/v1\"`."
                     .to_string(),
@@ -931,6 +953,21 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
                     .to_string(),
             ),
         });
+    } else if let Err(e) = crate::config::api_key::assert_credential_endpoint_safe(
+        &config.endpoint,
+        config.api_key.is_some(),
+    ) {
+        out.push(DoctorCheck {
+            name: "api_key".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Missing,
+            version: None,
+            message: e.to_string(),
+            fix_hint: Some(
+                "Use an https:// endpoint, remove URL userinfo, or set SELFWARE_ALLOW_PLAINTEXT_REMOTE=1 if intentional."
+                    .to_string(),
+            ),
+        });
     } else {
         out.push(DoctorCheck {
             name: "api_key".to_string(),
@@ -961,6 +998,9 @@ fn endpoint_is_local_or_lan(endpoint: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return false;
     }

@@ -41,7 +41,8 @@ use std::path::PathBuf;
 
 use super::api_key::{
     endpoint_has_userinfo, is_insecure_remote_endpoint, is_keyless_endpoint, is_local_endpoint,
-    is_openrouter_endpoint, load_api_key_from_keyring, plaintext_remote_allowed, ApiKeySource,
+    is_openrouter_endpoint, load_api_key_from_keyring, plaintext_remote_allowed, redact_endpoint,
+    ApiKeySource,
 };
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
@@ -1115,14 +1116,14 @@ impl Config {
                 bail!(
                     "Refusing to send the API key: endpoint '{}' embeds URL credentials \
                      (user:pass@host), a host-spoofing vector. Remove the '@' userinfo.",
-                    config.endpoint
+                    redact_endpoint(&config.endpoint)
                 );
             }
             if is_insecure_remote_endpoint(&config.endpoint) && !plaintext_remote_allowed() {
                 bail!(
                     "Refusing to send the API key over plaintext HTTP to a remote endpoint '{}'. \
                      Use https:// or a local endpoint (localhost / 127.0.0.1).",
-                    config.endpoint
+                    redact_endpoint(&config.endpoint)
                 );
             }
             // Profile endpoints (`[models.*] endpoint`) route profile traffic
@@ -1135,14 +1136,14 @@ impl Config {
                     bail!(
                         "Refusing to send the API key: profile endpoint '{}' embeds URL credentials \
                          (user:pass@host), a host-spoofing vector. Remove the '@' userinfo.",
-                        profile.endpoint
+                        redact_endpoint(&profile.endpoint)
                     );
                 }
                 if is_insecure_remote_endpoint(&profile.endpoint) && !plaintext_remote_allowed() {
                     bail!(
                         "Refusing to send the API key over plaintext HTTP to a remote profile \
                          endpoint '{}'. Use https:// or a local endpoint (localhost / 127.0.0.1).",
-                        profile.endpoint
+                        redact_endpoint(&profile.endpoint)
                     );
                 }
             }
@@ -1177,7 +1178,7 @@ impl Config {
                         "Refusing to send the global SELFWARE_API_KEY to endpoint '{}' selected by \
                          the project's selfware.toml: this repository is not trusted. If you trust \
                          it, run `selfware trust` on this path:\n  {}",
-                        config.endpoint,
+                        redact_endpoint(&config.endpoint),
                         canon.display()
                     );
                 }
@@ -1199,7 +1200,7 @@ impl Config {
                             "Refusing to send the global SELFWARE_API_KEY to profile endpoint '{}' \
                              selected by the project's selfware.toml: this repository is not \
                              trusted. If you trust it, run `selfware trust` on this path:\n  {}",
-                            profile.endpoint,
+                            redact_endpoint(&profile.endpoint),
                             canon.display()
                         );
                     }
@@ -1227,7 +1228,7 @@ impl Config {
                          selfware.toml: this repository is not trusted, and the endpoint \
                          would receive the full conversation. If you trust it, run \
                          `selfware trust` on this path:\n  {}",
-                        config.endpoint,
+                        redact_endpoint(&config.endpoint),
                         canon.display()
                     );
                 }
@@ -1252,7 +1253,7 @@ impl Config {
                              selfware.toml: this repository is not trusted, and the endpoint \
                              would receive the full conversation. If you trust it, run \
                              `selfware trust` on this path:\n  {}",
-                            profile.endpoint,
+                            redact_endpoint(&profile.endpoint),
                             canon.display()
                         );
                     }

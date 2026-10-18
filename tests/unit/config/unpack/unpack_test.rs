@@ -1017,3 +1017,30 @@ async fn test_unpack_with_options_scan_only_returns_ok() {
         "unpack_with_options(true) should succeed without side effects"
     );
 }
+
+#[test]
+fn test_clamp_hardware_fallback_budgets_clamps_default_max_tokens_for_32k_window() {
+    let (max_tokens, token_budget) = clamp_hardware_fallback_budgets(32_768, 65_536, false);
+    assert_eq!(max_tokens, 8_192);
+    assert_eq!(token_budget, 19_660);
+    assert!(max_tokens + token_budget <= 32_768);
+
+    // Explicit user max_tokens within window is preserved.
+    let (user_max, user_budget) = clamp_hardware_fallback_budgets(32_768, 12_000, true);
+    assert_eq!(user_max, 12_000);
+    assert_eq!(user_budget, 19_660);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_save_unpack_config_refuses_symlink_target() {
+    with_temp_cwd(|| {
+        std::fs::write("real.toml", "original").unwrap();
+        std::os::unix::fs::symlink("real.toml", "selfware.toml").unwrap();
+        let config = Config::default();
+        let err = save_unpack_config(&config)
+            .expect_err("save_unpack_config must refuse symlink selfware.toml");
+        assert!(err.to_string().contains("symlink"), "unexpected: {err}");
+        assert_eq!(std::fs::read_to_string("real.toml").unwrap(), "original");
+    });
+}

@@ -148,6 +148,12 @@ impl ContextCompressor {
         }
     }
 
+    /// Update the compression threshold when the session's context budget or
+    /// content ratio changes (e.g. after endpoint fallback or model switch).
+    pub fn set_token_budget(&mut self, token_budget: usize, content_ratio: f32) {
+        self.compression_threshold = (token_budget as f32 * content_ratio) as usize;
+    }
+
     fn with_ledger<R>(&self, f: impl FnOnce(&mut WorkLedger) -> R) -> R {
         // A poisoned ledger is still valid data (every update is a plain
         // field write); recover it rather than losing the progress record.

@@ -49,10 +49,14 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Whether the file at `path` is exactly the pinned model: size gate first
-/// (cheap), then the full digest.
+/// Whether the file at `path` is exactly the pinned model: regular-file and
+/// size gates first (cheap), then the full digest.
 pub fn verify_model_file(path: &Path) -> Result<bool> {
-    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Ok(false);
+    }
     if meta.len() != MODEL_SIZE_BYTES {
         return Ok(false);
     }
@@ -98,8 +102,8 @@ pub const LLAMA_INSTALL_HINT: &str = "llama-server not found. Install llama.cpp 
 /// mismatch fails loudly.
 pub async fn ensure_model(dir: &Path) -> Result<PathBuf> {
     let path = model_path_in(dir);
-    if path.is_file() {
-        if verify_model_file(&path)? {
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_file() && verify_model_file(&path)? {
             return Ok(path);
         }
         eprintln!(
@@ -134,6 +138,17 @@ pub(crate) fn check_download_progress(
         );
     }
     Ok(next)
+}
+
+pub(crate) fn check_download_complete(downloaded: u64, expected_size: u64) -> Result<()> {
+    if downloaded != expected_size {
+        bail!(
+            "model download truncated ({} < {} bytes); refusing partial stream",
+            downloaded,
+            expected_size
+        );
+    }
+    Ok(())
 }
 
 async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
@@ -183,6 +198,7 @@ async fn download_model(dir: &Path, dest: &Path) -> Result<()> {
                 next_report += 256 * 1024 * 1024;
             }
         }
+        check_download_complete(downloaded, MODEL_SIZE_BYTES)?;
         file.sync_all()?;
         Ok::<(), anyhow::Error>(())
     }

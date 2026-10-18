@@ -215,6 +215,14 @@ pub fn emit_config(plan: &WizardPlan) -> Result<PathBuf> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
+    if let Ok(meta) = std::fs::symlink_metadata(&plan.config_path) {
+        if meta.file_type().is_symlink() {
+            bail!(
+                "refusing to write config through symlink at {}",
+                plan.config_path.display()
+            );
+        }
+    }
     std::fs::write(&plan.config_path, &body)
         .with_context(|| format!("writing {}", plan.config_path.display()))?;
     let _ = crate::config::trust::add_trusted_config(&plan.config_path);
@@ -315,7 +323,14 @@ fn detect_model_at(endpoint: &str) -> Option<DetectedModel> {
         builder = builder.no_proxy();
     }
     let client = builder.build().ok()?;
-    let body: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .ok()?;
     let model = body.get("data")?.as_array()?.first()?;
     let id = model.get("id")?.as_str()?.to_string();
     Some(DetectedModel {

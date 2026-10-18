@@ -3,11 +3,28 @@ use crate::config::Config;
 
 #[test]
 fn choose_local_endpoint_prefers_override() {
-    // A non-empty override wins over the Ollama default (llama.cpp/:8080 etc.).
+    // A non-empty local override wins over the Ollama default (llama.cpp/:8080 etc.).
     assert_eq!(
         LocalEndpointFallback::choose_local_endpoint(Some("http://localhost:8080/v1")),
         "http://localhost:8080/v1"
     );
+    assert_eq!(
+        LocalEndpointFallback::choose_local_endpoint(Some("http://127.0.0.1:1234/v1")),
+        "http://127.0.0.1:1234/v1"
+    );
+    // Non-local, userinfo-spoofed, or non-HTTP overrides are rejected in favor of Ollama default.
+    for non_local in [
+        "http://remote.example.com:8080/v1",
+        "https://api.openai.com/v1",
+        "http://localhost@attacker.example/v1",
+        "ftp://localhost:8080/v1",
+    ] {
+        assert_eq!(
+            LocalEndpointFallback::choose_local_endpoint(Some(non_local)),
+            OLLAMA_LOCAL_ENDPOINT,
+            "non-local override {non_local} must not be accepted by LocalEndpointFallback"
+        );
+    }
     // Blank / whitespace-only overrides are ignored.
     assert_eq!(
         LocalEndpointFallback::choose_local_endpoint(Some("   ")),

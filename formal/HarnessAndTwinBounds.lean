@@ -538,6 +538,90 @@ theorem verify_when_no_repair
 theorem clean_books_no_proposal :
     stewardTopKind false false false false false = none := rfl
 
+/-! ## Part III — Offline Endpoint Fallback & Context Budget Derivation -/
+
+/-- `MIN_CONVERSATION_TOKENS` in `src/config/mod.rs`. -/
+def minConversationTokens : Nat := 2048
+
+/-- `Config::derive_context_budget` in `src/config/mod.rs`:
+clamps `maxTokens` down to `context - context / 5 - minConversationTokens` and
+returns `some (maxContextTokens, reservedOutput)` iff `maxContextTokens ≥ 2048`. -/
+def deriveContextBudget (context maxTokens : Nat) : Option (Nat × Nat) :=
+  let safetyMargin := context / 5
+  let maxReservable := context - safetyMargin - minConversationTokens
+  let reservedOutput := min maxTokens maxReservable
+  let maxContextTokens := context - reservedOutput - safetyMargin
+  if maxContextTokens < minConversationTokens then none
+  else some (maxContextTokens, reservedOutput)
+
+theorem derive_context_budget_sound (context maxTokens budget reserved : Nat)
+    (h : deriveContextBudget context maxTokens = some (budget, reserved)) :
+    minConversationTokens ≤ budget ∧ reserved ≤ maxTokens ∧
+    budget + reserved + context / 5 ≤ context := by
+  unfold deriveContextBudget at h
+  dsimp at h
+  by_cases hlt : context - min maxTokens (context - context / 5 - minConversationTokens) - context / 5 < minConversationTokens
+  · simp [hlt] at h
+  · simp [hlt] at h
+    rcases h with ⟨rfl, rfl⟩
+    refine ⟨by omega, Nat.min_le_left _ _, ?_⟩
+    omega
+
+theorem derive_context_budget_32k_clamps_oversized_max_tokens :
+    deriveContextBudget 32768 65536 = some (2048, 24167) := rfl
+
+theorem derive_context_budget_32k_8k_output :
+    deriveContextBudget 32768 8192 = some (18023, 8192) := rfl
+
+inductive EndpointTarget where
+  | customLocal
+  | ollamaDefault
+  deriving DecidableEq, Repr
+
+/-- `LocalEndpointFallback::choose_local_endpoint` in `src/self_healing/recovery_tree.rs`:
+an override is accepted only when it is non-empty AND verified as a local endpoint. -/
+def chooseLocalEndpoint (overrideNonEmpty overrideIsLocal : Bool) : EndpointTarget :=
+  if overrideNonEmpty && overrideIsLocal then .customLocal else .ollamaDefault
+
+theorem non_local_override_never_selected (nonEmpty : Bool) :
+    chooseLocalEndpoint nonEmpty false = .ollamaDefault := by
+  simp [chooseLocalEndpoint]
+
+theorem chosen_endpoint_always_local (nonEmpty isLocal : Bool) :
+    chooseLocalEndpoint nonEmpty isLocal = .ollamaDefault ∨ isLocal = true := by
+  cases nonEmpty <;> cases isLocal <;> simp [chooseLocalEndpoint]
+
+/-- Rigor-mode transition in `src/agent/task_runner.rs`:
+when `resolved = true`, a recovery action that fails to apply (`appliedOk = false`)
+must still enter rigor mode, matching `Escalate` / `Unresolvable`. -/
+def shouldEnterRigorOnRecovery (resolved appliedOk escalatedOrUnresolvable : Bool) : Bool :=
+  if resolved then !appliedOk else escalatedOrUnresolvable
+
+theorem failed_recovery_application_always_enters_rigor (esc : Bool) :
+    shouldEnterRigorOnRecovery true false esc = true := rfl
+
+theorem successful_recovery_application_skips_rigor (esc : Bool) :
+    shouldEnterRigorOnRecovery true true esc = false := rfl
+
+/-- `clamp_hardware_fallback_budgets` in `src/config/unpack.rs`:
+clamps `maxTokens` and derives a safe `tokenBudget` when `auto_calibrate` falls
+back to a hardware-recommended model window without a live server probe. -/
+def clampHardwareFallbackBudgets (context maxTokens : Nat) (maxTokensUserSet : Bool) : Nat × Nat :=
+  let clampedMaxTokens :=
+    if maxTokensUserSet then min maxTokens context
+    else min (min maxTokens (max (context / 4) 1024)) context
+  let tokenBudget := max (min (context * 3 / 5) (context - clampedMaxTokens)) 1
+  (clampedMaxTokens, tokenBudget)
+
+theorem clamp_hardware_fallback_budgets_fits_window (context maxTokens : Nat) (userSet : Bool) :
+    let (clamped, budget) := clampHardwareFallbackBudgets context maxTokens userSet
+    clamped ≤ context ∧ 1 ≤ budget ∧ (clamped < context → clamped + budget ≤ context) := by
+  unfold clampHardwareFallbackBudgets
+  cases userSet <;> dsimp <;> refine ⟨?_, ?_, ?_⟩ <;> omega
+
+theorem clamp_hardware_fallback_32k_default :
+    clampHardwareFallbackBudgets 32768 65536 false = (8192, 19660) := rfl
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=

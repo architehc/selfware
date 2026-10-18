@@ -140,3 +140,91 @@ async fn test_generate_config_applies_profile_pinned_context_and_budget() {
     assert!(config.agent.streaming);
     config.validate().unwrap();
 }
+
+#[tokio::test]
+async fn test_fetch_models_rejects_error_status_and_redacts_endpoint() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let body = r#"{"error":{"message":"unauthorized"}}"#;
+            let resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let mut stream = reader.into_inner();
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let url = format!("http://user:supersecret@{}/v1?token=secret123", addr);
+    let configurator = AutoConfigurator::new(&url, None);
+    let err = configurator.fetch_models().await.unwrap_err().to_string();
+    assert!(err.contains("401"), "unexpected error: {err}");
+    assert!(!err.contains("supersecret"), "leaked userinfo in: {err}");
+    assert!(!err.contains("secret123"), "leaked query token in: {err}");
+}
+
+#[tokio::test]
+async fn test_run_tests_marks_chat_failed_on_error_payload_without_choices() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream);
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let (status, body) = if req_line.contains("/models") {
+                (
+                    "200 OK",
+                    r#"{"data":[{"id":"m0","root":"m0","owned_by":"vllm","max_model_len":32768}]}"#,
+                )
+            } else {
+                ("500 Internal Server Error", r#"{"error":"backend down"}"#)
+            };
+            let resp = format!(
+                "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let mut stream = reader.into_inner();
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let configurator = AutoConfigurator::new(&format!("http://{}/v1", addr), None);
+    let results = configurator.run_tests("m0").await.unwrap();
+    assert!(
+        !results.chat_works,
+        "HTTP 500 JSON error body must not be reported as chat_works = true"
+    );
+    assert!(!results.streaming);
+    assert!(!results.function_calling);
+}
+
+#[tokio::test]
+async fn test_streaming_and_function_calling_refuse_plaintext_remote_with_api_key() {
+    let configurator = AutoConfigurator::new("http://203.0.113.10:8000/v1", Some("sk-secret"));
+    assert!(!configurator.test_streaming("m0").await);
+    assert!(!configurator.test_function_calling("m0").await);
+}

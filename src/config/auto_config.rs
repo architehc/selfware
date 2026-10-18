@@ -97,7 +97,8 @@ impl AutoConfigurator {
     pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
         self.assert_credential_safe()?;
         let url = format!("{}/models", self.endpoint);
-        debug!("Fetching models from {url}");
+        let redacted_url = crate::config::redact_endpoint(&url);
+        debug!("Fetching models from {redacted_url}");
 
         let mut req = self.client.get(&url);
         if let Some((k, v)) = self.auth_header() {
@@ -107,7 +108,11 @@ impl AutoConfigurator {
         let resp = req
             .send()
             .await
-            .with_context(|| format!("Failed to connect to {url}"))?;
+            .with_context(|| format!("Failed to connect to {redacted_url}"))?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("GET {} returned HTTP {}", redacted_url, resp.status());
+        }
 
         let body: Value = resp
             .json()
@@ -341,9 +346,16 @@ impl AutoConfigurator {
 
     /// Print a TOML representation of the config.
     pub fn print_config_toml(&self, config: &Config) {
+        let redacted_endpoint = crate::config::redact_endpoint(&config.endpoint);
         println!("\n# --- Generated configuration ---");
-        println!("endpoint = \"{}\"", config.endpoint);
-        println!("model = \"{}\"", config.model);
+        println!(
+            "endpoint = {}",
+            crate::cli::init_wizard::toml_quote(&redacted_endpoint)
+        );
+        println!(
+            "model = {}",
+            crate::cli::init_wizard::toml_quote(&config.model)
+        );
         println!("max_tokens = {}", config.max_tokens);
         println!("context_length = {}", config.context_length);
         println!("temperature = {}", config.temperature);
@@ -424,7 +436,17 @@ impl AutoConfigurator {
         }
 
         let resp = req.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("chat completion returned HTTP {}", resp.status());
+        }
         let result: Value = resp.json().await?;
+        if result
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .is_none_or(|a| a.is_empty())
+        {
+            anyhow::bail!("chat completion response missing non-empty choices array");
+        }
         Ok(result)
     }
 
@@ -447,6 +469,9 @@ impl AutoConfigurator {
     }
 
     async fn test_streaming(&self, model: &str) -> bool {
+        if self.assert_credential_safe().is_err() {
+            return false;
+        }
         let url = format!("{}/chat/completions", self.endpoint);
         let body = json!({
             "model": model,
@@ -468,6 +493,9 @@ impl AutoConfigurator {
     }
 
     async fn test_function_calling(&self, model: &str) -> bool {
+        if self.assert_credential_safe().is_err() {
+            return false;
+        }
         let url = format!("{}/chat/completions", self.endpoint);
         let body = json!({
             "model": model,

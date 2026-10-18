@@ -71,6 +71,8 @@ async fn probe_lmstudio() -> Option<DiscoveredEndpoint> {
         .send()
         .await
         .ok()?
+        .error_for_status()
+        .ok()?
         .json::<serde_json::Value>()
         .await
         .ok()?;
@@ -91,6 +93,7 @@ async fn probe_lmstudio() -> Option<DiscoveredEndpoint> {
         .get("max_model_len")
         .and_then(|v| v.as_u64())
         .or_else(|| model_info.get("context_length").and_then(|v| v.as_u64()))
+        .filter(|&n| n > 0)
         .unwrap_or(131072) as usize;
 
     let multimodal = is_multimodal(&model, model_info);
@@ -152,6 +155,7 @@ async fn probe_generic(port: u16) -> Option<DiscoveredEndpoint> {
         .get("max_model_len")
         .and_then(|v| v.as_u64())
         .or_else(|| first.get("context_length").and_then(|v| v.as_u64()))
+        .filter(|&n| n > 0)
         .unwrap_or_else(|| infer_context_length(&model)) as usize;
 
     let multimodal = is_multimodal(&model, first);
@@ -227,7 +231,9 @@ fn infer_context_length(model: &str) -> u64 {
 // ── Backend auto-start helpers ───────────────────────────────────────────────
 
 fn is_ollama_installed() -> bool {
+    use crate::safety::process_env::SanitizedEnvExt;
     std::process::Command::new("ollama")
+        .sanitized_env()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -241,7 +247,9 @@ fn is_lm_studio_installed() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
+        use crate::safety::process_env::SanitizedEnvExt;
         std::process::Command::new("lmstudio")
+            .sanitized_env()
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -267,7 +275,9 @@ async fn try_start_ollama() -> bool {
         "⟳".cyan()
     );
 
-    let _ = tokio::process::Command::new("ollama")
+    let mut cmd = tokio::process::Command::new("ollama");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let _ = cmd
         .arg("serve")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -295,7 +305,9 @@ async fn ollama_pull(model: &str) -> Result<bool> {
         model.bright_white()
     );
 
-    let output = tokio::process::Command::new("ollama")
+    let mut cmd = tokio::process::Command::new("ollama");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let output = cmd
         .args(["pull", model])
         .output()
         .await
@@ -642,6 +654,15 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
         let top = coding_models.first().unwrap();
         config.model = top.model.name.clone();
         config.context_length = top.model.context_length as usize;
+        let (clamped_max_tokens, fallback_budget) = clamp_hardware_fallback_budgets(
+            config.context_length,
+            config.max_tokens,
+            provenance_is_user_set(config, "max_tokens"),
+        );
+        config.max_tokens = clamped_max_tokens;
+        if !provenance_is_user_set(config, "agent.token_budget") {
+            config.agent.token_budget = fallback_budget;
+        }
         if config.endpoint == super::default_endpoint() {
             config.endpoint = "http://127.0.0.1:1234/v1".to_string();
         }
@@ -655,6 +676,7 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
         if let Some(profile) = config.models.get_mut("default") {
             profile.endpoint = config.endpoint.clone();
             profile.model = config.model.clone();
+            profile.max_tokens = config.max_tokens;
             profile.context_length = config.context_length;
             profile.modalities = modalities.clone();
         }
@@ -721,9 +743,38 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
     Ok(true)
 }
 
+/// Pure helper that clamps `max_tokens` and derives a safe `token_budget`
+/// when `auto_calibrate` falls back to a hardware-recommended model window
+/// (e.g. 32k or 64k) without a live server probe.
+pub(crate) fn clamp_hardware_fallback_budgets(
+    context_length: usize,
+    current_max_tokens: usize,
+    max_tokens_user_set: bool,
+) -> (usize, usize) {
+    let clamped_max_tokens = if max_tokens_user_set {
+        current_max_tokens.min(context_length)
+    } else {
+        current_max_tokens
+            .min((context_length / 4).max(1024))
+            .min(context_length)
+    };
+    let token_budget = (context_length * 3 / 5)
+        .min(context_length.saturating_sub(clamped_max_tokens))
+        .max(1);
+    (clamped_max_tokens, token_budget)
+}
+
 /// Save the given config to `selfware.toml` in the current directory.
 pub fn save_unpack_config(config: &Config) -> Result<std::path::PathBuf> {
     let path = std::path::PathBuf::from("selfware.toml");
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to write configuration through symlink at {}",
+                path.display()
+            );
+        }
+    }
 
     let mut extra_body_str = String::new();
     if let Some(ref extra) = config.extra_body {
@@ -741,8 +792,8 @@ pub fn save_unpack_config(config: &Config) -> Result<std::path::PathBuf> {
 
     let content = format!(
         r#"# Selfware Configuration — auto-generated by unpack
-endpoint = "{}"
-model = "{}"
+endpoint = {}
+model = {}
 max_tokens = {}
 context_length = {}
 temperature = {}
@@ -759,8 +810,8 @@ token_budget = {}
 step_timeout_secs = {}
 {}
 "#,
-        config.endpoint,
-        config.model,
+        crate::cli::init_wizard::toml_quote(&config.endpoint),
+        crate::cli::init_wizard::toml_quote(&config.model),
         config.max_tokens,
         config.context_length,
         config.temperature,

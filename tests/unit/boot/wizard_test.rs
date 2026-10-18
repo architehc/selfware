@@ -280,3 +280,18 @@ async fn verify_loop_gives_up_after_max_attempts() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert!(io.said.iter().any(|l| l.contains("Out of retries")));
 }
+
+#[cfg(unix)]
+#[test]
+fn emit_config_refuses_symlink_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.toml");
+    std::fs::write(&real, "original").unwrap();
+    let plan = plan_in(&dir, "openrouter-free");
+    std::fs::create_dir_all(plan.config_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &plan.config_path).unwrap();
+
+    let err = emit_config(&plan).expect_err("emit_config must refuse symlink destination");
+    assert!(err.to_string().contains("symlink"), "unexpected: {err}");
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
+}

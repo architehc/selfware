@@ -292,6 +292,22 @@ impl ContextMap {
         update_files_in_context(self.entries.len());
     }
 
+    /// Update the token budgets in place when the session's model/context window
+    /// changes, preserving already-loaded file entries.
+    pub fn update_budget(
+        &mut self,
+        token_budget: usize,
+        content_ratio: f32,
+        compression_ratio: f32,
+        thinking_ratio: f32,
+    ) {
+        self.budget = (token_budget as f32 * content_ratio) as usize;
+        self.compression_headroom = (token_budget as f32 * compression_ratio) as usize;
+        self.thinking_reserve = (token_budget as f32 * thinking_ratio) as usize;
+        update_total_budget(token_budget);
+        self.sync_budget();
+    }
+
     // ── Budget queries ──────────────────────────────────────────────────
 
     /// Content budget (the 75% zone).

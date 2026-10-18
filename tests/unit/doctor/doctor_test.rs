@@ -240,6 +240,63 @@ fn test_config_checks_local_detection_is_url_parsed_not_substring() {
     }
 }
 
+#[test]
+fn test_config_checks_redacts_endpoint_credentials_and_rejects_non_http_schemes() {
+    let cfg = crate::config::Config {
+        endpoint: "https://user:supersecretpass@api.example.com/v1?api_key=querysecret".to_string(),
+        api_key: Some(crate::config::RedactedString::new("sk-test")),
+        ..crate::config::Config::default()
+    };
+    let checks = config_checks(&cfg);
+    for c in &checks {
+        assert!(
+            !c.message.contains("supersecretpass") && !c.message.contains("querysecret"),
+            "check '{}' leaked endpoint secret in message: {}",
+            c.name,
+            c.message
+        );
+    }
+    let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
+    assert_eq!(
+        api_check.status,
+        CheckStatus::Missing,
+        "userinfo endpoint with api_key must fail api_key safety check"
+    );
+
+    for bad_scheme in ["ftp://example.com/v1", "file:///tmp/socket"] {
+        let cfg = crate::config::Config {
+            endpoint: bad_scheme.to_string(),
+            ..crate::config::Config::default()
+        };
+        let checks = config_checks(&cfg);
+        let url_check = checks.iter().find(|c| c.name == "endpoint URL").unwrap();
+        assert_eq!(
+            url_check.status,
+            CheckStatus::Missing,
+            "non-HTTP endpoint {bad_scheme} must fail endpoint URL check"
+        );
+    }
+}
+
+#[test]
+fn test_config_checks_rejects_api_key_over_plaintext_remote() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ALLOW_PLAINTEXT_REMOTE"]);
+    std::env::remove_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE");
+    let cfg = crate::config::Config {
+        endpoint: "http://api.example.com/v1".to_string(),
+        api_key: Some(crate::config::RedactedString::new("sk-test")),
+        ..crate::config::Config::default()
+    };
+    let checks = config_checks(&cfg);
+    let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
+    assert_eq!(
+        api_check.status,
+        CheckStatus::Missing,
+        "plaintext remote endpoint with api_key must fail when SELFWARE_ALLOW_PLAINTEXT_REMOTE is unset"
+    );
+    assert!(api_check.fix_hint.is_some());
+}
+
 #[cfg(feature = "log-analysis")]
 #[test]
 fn analyze_log_file_counts_errors_and_anomalies() {

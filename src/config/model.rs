@@ -148,6 +148,10 @@ pub fn redact_config_secrets(value: &mut serde_json::Value) {
             for (key, val) in map.iter_mut() {
                 if is_secret_key_name(key) || is_secret_map_name(key) {
                     redact_all(val);
+                } else if key.eq_ignore_ascii_case("endpoint") {
+                    if let serde_json::Value::String(s) = val {
+                        *s = super::redact_endpoint(s);
+                    }
                 } else {
                     redact_config_secrets(val);
                 }

@@ -80,12 +80,28 @@ fn build_server_args_cpu_safe_and_aliased() {
 
 #[test]
 fn check_download_progress_rejects_oversized_stream() {
-    use super::check_download_progress;
+    use super::{check_download_complete, check_download_progress};
 
     let exact = check_download_progress(MODEL_SIZE_BYTES - 16, 16, MODEL_SIZE_BYTES).unwrap();
     assert_eq!(exact, MODEL_SIZE_BYTES);
+    check_download_complete(exact, MODEL_SIZE_BYTES).unwrap();
 
     let err = check_download_progress(MODEL_SIZE_BYTES, 1, MODEL_SIZE_BYTES)
         .expect_err("stream exceeding MODEL_SIZE_BYTES must fail immediately");
     assert!(err.to_string().contains("exceeded expected size"));
+
+    let truncated = check_download_complete(MODEL_SIZE_BYTES - 1, MODEL_SIZE_BYTES)
+        .expect_err("truncated stream must fail before atomic replace");
+    assert!(truncated.to_string().contains("truncated"));
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_model_file_rejects_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.gguf");
+    std::fs::write(&target, b"placeholder").unwrap();
+    let link = model_path_in(dir.path());
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(!verify_model_file(&link).unwrap());
 }

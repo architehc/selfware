@@ -1304,8 +1304,72 @@ async fn test_apply_recovery_action_fallback_switches_endpoint() {
     );
     assert_eq!(agent.config.context_length, 32768);
     assert_eq!(agent.config.max_tokens, 2048);
+    assert_eq!(
+        agent.max_context_tokens,
+        32768 - 2048 - (32768 / 5),
+        "install_config must recompute max_context_tokens for the fallback profile"
+    );
+    assert_eq!(
+        agent.compressor.compression_threshold(),
+        (agent.max_context_tokens as f32 * agent.config.effective_context_content_ratio()) as usize,
+        "compressor threshold must follow the fallback context budget"
+    );
+    assert_eq!(
+        agent.context_map.budget(),
+        (agent.max_context_tokens as f32 * agent.config.effective_context_content_ratio()) as usize,
+        "context_map budget must follow the fallback context budget"
+    );
     assert!(!agent.config.agent.native_function_calling);
     assert_eq!(agent.config.models["default"].max_retries, Some(1));
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+#[cfg(feature = "resilience")]
+async fn test_apply_recovery_action_fallback_synthesizes_local_profile_with_conservative_context() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let remote_endpoint = format!("{}/v1", server.url());
+    let config = Config {
+        endpoint: remote_endpoint,
+        model: "deepseek-v4.1-flash".to_string(),
+        context_length: 262_144,
+        max_tokens: 65_536,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let env =
+        crate::test_support::EnvGuard::capture(&["SELFWARE_LOCAL_MODEL", "SELFWARE_LOCAL_API_KEY"]);
+    env.set("SELFWARE_LOCAL_MODEL", "custom-local-llama-8b");
+    std::env::remove_var("SELFWARE_LOCAL_API_KEY");
+
+    let target = "http://127.0.0.1:11434/v1".to_string();
+    let action = crate::self_healing::RecoveryDirective::Action(
+        crate::self_healing::RecoveryAction::Fallback {
+            target: target.clone(),
+        },
+    );
+    let applied = agent
+        .apply_recovery_action(&action)
+        .await
+        .expect("synthesized local fallback should succeed");
+    assert!(applied);
+    assert_eq!(agent.config.endpoint, target);
+    assert_eq!(agent.config.model, "custom-local-llama-8b");
+    assert_eq!(
+        agent.config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH
+    );
+    assert_eq!(agent.config.max_tokens, 8192);
+    assert_eq!(
+        agent.max_context_tokens,
+        32_768 - 8192 - (32_768 / 5),
+        "synthesized unknown local model must use conservative 32k context budget"
+    );
     server.stop().await;
 }
 

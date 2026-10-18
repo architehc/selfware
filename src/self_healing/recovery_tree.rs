@@ -349,13 +349,21 @@ impl LocalEndpointFallback {
     }
 
     /// Pure decision used by `pick_local_endpoint`: a non-empty override string
+    /// that resolves to a local endpoint (`crate::config::is_local_endpoint`)
     /// wins; otherwise fall back to the Ollama default. Kept separate so it is
     /// deterministically unit-testable without touching process environment.
     fn choose_local_endpoint(override_endpoint: Option<&str>) -> String {
         if let Some(ep) = override_endpoint {
             let ep = ep.trim();
             if !ep.is_empty() {
-                return ep.to_string();
+                if crate::config::is_local_endpoint(ep) {
+                    return ep.to_string();
+                }
+                tracing::warn!(
+                    "Ignoring non-local SELFWARE_LOCAL_ENDPOINT '{}'; falling back to '{}'",
+                    crate::config::redact_endpoint(ep),
+                    OLLAMA_LOCAL_ENDPOINT
+                );
             }
         }
         OLLAMA_LOCAL_ENDPOINT.to_string()
@@ -406,8 +414,8 @@ impl Resolution for LocalEndpointFallback {
              classified as unreachable. This change is session-scoped and NOT \
              saved; update the `endpoint` in selfware.toml to make it \
              permanent, or unset {} to disable automatic fallback.",
-            current,
-            target,
+            crate::config::redact_endpoint(current),
+            crate::config::redact_endpoint(&target),
             ENDPOINT_FALLBACK_ENV
         );
         ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
