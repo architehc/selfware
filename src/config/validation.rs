@@ -489,11 +489,13 @@ pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
 
     // 3. Bounded HTTP probe
     let url = format!("{}/get_server_info", base);
-    let client = match reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
-        .connect_timeout(std::time::Duration::from_millis(300))
-        .build()
-    {
+        .connect_timeout(std::time::Duration::from_millis(300));
+    if super::api_key::is_local_endpoint(&base) {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -528,11 +530,13 @@ pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
 
 fn probe_sglang_backend_blocking_direct(base: &str) -> (bool, bool) {
     let url = format!("{}/get_server_info", base);
-    let client = match reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
-        .connect_timeout(std::time::Duration::from_millis(300))
-        .build()
-    {
+        .connect_timeout(std::time::Duration::from_millis(300));
+    if super::api_key::is_local_endpoint(base) {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
         Ok(c) => c,
         Err(_) => return (false, false),
     };

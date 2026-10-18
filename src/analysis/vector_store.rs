@@ -420,24 +420,47 @@ impl VectorCollection {
 
     /// Add a chunk to the collection
     pub fn add_chunk(&mut self, chunk: CodeChunk) -> Result<()> {
-        if self.chunks.len() >= MAX_CHUNKS {
-            return Err(anyhow!(
-                "Collection {} is full (max {} chunks)",
-                self.name,
-                MAX_CHUNKS
-            ));
+        if let Some(&existing_idx) = self.id_index.get(&chunk.id) {
+            let old_file_path = self.chunks[existing_idx].metadata.file_path.to_path_buf();
+            let remove_old_file = if let Some(file_chunks) = self.file_index.get_mut(&old_file_path)
+            {
+                file_chunks.retain(|cid| cid != &chunk.id);
+                file_chunks.is_empty()
+            } else {
+                false
+            };
+            if remove_old_file {
+                self.file_index.remove(&old_file_path);
+            }
+
+            let file_chunks = self
+                .file_index
+                .entry(chunk.metadata.file_path.to_path_buf())
+                .or_default();
+            if !file_chunks.contains(&chunk.id) {
+                file_chunks.push(chunk.id.clone());
+            }
+            self.chunks[existing_idx] = chunk;
+        } else {
+            if self.chunks.len() >= MAX_CHUNKS {
+                return Err(anyhow!(
+                    "Collection {} is full (max {} chunks)",
+                    self.name,
+                    MAX_CHUNKS
+                ));
+            }
+
+            // Update file index (convert Arc<Path> to PathBuf for the index key)
+            self.file_index
+                .entry(chunk.metadata.file_path.to_path_buf())
+                .or_default()
+                .push(chunk.id.clone());
+
+            // Add to chunks
+            let idx = self.chunks.len();
+            self.id_index.insert(chunk.id.clone(), idx);
+            self.chunks.push(chunk);
         }
-
-        // Update file index (convert Arc<Path> to PathBuf for the index key)
-        self.file_index
-            .entry(chunk.metadata.file_path.to_path_buf())
-            .or_default()
-            .push(chunk.id.clone());
-
-        // Add to chunks
-        let idx = self.chunks.len();
-        self.id_index.insert(chunk.id.clone(), idx);
-        self.chunks.push(chunk);
 
         self.updated_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -465,9 +488,16 @@ impl VectorCollection {
                 self.id_index.insert(self.chunks[idx].id.clone(), idx);
             }
 
-            // Update file index
-            if let Some(file_chunks) = self.file_index.get_mut(chunk.metadata.file_path.as_ref()) {
+            // Update file index and remove empty file entries
+            let file_path = chunk.metadata.file_path.as_ref();
+            let remove_file_entry = if let Some(file_chunks) = self.file_index.get_mut(file_path) {
                 file_chunks.retain(|cid| cid != id);
+                file_chunks.is_empty()
+            } else {
+                false
+            };
+            if remove_file_entry {
+                self.file_index.remove(file_path);
             }
 
             self.updated_at = SystemTime::now()
@@ -2579,7 +2609,7 @@ impl VectorStore {
         // opening it. On Unix O_NOFOLLOW also closes the final-component swap
         // window in which a repository file could become an external symlink
         // between enumeration and ingestion.
-        let mut file = options
+        let file = options
             .open(path)
             .with_context(|| format!("Failed to open {label}"))?;
         if !file
@@ -2589,9 +2619,17 @@ impl VectorStore {
         {
             anyhow::bail!("Refusing {label} that is a symlink or non-regular file");
         }
+        const MAX_PERSISTENCE_READ_BYTES: u64 = 64 * 1024 * 1024;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(MAX_PERSISTENCE_READ_BYTES + 1)
+            .read_to_end(&mut bytes)
             .with_context(|| format!("Failed to read {label}"))?;
+        if bytes.len() as u64 > MAX_PERSISTENCE_READ_BYTES {
+            anyhow::bail!(
+                "Refusing {label} larger than {} bytes",
+                MAX_PERSISTENCE_READ_BYTES
+            );
+        }
         Ok(bytes)
     }
 
@@ -2603,11 +2641,19 @@ impl VectorStore {
     /// returned by the gate is the descriptor read here, so a pathname swap
     /// cannot race the link-count decision.
     fn read_discovered_source_file(path: &Path, label: &str) -> Result<Vec<u8>> {
-        let mut file = crate::safety::source_context::open_broad_discovery_regular(path)
+        let file = crate::safety::source_context::open_broad_discovery_regular(path)
             .with_context(|| format!("Failed to open {label}"))?;
+        const MAX_SOURCE_READ_BYTES: u64 = 16 * 1024 * 1024;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(MAX_SOURCE_READ_BYTES + 1)
+            .read_to_end(&mut bytes)
             .with_context(|| format!("Failed to read {label}"))?;
+        if bytes.len() as u64 > MAX_SOURCE_READ_BYTES {
+            anyhow::bail!(
+                "Refusing {label} larger than {} bytes",
+                MAX_SOURCE_READ_BYTES
+            );
+        }
         Ok(bytes)
     }
 

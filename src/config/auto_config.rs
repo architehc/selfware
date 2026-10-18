@@ -65,11 +65,13 @@ pub struct AutoConfigurator {
 
 impl AutoConfigurator {
     pub fn new(endpoint: &str, api_key: Option<&str>) -> Self {
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .expect("Failed to build HTTP client");
+            .connect_timeout(std::time::Duration::from_secs(10));
+        if crate::config::api_key::is_local_endpoint(endpoint) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().expect("Failed to build HTTP client");
 
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),

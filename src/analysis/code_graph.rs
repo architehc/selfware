@@ -549,16 +549,37 @@ impl CodeGraph {
 
     /// Merge another graph into this one
     pub fn merge(&mut self, other: &CodeGraph) {
+        let mut id_map: HashMap<&str, String> = HashMap::new();
         for node in other.nodes.values() {
-            if !self.name_index.contains_key(&node.name) {
-                self.add_node(node.clone());
+            if let Some(existing_id) = self.name_index.get(&node.name) {
+                id_map.insert(node.id.as_str(), existing_id.clone());
+            } else {
+                let added_id = self.add_node(node.clone());
+                id_map.insert(node.id.as_str(), added_id);
             }
         }
 
         for edge in &other.edges {
-            // Check if both nodes exist
-            if self.nodes.contains_key(&edge.source) && self.nodes.contains_key(&edge.target) {
-                self.add_edge(edge.clone());
+            let source = id_map
+                .get(edge.source.as_str())
+                .cloned()
+                .unwrap_or_else(|| edge.source.clone());
+            let target = id_map
+                .get(edge.target.as_str())
+                .cloned()
+                .unwrap_or_else(|| edge.target.clone());
+            if self.nodes.contains_key(&source) && self.nodes.contains_key(&target) {
+                let already_exists = self.edges.iter().any(|existing| {
+                    existing.source == source
+                        && existing.target == target
+                        && existing.edge_type == edge.edge_type
+                });
+                if !already_exists {
+                    let mut remapped = edge.clone();
+                    remapped.source = source;
+                    remapped.target = target;
+                    self.add_edge(remapped);
+                }
             }
         }
     }
@@ -845,8 +866,11 @@ impl GraphRenderer {
 
     /// Write JSON to `w`.
     fn write_json(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        let json_str = |s: &str| {
+            serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s.escape_default()))
+        };
         writeln!(w, "{{")?;
-        writeln!(w, "  \"name\": \"{}\",", graph.name)?;
+        writeln!(w, "  \"name\": {},", json_str(&graph.name))?;
         writeln!(w, "  \"nodes\": [")?;
 
         let nodes: Vec<String> = graph
@@ -854,13 +878,13 @@ impl GraphRenderer {
             .values()
             .map(|n| {
                 format!(
-                    "    {{\"id\": \"{}\", \"name\": \"{}\", \"type\": \"{}\", \"file\": {}}}",
-                    n.id,
-                    n.name,
-                    n.node_type.as_str(),
+                    "    {{\"id\": {}, \"name\": {}, \"type\": {}, \"file\": {}}}",
+                    json_str(&n.id),
+                    json_str(&n.name),
+                    json_str(n.node_type.as_str()),
                     n.file_path
                         .as_ref()
-                        .map(|f| format!("\"{}\"", f))
+                        .map(|f| json_str(f))
                         .unwrap_or_else(|| "null".to_string())
                 )
             })
@@ -875,10 +899,10 @@ impl GraphRenderer {
             .iter()
             .map(|e| {
                 format!(
-                    "    {{\"source\": \"{}\", \"target\": \"{}\", \"type\": \"{}\"}}",
-                    e.source,
-                    e.target,
-                    e.edge_type.label()
+                    "    {{\"source\": {}, \"target\": {}, \"type\": {}}}",
+                    json_str(&e.source),
+                    json_str(&e.target),
+                    json_str(e.edge_type.label())
                 )
             })
             .collect();

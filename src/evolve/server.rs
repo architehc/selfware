@@ -2311,7 +2311,7 @@ async fn assistant_task_handler(
                 _ => 3,
             });
             let mut evidence = Vec::new();
-            let mut complete = true;
+            let mut complete = files.len() <= max_files;
             let mut used = Vec::new();
             for file in files.into_iter().take(max_files) {
                 let Ok(doc) = ide.read_document(&file.path) else {

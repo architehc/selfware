@@ -29,12 +29,14 @@ impl HarnessRunner {
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
 
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .pool_max_idle_per_host(config.max_concurrent)
-            .build()
-            .context("Failed to build HTTP client")?;
+            .pool_max_idle_per_host(config.max_concurrent);
+        if crate::config::api_key::is_local_endpoint(&config.endpoint) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context("Failed to build HTTP client")?;
 
         Ok(Self {
             config,

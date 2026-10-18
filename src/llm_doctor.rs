@@ -246,6 +246,15 @@ impl DoctorReport {
 pub async fn run_llm_doctor(config: &Config) -> Result<DoctorReport> {
     let (report, had_fail) = run_llm_doctor_inner(config).await?;
     if had_fail {
+        if let Some(ref reach) = report.endpoint_reachable {
+            if matches!(reach.status, CheckOutcome::Fail) {
+                return Err(anyhow::anyhow!(
+                    "LLM endpoint `{}` is unreachable: {}",
+                    crate::config::redact_endpoint(&config.endpoint),
+                    reach.detail
+                ));
+            }
+        }
         eprintln!(
             "{}",
             "  llm-doctor finished with FAILures — see remediation hints above."
@@ -390,27 +399,26 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
             }
         }
         Err(e) => {
+            let safe_endpoint = crate::config::redact_endpoint(&endpoint);
             print_unified_check(
                 "endpoint reachable",
                 DoctorCheckStatus::Missing,
-                &format!("could not reach `{}`: {}", endpoint, e),
+                &format!("could not reach `{}`: {}", safe_endpoint, e),
                 Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."),
             );
             report.endpoint_reachable = Some(DoctorCheckResult {
                 name: "endpoint reachable".to_string(),
                 status: CheckOutcome::Fail,
-                detail: format!("could not reach `{}`: {}", endpoint, e),
+                detail: format!("could not reach `{}`: {}", safe_endpoint, e),
                 fix_hint: Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml.".to_string()),
             });
             report.had_failures = true;
             println!();
-            // No point continuing — return a hard error so the caller
-            // (cli::run) can exit with a non-zero code gracefully.
-            return Err(anyhow::anyhow!(
-                "LLM endpoint `{}` is unreachable: {}",
-                endpoint,
-                e
-            ));
+            // Return the populated report with `had_fail = true` so
+            // `run_llm_doctor_report` honors its contract of returning the
+            // structured DoctorReport even when the endpoint is unreachable,
+            // while `run_llm_doctor` still returns an Err for CLI exit codes.
+            return Ok((report, true));
         }
     }
     println!();

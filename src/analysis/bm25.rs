@@ -169,7 +169,7 @@ impl BM25Index {
         let n = self.documents.len() as f32;
 
         // Compute average document length
-        let total_length: u32 = self.documents.iter().map(|d| d.length).sum();
+        let total_length: u64 = self.documents.iter().map(|d| u64::from(d.length)).sum();
         self.avgdl = total_length as f32 / n;
 
         // Compute document frequency for each term
@@ -377,7 +377,16 @@ impl BM25Index {
 
     /// Get all unique terms in the index
     pub fn terms(&self) -> Vec<&str> {
-        self.idf.keys().map(|s| s.as_str()).collect()
+        if !self.dirty {
+            return self.idf.keys().map(|s| s.as_str()).collect();
+        }
+        let mut unique = std::collections::HashSet::new();
+        for doc in &self.documents {
+            for term in doc.term_freqs.keys() {
+                unique.insert(term.as_str());
+            }
+        }
+        unique.into_iter().collect()
     }
 
     /// Check if a document ID exists

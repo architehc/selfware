@@ -1454,3 +1454,36 @@ fn build_probe_client_constructs_for_local_and_remote_endpoints() {
     assert!(build_probe_client("http://localhost:11434/v1", Duration::from_secs(5)).is_ok());
     assert!(build_probe_client("https://api.openai.com/v1", Duration::from_secs(5)).is_ok());
 }
+
+#[tokio::test]
+async fn run_llm_doctor_report_returns_structured_report_when_endpoint_is_unreachable() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let config = Config {
+        endpoint: format!("http://127.0.0.1:{closed_port}/v1"),
+        model: "qwen38-flash-next".to_string(),
+        ..Config::default()
+    };
+
+    let report = run_llm_doctor_report(&config)
+        .await
+        .expect("run_llm_doctor_report must return Ok(DoctorReport) when endpoint is down");
+    assert!(report.had_failures);
+    assert!(!report.config_checks.is_empty());
+    let reach = report
+        .endpoint_reachable
+        .as_ref()
+        .expect("endpoint_reachable check must be populated");
+    assert_eq!(reach.status, CheckOutcome::Fail);
+    assert!(reach.detail.contains("could not reach"), "{}", reach.detail);
+
+    let err = run_llm_doctor(&config)
+        .await
+        .expect_err("run_llm_doctor must still return Err when endpoint is down");
+    assert!(
+        err.to_string().contains("is unreachable"),
+        "unexpected error: {err}"
+    );
+}

@@ -507,3 +507,21 @@ fn test_debt_tracker_default_path() {
     let path = DebtTracker::default_path(root);
     assert_eq!(path, root.join(".selfware").join("tech_debt.json"));
 }
+
+#[cfg(unix)]
+#[test]
+fn test_debt_tracker_load_refuses_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_path = dir.path().join("real.json");
+    let link_path = dir.path().join("link.json");
+
+    let tracker = DebtTracker::new();
+    tracker.save(&real_path).unwrap();
+    std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
+
+    let err = DebtTracker::load(&link_path).expect_err("symlink tech debt file must be refused");
+    assert!(
+        err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+}

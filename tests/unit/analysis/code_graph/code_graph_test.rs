@@ -742,3 +742,45 @@ fn test_render_to_matches_render_plantuml() {
         .unwrap();
     assert_eq!(rendered, String::from_utf8(buf).unwrap());
 }
+
+#[test]
+fn test_merge_remaps_edges_for_shared_node_names() {
+    let mut g1 = CodeGraph::new("g1");
+    let mut n1 = GraphNode::new("shared_fn", NodeType::Function);
+    n1.id = "g1_shared".to_string();
+    g1.add_node(n1);
+
+    let mut g2 = CodeGraph::new("g2");
+    let mut n2_shared = GraphNode::new("shared_fn", NodeType::Function);
+    n2_shared.id = "g2_shared".to_string();
+    let mut n2_callee = GraphNode::new("helper_fn", NodeType::Function);
+    n2_callee.id = "g2_helper".to_string();
+    g2.add_node(n2_shared);
+    g2.add_node(n2_callee);
+    g2.add_edge(GraphEdge::new("g2_shared", "g2_helper", EdgeType::Calls));
+
+    g1.merge(&g2);
+    assert_eq!(g1.node_count(), 2);
+    assert_eq!(
+        g1.edge_count(),
+        1,
+        "edge touching shared-name node must be preserved and remapped"
+    );
+    let deps = g1.dependencies("g1_shared");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].name, "helper_fn");
+}
+
+#[test]
+fn test_write_json_escapes_special_characters() {
+    let mut graph = CodeGraph::new("quote\"and\\slash\nname");
+    graph
+        .add_node(GraphNode::new("fn\"weird", NodeType::Function).in_file("src/\"quoted\"/mod.rs"));
+    let renderer = GraphRenderer::new();
+    let json = renderer.render(&graph, OutputFormat::Json);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).expect("rendered graph JSON must be valid JSON");
+    assert_eq!(parsed["name"], "quote\"and\\slash\nname");
+    assert_eq!(parsed["nodes"][0]["name"], "fn\"weird");
+    assert_eq!(parsed["nodes"][0]["file"], "src/\"quoted\"/mod.rs");
+}

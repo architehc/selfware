@@ -2979,6 +2979,64 @@ fn status_probes_the_models_route_not_the_bare_base() {
     );
 }
 
+#[tokio::test]
+async fn probe_status_endpoint_exposes_api_key_and_handles_offline_or_unsafe_endpoints() {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::{routing::get, Json, Router};
+
+    async fn models_handler(headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+        let auth = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if auth == Some("Bearer top-secret-status-token") {
+            Ok(Json(serde_json::json!({"data": [{"id": "local-model"}]})))
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+
+    let app = Router::new().route("/v1/models", get(models_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // 1. Local authenticated endpoint receives the real exposed token (not [REDACTED]).
+    let mut cfg = Config {
+        endpoint: format!("http://{addr}/v1"),
+        api_key: Some(crate::config::RedactedString::new(
+            "top-secret-status-token",
+        )),
+        ..Config::default()
+    };
+    let (reachable, detail) = probe_status_endpoint(&cfg).await;
+    assert!(reachable, "expected Connected, got: {detail}");
+    assert_eq!(detail, "Connected");
+
+    // 2. Remote plaintext HTTP endpoint with a credential is refused by authorize_request.
+    cfg.endpoint = "http://remote.example.com/v1".to_string();
+    let (reachable, detail) = probe_status_endpoint(&cfg).await;
+    assert!(!reachable);
+    assert!(
+        detail.contains("Refusing to send the API key"),
+        "expected credential-transport refusal, got: {detail}"
+    );
+
+    // 3. Unreachable local endpoint reports honest offline status.
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+    cfg.endpoint = format!("http://127.0.0.1:{closed_port}/v1");
+    cfg.api_key = None;
+    let (reachable, detail) = probe_status_endpoint(&cfg).await;
+    assert!(!reachable);
+    assert!(
+        detail.starts_with("Endpoint unreachable:"),
+        "expected offline status detail, got: {detail}"
+    );
+}
+
 #[test]
 fn run_summary_says_cost_is_not_reported_instead_of_billing_incomplete() {
     // UX field test (0.9.0): a free, self-hosted endpoint that never reports

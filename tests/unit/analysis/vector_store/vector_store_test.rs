@@ -1850,3 +1850,58 @@ fn test_http_embedding_provider_allows_remote_endpoint_without_key() {
         "no credential, no refusal"
     );
 }
+
+#[test]
+fn test_vector_collection_add_chunk_replaces_existing_id_and_remove_cleans_file_index() {
+    let mut collection = VectorCollection::new("dedup_test", CollectionScope::Project);
+    let mut chunk_v1 = CodeChunk::new(
+        "fn alpha() {}".to_string(),
+        ChunkMetadata::new(
+            PathBuf::from("src/a.rs"),
+            1,
+            1,
+            ChunkType::Function,
+            "rust",
+            "fn alpha() {}",
+        ),
+    );
+    chunk_v1.id = "chunk-1".to_string();
+
+    let mut chunk_v2 = CodeChunk::new(
+        "fn alpha_updated() {}".to_string(),
+        ChunkMetadata::new(
+            PathBuf::from("src/b.rs"),
+            1,
+            1,
+            ChunkType::Function,
+            "rust",
+            "fn alpha_updated() {}",
+        ),
+    );
+    chunk_v2.id = "chunk-1".to_string();
+
+    collection.add_chunk(chunk_v1).unwrap();
+    collection.add_chunk(chunk_v2).unwrap();
+
+    assert_eq!(collection.len(), 1);
+    assert_eq!(
+        collection.get_chunk("chunk-1").unwrap().content,
+        "fn alpha_updated() {}"
+    );
+    assert_eq!(collection.files().len(), 1);
+    assert!(collection
+        .chunk_ids_for_file(Path::new("src/a.rs"))
+        .is_empty());
+    assert_eq!(
+        collection.chunk_ids_for_file(Path::new("src/b.rs")).len(),
+        1
+    );
+
+    let removed = collection.remove_chunk("chunk-1");
+    assert!(removed.is_some());
+    assert!(collection.is_empty());
+    assert!(
+        collection.files().is_empty(),
+        "removing the last chunk for a file must remove its empty file_index entry"
+    );
+}

@@ -61,6 +61,7 @@ async fn probe_lmstudio() -> Option<DiscoveredEndpoint> {
     let model = models.iter().next().cloned()?;
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
@@ -127,6 +128,7 @@ async fn probe_ollama() -> Option<DiscoveredEndpoint> {
 async fn probe_generic(port: u16) -> Option<DiscoveredEndpoint> {
     let endpoint = format!("http://localhost:{}/v1", port);
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .ok()?;

@@ -293,3 +293,12 @@ fn test_bm25_default() {
     assert_eq!(index.k1, 1.5);
     assert_eq!(index.b, 0.75);
 }
+
+#[test]
+fn test_bm25_terms_returns_live_terms_when_dirty() {
+    let mut index = BM25Index::new();
+    index.add("doc1", "alpha beta");
+    let mut terms = index.terms();
+    terms.sort_unstable();
+    assert_eq!(terms, vec!["alpha", "beta"]);
+}

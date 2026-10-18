@@ -309,10 +309,12 @@ fn detect_served_model(card: &RecipeCard) -> Option<DetectedModel> {
 
 fn detect_model_at(endpoint: &str) -> Option<DetectedModel> {
     let url = format!("{}/models", endpoint.trim_end_matches('/'));
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
+    let mut builder =
+        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(2));
+    if crate::config::api_key::is_local_endpoint(endpoint) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().ok()?;
     let body: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
     let model = body.get("data")?.as_array()?.first()?;
     let id = model.get("id")?.as_str()?.to_string();

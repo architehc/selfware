@@ -184,6 +184,7 @@ pub async fn run_boot_chat() -> Result<()> {
     println!("  Configs come from recipe cards — run `selfware boot` for guided setup.\n");
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
     let stdin = std::io::stdin();

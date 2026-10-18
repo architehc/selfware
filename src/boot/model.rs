@@ -253,6 +253,7 @@ pub async fn spawn_server(binary: &Path, model: &Path, port: u16) -> Result<Llam
         .with_context(|| format!("spawning {}", binary.display()))?;
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(2))
         .build()?;

@@ -2173,6 +2173,44 @@ fn status_probe_url(endpoint: &str) -> String {
     format!("{}/models", endpoint.trim_end_matches('/'))
 }
 
+async fn probe_status_endpoint(config: &Config) -> (bool, String) {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_secs(2));
+    if crate::config::api_key::is_local_endpoint(&config.endpoint) {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => return (false, format!("Endpoint unreachable: {}", e)),
+    };
+    let req = match crate::config::api_key::authorize_request(
+        client.get(status_probe_url(&config.endpoint)),
+        &config.endpoint,
+        config.api_key.as_ref().map(|k| k.expose()),
+    ) {
+        Ok(req) => req,
+        Err(e) => return (false, e.to_string()),
+    };
+    match req.send().await {
+        Ok(resp) => {
+            let code = resp.status();
+            if code.is_success() || code == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                (true, "Connected".to_string())
+            } else if code == reqwest::StatusCode::UNAUTHORIZED
+                || code == reqwest::StatusCode::FORBIDDEN
+            {
+                (false, format!("Authentication failed ({})", code))
+            } else if code == reqwest::StatusCode::NOT_FOUND {
+                (false, format!("Endpoint not found ({})", code))
+            } else {
+                (false, format!("Endpoint returned error ({})", code))
+            }
+        }
+        Err(e) => (false, format!("Endpoint unreachable: {}", e)),
+    }
+}
+
 /// How long a tool-confirmation prompt waits in a non-REPL run (`-p`, `run`,
 /// `improve`, `batch`) before failing closed. Long enough for someone
 /// watching to read the reason and answer; short enough that an unattended
@@ -3022,38 +3060,8 @@ async fn handle_command(
 
             // Fast reachability probe of configured endpoint (2s timeout)
             // to satisfy Rule 3 (never claim Connected without verification).
-            let probe_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .build();
-            let probe_res = match probe_client {
-                Ok(c) => {
-                    let mut req = c.get(status_probe_url(&config.endpoint));
-                    if let Some(ref key) = config.api_key {
-                        req = req.bearer_auth(key);
-                    }
-                    req.send().await
-                }
-                Err(e) => Err(e),
-            };
-
-            let (endpoint_reachable, endpoint_status_detail) = match probe_res {
-                Ok(resp) => {
-                    let code = resp.status();
-                    if code.is_success() || code == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-                        (true, "Connected".to_string())
-                    } else if code == reqwest::StatusCode::UNAUTHORIZED
-                        || code == reqwest::StatusCode::FORBIDDEN
-                    {
-                        (false, format!("Authentication failed ({})", code))
-                    } else if code == reqwest::StatusCode::NOT_FOUND {
-                        (false, format!("Endpoint not found ({})", code))
-                    } else {
-                        (false, format!("Endpoint returned error ({})", code))
-                    }
-                }
-                Err(e) => (false, format!("Endpoint unreachable: {}", e)),
-            };
+            let (endpoint_reachable, endpoint_status_detail) = probe_status_endpoint(&config).await;
+            let redacted_endpoint = crate::config::redact_endpoint(&config.endpoint);
 
             // The global --output-format flag covers this command: both JSON
             // variants emit a single machine-readable object here.
@@ -3061,7 +3069,7 @@ async fn handle_command(
                 HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson => {
                     let status = serde_json::json!({
                         "model": ctx.model_name,
-                        "endpoint": config.endpoint,
+                        "endpoint": redacted_endpoint,
                         "is_local": ctx.is_local_model,
                         "endpoint_reachable": endpoint_reachable,
                         "endpoint_status": endpoint_status_detail,
@@ -3094,7 +3102,7 @@ async fn handle_command(
                                 "{} Local model endpoint issue: {} ({})",
                                 Glyphs::wilt(),
                                 endpoint_status_detail,
-                                config.endpoint
+                                redacted_endpoint
                             )
                             .garden_wilting()
                         }
@@ -3105,7 +3113,7 @@ async fn handle_command(
                             "{} Remote model endpoint issue: {} ({})",
                             Glyphs::wilt(),
                             endpoint_status_detail,
-                            config.endpoint
+                            redacted_endpoint
                         )
                         .garden_wilting()
                     };

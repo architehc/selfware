@@ -124,6 +124,7 @@ async fn check_round_trip(plan: RoundTripPlan) -> BootCheck {
     let result = async {
         let guard = model::spawn_server(&server, &model, model::SERVER_PORT).await?;
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
         let body = chat::build_messages("Reply with exactly: boot-ok", None);

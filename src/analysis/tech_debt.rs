@@ -882,8 +882,42 @@ impl DebtTracker {
 
     /// Load tracker state from a JSON file.
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        let data = std::fs::read_to_string(path)?;
-        let tracker: Self = serde_json::from_str(&data)?;
+        use std::io::Read;
+        const MAX_TECH_DEBT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            anyhow::bail!(
+                "Refusing to load tech debt tracker from symlink or non-regular file: {}",
+                path.display()
+            );
+        }
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = opts.open(path)?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!(
+                "Refusing to load tech debt tracker from non-regular file: {}",
+                path.display()
+            );
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_TECH_DEBT_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_TECH_DEBT_FILE_BYTES {
+            anyhow::bail!(
+                "Tech debt file {} exceeds maximum size ({} bytes)",
+                path.display(),
+                MAX_TECH_DEBT_FILE_BYTES
+            );
+        }
+        let tracker: Self = serde_json::from_slice(&bytes)?;
         Ok(tracker)
     }
 
