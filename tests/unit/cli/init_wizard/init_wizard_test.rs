@@ -225,3 +225,47 @@ fn template_declining_overwrite_does_not_scaffold_files() {
         "declining overwrite must not scaffold template files before checking selfware.toml"
     );
 }
+
+#[test]
+fn build_config_content_quotes_and_redacts_endpoint_and_model() {
+    let content = build_config_content(
+        "http://user:topsecret@127.0.0.1:8000/v1?api_key=leak",
+        "custom\"model\\v1",
+        "[\"./**\"]",
+    );
+    assert!(
+        !content.contains("topsecret") && !content.contains("api_key=leak"),
+        "build_config_content must redact endpoint credentials: {content}"
+    );
+    let parsed: crate::config::Config =
+        toml::from_str(&content).expect("quoted model and redacted endpoint must parse as TOML");
+    assert_eq!(parsed.endpoint, "http://REDACTED@127.0.0.1:8000/v1");
+    assert_eq!(parsed.model, "custom\"model\\v1");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_config_file_in_dir_refuses_symlink_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim.toml");
+    std::fs::write(&victim, "original").unwrap();
+    let symlink_path = dir.path().join("selfware.toml");
+    std::os::unix::fs::symlink(&victim, &symlink_path).unwrap();
+
+    let mut input = std::io::Cursor::new(b"y\n");
+    let err = super::write_config_file_in_dir(
+        dir.path(),
+        "http://127.0.0.1:1234/v1",
+        "qwen3-coder",
+        "normal",
+        "[\"./**\"]",
+        true,
+        &mut input,
+    )
+    .expect_err("symlinked selfware.toml must be refused");
+    assert!(
+        err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original");
+}

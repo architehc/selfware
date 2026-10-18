@@ -839,8 +839,9 @@ impl ApiClient {
         if config.endpoint.starts_with("http://")
             && !crate::config::is_local_endpoint(&config.endpoint)
         {
+            let redacted_endpoint = crate::config::redact_endpoint(&config.endpoint);
             warn!(
-                endpoint = %config.endpoint,
+                endpoint = %redacted_endpoint,
                 "API endpoint uses HTTP \u{2014} credentials may be transmitted in plaintext. \
                  Use HTTPS in production."
             );
@@ -1465,7 +1466,7 @@ impl ApiClient {
     /// attachment, thinking-mode injection and `extra_body` merging.  The
     /// returned `serde_json::Value` is exactly what would be POSTed to the
     /// backend (sans HTTP headers — credentials live there, not in the body).
-    fn build_chat_body(
+    pub(super) fn build_chat_body(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
@@ -1548,7 +1549,7 @@ impl ApiClient {
         // only when its `usage.include` extension is requested. That field is
         // OpenRouter-specific, so keep it guarded — a plain OpenAI/vLLM endpoint
         // would reject it.
-        if self.config.endpoint.contains("openrouter.ai") {
+        if crate::config::is_openrouter_endpoint(&self.config.endpoint) {
             body["usage"] = serde_json::json!({ "include": true });
         }
 
@@ -1838,13 +1839,17 @@ impl ApiClient {
         opts: StreamSendOpts,
     ) -> Result<(StreamingResponse, serde_json::Value)> {
         let url = format!("{}/chat/completions", self.base_url);
-        debug!("Starting streaming request to {}", url);
+        debug!(
+            "Starting streaming request to {}",
+            crate::config::redact_endpoint(&url)
+        );
 
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let max_attempts = opts.max_attempts.max(1);
         // Gateway timeouts retried so far (see classify_gateway_timeout):
         // at most one, and never after a long wait.
         let mut gateway_retries = 0u32;
+        let mut saw_connect_error = false;
 
         // One absolute deadline for the WHOLE run (all calls + retries + body
         // streaming), latched at the first billable request — previously each
@@ -2050,21 +2055,38 @@ impl ApiClient {
                             ));
                         }
                         Err(e) => {
+                            saw_connect_error |= e.is_connect();
+                            let redacted_url = crate::config::redact_endpoint(&url);
+                            let redacted_endpoint = crate::config::redact_endpoint(&self.base_url);
+                            let err_text = e
+                                .to_string()
+                                .replace(&url, &redacted_url)
+                                .replace(&self.base_url, &redacted_endpoint);
                             if attempt < max_attempts {
                                 let sleep_ms = self.retry_sleep_ms(delay_ms, None);
                                 warn!(
                                 "Streaming request network error: {} (attempt {}/{}); retrying after {}ms (jittered)",
-                                e, attempt, max_attempts, sleep_ms
+                                err_text, attempt, max_attempts, sleep_ms
                             );
                                 self.retry_pause(Duration::from_millis(sleep_ms)).await?;
                                 delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                                 continue;
                             }
-                            return Err(ApiError::Network(format!(
-                                "Failed to send streaming request after {} attempts: {}",
-                                attempt, e
-                            ))
-                            .into());
+                            let msg = if saw_connect_error {
+                                format!(
+                                    "Failed to send streaming request after {} attempts: {} \
+                                     (endpoint '{}' is unreachable — is the model server running? \
+                                     Check the `endpoint` config key, start your local server, or run \
+                                     `selfware llm-doctor` for diagnosis)",
+                                    attempt, err_text, redacted_endpoint
+                                )
+                            } else {
+                                format!(
+                                    "Failed to send streaming request after {} attempts: {}",
+                                    attempt, err_text
+                                )
+                            };
+                            return Err(ApiError::Network(msg).into());
                         }
                     }
                 }
@@ -2290,12 +2312,13 @@ impl ApiClient {
             .into();
         }
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+            let redacted_endpoint = crate::config::redact_endpoint(endpoint);
             format!(
                 "{}\nHint: authentication failed against '{}'. Set SELFWARE_API_KEY{} in your \
                  environment, run `selfware config set-key <key>` to store it in the OS keyring, \
                  or add `api_key = \"...\"` to your config file.",
                 body.trim(),
-                endpoint,
+                redacted_endpoint,
                 if crate::config::is_openrouter_endpoint(endpoint) {
                     " (or OPENROUTER_API_KEY)"
                 } else {
@@ -2505,7 +2528,11 @@ impl ApiClient {
                 }
             }
 
-            debug!("Sending request to {} (attempt {})", url, attempt + 1);
+            debug!(
+                "Sending request to {} (attempt {})",
+                crate::config::redact_endpoint(&url),
+                attempt + 1
+            );
 
             // Use the streaming client, which has NO total `.timeout()`. The
             // default non-streaming client caps the whole request at
@@ -2833,13 +2860,19 @@ impl ApiClient {
                     ));
                 }
                 Err(e) => {
+                    let redacted_url = crate::config::redact_endpoint(&url);
+                    let redacted_endpoint = crate::config::redact_endpoint(endpoint);
+                    let err_text = e
+                        .to_string()
+                        .replace(&url, &redacted_url)
+                        .replace(endpoint, &redacted_endpoint);
                     if e.is_timeout() || e.is_connect() {
                         saw_connect_error |= e.is_connect();
-                        warn!("Network error (retrying): {}", e);
-                        last_error = Some(ApiError::Network(e.to_string()).into());
+                        warn!("Network error (retrying): {}", err_text);
+                        last_error = Some(ApiError::Network(err_text).into());
                         continue;
                     }
-                    return Err(ApiError::Network(e.to_string()).into());
+                    return Err(ApiError::Network(err_text).into());
                 }
             }
         }
@@ -2853,8 +2886,9 @@ impl ApiClient {
             ApiError::Network("Request failed after all retries".to_string()).into()
         });
         if saw_connect_error {
+            let redacted_endpoint = crate::config::redact_endpoint(endpoint);
             Err(terminal.context(format!(
-                "endpoint '{endpoint}' is unreachable — is the model server running? \
+                "endpoint '{redacted_endpoint}' is unreachable — is the model server running? \
                  Check the `endpoint` config key, start your local server, or run \
                  `selfware llm-doctor` for diagnosis"
             )))
@@ -2946,7 +2980,7 @@ impl ApiClient {
         if !native_fc || self.tool_mode_latched(&profile.endpoint, &profile.model) {
             convert_body_to_xml(&mut body, &tools, profile.context_length)?;
         }
-        if profile.endpoint.contains("openrouter.ai") {
+        if crate::config::is_openrouter_endpoint(&profile.endpoint) {
             body["usage"] = serde_json::json!({ "include": true });
         }
         let ChatCallResult {
@@ -3228,9 +3262,13 @@ fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
 }
 
 pub fn detect_backend(endpoint: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(10));
+    if crate::config::is_local_endpoint(endpoint) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
         .build()
         .context("Failed to build blocking HTTP client")?;
 
@@ -3257,8 +3295,17 @@ pub fn detect_backend(endpoint: &str) -> Result<String> {
         }
     }
 
-    // Body hints
-    let body = response.text().unwrap_or_default();
+    if !response.status().is_success() {
+        return Ok("unknown".into());
+    }
+
+    // Body hints (capped at 64 KiB so a misbehaving server cannot force an unbounded read)
+    let mut body_bytes = Vec::new();
+    let _ = std::io::Read::read_to_end(
+        &mut std::io::Read::take(response, 64 * 1024),
+        &mut body_bytes,
+    );
+    let body = String::from_utf8_lossy(&body_bytes);
     let lower = body.to_lowercase();
     if lower.contains("llama.cpp") || lower.contains("llamacpp") {
         return Ok("llama.cpp".into());

@@ -6491,3 +6491,111 @@ fn test_set_enable_thinking_creates_or_updates_kwargs() {
     assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
     assert_eq!(body["chat_template_kwargs"]["x"], 1);
 }
+
+#[tokio::test]
+async fn test_chat_stream_unreachable_endpoint_includes_diagnostic_and_redacts_query() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{dead_port}/v1?api_key=secret-token"),
+        retry: crate::config::RetrySettings {
+            max_retries: 0,
+            base_delay_ms: 1,
+            max_delay_ms: 5,
+        },
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    let err = match client
+        .chat_stream(vec![Message::user("hello")], None, ThinkingMode::Disabled)
+        .await
+    {
+        Ok(_) => panic!("closed port must fail streaming request"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("is unreachable") && msg.contains("selfware llm-doctor"),
+        "streaming connect error must include actionable unreachable hint: {msg}"
+    );
+    assert!(
+        !msg.contains("secret-token"),
+        "streaming connect error must redact query credentials: {msg}"
+    );
+    assert_eq!(
+        crate::self_healing::recovery_tree::classify(&msg),
+        crate::self_healing::FailureKind::LlmUnreachable,
+        "streaming connect error must classify as LlmUnreachable"
+    );
+}
+
+#[test]
+fn test_build_chat_body_openrouter_host_check_rejects_substring_spoof() {
+    let spoof_cfg = crate::config::Config {
+        endpoint: "http://127.0.0.1:8000/openrouter.ai/v1".to_string(),
+        ..Default::default()
+    };
+    let spoof_client = ApiClient::new(&spoof_cfg).unwrap();
+    let spoof_body = spoof_client
+        .build_chat_body(
+            vec![Message::user("hi")],
+            None,
+            ThinkingMode::Disabled,
+            false,
+        )
+        .unwrap();
+    assert!(
+        spoof_body.get("usage").is_none(),
+        "non-OpenRouter host with openrouter.ai in path must not receive usage.include"
+    );
+
+    let real_cfg = crate::config::Config {
+        endpoint: "https://openrouter.ai/api/v1".to_string(),
+        ..Default::default()
+    };
+    let real_client = ApiClient::new(&real_cfg).unwrap();
+    let real_body = real_client
+        .build_chat_body(
+            vec![Message::user("hi")],
+            None,
+            ThinkingMode::Disabled,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        real_body["usage"],
+        serde_json::json!({ "include": true }),
+        "real openrouter.ai host must receive usage.include"
+    );
+}
+
+#[test]
+fn test_detect_backend_returns_unknown_on_http_error_body() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let body = "500 Internal Server Error from vllm gateway";
+            let resp = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let detected =
+        crate::api::client::detect_backend(&format!("http://127.0.0.1:{}/v1", addr.port()))
+            .unwrap();
+    let _ = handle.join();
+    assert_eq!(
+        detected, "unknown",
+        "non-2xx error body must not be misidentified as a backend"
+    );
+}

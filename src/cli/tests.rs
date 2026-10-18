@@ -3639,3 +3639,37 @@ fn workflow_requested_tools_parses_swl_agent_tool_allowlist() {
     assert!(workflow_requested_tools("SWL agent: plain\nTask:\nHello").is_empty());
     assert!(workflow_requested_tools("Requested tools:   ,  \n").is_empty());
 }
+
+#[test]
+fn classify_bench_suite_and_run_succeeded_enforce_honest_status() {
+    use super::bench_cmd::{bench_run_succeeded, classify_bench_suite, BenchSuiteStatus};
+
+    assert_eq!(classify_bench_suite(0, 0), BenchSuiteStatus::Failed);
+    assert_eq!(classify_bench_suite(0, 4), BenchSuiteStatus::Failed);
+    assert_eq!(classify_bench_suite(2, 4), BenchSuiteStatus::PartialPass);
+    assert_eq!(classify_bench_suite(4, 4), BenchSuiteStatus::Passed);
+
+    // Health-check-only (`suites_ran == 0`) requires `endpoint_online == true`
+    assert!(!bench_run_succeeded(false, 0, 0));
+    assert!(bench_run_succeeded(true, 0, 0));
+
+    // When suites ran, any failed suite fails the run
+    assert!(!bench_run_succeeded(true, 2, 1));
+    assert!(!bench_run_succeeded(false, 2, 2));
+    assert!(bench_run_succeeded(false, 1, 0));
+}
+
+#[test]
+fn config_show_rows_redacts_endpoint_credentials() {
+    let cfg = Config {
+        endpoint: "http://admin:topsecret@127.0.0.1:8000/v1?api_key=leak".to_string(),
+        ..Default::default()
+    };
+    let rows = config_show_rows(&cfg);
+    let ep_row = rows
+        .iter()
+        .find(|(k, _, _)| k == "endpoint")
+        .expect("endpoint row must exist");
+    assert_eq!(ep_row.1, "http://REDACTED@127.0.0.1:8000/v1");
+    assert!(!ep_row.1.contains("topsecret") && !ep_row.1.contains("leak"));
+}

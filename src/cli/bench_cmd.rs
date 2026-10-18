@@ -29,6 +29,49 @@ pub(crate) fn handle_swebench_command(command: SWEBenchCommands) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(feature = "bench-harness", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BenchSuiteStatus {
+    Passed,
+    PartialPass,
+    Failed,
+}
+
+/// Classify a benchmark suite's outcome (AGENTS.md Rule 3: Honest status over optimistic success).
+///
+/// Mirrors `classifyBenchSuite` in `formal/HarnessAndTwinBounds.lean`:
+/// - `Failed`: zero tasks ran or zero tasks passed (e.g. endpoint unreachable).
+/// - `Passed`: all tasks passed (`tasks_passed >= tasks_total` with `tasks_total > 0`).
+/// - `PartialPass`: some tasks passed and some failed (`0 < tasks_passed < tasks_total`).
+#[cfg(any(feature = "bench-harness", test))]
+pub(crate) fn classify_bench_suite(tasks_passed: usize, tasks_total: usize) -> BenchSuiteStatus {
+    if tasks_total == 0 || tasks_passed == 0 {
+        BenchSuiteStatus::Failed
+    } else if tasks_passed >= tasks_total {
+        BenchSuiteStatus::Passed
+    } else {
+        BenchSuiteStatus::PartialPass
+    }
+}
+
+/// Determine whether a `selfware bench` run succeeded overall.
+///
+/// Mirrors `benchRunSucceeded` in `formal/HarnessAndTwinBounds.lean`:
+/// - When no benchmark suites were selected (`suites_ran == 0`, health-check-only),
+///   succeeds iff `endpoint_online == true`.
+/// - When one or more suites ran (`suites_ran > 0`), succeeds iff `suites_failed == 0`.
+pub(crate) fn bench_run_succeeded(
+    endpoint_online: bool,
+    suites_ran: usize,
+    suites_failed: usize,
+) -> bool {
+    if suites_ran == 0 {
+        endpoint_online
+    } else {
+        suites_failed == 0
+    }
+}
+
 pub(crate) async fn handle_bench_command(
     config: &Config,
     ctx: &WorkshopContext,
@@ -49,7 +92,7 @@ pub(crate) async fn handle_bench_command(
     println!("   Suites: {}", suite.clone().emphasis());
     println!("   Concurrent: {}", concurrent);
     if let Some(ref ep) = endpoint {
-        println!("   Endpoint: {}", ep);
+        println!("   Endpoint: {}", crate::config::redact_endpoint(ep));
     }
     println!();
 
@@ -60,8 +103,11 @@ pub(crate) async fn handle_bench_command(
     println!("{} Checking endpoint health...", "⏳".dimmed());
     let ep = endpoint.as_deref().unwrap_or(&config.endpoint);
 
-    let auto_cfg = crate::config::auto_config::AutoConfigurator::new(ep, None);
-    match auto_cfg.fetch_models().await {
+    let auto_cfg = crate::config::auto_config::AutoConfigurator::new(
+        ep,
+        config.api_key.as_ref().map(|k| k.expose()),
+    );
+    let endpoint_online = match auto_cfg.fetch_models().await {
         Ok(models) => {
             println!(
                 "{} Endpoint online: {} models available\n",
@@ -79,14 +125,19 @@ pub(crate) async fn handle_bench_command(
                 println!("   ... and {} more", models.len() - 3);
             }
             println!();
+            true
         }
         Err(e) => {
             println!("{} Failed to connect: {}\n", "✗".red(), e);
+            false
         }
-    }
+    };
 
     #[cfg(not(feature = "bench-harness"))]
     let mut unavailable_suites: Vec<&str> = Vec::new();
+    let mut suites_ran = 0usize;
+    #[allow(unused_mut)]
+    let mut failed_suites: Vec<&str> = Vec::new();
 
     // 2. Throughput benchmark
     if suite.contains("throughput") || suite.contains("e2e") || suite.contains("all") {
@@ -94,6 +145,7 @@ pub(crate) async fn handle_bench_command(
             "{} Running throughput benchmark ({concurrent} concurrent)...",
             "⏳".dimmed()
         );
+        suites_ran += 1;
 
         let _ep = endpoint.as_deref().unwrap_or(&config.endpoint);
         let _model_name = config.model.clone();
@@ -139,10 +191,19 @@ pub(crate) async fn handle_bench_command(
 
             match runner.run(tasks).await {
                 Ok(report) => {
+                    let status = classify_bench_suite(report.tasks_passed, report.tasks_total);
+                    let badge = match status {
+                        BenchSuiteStatus::Passed => "✓".green(),
+                        BenchSuiteStatus::PartialPass => "◐".yellow(),
+                        BenchSuiteStatus::Failed => {
+                            failed_suites.push("throughput");
+                            "✗".red()
+                        }
+                    };
                     if report.total_queue_wait_ms > 0 {
                         println!(
                             "{} Throughput: {:.0} tok/s ({:.0} tok/s active infer) | p50: {:.1}s ({:.1}s infer) | {}/{} passed\n",
-                            "✓".green(),
+                            badge,
                             report.tokens_per_sec,
                             report.inference_tokens_per_sec,
                             report.latency_p50_ms as f64 / 1000.0,
@@ -153,7 +214,7 @@ pub(crate) async fn handle_bench_command(
                     } else {
                         println!(
                             "{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
-                            "✓".green(),
+                            badge,
                             report.tokens_per_sec,
                             report.latency_p50_ms as f64 / 1000.0,
                             report.tasks_passed,
@@ -161,7 +222,10 @@ pub(crate) async fn handle_bench_command(
                         );
                     }
                 }
-                Err(e) => println!("{} Throughput test failed: {}\n", "✗".red(), e),
+                Err(e) => {
+                    failed_suites.push("throughput");
+                    println!("{} Throughput test failed: {}\n", "✗".red(), e);
+                }
             }
         }
 
@@ -178,6 +242,7 @@ pub(crate) async fn handle_bench_command(
     // 3. Multi-language coding benchmark
     if suite.contains("multilang") || suite.contains("all") {
         println!("{} Running multi-language benchmark...", "⏳".dimmed());
+        suites_ran += 1;
 
         #[cfg(feature = "bench-harness")]
         {
@@ -259,10 +324,19 @@ pub(crate) async fn handle_bench_command(
 
             match runner.run(tasks).await {
                 Ok(report) => {
+                    let status = classify_bench_suite(report.tasks_passed, report.tasks_total);
+                    let badge = match status {
+                        BenchSuiteStatus::Passed => "✓".green(),
+                        BenchSuiteStatus::PartialPass => "◐".yellow(),
+                        BenchSuiteStatus::Failed => {
+                            failed_suites.push("multilang");
+                            "✗".red()
+                        }
+                    };
                     if report.total_queue_wait_ms > 0 {
                         println!(
                             "{} Multi-lang: {}/{} passed | {:.0} tok/s ({:.0} tok/s active infer)\n",
-                            "✓".green(),
+                            badge,
                             report.tasks_passed,
                             report.tasks_total,
                             report.tokens_per_sec,
@@ -271,10 +345,7 @@ pub(crate) async fn handle_bench_command(
                     } else {
                         println!(
                             "{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
-                            "✓".green(),
-                            report.tasks_passed,
-                            report.tasks_total,
-                            report.tokens_per_sec,
+                            badge, report.tasks_passed, report.tasks_total, report.tokens_per_sec,
                         );
                     }
                     for r in &report.results {
@@ -292,7 +363,10 @@ pub(crate) async fn handle_bench_command(
                     }
                     println!();
                 }
-                Err(e) => println!("{} Multi-lang test failed: {}\n", "✗".red(), e),
+                Err(e) => {
+                    failed_suites.push("multilang");
+                    println!("{} Multi-lang test failed: {}\n", "✗".red(), e);
+                }
             }
         }
 
@@ -317,6 +391,21 @@ pub(crate) async fn handle_bench_command(
     }
 
     let elapsed = start_time.elapsed();
+    if !bench_run_succeeded(endpoint_online, suites_ran, failed_suites.len()) {
+        println!(
+            "{} Benchmark failed in {:.1}s\n",
+            "✗".red(),
+            elapsed.as_secs_f64()
+        );
+        if failed_suites.is_empty() {
+            anyhow::bail!(
+                "Benchmark failed: endpoint '{}' is unreachable",
+                crate::config::redact_endpoint(ep)
+            );
+        }
+        anyhow::bail!("Benchmark failed in suite(s): {}", failed_suites.join(", "));
+    }
+
     println!(
         "{} Benchmark complete in {:.1}s\n",
         "✓".green(),
@@ -354,7 +443,7 @@ pub(crate) async fn handle_long_test_command(
     println!("   Concurrent: {}", concurrent.to_string().emphasis());
     println!("   Output: {}", output.clone().emphasis());
     if let Some(ref ep) = endpoint {
-        println!("   Endpoint: {}", ep);
+        println!("   Endpoint: {}", crate::config::redact_endpoint(ep));
     }
     if let Some(ref m) = model {
         println!("   Model: {}", m);

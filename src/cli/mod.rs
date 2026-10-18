@@ -3416,7 +3416,10 @@ async fn handle_command(
 
             println!("{}", render_header(ctx));
             println!("\n{} Auto-Configuration Detection\n", "⚙️".emphasis());
-            println!("   Endpoint: {}", endpoint.clone().emphasis());
+            println!(
+                "   Endpoint: {}",
+                crate::config::redact_endpoint(&endpoint).emphasis()
+            );
 
             // Show the model-defaults profile that was matched (if any) at
             // config-load time. This is purely static (driven by config.model)
@@ -3520,10 +3523,11 @@ async fn handle_command(
             }
 
             if save {
+                let redacted_endpoint = crate::config::redact_endpoint(&detected_config.endpoint);
                 let mut toml_str = format!(
                     r#"# Auto-configured by selfware auto-config
-endpoint = "{}"
-model = "{}"
+endpoint = {}
+model = {}
 max_tokens = {}
 context_length = {}
 temperature = {}
@@ -3546,8 +3550,8 @@ checkpoint_interval_secs = 300
 auto_recovery = true
 max_recovery_attempts = 3
 "#,
-                    detected_config.endpoint,
-                    detected_config.model,
+                    crate::cli::init_wizard::toml_quote(&redacted_endpoint),
+                    crate::cli::init_wizard::toml_quote(&detected_config.model),
                     detected_config.max_tokens,
                     detected_config.context_length,
                     detected_config.temperature,
@@ -3576,9 +3580,16 @@ max_recovery_attempts = 3
                     "\n[retry]\nmax_retries = 5\nbase_delay_ms = 1000\nmax_delay_ms = 60000\n",
                 );
 
-                std::fs::write("selfware.toml", &toml_str)?;
-                let _ =
-                    crate::config::trust::add_trusted_config(std::path::Path::new("selfware.toml"));
+                crate::config::Config::validate_generated_toml(&toml_str)?;
+                let save_path = std::path::Path::new("selfware.toml");
+                if std::fs::symlink_metadata(save_path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    anyhow::bail!(
+                        "Refusing to write configuration through symlink {}",
+                        save_path.display()
+                    );
+                }
+                std::fs::write(save_path, &toml_str)?;
+                let _ = crate::config::trust::add_trusted_config(save_path);
                 println!("{} Configuration saved to selfware.toml", "✓".green());
             }
 
@@ -4124,7 +4135,7 @@ pub(crate) fn bug_report_text(agent: &crate::agent::Agent) -> String {
          - execution mode: {:?}\n\
          - config: {}",
         env!("CARGO_PKG_VERSION"),
-        config.endpoint,
+        crate::config::redact_endpoint(&config.endpoint),
         config.model,
         config.execution_mode,
         config
@@ -4962,7 +4973,7 @@ pub(crate) fn config_show_rows(
 
     rows.push((
         "endpoint".to_string(),
-        config.endpoint.clone(),
+        crate::config::redact_endpoint(&config.endpoint),
         config.source_of("endpoint"),
     ));
     rows.push((

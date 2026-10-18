@@ -622,6 +622,57 @@ theorem clamp_hardware_fallback_budgets_fits_window (context maxTokens : Nat) (u
 theorem clamp_hardware_fallback_32k_default :
     clampHardwareFallbackBudgets 32768 65536 false = (8192, 19660) := rfl
 
+inductive BenchSuiteStatus where
+  | passed
+  | partialPass
+  | failed
+  deriving DecidableEq, Repr
+
+/-- `classify_bench_suite` in `src/cli/bench_cmd.rs`:
+honest status (AGENTS.md Rule 3) — a benchmark suite is `passed` iff at least one
+task ran and every task passed; `partialPass` iff some tasks passed and some failed;
+and `failed` whenever zero tasks passed (e.g. endpoint down) or no tasks ran. -/
+def classifyBenchSuite (tasksPassed tasksTotal : Nat) : BenchSuiteStatus :=
+  if tasksTotal == 0 || tasksPassed == 0 then .failed
+  else if tasksPassed >= tasksTotal then .passed
+  else .partialPass
+
+theorem zero_passed_never_succeeds (total : Nat) :
+    classifyBenchSuite 0 total = .failed := by
+  unfold classifyBenchSuite
+  cases total <;> rfl
+
+theorem bench_passed_requires_all_tasks (passed total : Nat)
+    (h : classifyBenchSuite passed total = .passed) :
+    0 < total ∧ total ≤ passed := by
+  unfold classifyBenchSuite at h
+  by_cases hz : (total == 0 || passed == 0) = true
+  · simp [hz] at h
+  · simp [hz] at h
+    by_cases hge : passed ≥ total
+    · simp [Bool.or_eq_true, beq_iff_eq] at hz
+      omega
+    · simp [hge] at h
+
+/-- Overall `selfware bench` run success (`bench_run_succeeded` in `src/cli/bench_cmd.rs`):
+when suites ran, succeeds iff zero suites failed (`suitesFailed == 0`); when no suites
+were selected (`suitesRan == 0`, health-check-only), succeeds iff `endpointOnline = true`. -/
+def benchRunSucceeded (endpointOnline : Bool) (suitesRan suitesFailed : Nat) : Bool :=
+  if suitesRan == 0 then endpointOnline else suitesFailed == 0
+
+theorem offline_health_only_bench_fails :
+    benchRunSucceeded false 0 0 = false := rfl
+
+theorem failed_suite_fails_bench_run (online : Bool) (ran failed : Nat)
+    (hran : 0 < ran) (hfail : 0 < failed) :
+    benchRunSucceeded online ran failed = false := by
+  cases ran with
+  | zero => contradiction
+  | succ _ =>
+    cases failed with
+    | zero => contradiction
+    | succ _ => rfl
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
