@@ -710,3 +710,30 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .phi-proposal[data-kind="explore"] .phi-proposal-kind { color: #22c55e; }
 @media (max-width: 720px) { .phi-proposals { right: 10px; left: 10px; width: auto; bottom: 64px; } }
 @media (prefers-reduced-motion: reduce) { .phi-proposal { backdrop-filter: none; } }
+
+/* Phi Fox Interactive Bot UI */
+.phi-bot-card { min-width: 0; }
+.phi-bot-badge { font: 9px var(--font-mono); color: var(--accent-cyan); padding: 2px 6px; border: 1px solid #38bdf833; border-radius: 4px; background: #38bdf812; }
+.phi-bot-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; min-width: 0; }
+.phi-bot-chip { font-size: 11px; padding: 5px 9px; white-space: normal; text-align: left; }
+.phi-bot-mode-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-width: 0; }
+.phi-bot-mode-label { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.phi-bot-mode-select { flex: 1; min-width: 0; padding: 5px 8px; font-size: 11px; margin: 0 !important; }
+.phi-bot-messages { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; padding-right: 2px; min-width: 0; }
+.phi-bot-turn { border: 1px solid var(--border-color); border-radius: 8px; padding: 9px 11px; background: rgba(9, 13, 22, 0.55); min-width: 0; overflow-wrap: anywhere; }
+.phi-bot-turn-user { border-color: rgba(56, 189, 248, 0.28); background: rgba(56, 189, 248, 0.06); }
+.phi-bot-turn-assistant[data-emotion="error"] { border-left: 3px solid var(--accent-rose); }
+.phi-bot-turn-assistant[data-emotion="skeptical"] { border-left: 3px solid var(--accent-bright-gold); }
+.phi-bot-turn-assistant[data-emotion="analytical"] { border-left: 3px solid var(--accent-cyan); }
+.phi-bot-turn-meta { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; margin-bottom: 5px; font-size: 10px; }
+.phi-bot-role { font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-bright-gold); }
+.phi-bot-turn-user .phi-bot-role { color: var(--accent-cyan); }
+.phi-bot-trust-pill { font: 9px var(--font-mono); color: var(--text-secondary); background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 1px 5px; }
+.phi-bot-msg-text { font-size: 12px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; margin: 4px 0; }
+.phi-bot-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-width: 0; }
+.phi-bot-action-btn { font-size: 10.5px; padding: 4px 8px; white-space: normal; text-align: left; }
+.phi-bot-form { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.phi-bot-input { flex: 1; min-width: 0; font-size: 12px; padding: 7px 10px; }
+.phi-bot-send { flex: 0 0 auto; font-size: 11px; padding: 7px 12px; }
+.phi-bot-status { margin-top: 6px; overflow-wrap: anywhere; }
+

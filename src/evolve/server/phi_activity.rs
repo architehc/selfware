@@ -2,11 +2,25 @@
 //! declaration that a workspace is verified. No command, source or prompt is
 //! returned to the browser.
 
-use super::{require_session, ApiResult, EvolveServer};
-use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
-use serde::Deserialize;
+use super::{
+    bad_request, document_read_error, internal_error, require_session, revalidate_document_hash,
+    review_error, unprocessable, validate_expected_document_hash, validate_graph, ApiResult,
+    EvolveServer,
+};
+use crate::evolve::assistant::{
+    evidence_from_document, gate_evidence_trust, redact_secrets, GroundedClaim,
+    GroundedRecommendation, GroundingEvidence,
+};
+use axum::{
+    extract::State,
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -18,6 +32,9 @@ const MAX_AGENTS: usize = 64;
 const MAX_FILE: u64 = 256 * 1024;
 const MAX_TOTAL: u64 = 4 * 1024 * 1024;
 const STALE_MS: u64 = 5 * 60 * 1000;
+const MAX_CHAT_MESSAGE_CHARS: usize = 4_000;
+const MAX_CHAT_HISTORY_TURNS: usize = 12;
+const MAX_CHAT_SELECTION_LINES: usize = 240;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +86,7 @@ pub(super) fn routes() -> Router<Arc<EvolveServer>> {
     Router::new()
         .route("/api/phi/activity", get(activity))
         .route("/api/phi/policy", get(policy))
+        .route("/api/phi/chat", post(chat))
 }
 
 async fn policy(
@@ -379,6 +397,757 @@ fn summarize(capture: Capture, now: u64) -> Value {
         "phase":capture.phase.label(),"evidence":evidence,"fox_posture":fox_posture})
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PhiChatTurn {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+struct PhiLineSelection {
+    start_line: usize,
+    end_line: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PhiChatRequest {
+    message: String,
+    #[serde(default)]
+    history: Vec<PhiChatTurn>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    expected_hash: Option<String>,
+    #[serde(default)]
+    selection: Option<PhiLineSelection>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PhiSuggestedAction {
+    id: String,
+    label: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct ObservedSignalSummary {
+    activity_status: String,
+    activity_reason: Option<String>,
+    agent_count: usize,
+    running_agents: usize,
+    failed_agents: usize,
+    incomplete_agents: usize,
+    stale_agents: usize,
+    failed_runs: usize,
+    passed_runs: usize,
+    unknown_runs: usize,
+    outstanding: usize,
+    unreviewed_lines: usize,
+    untested_lines: usize,
+    gate_passed: bool,
+    gate_findings: Vec<String>,
+}
+
+fn summarize_observed_signals(
+    activity_body: &Value,
+    gate_passed: bool,
+    gate_findings: Vec<String>,
+) -> ObservedSignalSummary {
+    let mut summary = ObservedSignalSummary {
+        activity_status: activity_body["status"]
+            .as_str()
+            .unwrap_or("unavailable")
+            .to_string(),
+        activity_reason: activity_body["reason"].as_str().map(str::to_string),
+        gate_passed,
+        gate_findings,
+        ..Default::default()
+    };
+    if let Some(agents) = activity_body["agents"].as_array() {
+        summary.agent_count = agents.len();
+        for agent in agents {
+            let status = agent["status"].as_str().unwrap_or("incomplete");
+            let phase = agent["phase"].as_str().unwrap_or("");
+            if status == "stale" {
+                summary.stale_agents += 1;
+                continue;
+            }
+            if status != "available" {
+                summary.incomplete_agents += 1;
+            }
+            if phase == "running" {
+                summary.running_agents += 1;
+            } else if phase == "failed" {
+                summary.failed_agents += 1;
+            }
+            if let Some(ev) = agent["evidence"].as_object() {
+                summary.failed_runs +=
+                    ev.get("failed_runs").and_then(Value::as_u64).unwrap_or(0) as usize;
+                summary.passed_runs +=
+                    ev.get("passed_runs").and_then(Value::as_u64).unwrap_or(0) as usize;
+                summary.unknown_runs +=
+                    ev.get("unknown_runs").and_then(Value::as_u64).unwrap_or(0) as usize;
+                summary.outstanding +=
+                    ev.get("outstanding").and_then(Value::as_u64).unwrap_or(0) as usize;
+                summary.unreviewed_lines += ev
+                    .get("unreviewed_lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                summary.untested_lines += ev
+                    .get("untested_lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+            }
+        }
+    }
+    summary
+}
+
+fn build_selection_evidence(
+    path: &str,
+    content: &str,
+    content_hash: &str,
+    selection: Option<PhiLineSelection>,
+) -> (Vec<GroundingEvidence>, bool) {
+    if let Some(sel) = selection {
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.is_empty() {
+            return (Vec::new(), true);
+        }
+        let first = sel.start_line.max(1).min(lines.len());
+        let capped_end = sel
+            .end_line
+            .max(first)
+            .min(first.saturating_add(MAX_CHAT_SELECTION_LINES - 1))
+            .min(lines.len());
+        let excerpt = (first..=capped_end)
+            .map(|line_no| format!("{:>6} | {}", line_no, lines[line_no - 1]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let complete = capped_end == sel.end_line.min(lines.len());
+        return (
+            vec![GroundingEvidence {
+                id: "E1".to_string(),
+                path: path.to_string(),
+                start_line: first,
+                end_line: capped_end,
+                excerpt,
+                content_hash: content_hash.to_string(),
+                source: "workspace_snapshot".to_string(),
+            }],
+            complete,
+        );
+    }
+    evidence_from_document(path, content, content_hash, 120)
+}
+
+fn derive_signal_emotion(signals: &ObservedSignalSummary, has_citations: bool) -> &'static str {
+    if !signals.gate_passed || signals.failed_agents > 0 || signals.failed_runs > 0 {
+        "error"
+    } else if signals.unreviewed_lines > 0 || signals.untested_lines > 0 || signals.outstanding > 0
+    {
+        "skeptical"
+    } else if signals.incomplete_agents > 0 || signals.unknown_runs > 0 {
+        "guard"
+    } else if signals.running_agents > 0 {
+        "working"
+    } else if has_citations {
+        "analytical"
+    } else {
+        "curious"
+    }
+}
+
+fn extract_notable_declarations(
+    evidence: &[GroundingEvidence],
+) -> Vec<(String, usize, GroundingEvidence)> {
+    let mut out = Vec::new();
+    for chunk in evidence {
+        for raw_line in chunk.excerpt.lines() {
+            let Some((num_part, code_part)) = raw_line.split_once(" | ") else {
+                continue;
+            };
+            let Ok(line_no) = num_part.trim().parse::<usize>() else {
+                continue;
+            };
+            let trimmed = code_part.trim();
+            if trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("struct ")
+                || trimmed.starts_with("pub enum ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("pub trait ")
+                || trimmed.starts_with("trait ")
+                || trimmed.starts_with("impl ")
+                || trimmed.starts_with("def ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("export class ")
+                || trimmed.starts_with("export function ")
+            {
+                let single_excerpt = format!("{:>6} | {}", line_no, code_part);
+                let pin = GroundingEvidence {
+                    id: format!("E{}", out.len() + 1),
+                    path: chunk.path.clone(),
+                    start_line: line_no,
+                    end_line: (line_no + 4).min(chunk.end_line).max(line_no),
+                    excerpt: single_excerpt,
+                    content_hash: chunk.content_hash.clone(),
+                    source: "workspace_snapshot".to_string(),
+                };
+                out.push((trimmed.to_string(), line_no, pin));
+                if out.len() >= 4 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn synthesize_local_bot_turn(
+    intent: &str,
+    message: &str,
+    signals: &ObservedSignalSummary,
+    doc_path: Option<&str>,
+    selection: Option<PhiLineSelection>,
+    doc_evidence: &[GroundingEvidence],
+    evidence_complete: bool,
+) -> (
+    String,
+    &'static str,
+    Vec<GroundingEvidence>,
+    Vec<GroundedClaim>,
+    Vec<GroundedRecommendation>,
+    Vec<PhiSuggestedAction>,
+    &'static str,
+) {
+    let mut citations = Vec::new();
+    let mut claims = Vec::new();
+    let mut actions = Vec::new();
+
+    let declarations = extract_notable_declarations(doc_evidence);
+    if selection.is_some() {
+        if let Some(first_chunk) = doc_evidence.first() {
+            citations.push(first_chunk.clone());
+        }
+    } else if !declarations.is_empty() {
+        for (_, _, pin) in &declarations {
+            citations.push(pin.clone());
+        }
+    } else if let Some(first_chunk) = doc_evidence.first() {
+        citations.push(first_chunk.clone());
+    }
+
+    let reply = match intent {
+        "whats_red" => {
+            let mut parts = Vec::new();
+            if !signals.gate_passed {
+                parts.push(format!(
+                    "Architecture gates are failing ({}).",
+                    if signals.gate_findings.is_empty() {
+                        "unspecified architecture finding".to_string()
+                    } else {
+                        signals.gate_findings.join(", ")
+                    }
+                ));
+            } else {
+                parts.push("Architecture graph validation (`validate_graph`) has 0 reported cycle/dangling-edge findings.".to_string());
+            }
+            if signals.failed_agents > 0 || signals.failed_runs > 0 {
+                parts.push(format!(
+                    "Observed activity captures show {} failed agent(s) and {} failed command run(s).",
+                    signals.failed_agents, signals.failed_runs
+                ));
+            } else if signals.activity_status == "unavailable" {
+                parts.push(format!(
+                    "Live agent activity captures are currently unavailable ({}); absence of captures does not prove tests passed.",
+                    signals.activity_reason.as_deref().unwrap_or("no_capture")
+                ));
+            } else {
+                parts.push(format!(
+                    "Across {} observed agent capture(s), 0 failed runs are recorded ({} passed, {} unknown).",
+                    signals.agent_count, signals.passed_runs, signals.unknown_runs
+                ));
+            }
+            parts.join(" ")
+        }
+        "audit_unreviewed" | "check_debt" => {
+            let mut parts = Vec::new();
+            if signals.unreviewed_lines > 0 || signals.untested_lines > 0 || signals.outstanding > 0
+            {
+                parts.push(format!(
+                    "Observed agent debt: {} unreviewed line(s), {} line(s) without confirmed test coverage, and {} outstanding verification obligation(s).",
+                    signals.unreviewed_lines, signals.untested_lines, signals.outstanding
+                ));
+            } else if signals.activity_status == "unavailable" {
+                parts.push(format!(
+                    "No live agent activity captures are present ({}).",
+                    signals.activity_reason.as_deref().unwrap_or("no_capture")
+                ));
+            } else {
+                parts.push(format!(
+                    "Observed agent captures report 0 unreviewed lines and 0 outstanding obligations across {} agent(s).",
+                    signals.agent_count
+                ));
+            }
+            if let Some(path) = doc_path {
+                if !declarations.is_empty() {
+                    let names = declarations
+                        .iter()
+                        .map(|(sig, line, _)| format!("`{}` (line {})", sig, line))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    parts.push(format!(
+                        "In `{path}`, key entry points ready for grounded line-by-line review include {names}."
+                    ));
+                }
+            }
+            parts.join(" ")
+        }
+        "explain_selection" => {
+            if let Some(chunk) = citations.first() {
+                let raw_lines: Vec<&str> = chunk
+                    .excerpt
+                    .lines()
+                    .map(|l| {
+                        l.split_once(" | ")
+                            .map(|(_, c)| c.trim())
+                            .unwrap_or(l.trim())
+                    })
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                let preview = raw_lines.first().copied().unwrap_or("selected block");
+                let summary = format!(
+                    "Focused `{}` lines {}–{} ({} non-empty line(s), starting at `{}`). Click the citation pill to aim Phi's optical laser at this block, or dispatch a grounded model reading below.",
+                    chunk.path,
+                    chunk.start_line,
+                    chunk.end_line,
+                    raw_lines.len(),
+                    preview.chars().take(72).collect::<String>()
+                );
+                claims.push(GroundedClaim {
+                    text: summary.clone(),
+                    evidence_ids: vec![chunk.id.clone()],
+                });
+                summary
+            } else {
+                "Select lines in the code editor (or open a saved workspace file) so Phi can anchor explanations to exact line numbers.".to_string()
+            }
+        }
+        _ => {
+            let mut parts = Vec::new();
+            if let Some(path) = doc_path {
+                if let Some(sel) = selection {
+                    parts.push(format!(
+                        "Anchored to `{path}:{}-{}` for your question (\"{}\").",
+                        sel.start_line,
+                        sel.end_line,
+                        message.chars().take(80).collect::<String>()
+                    ));
+                } else if !declarations.is_empty() {
+                    let names = declarations
+                        .iter()
+                        .map(|(sig, line, _)| format!("`{}` (L{})", sig, line))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    parts.push(format!(
+                        "In `{path}`, structural landmarks matching this snapshot are: {names}."
+                    ));
+                } else {
+                    parts.push(format!("Anchored to saved snapshot of `{path}`."));
+                }
+            }
+            if !signals.gate_passed || signals.failed_runs > 0 || signals.unreviewed_lines > 0 {
+                parts.push(format!(
+                    "Workspace status: gates={}, failed_runs={}, unreviewed_lines={}, untested_lines={}.",
+                    if signals.gate_passed { "passing" } else { "failing" },
+                    signals.failed_runs,
+                    signals.unreviewed_lines,
+                    signals.untested_lines
+                ));
+            } else {
+                parts.push(format!(
+                    "Architecture graph validation has 0 findings; activity status is `{}`.",
+                    signals.activity_status
+                ));
+            }
+            parts.join(" ")
+        }
+    };
+
+    if claims.is_empty() && !citations.is_empty() {
+        claims.push(GroundedClaim {
+            text: reply.clone(),
+            evidence_ids: citations.iter().map(|c| c.id.clone()).collect(),
+        });
+    }
+
+    if let Some(first_cite) = citations.first() {
+        actions.push(PhiSuggestedAction {
+            id: format!("laser:{}:{}", first_cite.path, first_cite.start_line),
+            label: format!(
+                "↗ Aim laser at {}:{}-{}",
+                first_cite.path, first_cite.start_line, first_cite.end_line
+            ),
+            kind: "focus_citation".to_string(),
+            target: Some(first_cite.path.clone()),
+            question: None,
+            start_line: Some(first_cite.start_line),
+            end_line: Some(first_cite.end_line),
+        });
+    }
+    if let Some(path) = doc_path {
+        actions.push(PhiSuggestedAction {
+            id: format!("prepare_reading:{path}"),
+            label: format!("✧ Prepare grounded reading for {path}"),
+            kind: "prepare_reading".to_string(),
+            target: Some(path.to_string()),
+            question: Some(message.to_string()),
+            start_line: selection.map(|s| s.start_line),
+            end_line: selection.map(|s| s.end_line),
+        });
+    }
+    if signals.agent_count > 0 {
+        actions.push(PhiSuggestedAction {
+            id: "inspect_activity:panel".to_string(),
+            label: "Inspect live agent activity".to_string(),
+            kind: "inspect_activity".to_string(),
+            target: None,
+            question: None,
+            start_line: None,
+            end_line: None,
+        });
+    }
+
+    let emotion = derive_signal_emotion(signals, !citations.is_empty());
+    let trust_state = if !citations.is_empty() && evidence_complete {
+        "structural"
+    } else {
+        "observed_signals"
+    };
+
+    (
+        reply,
+        emotion,
+        citations,
+        claims,
+        Vec::new(),
+        actions,
+        trust_state,
+    )
+}
+
+async fn chat(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<PhiChatRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+
+    let trimmed_message = body.message.trim();
+    if trimmed_message.is_empty() {
+        return Err(bad_request("chat message cannot be empty"));
+    }
+    if trimmed_message.chars().count() > MAX_CHAT_MESSAGE_CHARS {
+        return Err(bad_request(format!(
+            "chat message exceeds maximum length of {MAX_CHAT_MESSAGE_CHARS} characters"
+        )));
+    }
+    if body.history.len() > MAX_CHAT_HISTORY_TURNS {
+        return Err(bad_request(format!(
+            "chat history exceeds maximum of {MAX_CHAT_HISTORY_TURNS} turns"
+        )));
+    }
+    for (idx, turn) in body.history.iter().enumerate() {
+        if !matches!(turn.role.as_str(), "user" | "assistant") {
+            return Err(bad_request(format!(
+                "invalid history role at index {idx}: must be 'user' or 'assistant'"
+            )));
+        }
+        if turn.content.chars().count() > MAX_CHAT_MESSAGE_CHARS {
+            return Err(bad_request(format!(
+                "history turn {idx} exceeds maximum length of {MAX_CHAT_MESSAGE_CHARS} characters"
+            )));
+        }
+    }
+    if let Some(sel) = body.selection {
+        if sel.start_line == 0 || sel.end_line < sel.start_line {
+            return Err(bad_request(
+                "selection start_line must be >= 1 and end_line >= start_line",
+            ));
+        }
+    }
+
+    // Rule 5: Trust-gate the user message and conversation history before any
+    // model or workspace processing.
+    let mut prompt_gate_chunks = vec![GroundingEvidence {
+        id: "CHAT_MSG".to_string(),
+        path: "phi_chat_message".to_string(),
+        start_line: 1,
+        end_line: trimmed_message.lines().count().max(1),
+        excerpt: trimmed_message.to_string(),
+        content_hash: String::new(),
+        source: "user_input".to_string(),
+    }];
+    for (idx, turn) in body.history.iter().enumerate() {
+        prompt_gate_chunks.push(GroundingEvidence {
+            id: format!("CHAT_HIST_{idx}"),
+            path: "phi_chat_history".to_string(),
+            start_line: 1,
+            end_line: turn.content.lines().count().max(1),
+            excerpt: turn.content.clone(),
+            content_hash: String::new(),
+            source: "user_input".to_string(),
+        });
+    }
+    let mut trust_gate =
+        gate_evidence_trust(&prompt_gate_chunks).map_err(|err| unprocessable(err.body()))?;
+
+    // Gather optional document snapshot and validate expected_hash (409 on mismatch).
+    let mut doc_snapshot = None;
+    let mut doc_evidence = Vec::new();
+    let mut evidence_complete = true;
+    if let Some(path) = body.path.as_deref() {
+        if !path.trim().is_empty() {
+            let doc = server
+                .ide
+                .read_document(path)
+                .map_err(document_read_error)?;
+            if let Some(expected_hash) = body.expected_hash.as_deref() {
+                validate_expected_document_hash(expected_hash, &doc.hash)?;
+            }
+            let (ev, complete) =
+                build_selection_evidence(&doc.path, &doc.content, &doc.hash, body.selection);
+            let doc_gate = gate_evidence_trust(&ev).map_err(|err| unprocessable(err.body()))?;
+            trust_gate.sources_scanned += doc_gate.sources_scanned;
+            trust_gate.findings += doc_gate.findings;
+            trust_gate.worst_risk_score =
+                trust_gate.worst_risk_score.max(doc_gate.worst_risk_score);
+            doc_evidence = ev;
+            evidence_complete = complete;
+            doc_snapshot = Some(doc);
+        }
+    }
+
+    // Gather deterministic workspace & activity signals.
+    let root = server.project_root.clone();
+    let now = now_ms();
+    let activity_body = tokio::task::spawn_blocking(move || read_activity(&root, now))
+        .await
+        .unwrap_or_else(|_| empty(now, "capture_read_failed"));
+
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let validation = validate_graph(&graph);
+    let mut gate_findings = Vec::new();
+    if !validation.duplicate_ids.is_empty() {
+        gate_findings.push(format!(
+            "duplicate_ids ({})",
+            validation.duplicate_ids.len()
+        ));
+    }
+    if !validation.cycles.is_empty() {
+        gate_findings.push(format!("cycles ({})", validation.cycles.len()));
+    }
+    if !validation.dangling_edges.is_empty() {
+        gate_findings.push(format!(
+            "dangling_edges ({})",
+            validation.dangling_edges.len()
+        ));
+    }
+    if !validation.isolated_nodes.is_empty() {
+        gate_findings.push(format!(
+            "isolated_nodes ({})",
+            validation.isolated_nodes.len()
+        ));
+    }
+    let gate_passed = validation.valid;
+    let signals = summarize_observed_signals(&activity_body, gate_passed, gate_findings);
+
+    let intent = body.intent.as_deref().unwrap_or("chat");
+    let mode = body.mode.as_deref().unwrap_or("local_signals");
+
+    // Rule 4: Measured token accounting via estimate_content_tokens.
+    let mut measured_prompt = redact_secrets(trimmed_message);
+    for turn in &body.history {
+        measured_prompt.push('\n');
+        measured_prompt.push_str(&redact_secrets(&turn.content));
+    }
+    for chunk in &doc_evidence {
+        measured_prompt.push('\n');
+        measured_prompt.push_str(&chunk.excerpt);
+    }
+    let prompt_tokens_measured = crate::token_count::estimate_content_tokens(&measured_prompt);
+
+    if mode == "grounded_model" {
+        if doc_evidence.is_empty() {
+            return Err(bad_request(
+                "grounded_model chat mode requires a readable workspace document path",
+            ));
+        }
+        let _assistant_guard = server.assistant_lock.lock().await;
+        if let (Some(doc), Some(expected_hash)) =
+            (doc_snapshot.as_ref(), body.expected_hash.as_deref())
+        {
+            revalidate_document_hash(&server, &doc.path, expected_hash)?;
+        }
+        let history_context = if body.history.is_empty() {
+            String::new()
+        } else {
+            body.history
+                .iter()
+                .map(|t| format!("{}: {}", t.role, redact_secrets(&t.content)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let orientation = format!(
+            "Observed signals (non-citeable): activity_status={}, running_agents={}, failed_runs={}, unreviewed_lines={}, untested_lines={}, gates_passed={}.\n{}",
+            signals.activity_status,
+            signals.running_agents,
+            signals.failed_runs,
+            signals.unreviewed_lines,
+            signals.untested_lines,
+            signals.gate_passed,
+            history_context
+        );
+        let review = server
+            .assistant
+            .review_with_orientation(
+                trimmed_message,
+                doc_evidence.clone(),
+                evidence_complete,
+                Some(&orientation),
+            )
+            .await
+            .map_err(review_error)?;
+
+        let cited_ids: HashSet<&str> = review
+            .claims
+            .iter()
+            .flat_map(|c| c.evidence_ids.iter().map(String::as_str))
+            .chain(
+                review
+                    .recommendations
+                    .iter()
+                    .flat_map(|r| r.evidence_ids.iter().map(String::as_str)),
+            )
+            .collect();
+        let citations: Vec<GroundingEvidence> = review
+            .evidence
+            .iter()
+            .filter(|e| cited_ids.contains(e.id.as_str()))
+            .cloned()
+            .collect();
+        let reply = review
+            .claims
+            .iter()
+            .map(|c| c.text.as_str())
+            .chain(review.recommendations.iter().map(|r| r.rationale.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let emotion = derive_signal_emotion(&signals, !citations.is_empty());
+        let mut suggested_actions = Vec::new();
+        if let Some(first) = citations.first() {
+            suggested_actions.push(PhiSuggestedAction {
+                id: format!("laser:{}:{}", first.path, first.start_line),
+                label: format!(
+                    "↗ Aim laser at {}:{}-{}",
+                    first.path, first.start_line, first.end_line
+                ),
+                kind: "focus_citation".to_string(),
+                target: Some(first.path.clone()),
+                question: None,
+                start_line: Some(first.start_line),
+                end_line: Some(first.end_line),
+            });
+        }
+        return Ok(Json(json!({
+            "reply": reply,
+            "emotion": emotion,
+            "trust_state": review.trust_state,
+            "grounding_scope": review.grounding_scope,
+            "semantic_validation": review.semantic_validation,
+            "hallucination_free_guarantee": false,
+            "verification_note": "Structural citation check passed; no code tests were executed during this chat turn.",
+            "citations": citations,
+            "claims": review.claims,
+            "recommendations": review.recommendations,
+            "suggested_actions": suggested_actions,
+            "signals": {
+                "activity_status": signals.activity_status,
+                "agent_count": signals.agent_count,
+                "running_agents": signals.running_agents,
+                "failed_runs": signals.failed_runs,
+                "unreviewed_lines": signals.unreviewed_lines,
+                "untested_lines": signals.untested_lines,
+                "gate_passed": signals.gate_passed,
+                "gate_findings": signals.gate_findings,
+            },
+            "trust_gate": review.trust_gate,
+            "model": review.model,
+            "usage": review.usage,
+            "prompt_tokens_measured": prompt_tokens_measured,
+        })));
+    }
+
+    let (reply, emotion, citations, claims, recommendations, suggested_actions, trust_state) =
+        synthesize_local_bot_turn(
+            intent,
+            trimmed_message,
+            &signals,
+            doc_snapshot.as_ref().map(|d| d.path.as_str()),
+            body.selection,
+            &doc_evidence,
+            evidence_complete,
+        );
+
+    Ok(Json(json!({
+        "reply": reply,
+        "emotion": emotion,
+        "trust_state": trust_state,
+        "grounding_scope": if citations.is_empty() {
+            "observed_workspace_and_activity_signals"
+        } else {
+            "snapshot_and_citation_integrity_only"
+        },
+        "semantic_validation": "not_performed",
+        "hallucination_free_guarantee": false,
+        "verification_note": "Grounded in local workspace snapshots and observed activity captures; no new test runs were executed by this chat turn.",
+        "citations": citations,
+        "claims": claims,
+        "recommendations": recommendations,
+        "suggested_actions": suggested_actions,
+        "signals": {
+            "activity_status": signals.activity_status,
+            "agent_count": signals.agent_count,
+            "running_agents": signals.running_agents,
+            "failed_runs": signals.failed_runs,
+            "unreviewed_lines": signals.unreviewed_lines,
+            "untested_lines": signals.untested_lines,
+            "gate_passed": signals.gate_passed,
+            "gate_findings": signals.gate_findings,
+        },
+        "trust_gate": trust_gate,
+        "model": null,
+        "usage": null,
+        "prompt_tokens_measured": prompt_tokens_measured,
+    })))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -680,5 +1449,155 @@ mod tests {
         write(root.path(), 0, &capture(root.path(), 0, 1000));
         let body = read_activity(root.path(), 1100);
         assert_eq!(body["agents"][0]["fox_posture"]["emotion"], "error");
+    }
+
+    #[tokio::test]
+    async fn chat_endpoint_requires_session_validates_hash_and_grounds_citations() {
+        let root = tempfile::tempdir().unwrap();
+        let src_dir = root.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let source = "pub fn greeting() -> String {\n    String::from(\"Hello Phi\")\n}\n";
+        std::fs::write(src_dir.join("lib.rs"), source).unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+
+        let server = EvolveServer::for_project(
+            crate::evolve::Graph {
+                nodes: vec![],
+                edges: vec![],
+            },
+            root.path(),
+        )
+        .unwrap();
+
+        // 1. Missing session token -> 401
+        let unauth = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "message": "What's red?" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), 401);
+
+        // 2. Empty message -> 400
+        let empty_req = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "message": "   " })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_req.status(), 400);
+
+        // 3. Stale expected_hash -> 409 Conflict
+        let stale_req = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "message": "Explain selection",
+                            "path": "src/lib.rs",
+                            "expected_hash": "deadbeef"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale_req.status(), 409);
+
+        // 4. Valid selection + document snapshot -> 200 with structural citation and measured tokens
+        let valid_req = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "message": "Explain this greeting function",
+                            "intent": "explain_selection",
+                            "path": "src/lib.rs",
+                            "expected_hash": expected_hash,
+                            "selection": { "start_line": 1, "end_line": 3 },
+                            "history": [
+                                { "role": "user", "content": "Hi Phi" },
+                                { "role": "assistant", "content": "Hello! Select some code to inspect." }
+                            ]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid_req.status(), 200);
+        let bytes = to_bytes(valid_req.into_body(), 64 * 1024).await.unwrap();
+        let payload: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["trust_state"], "structural");
+        assert_eq!(payload["hallucination_free_guarantee"], false);
+        assert_eq!(payload["emotion"], "analytical");
+        assert!(payload["prompt_tokens_measured"].as_u64().unwrap_or(0) > 0);
+        let citations = payload["citations"].as_array().unwrap();
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0]["path"], "src/lib.rs");
+        assert_eq!(citations[0]["start_line"], 1);
+        assert_eq!(citations[0]["end_line"], 3);
+        assert_eq!(citations[0]["content_hash"], expected_hash);
+
+        // 5. Write a failed activity capture and query "whats_red" -> emotion "error"
+        write(root.path(), 0, &capture(root.path(), 0, now_ms()));
+        let red_req = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "message": "What's red?",
+                            "intent": "whats_red"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(red_req.status(), 200);
+        let red_bytes = to_bytes(red_req.into_body(), 64 * 1024).await.unwrap();
+        let red_payload: Value = serde_json::from_slice(&red_bytes).unwrap();
+        assert_eq!(red_payload["emotion"], "error");
+        assert_eq!(red_payload["trust_state"], "observed_signals");
+        assert_eq!(red_payload["signals"]["failed_runs"], 1);
+        assert!(red_payload["reply"]
+            .as_str()
+            .unwrap_or("")
+            .contains("1 failed command run"));
     }
 }

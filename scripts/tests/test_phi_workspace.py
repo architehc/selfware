@@ -74,6 +74,33 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == '/api/ide/write':
             state['content'] = body['content']
             return self.reply({'saved': True, 'write': {'hash': document(state['content'])['hash']}, 'graph_refresh': {'success': True}})
+        if self.path == '/api/phi/chat':
+            snap = document(state['content'])
+            evidence = {'id': 'E1', 'path': snap['path'], 'content_hash': snap['hash'], 'start_line': 1, 'end_line': 3,
+                        'excerpt': '\n'.join(str(i + 1).rjust(6) + ' | ' + line for i, line in enumerate(snap['content'].splitlines()))}
+            return self.reply({
+                'reply': f"Anchored to `{snap['path']}`: `greeting` returns an owned String.",
+                'emotion': 'analytical',
+                'trust_state': 'structural',
+                'grounding_scope': 'snapshot_and_citation_integrity_only',
+                'semantic_validation': 'not_performed',
+                'hallucination_free_guarantee': False,
+                'verification_note': 'Grounded in local workspace snapshots; no new test runs were executed by this chat turn.',
+                'citations': [evidence],
+                'claims': [{'text': '`greeting` returns an owned String.', 'evidence_ids': ['E1']}],
+                'recommendations': [],
+                'suggested_actions': [{
+                    'id': 'laser:src/lib.rs:1',
+                    'label': '↗ Aim laser at src/lib.rs:1-3',
+                    'kind': 'focus_citation',
+                    'target': 'src/lib.rs',
+                    'start_line': 1,
+                    'end_line': 3,
+                }],
+                'signals': {'activity_status': 'unavailable', 'agent_count': 0, 'running_agents': 0,
+                            'failed_runs': 0, 'unreviewed_lines': 0, 'untested_lines': 0, 'gate_passed': True, 'gate_findings': []},
+                'prompt_tokens_measured': 42,
+            })
         self.reply({'error': 'unknown_route'}, 404)
 
 
@@ -187,6 +214,27 @@ class PhiWorkspaceTests(unittest.TestCase):
             self.assertFalse(self.page.evaluate('document.documentElement.scrollWidth>innerWidth'), str(width))
         self.page.locator('#reading-question').fill('Explain the return value.')
         self.assertEqual(self.page.locator('#reading-question').input_value(), 'Explain the return value.')
+
+    def test_phi_bot_multi_turn_chat_quick_chips_and_laser_citation_focus(self):
+        self.assertEqual(self.server.state['posts'], [])
+        self.page.locator('[data-bot-intent="explain_selection"]').click()
+        self.page.wait_for_function('phiApp.bot.turns.length === 3')
+        self.assertEqual(len(self.server.state['posts']), 1)
+        self.assertEqual(self.server.state['posts'][0]['path'], '/api/phi/chat')
+        self.assertEqual(self.server.state['posts'][0]['body']['intent'], 'explain_selection')
+        self.assertEqual(self.server.state['posts'][0]['body']['expected_hash'], document(SOURCE)['hash'])
+        self.assertIn('42 prompt tokens measured', self.page.locator('#phi-bot-status').inner_text())
+        self.assertEqual(self.page.locator('#phi-bot-trust-badge').inner_text(), 'STRUCTURAL')
+
+        self.page.locator('.phi-bot-citation').first.click()
+        self.page.wait_for_function('phiApp.focus.active?.target?.descriptor?.line === 1')
+        self.assertEqual(self.page.evaluate('phiApp.focus.active.target.descriptor.endLine'), 3)
+
+        self.page.locator('#phi-bot-input').fill('Follow up question about greeting')
+        self.page.locator('#btn-phi-bot-send').click()
+        self.page.wait_for_function('phiApp.bot.turns.length === 5')
+        self.assertEqual(len(self.server.state['posts']), 2)
+        self.assertEqual(len(self.server.state['posts'][1]['body']['history']), 2)
 
 
 if __name__ == '__main__':

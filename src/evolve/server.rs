@@ -3407,6 +3407,10 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_str!("web/phi/phi_friction_ui.js").as_bytes(),
             "text/javascript; charset=utf-8",
         ),
+        "/phi/phi_bot.js" => (
+            include_str!("web/phi/phi_bot.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
         "/phi/style.css" => (
             include_str!("web/phi/style.css").as_bytes(),
             "text/css; charset=utf-8",

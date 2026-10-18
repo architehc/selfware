@@ -12,6 +12,7 @@ import { PhiSteward, IdleWatcher } from './phi_steward.js';
 import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
 import { PhiActivity, parsePolicy } from './phi_activity.js';
 import { PhiMediator } from './phi_mediator.js';
+import { PhiBotUI } from './phi_bot.js';
 
 const $ = id => document.getElementById(id);
 const make = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
@@ -75,6 +76,17 @@ export class PhiApp {
     this.companion = new PhiFrictionUI({ container: $('phi-friction-panel'), editor: $('code-buffer'), getToken: () => this.examples ? null : this.workspace.token });
     this.activity = new PhiActivity({ container: $('phi-activity-panel'), getToken: () => this.examples ? null : this.workspace.token,
       onChange: (_snapshot, emotion, posture) => { this.activityEmotion = emotion; this.activityPosture = posture; this.restoreAmbientPose(); } });
+    this.bot = new PhiBotUI({
+      container: $('phi-bot-panel'),
+      getWorkspace: () => this.workspace,
+      getDocument: () => this.document,
+      getSelection: () => this.currentLineSelection(),
+      isExampleMode: () => this.examples,
+      onFocusCitation: cite => this.focusBotCitation(cite),
+      onSpeakReply: (reply, emotion, cite) => this.speakBotReply(reply, emotion, cite),
+      onSetEmotion: emotion => { if (!this.narrationOwnsPose()) this.rig.setEmotion(emotion); },
+      onDispatchAction: (action, turn) => this.dispatchBotAction(action, turn)
+    });
     this.viseme.onStateChange = state => this.speechState(state);
     this.bindUI(); this.startLoop(); this.connect(); this.dock();
   }
@@ -642,6 +654,59 @@ export class PhiApp {
     try { const fresh = await this.citationDocument(evidence); this.rig.wrapper.hidden = false; this.rig.laserCanvas.hidden = false; await this.focus.focusRange(resolveEvidence(evidence, fresh), { speechStatus: 'Cited source', laser: true }); }
     catch (error) { if (version === this.playVersion) this.status(error.message, true); }
   }
+  currentLineSelection() {
+    if (!this.document) return null;
+    if (this.editing) {
+      const area = $('code-buffer'), selected = area.value.slice(area.selectionStart, area.selectionEnd);
+      if (!selected) return null;
+      const before = area.value.slice(0, area.selectionStart);
+      const startLine = before.split('\n').length;
+      const endLine = startLine + selected.split('\n').length - 1;
+      return { start_line: startLine, end_line: endLine };
+    }
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0), element = node => node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    const firstCode = element(range.startContainer)?.closest?.('.line-code'), lastCode = element(range.endContainer)?.closest?.('.line-code');
+    if (!firstCode || !lastCode || !$('editor-code').contains(firstCode) || !$('editor-code').contains(lastCode)) return null;
+    const a = Number(firstCode.parentElement.dataset.line), b = Number(lastCode.parentElement.dataset.line);
+    if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+    return { start_line: Math.min(a, b), end_line: Math.max(a, b) };
+  }
+  async focusBotCitation(citation) {
+    if (!citation) return;
+    if (this.examples) {
+      this.stopReading();
+      this.rig.wrapper.hidden = false; this.rig.laserCanvas.hidden = false;
+      await this.focus.focusRange({ line: citation.start_line, endLine: citation.end_line }, { speechStatus: 'Cited source', laser: true });
+      return;
+    }
+    await this.focusCitation(citation);
+  }
+  speakBotReply(reply, emotion = 'analytical', citation = null) {
+    if (this.destroyed || !reply) return;
+    if (!this.narrationOwnsPose()) {
+      this.rig.setEmotion(emotion);
+      this.rig.setSpeechText(reply, 'Phi · Bot');
+    }
+    if (!this.speechEnabled || this.orchestrator.isRunning) return;
+    this.showTranscript(reply);
+    this.viseme.speak(reply, this.speechOptions());
+    if (citation && this.document?.path === citation.path && !this.dirty) {
+      void this.focusBotCitation(citation);
+    }
+  }
+  async dispatchBotAction(action) {
+    if (!action || this.destroyed) return false;
+    if (action.kind === 'prepare_reading') {
+      if (action.question) $('reading-question').value = action.question;
+      return await this.prepareReading();
+    }
+    if (action.kind === 'inspect_activity') {
+      return await this.acceptProposal({ id: action.id || 'inspect:bot', task: { kind: 'inspect_activity', target: '' } });
+    }
+    return false;
+  }
   async playFacts(indices = this.facts.map((_, index) => index)) {
     this.stopReading(); const version = this.playVersion;
     try {
@@ -811,6 +876,7 @@ export class PhiApp {
     if (this.destroyed) return; this.destroyed = true; this.stopReading();
     this.companion.destroy();
     this.activity.destroy();
+    this.bot?.destroy();
     clearInterval(this.idleTimer);
     clearTimeout(this.speechCapabilityTimer); this.speechCapabilityAbort?.abort();
     if (this.frame != null) cancelAnimationFrame(this.frame);

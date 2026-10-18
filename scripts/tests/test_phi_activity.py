@@ -9,6 +9,7 @@ import test_phi_workspace as fixture
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE = ROOT / 'src/evolve/web/phi/phi_activity.js'
+BOT_MODULE = ROOT / 'src/evolve/web/phi/phi_bot.js'
 
 JS_FIXTURE = """
 const evidence = {outstanding:0,unreviewed_lines:0,untested_lines:0,unknown_size_obligations:0,
@@ -26,6 +27,7 @@ class ActivityContracts(unittest.TestCase):
             self.skipTest('Node is required')
         source = ("import assert from 'node:assert/strict';\n"
                   f"import {{parseActivity, parsePolicy, activityMood, activityPosture, PhiActivity}} from {json.dumps(MODULE.as_uri())};\n"
+                  f"import {{parseBotResponse, formatBotCitation, buildQuickChips, synthesizeOfflineBotReply}} from {json.dumps(BOT_MODULE.as_uri())};\n"
                   + JS_FIXTURE + body)
         result = subprocess.run(['node', '--input-type=module', '-'], input=source,
                                 text=True, capture_output=True, timeout=15)
@@ -124,6 +126,32 @@ const huge=new PhiActivity({getToken:()=> 'session',pollIntervalMs:10000,
 fetch:async()=>new Response('x'.repeat(262145),{headers:{'content-type':'application/json'}})});
 huge.connect();await new Promise(resolve=>setTimeout(resolve,30));
 assert.equal(huge.snapshot.reason,'request_failed');huge.destroy();
+""")
+
+    def test_phi_bot_response_and_citation_contracts(self):
+        self.node("""
+const chips=buildQuickChips();
+assert.equal(chips.length,4);
+assert.deepEqual(chips.map(c=>c.id),['whats_red','explain_selection','audit_unreviewed','check_debt']);
+assert.equal(formatBotCitation({path:'src/lib.rs',start_line:1,end_line:3}),'src/lib.rs:1–3');
+assert.equal(formatBotCitation({path:'src/lib.rs',start_line:5,end_line:5}),'src/lib.rs:5');
+assert.throws(()=>formatBotCitation({path:'',start_line:1,end_line:2}));
+assert.throws(()=>formatBotCitation({path:'src/lib.rs',start_line:5,end_line:2}));
+assert.throws(()=>parseBotResponse({reply:' Dishonest green ',trust_state:'verified',semantic_validation:'not_performed'}));
+const valid=parseBotResponse({
+  reply:'Anchored to src/lib.rs.',
+  emotion:'analytical',
+  trust_state:'structural',
+  citations:[{id:'E1',path:'src/lib.rs',start_line:1,end_line:3,excerpt:'1 | pub fn a()',content_hash:'abc'}],
+  suggested_actions:[{id:'laser:1',label:'Aim laser',kind:'focus_citation',target:'src/lib.rs',start_line:1,end_line:3}],
+  prompt_tokens_measured:28
+});
+assert.equal(valid.trust_state,'structural');
+assert.equal(valid.citations.length,1);
+assert.equal(valid.prompt_tokens_measured,28);
+const preview=synthesizeOfflineBotReply({message:'Explain sample',document:{path:'sample.rs',content:'fn main() {}\\n'}});
+assert.equal(preview.trust_state,'example_preview');
+assert.equal(preview.citations[0].path,'sample.rs');
 """)
 
 
