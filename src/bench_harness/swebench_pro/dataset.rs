@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::safety::process_env::SanitizedEnvExt;
+
 /// A single SWE-bench Pro problem.  We keep the schema permissive — Scale AI
 /// occasionally adds optional fields, and we don't want to break on them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +86,24 @@ pub fn load_instances(
         );
     }
 
+    if let Some(bad) = all.iter().find(|i| !is_safe_repo_slug(&i.repo)) {
+        bail!(
+            "unsafe SWE-bench Pro repo {:?} in instance {:?}: must be '<owner>/<repo>' \
+             with safe path components",
+            bad.repo,
+            bad.instance_id
+        );
+    }
+
+    if let Some(bad) = all.iter().find(|i| !is_safe_git_revision(&i.base_commit)) {
+        bail!(
+            "unsafe SWE-bench Pro base_commit {:?} in instance {:?}: must be a \
+             non-flag git revision token",
+            bad.base_commit,
+            bad.instance_id
+        );
+    }
+
     if !instance_ids.is_empty() {
         let wanted: std::collections::HashSet<&str> =
             instance_ids.iter().map(String::as_str).collect();
@@ -109,9 +129,43 @@ fn is_safe_instance_id(id: &str) -> bool {
     )
 }
 
+/// Whether `repo` is a safe `<owner>/<name>` GitHub repository slug (exactly
+/// two normal path components, no whitespace/control characters, and neither
+/// component starts with `-`).
+pub(crate) fn is_safe_repo_slug(repo: &str) -> bool {
+    let Some((owner, name)) = repo.split_once('/') else {
+        return false;
+    };
+    if name.contains('/') {
+        return false;
+    }
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && is_safe_instance_id(part)
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    valid_part(owner) && valid_part(name)
+}
+
+/// Whether `rev` is a safe git commit SHA / revision token (non-empty, does
+/// not start with `-` which `git fetch`/`git checkout` would parse as a flag,
+/// and contains only safe ASCII revision characters).
+pub(crate) fn is_safe_git_revision(rev: &str) -> bool {
+    !rev.is_empty()
+        && !rev.starts_with('-')
+        && !rev.contains("..")
+        && rev
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 fn run_loader_script() -> Result<String> {
     let py = std::env::var("SELFWARE_PYTHON").unwrap_or_else(|_| "python3".to_string());
     let out = Command::new(&py)
+        .sanitized_env()
         .arg("-c")
         .arg(LOADER_PY)
         .stdin(Stdio::null())

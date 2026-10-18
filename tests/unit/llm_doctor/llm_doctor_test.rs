@@ -1447,3 +1447,10 @@ fn detect_backend_from_headers_identifies_colibri() {
     );
     assert_eq!(Backend::Colibri.to_string(), "colibri");
 }
+
+#[test]
+fn build_probe_client_constructs_for_local_and_remote_endpoints() {
+    assert!(build_probe_client("http://127.0.0.1:8000/v1", Duration::from_secs(5)).is_ok());
+    assert!(build_probe_client("http://localhost:11434/v1", Duration::from_secs(5)).is_ok());
+    assert!(build_probe_client("https://api.openai.com/v1", Duration::from_secs(5)).is_ok());
+}

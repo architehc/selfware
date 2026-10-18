@@ -228,3 +228,24 @@ fn capture_patch_excludes_harness_artifacts() {
         "capture_patch mutated the real git index"
     );
 }
+
+#[test]
+fn clone_instance_rejects_unsafe_repo_or_base_commit_before_touching_dest() {
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("keep.txt");
+    std::fs::write(&sentinel, "safe").unwrap();
+
+    let err = clone_instance("../evil", "deadbeef", dir.path()).unwrap_err();
+    assert!(err.to_string().contains("unsafe repo slug"), "{err}");
+    assert!(
+        sentinel.exists(),
+        "dest must not be removed when repo validation fails"
+    );
+
+    let err = clone_instance("octocat/hello-world", "--upload-pack=evil", dir.path()).unwrap_err();
+    assert!(err.to_string().contains("unsafe base_commit"), "{err}");
+    assert!(
+        sentinel.exists(),
+        "dest must not be removed when base_commit validation fails"
+    );
+}

@@ -984,3 +984,44 @@ fn merge_official_metrics_into_result_adds_keys() {
     assert_eq!(value["pass_to_pass_total"], 4);
     assert_eq!(value["overall_pass"], true);
 }
+
+#[test]
+fn run_one_skip_existing_recovers_candidate_subdirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = dummy_opts(dir.path().to_path_buf());
+    opts.skip_existing = true;
+    opts.candidates = 2;
+    let spec = dummy_quant("q1");
+    let inst = dummy_instance();
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, 1);
+    std::fs::create_dir_all(&trial_dir).unwrap();
+
+    std::fs::write(
+        trial_dir.join(format!("{}.pred", inst.instance_id)),
+        "selected patch\n",
+    )
+    .unwrap();
+    std::fs::write(
+        trial_dir.join("result.json"),
+        serde_json::to_vec(&make_candidate_result(0, false)).unwrap(),
+    )
+    .unwrap();
+    for c in 1..=2u32 {
+        let c_dir = trial_dir.join(format!("candidate_{c}"));
+        std::fs::create_dir_all(&c_dir).unwrap();
+        std::fs::write(
+            c_dir.join("result.json"),
+            serde_json::to_vec(&make_candidate_result(c, false)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let (selected, candidates) = run_one(&opts, &spec, &inst, 1).unwrap();
+    assert_eq!(selected.candidate_num, 0);
+    let nums: Vec<u32> = candidates.iter().map(|r| r.candidate_num).collect();
+    assert_eq!(
+        nums,
+        vec![1, 2],
+        "run_one with skip_existing and candidates > 1 must recover candidate subdirs"
+    );
+}

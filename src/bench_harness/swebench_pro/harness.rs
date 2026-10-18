@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use super::catalog::QuantSpec;
 use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
+use crate::safety::process_env::SanitizedEnvExt;
 
 #[derive(Clone, Debug)]
 pub struct LlamaServerOpts {
@@ -54,7 +55,11 @@ pub fn resolve_llama_binary() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    if let Ok(out) = Command::new("which").arg("llama-server").output() {
+    if let Ok(out) = Command::new("which")
+        .sanitized_env()
+        .arg("llama-server")
+        .output()
+    {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !path.is_empty() {
@@ -173,7 +178,7 @@ impl LlamaServer {
         let canon_mmproj = mmproj.canonicalize().ok();
         let argv = build_llama_server_args(spec, opts, &gguf, canon_mmproj.as_deref());
         let mut cmd = Command::new(&opts.binary);
-        cmd.args(&argv);
+        cmd.sanitized_env().args(&argv);
 
         let log_path = format!("/tmp/llama-{}.log", spec.alias);
         let log = std::fs::File::create(&log_path)
@@ -238,6 +243,7 @@ fn cmd_targets_port(cmd: &[String], port: u16) -> bool {
 fn probe_endpoint(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{}/v1/models", port);
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(1))
         .build()
         .ok()
@@ -401,6 +407,7 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
     // After the agent ran, the workdir's `.git/config` is agent-writable:
     // neutralise repo-configured programs (filters, fsmonitor, textconv).
     let _ = Command::new("git")
+        .sanitized_env()
         .args(crate::safety::git_exec::hardening_args(
             workdir,
             crate::safety::git_exec::GitScope::Internal,
@@ -418,6 +425,7 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .status();
 
     let out = Command::new("git")
+        .sanitized_env()
         .args(crate::safety::git_exec::hardening_args(
             workdir,
             crate::safety::git_exec::GitScope::Internal,
@@ -467,6 +475,19 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
 /// Shallow-clone `repo` at `base_commit` into `dest`.  Mirrors the
 /// fetch-then-fall-back-to-clone strategy in run.py.
 pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> {
+    if !super::dataset::is_safe_repo_slug(repo) {
+        bail!(
+            "unsafe repo slug {:?}: must be '<owner>/<repo>' with safe path components",
+            repo
+        );
+    }
+    if !super::dataset::is_safe_git_revision(base_commit) {
+        bail!(
+            "unsafe base_commit {:?}: must be a non-flag git revision token",
+            base_commit
+        );
+    }
+
     if dest.exists() {
         std::fs::remove_dir_all(dest)
             .with_context(|| format!("removing existing dest {}", dest.display()))?;
@@ -480,6 +501,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
     // First strategy: init + fetch a single SHA.
     let init = Command::new("git")
+        .sanitized_env()
         .arg("init")
         .arg(dest)
         .stdout(Stdio::null())
@@ -489,11 +511,13 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
     if init.success() {
         let add_remote = Command::new("git")
+            .sanitized_env()
             .args(["-C"])
             .arg(dest)
             .args(["remote", "add", "origin", &url])
             .status()?;
         let fetch = Command::new("git")
+            .sanitized_env()
             .args(["-C"])
             .arg(dest)
             .args(["fetch", "--depth", "1", "origin", base_commit])
@@ -501,6 +525,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
             .stderr(Stdio::null())
             .status()?;
         let checkout = Command::new("git")
+            .sanitized_env()
             .args(["-C"])
             .arg(dest)
             .args(["checkout", "FETCH_HEAD"])
@@ -518,6 +543,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
         let _ = std::fs::remove_dir_all(dest);
     }
     let clone_status = Command::new("git")
+        .sanitized_env()
         .args(["clone", "--filter=blob:none", "--depth", "200", &url])
         .arg(dest)
         .stdout(Stdio::null())
@@ -532,6 +558,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
         );
     }
     let checkout_status = Command::new("git")
+        .sanitized_env()
         .args(["-C"])
         .arg(dest)
         .args(["checkout", base_commit])

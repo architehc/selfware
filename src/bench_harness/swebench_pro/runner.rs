@@ -19,6 +19,7 @@ use super::manifest::{
 };
 use super::trace::{RunTrace, TraceEvent};
 use crate::config::PromptProfile;
+use crate::safety::process_env::SanitizedEnvExt;
 
 /// Caller-supplied configuration for `run_swebench_pro`.
 ///
@@ -199,19 +200,9 @@ fn reconstruct_result_from_disk(
 /// N+1 samples. On resume the old skip path reconstructed only the trial-level
 /// result, collapsing the pool to a single sample and degrading pass@k. This
 /// recovers the candidate subdirs so a resumed sweep matches a fresh one.
-fn reconstruct_trial_pool_from_disk(
-    opts: &SwebenchProOpts,
-    spec: &QuantSpec,
-    inst: &Instance,
-    trial: u32,
-) -> Result<Vec<PerRunResult>> {
-    // Trial-level result first (existing single-result logic, incl. synthesis
-    // when result.json is absent).
-    let mut pool = vec![reconstruct_result_from_disk(opts, spec, inst, trial)?];
-
-    // Then every candidate_N/result.json, in deterministic candidate order.
-    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
-    if let Ok(entries) = std::fs::read_dir(&trial_dir) {
+fn reconstruct_candidate_results_from_dir(trial_dir: &Path) -> Vec<PerRunResult> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(trial_dir) {
         let mut candidate_dirs: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
@@ -226,11 +217,27 @@ fn reconstruct_trial_pool_from_disk(
         for c_dir in candidate_dirs {
             if let Ok(bytes) = std::fs::read(c_dir.join("result.json")) {
                 if let Ok(res) = serde_json::from_slice::<PerRunResult>(&bytes) {
-                    pool.push(res);
+                    out.push(res);
                 }
             }
         }
     }
+    out
+}
+
+fn reconstruct_trial_pool_from_disk(
+    opts: &SwebenchProOpts,
+    spec: &QuantSpec,
+    inst: &Instance,
+    trial: u32,
+) -> Result<Vec<PerRunResult>> {
+    // Trial-level result first (existing single-result logic, incl. synthesis
+    // when result.json is absent).
+    let mut pool = vec![reconstruct_result_from_disk(opts, spec, inst, trial)?];
+
+    // Then every candidate_N/result.json, in deterministic candidate order.
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
+    pool.extend(reconstruct_candidate_results_from_dir(&trial_dir));
     Ok(pool)
 }
 
@@ -1209,11 +1216,12 @@ fn run_one(
             "  → {} (trial {}): SKIP (pred exists)",
             inst.instance_id, trial
         );
+        let candidate_results = reconstruct_candidate_results_from_dir(&trial_dir);
         let result_path = trial_dir.join("result.json");
         if result_path.exists() {
             let bytes = std::fs::read(&result_path)?;
             let result: PerRunResult = serde_json::from_slice(&bytes)?;
-            return Ok((result, vec![]));
+            return Ok((result, candidate_results));
         }
         let bytes = std::fs::metadata(&trial_pred)
             .map(|m| m.len() as usize)
@@ -1243,7 +1251,7 @@ fn run_one(
             candidate_num: 0,
             official_resolved: None,
         };
-        return Ok((synthetic, vec![]));
+        return Ok((synthetic, candidate_results));
     }
 
     let mut candidate_results = Vec::new();
@@ -1678,7 +1686,8 @@ fn evaluate_single_pred(
         .with_context(|| format!("resolving {}", output_dir.display()))?;
 
     let mut cmd = std::process::Command::new("python3");
-    cmd.arg(&eval_script)
+    cmd.sanitized_env()
+        .arg(&eval_script)
         .arg("--raw_sample_path")
         .arg(&raw_sample_for_eval)
         .arg("--patch_path")
@@ -2320,7 +2329,8 @@ fn run_official_eval(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<Of
             .with_context(|| format!("resolving {}", eval_dir.display()))?;
 
         let mut cmd = std::process::Command::new("python3");
-        cmd.arg(&eval_script)
+        cmd.sanitized_env()
+            .arg(&eval_script)
             .arg("--raw_sample_path")
             .arg(&normalized_raw_sample_path)
             .arg("--patch_path")

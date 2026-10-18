@@ -926,17 +926,30 @@ pub(crate) fn resolve_vision_target<'a>(
     None
 }
 
+/// Build an HTTP client for probing `endpoint`: never follow redirects (so a
+/// 302 cannot carry a Bearer token off-host) and bypass system `HTTP_PROXY` /
+/// `ALL_PROXY` variables when probing a loopback/local endpoint, matching
+/// [`crate::api::ApiClient::new`].
+pub(crate) fn build_probe_client(
+    endpoint: &str,
+    timeout: Duration,
+) -> std::result::Result<Client, reqwest::Error> {
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout);
+    if crate::config::api_key::is_local_endpoint(endpoint) {
+        builder = builder.no_proxy();
+    }
+    builder.build()
+}
+
 /// Probe whether the backend accepts `chat_template_kwargs` (Qwen-style
 /// thinking control). Sends one request with `enable_thinking: false`; a
 /// 2xx response means the backend accepts thinking control, a rejection or
 /// transport error means it cannot consume it.
 async fn probe_thinking_support(endpoint: &str, model: &str, config: &Config) -> Option<bool> {
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(probe_timeout)
-        .build()
-    {
+    let client = match build_probe_client(endpoint, probe_timeout) {
         Ok(c) => c,
         Err(_) => return None,
     };
@@ -1018,11 +1031,7 @@ async fn probe_capabilities(
     // Steps 3/6 so the recommendations and the matrix agree.
 
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(probe_timeout)
-        .build()
-    {
+    let client = match build_probe_client(endpoint, probe_timeout) {
         Ok(c) => c,
         Err(_) => return caps,
     };
@@ -1071,8 +1080,10 @@ async fn probe_capabilities(
     if let Some(target) = resolve_vision_target(model, config) {
         let target_base = target.endpoint.trim_end_matches('/');
         let target_url = format!("{}/chat/completions", target_base);
+        let vision_client = build_probe_client(target.endpoint, probe_timeout).unwrap_or(client);
         caps.multimodal = Some(
-            probe_vision_conditioning(&client, &target_url, target.model, target.api_key).await,
+            probe_vision_conditioning(&vision_client, &target_url, target.model, target.api_key)
+                .await,
         );
         caps.multimodal_target = Some(target.label);
     }
@@ -1181,11 +1192,7 @@ async fn probe_streaming_tool_call(
     config: &Config,
 ) -> StreamingToolCallProbe {
     let probe_timeout = connection_test_timeout(config);
-    let client = match Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(probe_timeout)
-        .build()
-    {
+    let client = match build_probe_client(endpoint, probe_timeout) {
         Ok(c) => c,
         Err(e) => {
             return StreamingToolCallProbe {
@@ -1554,11 +1561,7 @@ async fn fetch_server_info(endpoint: &str, api_key: Option<&str>) -> Option<Serv
     let base_no_v1 = base.trim_end_matches("/v1");
     let url = format!("{}/get_server_info", base_no_v1);
 
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .ok()?;
+    let client = build_probe_client(endpoint, HTTP_TIMEOUT).ok()?;
     let mut req = client.get(&url);
     if let Some(key) = api_key {
         if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
@@ -1703,10 +1706,7 @@ fn server_capacity_checks(
 // ── Step 1 implementation ────────────────────────────────────────────────────
 
 async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<DetectionResult> {
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(HTTP_TIMEOUT)
-        .build()?;
+    let client = build_probe_client(endpoint, HTTP_TIMEOUT)?;
 
     // Strip trailing /v1 for base URL probes
     let base = endpoint.trim_end_matches('/');
@@ -2415,10 +2415,7 @@ async fn connection_test(
     config: &Config,
 ) -> Result<ConnectionTestResult> {
     let probe_timeout = connection_test_timeout(config);
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(probe_timeout)
-        .build()?;
+    let client = build_probe_client(endpoint, probe_timeout)?;
 
     let base = endpoint.trim_end_matches('/');
     let completions_url = format!("{}/chat/completions", base);
