@@ -788,7 +788,6 @@ impl Tool for CodeQuery {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             query: String,
             #[serde(default)]
@@ -833,14 +832,38 @@ impl Tool for CodeQuery {
         // Format results
         let mut output = Vec::new();
         for result in results.results.iter().take(args.max_results) {
+            let file_lines: Option<Vec<String>> = if args.include_bodies {
+                query::read_query_source(&result.path, !exact_file)
+                    .await
+                    .map(|content| content.lines().map(str::to_string).collect())
+            } else {
+                None
+            };
+
             for symbol in &result.matched_symbols {
-                output.push(json!({
+                let mut entry = json!({
                     "file": result.path.to_string_lossy().to_string(),
                     "name": symbol.name,
                     "kind": format!("{:?}", symbol.kind),
                     "signature": symbol.signature,
                     "line": symbol.line_start,
-                }));
+                });
+                if let Some(end_line) = symbol.line_end {
+                    entry["line_end"] = json!(end_line);
+                }
+                if args.include_bodies {
+                    let body = file_lines
+                        .as_ref()
+                        .and_then(|lines| {
+                            let start_idx = symbol.line_start.checked_sub(1)?;
+                            let end_line = symbol.line_end.unwrap_or(symbol.line_start);
+                            let end_idx = end_line.min(lines.len());
+                            (start_idx < end_idx).then(|| lines[start_idx..end_idx].join("\n"))
+                        })
+                        .unwrap_or_else(|| symbol.render().trim_end().to_string());
+                    entry["body"] = json!(body);
+                }
+                output.push(entry);
             }
         }
 
@@ -947,7 +970,6 @@ impl Tool for CodePlan {
         use planner::EvolutionPlanner;
 
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             goal: String,
             #[serde(default = "default_iterations")]
@@ -987,7 +1009,8 @@ impl Tool for CodePlan {
             args.budget_tokens,
             root,
         )
-        .with_safety_config(safety);
+        .with_safety_config(safety)
+        .with_strategy_override(args.strategy.as_deref())?;
 
         let plan = planner.generate_plan().await?;
 
@@ -1062,7 +1085,6 @@ impl Tool for CodeDiffPlan {
         use planner::analyze_impact_with_safety;
 
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             target_file: String,
             change_type: String,
@@ -1093,6 +1115,7 @@ impl Tool for CodeDiffPlan {
         let analysis = analyze_impact_with_safety(
             &target,
             args.affected_symbol.as_deref(),
+            Some(args.change_type.as_str()),
             &root,
             Some(&safety),
         )

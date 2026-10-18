@@ -116,6 +116,8 @@ pub struct EvolutionPlanner {
     /// Workspace path policy for every file and directory the walk reaches
     /// (`None`: no per-path validation, library callers only).
     safety: Option<crate::config::SafetyConfig>,
+    /// Optional caller-requested planning strategy override.
+    strategy_override: Option<PlanningStrategy>,
 }
 
 impl EvolutionPlanner {
@@ -131,6 +133,7 @@ impl EvolutionPlanner {
             budget: PlanBudget::new(max_iterations, max_tokens),
             codebase_root,
             safety: None,
+            strategy_override: None,
         }
     }
 
@@ -141,13 +144,34 @@ impl EvolutionPlanner {
         self
     }
 
+    /// Override the heuristic planning strategy with a caller-specified strategy
+    /// (`"breadth_first"`, `"depth_first"`, or `"impact_analysis"`).
+    pub fn with_strategy_override(mut self, strategy: Option<&str>) -> Result<Self> {
+        self.strategy_override = match strategy.map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some("breadth_first") => Some(PlanningStrategy::IntrospectionFirst),
+            Some("depth_first") => Some(PlanningStrategy::TargetedChange),
+            Some("impact_analysis") => Some(PlanningStrategy::ImpactAnalysis),
+            Some(other) => {
+                anyhow::bail!(
+                    "Unknown planning strategy '{}'. Expected 'breadth_first', 'depth_first', or 'impact_analysis'",
+                    other
+                );
+            }
+        };
+        Ok(self)
+    }
+
     /// Generate an evolution plan
     pub async fn generate_plan(&self) -> Result<EvolutionPlan> {
         // Extract keywords from goal to understand intent
         let keywords = extract_keywords(&self.goal);
 
-        // Analyze goal to determine strategy
-        let strategy = self.determine_strategy(&keywords);
+        // Analyze goal to determine strategy (honoring explicit caller override)
+        let strategy = self
+            .strategy_override
+            .clone()
+            .unwrap_or_else(|| self.determine_strategy(&keywords));
 
         // Find relevant files
         let relevant_files = self.find_relevant_files(&keywords).await?;
@@ -155,7 +179,11 @@ impl EvolutionPlanner {
         // Generate phases based on strategy
         let phases = match strategy {
             PlanningStrategy::IntrospectionFirst => {
-                self.plan_introspection_first(&relevant_files).await?
+                self.plan_introspection_first(&relevant_files, false)
+                    .await?
+            }
+            PlanningStrategy::ImpactAnalysis => {
+                self.plan_introspection_first(&relevant_files, true).await?
             }
             PlanningStrategy::TargetedChange => self.plan_targeted_change(&relevant_files).await?,
             PlanningStrategy::Exploratory => self.plan_exploratory(&relevant_files).await?,
@@ -257,7 +285,11 @@ impl EvolutionPlanner {
     }
 
     /// Plan with introspection-first strategy
-    async fn plan_introspection_first(&self, files: &[PathBuf]) -> Result<Vec<PlanPhase>> {
+    async fn plan_introspection_first(
+        &self,
+        files: &[PathBuf],
+        force_impact_analysis: bool,
+    ) -> Result<Vec<PlanPhase>> {
         let mut phases = Vec::new();
         let mut phase_num = 1;
 
@@ -329,8 +361,9 @@ impl EvolutionPlanner {
             phase_num += 1;
         }
 
-        // Phase 4: Impact analysis if modifying
-        if self.goal.to_lowercase().contains("modify")
+        // Phase 4: Impact analysis if modifying or explicitly requested
+        if force_impact_analysis
+            || self.goal.to_lowercase().contains("modify")
             || self.goal.to_lowercase().contains("change")
             || self.goal.to_lowercase().contains("fix")
         {
@@ -580,6 +613,8 @@ impl EvolutionPlanner {
 enum PlanningStrategy {
     /// Start with broad introspection, then narrow down
     IntrospectionFirst,
+    /// Broad introspection with an explicit dependency impact analysis phase
+    ImpactAnalysis,
     /// Go directly to relevant files
     TargetedChange,
     /// Broad exploration without specific modifications
@@ -611,21 +646,23 @@ pub async fn analyze_impact(
     symbol: Option<&str>,
     codebase_root: &Path,
 ) -> Result<ImpactAnalysis> {
-    analyze_impact_with_safety(target_file, symbol, codebase_root, None).await
+    analyze_impact_with_safety(target_file, symbol, None, codebase_root, None).await
 }
 
 pub(super) async fn analyze_impact_with_safety(
     target_file: &Path,
     symbol: Option<&str>,
+    change_type: Option<&str>,
     codebase_root: &Path,
     safety: Option<&crate::config::SafetyConfig>,
 ) -> Result<ImpactAnalysis> {
     let mut direct_callers = Vec::new();
-    let transitive_deps = Vec::new();
+    let mut transitive_deps = Vec::new();
     let mut tests_affected = Vec::new();
 
-    // Get target file content
-    let _target_content = crate::tools::file::read_to_string_capped_async(
+    // Get target file content and parse exported symbol names when no
+    // explicit symbol was requested.
+    let target_content = crate::tools::file::read_to_string_capped_async(
         target_file,
         crate::tools::file::MAX_SOURCE_READ_SIZE,
     )
@@ -634,6 +671,21 @@ pub(super) async fn analyze_impact_with_safety(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+    let parsed_target = super::parser::parse(
+        &target_content,
+        super::parser::Language::detect(target_file, None),
+    );
+    let target_symbols: Vec<String> = parsed_target
+        .symbols
+        .into_iter()
+        .filter(|s| {
+            matches!(
+                s.visibility,
+                super::parser::Visibility::Public | super::parser::Visibility::PublicCrate
+            )
+        })
+        .map(|s| s.name)
+        .collect();
 
     // Use the same bounded, policy-checked, no-symlink walk as every other
     // introspection tool. `DirEntry::path().is_file()` follows symlinks, so
@@ -647,6 +699,9 @@ pub(super) async fn analyze_impact_with_safety(
     .await??
     .files;
 
+    let mut non_caller_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut caller_stems: Vec<String> = Vec::new();
+
     for path in files {
         if path == target_file {
             continue;
@@ -654,28 +709,88 @@ pub(super) async fn analyze_impact_with_safety(
         // The walk already chose this path. Read that descriptor so a
         // hard-link swap cannot replace the bytes after the link-count check.
         if let Some(content) = super::read_introspect_source(&path, false).await {
-            // Check for imports/references to target
             let file_name = path.to_string_lossy().to_lowercase();
 
-            // Simple text-based search for references
-            let symbol_matches = symbol.is_some_and(|s: &str| content.contains(s));
-            if content.contains(&target_name) || symbol_matches {
+            let matched_line = content.lines().enumerate().find_map(|(idx, line)| {
+                let matches_symbol = match symbol {
+                    Some(s) => !s.is_empty() && line.contains(s),
+                    None => target_symbols
+                        .iter()
+                        .any(|sym| !sym.is_empty() && line.contains(sym.as_str())),
+                };
+                let matches_target = !target_name.is_empty()
+                    && target_name != "mod"
+                    && target_name != "lib"
+                    && line.contains(&target_name);
+                if matches_symbol || matches_target {
+                    Some(((idx + 1) as u32, line.trim().to_string()))
+                } else {
+                    None
+                }
+            });
+
+            if let Some((line_no, line_text)) = matched_line {
+                let context = if line_text.is_empty() {
+                    format!("References {}", symbol.unwrap_or(&target_name))
+                } else {
+                    line_text
+                };
                 let info = CallerInfo {
                     file: path.to_string_lossy().to_string(),
-                    line: 1, // Would need line-by-line analysis
-                    context: format!("References {}", target_name),
+                    line: line_no,
+                    context,
                 };
 
                 if file_name.contains("test") {
                     tests_affected.push(path.to_string_lossy().to_string());
                 } else {
+                    if let Some(stem) = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .filter(|s| !s.is_empty() && s != "mod" && s != "lib" && s != "main")
+                    {
+                        caller_stems.push(stem);
+                    }
                     direct_callers.push(info);
                 }
+            } else if !file_name.contains("test") {
+                non_caller_files.push((path, content));
+            }
+        }
+    }
+
+    if !caller_stems.is_empty() {
+        for (path, content) in non_caller_files {
+            if caller_stems
+                .iter()
+                .any(|stem| content.lines().any(|line| line.contains(stem.as_str())))
+            {
+                transitive_deps.push(path.to_string_lossy().to_string());
             }
         }
     }
 
     let estimated_files = direct_callers.len();
+    let suggested_order = match change_type {
+        Some("delete") => vec![
+            "Remove or migrate references in direct callers".to_string(),
+            "Update transitive dependencies".to_string(),
+            "Update or remove affected tests".to_string(),
+            "Delete target and verify compilation".to_string(),
+        ],
+        Some("rename") => vec![
+            "Rename symbol/module in target".to_string(),
+            "Update direct callers to new name".to_string(),
+            "Update transitive dependencies".to_string(),
+            "Update tests".to_string(),
+            "Verify compilation".to_string(),
+        ],
+        _ => vec![
+            "Update direct callers".to_string(),
+            "Update tests".to_string(),
+            "Verify compilation".to_string(),
+        ],
+    };
 
     Ok(ImpactAnalysis {
         target_file: target_file.to_string_lossy().to_string(),
@@ -684,11 +799,7 @@ pub(super) async fn analyze_impact_with_safety(
         transitive_deps,
         tests_affected,
         estimated_files_to_update: estimated_files,
-        suggested_order: vec![
-            "Update direct callers".to_string(),
-            "Update tests".to_string(),
-            "Verify compilation".to_string(),
-        ],
+        suggested_order,
     })
 }
 

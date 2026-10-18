@@ -356,3 +356,28 @@ async fn test_computer_screen_window_mode_points_to_screen_capture() {
         .to_string();
     assert!(err.contains("screen_capture"), "{err}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_shape_capture_output_refuses_symlink_output_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim.png");
+    std::fs::write(&victim, b"preserve").unwrap();
+    let link = dir.path().join("shot.png");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let session_dir = dir.path().join("session");
+    let png = fake_png(32);
+
+    crate::tools::workspace_root::scope(root, async {
+        let opts = CaptureOutputOptions {
+            inline: false,
+            output_path: Some("shot.png".to_string()),
+        };
+        let res = shape_capture_output("screen_capture", "screen", &png, 1, 1, &opts, &session_dir);
+        assert!(res.is_err(), "symlink output_path must be refused");
+    })
+    .await;
+    assert_eq!(std::fs::read(&victim).unwrap(), b"preserve");
+}

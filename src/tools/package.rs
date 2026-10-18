@@ -17,7 +17,6 @@ use crate::tools::argv_guard::{reject_flag_like_operand, reject_flag_like_operan
 
 use super::Tool;
 use crate::config::SafetyConfig;
-use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
 /// Maximum output buffer size from a package command (10 MB).
@@ -702,10 +701,10 @@ impl Tool for PipFreeze {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let output_file = pip_freeze_output_file(&args);
+        let safety = resolve_safety_config(self.safety_config.as_ref());
         if let Some(file_path) = output_file.as_deref() {
             // Validate the exact anchored path that will later be written,
             // before doing the comparatively expensive child-process work.
-            let safety = resolve_safety_config(self.safety_config.as_ref());
             validate_tool_path(file_path, &safety)?;
         }
 
@@ -732,8 +731,9 @@ impl Tool for PipFreeze {
             // Arbitrary-write fix (2026-09-21 review): `output_file` was
             // forwarded to fs::write unvalidated, so `pip_freeze` could
             // overwrite any path the process could write. The write target
-            // now obeys the same workspace path policy as file_write.
-            tokio::fs::write(file_path, &stdout)
+            // now obeys the same atomic, symlink-rejecting workspace path
+            // policy as file_write.
+            crate::tools::file::write_atomic_checked(Path::new(file_path), &stdout, &safety)
                 .await
                 .context("Failed to write requirements file")?;
         }
@@ -1134,7 +1134,14 @@ pub(crate) fn check_requirements_file(
              than {MAX_REQUIREMENTS_DEPTH} levels"
         );
     }
-    let content = std::fs::read_to_string(path).with_context(|| {
+    let file = crate::tools::file::open_checked_regular(&shown, safety).with_context(|| {
+        format!("{tool} could not open requirements file {shown:?} to check its sources")
+    })?;
+    let content = crate::tools::file::read_handle_to_string_capped(
+        file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .with_context(|| {
         format!("{tool} could not read requirements file {shown:?} to check its sources")
     })?;
     let refuse = |line: &str, why: &str| -> anyhow::Error {
@@ -1224,14 +1231,17 @@ struct PipPackage {
 
 /// Find the Python executable (python3 or python)
 async fn find_python() -> String {
-    // Try python3 first
-    if Command::new("python3")
-        .sanitized_env()
-        .arg("--version")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // Try python3 first with a short timeout and output cap
+    let mut cmd = Command::new("python3");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.arg("--version");
+    if crate::tools::process_guard::run_command_bounded(
+        cmd,
+        std::time::Duration::from_secs(5),
+        4096,
+    )
+    .await
+    .is_ok_and(|o| o.success())
     {
         return "python3".to_string();
     }

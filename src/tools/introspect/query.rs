@@ -39,7 +39,7 @@ fn read_discovered_source(path: &Path) -> Option<String> {
         .ok()
 }
 
-async fn read_query_source(path: &Path, discovered: bool) -> Option<String> {
+pub(super) async fn read_query_source(path: &Path, discovered: bool) -> Option<String> {
     if !discovered {
         return crate::tools::file::read_to_string_capped_async(
             path,

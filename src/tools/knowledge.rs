@@ -772,12 +772,12 @@ impl Tool for KnowledgeExport {
             );
         }
 
-        // Enforce the workspace path policy on the write target so the export
-        // cannot land outside the workspace (or in a denied location) even
-        // through a relative path that survives the `..` check (e.g. via a
-        // symlinked subdirectory of the working dir).
+        // Enforce the workspace path policy on the anchored write target so the
+        // export cannot land outside the workspace (or in a denied location)
+        // or follow a symlink at the destination.
+        let anchored_path = crate::tools::workspace_root::anchor(output_path);
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        validate_tool_path(output_path, &safety)?;
+        validate_tool_path(&anchored_path, &safety)?;
 
         let graph = KNOWLEDGE_GRAPH.read().await;
 
@@ -788,9 +788,13 @@ impl Tool for KnowledgeExport {
         });
 
         let json_str = serde_json::to_string_pretty(&export_data)?;
-        tokio::fs::write(crate::tools::workspace_root::anchor(output_path), &json_str)
-            .await
-            .context("Failed to write export file")?;
+        crate::tools::file::write_atomic_checked(
+            std::path::Path::new(&anchored_path),
+            &json_str,
+            &safety,
+        )
+        .await
+        .context("Failed to write export file")?;
 
         Ok(json!({
             "success": true,
@@ -965,7 +969,7 @@ impl Tool for KnowledgeAutoExtract {
             .unwrap_or(false);
 
         // Use LSP to get all symbols in the file
-        let lsp_symbols = match lsp_document_symbols(file_path).await {
+        let lsp_symbols = match lsp_document_symbols(file_path, &safety).await {
             Ok(symbols) => symbols,
             Err(e) => {
                 return Err(anyhow::anyhow!(
@@ -1079,13 +1083,15 @@ fn parse_symbol_kind(kind: &str) -> NodeType {
 }
 
 /// LSP document symbols wrapper
-async fn lsp_document_symbols(file_path: &str) -> Result<Vec<LSymbol>> {
-    // For now, use a simple grep-based approach to find definitions
-    // In a full implementation, this would call rust-analyzer or similar
-    let content = crate::tools::file::read_to_string_capped(
-        std::path::Path::new(file_path),
-        crate::tools::file::MAX_SOURCE_READ_SIZE,
+async fn lsp_document_symbols(file_path: &str, safety: &SafetyConfig) -> Result<Vec<LSymbol>> {
+    // Read via the descriptor-checked file helper so symlinks/FIFOs cannot be
+    // swapped in after path validation.
+    let (content, _) = crate::tools::file::read_file_checked(
+        file_path,
+        safety,
+        Some(crate::tools::file::MAX_SOURCE_READ_SIZE),
     )
+    .await
     .context(format!("Cannot read file: {}", file_path))?;
 
     let mut symbols = Vec::new();
@@ -1195,21 +1201,108 @@ async fn lsp_document_symbols(file_path: &str) -> Result<Vec<LSymbol>> {
     Ok(symbols)
 }
 
-/// Extract symbol name from a definition line
+/// Extract symbol name from a Rust item definition line.
+///
+/// Only matches leading item declarations (with optional `pub(...)`/`pub`
+/// visibility and `async`/`const`/`unsafe` qualifiers) so substrings inside
+/// identifiers (`let defn_count = 1;`) or string literals (`"fn fake()"`)
+/// are never misidentified as definitions.
 fn extract_symbol_name(line: &str, prefix: &str) -> Option<String> {
-    if let Some(pos) = line.find(prefix) {
-        let after_prefix = &line[pos + prefix.len()..];
-        let trimmed = after_prefix.trim_start();
+    let mut rest = line.trim_start();
+    if rest.is_empty()
+        || rest.starts_with("//")
+        || rest.starts_with("/*")
+        || rest.starts_with('*')
+        || rest.starts_with('#')
+    {
+        return None;
+    }
 
-        // Extract the identifier (alphanumeric + _)
-        if let Some(name_end) = trimmed.find(|c: char| !c.is_alphanumeric() && c != '_') {
-            let name = &trimmed[..name_end];
-            if !name.is_empty() {
-                return Some(name.to_string());
+    let (expect_pub, keyword) = match prefix.strip_prefix("pub ") {
+        Some(kw) => (true, kw.trim()),
+        None => (false, prefix.trim()),
+    };
+
+    if expect_pub {
+        let after_pub = rest.strip_prefix("pub")?;
+        if let Some(in_parens) = after_pub.strip_prefix('(') {
+            let close = in_parens.find(')')?;
+            rest = in_parens[close + 1..].trim_start();
+        } else if after_pub.starts_with(char::is_whitespace) {
+            rest = after_pub.trim_start();
+        } else {
+            return None;
+        }
+    } else if rest.starts_with("pub ") || rest.starts_with("pub(") {
+        return None;
+    }
+
+    loop {
+        let mut stripped_qualifier = false;
+        for qualifier in ["async", "const", "unsafe"] {
+            if let Some(after_q) = rest.strip_prefix(qualifier) {
+                if after_q.starts_with(char::is_whitespace) {
+                    rest = after_q.trim_start();
+                    stripped_qualifier = true;
+                    break;
+                }
             }
         }
+        if !stripped_qualifier {
+            break;
+        }
     }
-    None
+
+    let after_kw = rest.strip_prefix(keyword)?;
+    if keyword == "impl" {
+        if !after_kw.starts_with(char::is_whitespace) && !after_kw.starts_with('<') {
+            return None;
+        }
+        let mut impl_rest = after_kw.trim_start();
+        if impl_rest.starts_with('<') {
+            let mut depth = 0usize;
+            let mut end_idx = None;
+            for (i, ch) in impl_rest.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end_idx = Some(i + ch.len_utf8());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            impl_rest = impl_rest[end_idx?..].trim_start();
+        }
+        let before_brace = impl_rest.split('{').next().unwrap_or(impl_rest);
+        let target_part = match before_brace.find(" for ") {
+            Some(pos) => before_brace[pos + 5..].trim_start(),
+            None => before_brace.trim_start(),
+        };
+        return take_rust_ident(target_part);
+    }
+
+    if !after_kw.starts_with(char::is_whitespace) {
+        return None;
+    }
+    take_rust_ident(after_kw.trim_start())
+}
+
+fn take_rust_ident(s: &str) -> Option<String> {
+    let s = s.strip_prefix("r#").unwrap_or(s);
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return None;
+    }
+    let end = s
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(s.len());
+    let ident = &s[..end];
+    (!ident.is_empty()).then(|| ident.to_string())
 }
 
 /// LSP symbol representation

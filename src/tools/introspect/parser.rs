@@ -214,6 +214,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
 
     for cap in fn_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_brace_span_end_line(content, start_byte);
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let name = cap
             .get(2)
@@ -243,8 +246,8 @@ pub fn parse_rust(content: &str) -> ParsedFile {
             visibility,
             signature,
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
@@ -255,6 +258,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
         .map_err(|e| format!("Invalid struct regex: {}", e))
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in struct_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_brace_span_end_line(content, start_byte);
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let name = cap
             .get(2)
@@ -268,8 +274,8 @@ pub fn parse_rust(content: &str) -> ParsedFile {
             visibility,
             signature: format!("struct {}", name),
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
@@ -280,6 +286,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
         .map_err(|e| format!("Invalid trait regex: {}", e))
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in trait_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_brace_span_end_line(content, start_byte);
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let name = cap
             .get(2)
@@ -293,14 +302,14 @@ pub fn parse_rust(content: &str) -> ParsedFile {
             visibility,
             signature: format!("trait {}", name),
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
     }
 
-    // Sort symbols by line number for consistent output
+    // Sort symbols by name for consistent output
     symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
     ParsedFile {
@@ -309,6 +318,58 @@ pub fn parse_rust(content: &str) -> ParsedFile {
         symbols,
         module_doc,
     }
+}
+
+fn line_number_at(content: &str, byte_offset: usize) -> usize {
+    1 + content[..byte_offset.min(content.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count()
+}
+
+fn find_brace_span_end_line(content: &str, match_start: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut i = match_start.min(bytes.len());
+    let mut brace_depth = 0usize;
+    let mut saw_open = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' if !saw_open => return Some(line_number_at(content, i)),
+            b'{' => {
+                saw_open = true;
+                brace_depth += 1;
+            }
+            b'}' if saw_open => {
+                brace_depth = brace_depth.saturating_sub(1);
+                if brace_depth == 0 {
+                    return Some(line_number_at(content, i));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_python_block_end_line(content: &str, start_line: usize) -> Option<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    let start_idx = start_line.checked_sub(1)?;
+    let header = *lines.get(start_idx)?;
+    let base_indent = header.len() - header.trim_start().len();
+    let mut last_line = start_line;
+    for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= base_indent {
+            break;
+        }
+        last_line = idx + 1;
+    }
+    Some(last_line)
 }
 
 /// Parse visibility string
@@ -356,6 +417,9 @@ fn parse_python(content: &str) -> ParsedFile {
         .map_err(|e| format!("Invalid class regex: {}", e))
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in class_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_python_block_end_line(content, line_start);
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
@@ -374,8 +438,8 @@ fn parse_python(content: &str) -> ParsedFile {
             visibility: Visibility::Public,
             signature,
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
@@ -386,6 +450,9 @@ fn parse_python(content: &str) -> ParsedFile {
         .map_err(|e| format!("Invalid fn regex: {}", e))
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in fn_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_python_block_end_line(content, line_start);
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
@@ -408,8 +475,8 @@ fn parse_python(content: &str) -> ParsedFile {
             visibility: Visibility::Public,
             signature,
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
@@ -433,6 +500,9 @@ fn parse_typescript(content: &str) -> ParsedFile {
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
 
     for cap in fn_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_brace_span_end_line(content, start_byte);
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
@@ -455,8 +525,8 @@ fn parse_typescript(content: &str) -> ParsedFile {
             visibility: Visibility::Public,
             signature,
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });
@@ -467,6 +537,9 @@ fn parse_typescript(content: &str) -> ParsedFile {
         .map_err(|e| format!("Invalid type regex: {}", e))
         .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in type_regex.captures_iter(content) {
+        let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let line_start = line_number_at(content, start_byte);
+        let line_end = find_brace_span_end_line(content, start_byte);
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
@@ -478,8 +551,8 @@ fn parse_typescript(content: &str) -> ParsedFile {
             visibility: Visibility::Public,
             signature: format!("interface {}", name),
             documentation: None,
-            line_start: 0,
-            line_end: None,
+            line_start,
+            line_end,
             children: Vec::new(),
             attributes: Vec::new(),
         });

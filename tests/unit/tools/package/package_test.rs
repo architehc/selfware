@@ -1,4 +1,5 @@
 use super::*;
+use crate::safety::process_env::SanitizedEnvExt;
 
 #[test]
 fn test_npm_install_schema() {
@@ -731,4 +732,21 @@ fn requirements_scan_follows_includes_and_accepts_registry_files() {
     std::fs::write(dir.path().join("a.txt"), "-r b.txt\n").unwrap();
     std::fs::write(dir.path().join("b.txt"), "-r a.txt\n").unwrap();
     assert!(check_requirements_file("pip_install", &dir.path().join("a.txt"), &safety, 0).is_err());
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "requests==2.31.0\n").unwrap();
+        let link = dir.path().join("link_req.txt");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        let scoped_safety = SafetyConfig {
+            allowed_paths: vec![format!("{}/**", dir.path().display())],
+            ..SafetyConfig::default()
+        };
+        assert!(
+            check_requirements_file("pip_install", &link, &scoped_safety, 0).is_err(),
+            "check_requirements_file should reject symlinks escaping the allowed workspace"
+        );
+    }
 }

@@ -1045,3 +1045,118 @@ async fn code_plan_walk_validates_every_path() {
         .unwrap_err();
     assert!(is_path_policy_error(&err.to_string()), "{err}");
 }
+
+#[tokio::test]
+async fn test_code_query_include_bodies_and_line_spans() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root,
+        "src/sample.rs",
+        "// header\npub fn compute_answer(x: i32) -> i32 {\n    let doubled = x * 2;\n    doubled + 1\n}\n",
+    );
+    let config = scoped_config(format!("{}/**", root.to_string_lossy()), vec![]);
+    let tool = CodeQuery::with_safety_config(config);
+    let out = tool
+        .execute(json!({
+            "query": "compute_answer",
+            "scope": root.to_string_lossy(),
+            "include_bodies": true
+        }))
+        .await
+        .unwrap();
+    let item = &out["results"][0];
+    assert_eq!(item["name"], "compute_answer");
+    assert_eq!(item["line"], 2);
+    assert_eq!(item["line_end"], 5);
+    let body = item["body"].as_str().unwrap();
+    assert!(body.contains("let doubled = x * 2;"), "{body}");
+    assert!(body.contains("doubled + 1"), "{body}");
+}
+
+#[tokio::test]
+async fn test_code_plan_honors_strategy_override_and_rejects_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "src/lib.rs", "pub fn alpha() {}\n");
+    let config = scoped_config(format!("{}/**", root.to_string_lossy()), vec![]);
+    let tool = CodePlan::with_safety_config(config);
+
+    // Goal "explore alpha" would normally pick Exploratory, but strategy="impact_analysis"
+    // overrides it and includes an impact_analysis phase.
+    let plan = tool
+        .execute(json!({
+            "goal": "explore alpha",
+            "strategy": "impact_analysis",
+            "codebase_root": root.to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    let actions: Vec<&str> = plan["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["action"].as_str())
+        .collect();
+    assert!(actions.contains(&"impact_analysis"), "{actions:?}");
+
+    let bad = tool
+        .execute(json!({
+            "goal": "explore alpha",
+            "strategy": "nonexistent_strategy",
+            "codebase_root": root.to_string_lossy()
+        }))
+        .await;
+    assert!(bad.is_err());
+}
+
+#[tokio::test]
+async fn test_code_diff_plan_reports_caller_line_transitive_deps_and_change_type_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "src/leaf.rs", "pub fn leaf_helper() -> i32 { 42 }\n");
+    write_file(
+        root,
+        "src/mid_service.rs",
+        "// line 1\n// line 2\npub fn run_mid() -> i32 { crate::leaf::leaf_helper() }\n",
+    );
+    write_file(
+        root,
+        "src/top_consumer.rs",
+        "pub fn run_top() -> i32 { crate::mid_service::run_mid() }\n",
+    );
+    let config = scoped_config(format!("{}/**", root.to_string_lossy()), vec![]);
+    let tool = CodeDiffPlan::with_safety_config(config);
+    let out = tool
+        .execute(json!({
+            "target_file": root.join("src/leaf.rs").to_string_lossy(),
+            "change_type": "delete",
+            "affected_symbol": "leaf_helper",
+            "codebase_root": root.to_string_lossy()
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(out["direct_callers"][0]["line"], 3);
+    assert!(out["direct_callers"][0]["context"]
+        .as_str()
+        .unwrap()
+        .contains("leaf_helper"));
+    let transitive: Vec<&str> = out["transitive_deps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        transitive.iter().any(|p| p.ends_with("top_consumer.rs")),
+        "{transitive:?}"
+    );
+    let order: Vec<&str> = out["suggested_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(order.iter().any(|step| step.contains("Delete target")));
+}

@@ -179,11 +179,39 @@ fn write_to_session_dir(dir: &Path, tool: &str, png: &[u8]) -> Result<PathBuf> {
 }
 
 /// Write to a caller-chosen path after the same safety validation file tools use.
-fn write_to_output_path(tool: &str, path: &str, png: &[u8]) -> Result<()> {
+fn write_to_output_path(tool: &str, path: &str, png: &[u8]) -> Result<String> {
+    let anchored = crate::tools::workspace_root::anchor(path);
     let safety = crate::tools::file::resolve_safety_config(None);
-    crate::tools::file::validate_tool_path(path, &safety)
+    crate::tools::file::validate_tool_path(&anchored, &safety)
         .map_err(|e| anyhow::anyhow!("{} output_path validation failed: {}", tool, e))?;
-    std::fs::write(path, png).with_context(|| format!("Failed to write screenshot to {}", path))
+
+    let target = Path::new(&anchored);
+    if let Ok(meta) = std::fs::symlink_metadata(target) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} output_path validation failed: refusing to write through symlink '{}'",
+                tool,
+                anchored
+            );
+        }
+    }
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create parent directory for screenshot {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let tmp_path = target.with_extension(format!("png.tmp.{}", std::process::id()));
+    std::fs::write(&tmp_path, png)
+        .with_context(|| format!("Failed to write screenshot to {}", anchored))?;
+    if let Err(err) = std::fs::rename(&tmp_path, target) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("Failed to write screenshot to {}", anchored));
+    }
+    Ok(anchored)
 }
 
 /// Shape a capture into the tool result shared by `screen_capture` and
@@ -205,10 +233,7 @@ pub(crate) fn shape_capture_output(
     session_dir: &Path,
 ) -> Result<Value> {
     let saved: String = match &opts.output_path {
-        Some(path) => {
-            write_to_output_path(tool, path, png)?;
-            path.clone()
-        }
+        Some(path) => write_to_output_path(tool, path, png)?,
         None => write_to_session_dir(session_dir, tool, png)?
             .display()
             .to_string(),

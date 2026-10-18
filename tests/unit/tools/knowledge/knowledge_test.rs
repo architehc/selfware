@@ -689,3 +689,82 @@ fn test_custom_relation_type() {
     let parsed = parse_relation_type("my_custom_rel");
     assert_eq!(custom, parsed);
 }
+
+#[test]
+fn test_extract_symbol_name_ignores_substrings_and_string_literals() {
+    // Substrings inside identifiers or string literals must not match
+    assert_eq!(extract_symbol_name("    let defn_count = 1;", "fn"), None);
+    assert_eq!(extract_symbol_name("    let mod_name = 2;", "mod"), None);
+    assert_eq!(
+        extract_symbol_name("    let s = \"pub fn fake() {}\";", "pub fn"),
+        None
+    );
+
+    // Real declarations (including pub(crate), async, const, unsafe, impl) must match
+    assert_eq!(
+        extract_symbol_name("pub(crate) async fn real_fn(x: i32) {", "pub fn"),
+        Some("real_fn".to_string())
+    );
+    assert_eq!(
+        extract_symbol_name("    const unsafe fn raw_op() {}", "fn"),
+        Some("raw_op".to_string())
+    );
+    assert_eq!(
+        extract_symbol_name("impl<T: Clone> MyTrait for MyStruct<T> {", "impl"),
+        Some("MyStruct".to_string())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_knowledge_export_refuses_symlink_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_victim = outside.path().join("victim.json");
+    std::fs::write(&outside_victim, "keep-outside").unwrap();
+    let escaping_link = dir.path().join("escape.json");
+    std::os::unix::fs::symlink(&outside_victim, &escaping_link).unwrap();
+
+    let inside_victim = dir.path().join("inside_victim.json");
+    std::fs::write(&inside_victim, "keep-inside").unwrap();
+    let inside_link = dir.path().join("inside_link.json");
+    std::os::unix::fs::symlink(&inside_victim, &inside_link).unwrap();
+
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(dir.path());
+    let config = SafetyConfig {
+        allowed_paths: vec![format!("{}/**", dir.path().display())],
+        ..SafetyConfig::default()
+    };
+    let tool = KnowledgeExport::with_safety_config(config);
+
+    crate::tools::workspace_root::scope(root, async {
+        // 1. Symlink escaping workspace is refused by path validation
+        let res = tool.execute(json!({"output_path": "escape.json"})).await;
+        assert!(res.is_err(), "escaping symlink output_path must be refused");
+
+        // 2. Intra-workspace symlink is replaced atomically without overwriting its target
+        let res = tool
+            .execute(json!({"output_path": "inside_link.json"}))
+            .await;
+        assert!(
+            res.is_ok(),
+            "intra-workspace export should succeed: {res:?}"
+        );
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&outside_victim).unwrap(),
+        "keep-outside"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&inside_victim).unwrap(),
+        "keep-inside"
+    );
+    assert!(
+        !std::fs::symlink_metadata(&inside_link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "atomic rename replaces the symlink itself rather than writing through it"
+    );
+}
