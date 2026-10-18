@@ -192,7 +192,9 @@ impl Tool for GlobFind {
                 // Enforce the per-file path policy on every discovered entry:
                 // a denied subdirectory inside an allowed root must not even
                 // be enumerated (the root itself was validated up front).
-                if validate_tool_path(&path_str, &safety).is_err() {
+                if validate_tool_path(&path_str, &safety).is_err()
+                    || !crate::safety::source_context::broad_discovery_file_is_safe(path)
+                {
                     continue;
                 }
 
@@ -350,14 +352,18 @@ impl Tool for SymbolSearch {
                 // bytes are consumed. Re-opening the pathname after the
                 // walker check would let a concurrent hard-link swap bypass
                 // the repository-discovery policy.
-                let content = match tokio::task::block_in_place(|| {
-                    let file = crate::safety::source_context::open_broad_discovery_regular(path)?;
-                    crate::tools::file::read_handle_to_string_capped(file, MAX_SOURCE_READ_SIZE)
-                        .map_err(std::io::Error::other)
-                }) {
-                    Ok(content) => content,
-                    Err(_) => continue,
-                };
+                let content =
+                    match crate::safety::source_context::open_broad_discovery_regular(path)
+                        .and_then(|file| {
+                            crate::tools::file::read_handle_to_string_capped(
+                                file,
+                                MAX_SOURCE_READ_SIZE,
+                            )
+                            .map_err(std::io::Error::other)
+                        }) {
+                        Ok(content) => content,
+                        Err(_) => continue,
+                    };
 
                 for (regex, sym_type) in &patterns {
                     if symbols.len() >= max_results {

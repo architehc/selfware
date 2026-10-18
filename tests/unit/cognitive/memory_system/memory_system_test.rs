@@ -473,3 +473,22 @@ fn test_memory_files_are_labelled_untrusted_data() {
         "memory text must sit inside the frame, not before it: {formatted}"
     );
 }
+
+#[test]
+fn test_discover_memory_file_truncates_oversized_regular_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let oversized = project.join(MEMORY_FILENAME);
+    std::fs::write(&oversized, "m".repeat(MAX_MEMORY_FILE_BYTES + 512)).unwrap();
+
+    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+    env.set("HOME", &home);
+
+    let files = MemorySystem::discover(&project);
+    assert_eq!(files.len(), 1);
+    assert!(files[0].content.ends_with("... [truncated]"));
+    assert!(files[0].content.len() <= MAX_MEMORY_FILE_BYTES + 32);
+}

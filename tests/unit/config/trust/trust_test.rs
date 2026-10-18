@@ -219,3 +219,27 @@ fn relative_line_in_trust_file_is_ignored() {
 
     assert!(!is_config_trusted_in(&trust, &victim));
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_trust_file_is_rejected_on_read_and_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("selfware.toml");
+    std::fs::write(&cfg, "x").unwrap();
+
+    let real_trust = dir.path().join("real_trusted_repos");
+    add_trusted_config_to(&real_trust, &cfg).unwrap();
+    assert!(is_config_trusted_in(&real_trust, &cfg));
+
+    let symlink_trust = dir.path().join("symlink_trusted_repos");
+    std::os::unix::fs::symlink(&real_trust, &symlink_trust).unwrap();
+
+    assert!(
+        !is_config_trusted_in(&symlink_trust, &cfg),
+        "symlinked trusted_repos file must not be followed"
+    );
+    assert!(
+        add_trusted_config_to(&symlink_trust, &cfg).is_err(),
+        "writing to a symlinked trusted_repos file must be refused"
+    );
+}

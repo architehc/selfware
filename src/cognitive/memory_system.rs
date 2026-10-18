@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 pub const WORKSPACE_GUIDANCE_FILENAMES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".claude.md"];
 pub const MEMORY_FILENAME: &str = ".selfware.md";
 const MAX_WORKSPACE_GUIDANCE_BYTES: usize = 24 * 1024;
+const MAX_MEMORY_FILE_BYTES: usize = 256 * 1024;
 
 /// Delimiter tag wrapping each workspace guidance file (`AGENTS.md`, ...).
 pub const WORKSPACE_GUIDANCE_TAG: &str = "workspace_guidance_file";
@@ -131,7 +132,7 @@ impl MemorySystem {
             }
         }
 
-        let mut file = match options.open(path) {
+        let file = match options.open(path) {
             Ok(file) => file,
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
@@ -147,8 +148,21 @@ impl MemorySystem {
             tracing::warn!("Skipping {}: symlink or non-regular file", path.display());
             return None;
         }
-        let mut text = String::new();
-        file.read_to_string(&mut text).ok()?;
+        let mut raw = Vec::new();
+        file.take(MAX_MEMORY_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut raw)
+            .ok()?;
+        let truncated = raw.len() > MAX_MEMORY_FILE_BYTES;
+        if truncated {
+            raw.truncate(MAX_MEMORY_FILE_BYTES);
+            while !raw.is_empty() && std::str::from_utf8(&raw).is_err() {
+                raw.pop();
+            }
+        }
+        let mut text = String::from_utf8(raw).ok()?;
+        if truncated {
+            text.push_str("\n... [truncated]");
+        }
         Some(text)
     }
 

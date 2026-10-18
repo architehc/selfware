@@ -1025,3 +1025,136 @@ fn run_one_skip_existing_recovers_candidate_subdirs() {
         "run_one with skip_existing and candidates > 1 must recover candidate subdirs"
     );
 }
+
+#[test]
+fn rust_bench_harness_matches_lean_formal_table_and_invariants() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/harness_twin_table.json"
+    ));
+    let rows: Vec<[String; 3]> = serde_json::from_str(raw).expect("valid harness_twin_table.json");
+
+    let parse_state = |s: &str| -> TrialState {
+        match s {
+            "planned" => TrialState::Planned,
+            "boot_failed" => TrialState::BootFailed,
+            "clone_failed" => TrialState::CloneFailed,
+            "running" => TrialState::Running,
+            "agent_failed" => TrialState::AgentFailed,
+            "patch_captured" => TrialState::PatchCaptured,
+            "evaluated" => TrialState::Evaluated,
+            other => panic!("unknown TrialState in formal table: {other}"),
+        }
+    };
+
+    let state_name = |s: &TrialState| -> &'static str {
+        match s {
+            TrialState::Planned => "planned",
+            TrialState::BootFailed => "boot_failed",
+            TrialState::CloneFailed => "clone_failed",
+            TrialState::Running => "running",
+            TrialState::AgentFailed => "agent_failed",
+            TrialState::PatchCaptured => "patch_captured",
+            TrialState::Evaluated => "evaluated",
+        }
+    };
+
+    let mut checked_skip = 0usize;
+    let mut checked_result = 0usize;
+
+    for [domain, input, expected] in &rows {
+        if let Some(mode) = domain.strip_prefix("bench_skip:") {
+            let mut opts = dummy_opts(PathBuf::from("/tmp/sw_formal_bench"));
+            opts.force_rerun = match mode {
+                "force_rerun" => true,
+                "normal_resume" => false,
+                other => panic!("unknown bench_skip mode: {other}"),
+            };
+            let st = parse_state(input);
+            let actual = if should_skip_trial(&opts, Some(&trial_in_state(st))) {
+                "skip"
+            } else {
+                "run"
+            };
+            assert_eq!(
+                actual, expected,
+                "Lean BH1 mismatch for ({domain}, {input})"
+            );
+            checked_skip += 1;
+        } else if let Some(err_kind) = domain.strip_prefix("bench_result:") {
+            let mut res = make_candidate_result(0, false);
+            res.error = match err_kind {
+                "none" => String::new(),
+                "boot_failed" => "boot failed: server exited".to_string(),
+                "clone_failed" => "clone failed: git error".to_string(),
+                "other_error" => "run_one error: unexpected".to_string(),
+                other => panic!("unknown bench_result error kind: {other}"),
+            };
+            match input.as_str() {
+                "empty_fail" => {
+                    res.patch_bytes = 0;
+                    res.patch_lines = 0;
+                    res.exit_code = 1;
+                    res.timed_out = true;
+                }
+                "empty_clean" => {
+                    res.patch_bytes = 0;
+                    res.patch_lines = 0;
+                    res.exit_code = 0;
+                    res.timed_out = false;
+                }
+                "patch_fail" => {
+                    res.patch_bytes = 42;
+                    res.patch_lines = 3;
+                    res.exit_code = 1;
+                    res.timed_out = true;
+                }
+                "patch_clean" => {
+                    res.patch_bytes = 42;
+                    res.patch_lines = 3;
+                    res.exit_code = 0;
+                    res.timed_out = false;
+                }
+                other => panic!("unknown bench_result input: {other}"),
+            }
+            let (st, _) = trial_state_from_result(&res);
+            assert_eq!(
+                state_name(&st),
+                expected,
+                "Lean BH2 mismatch for ({domain}, {input})"
+            );
+            checked_result += 1;
+        }
+    }
+
+    assert_eq!(checked_skip, 14, "all 14 BH1 rows must be checked");
+    assert_eq!(checked_result, 16, "all 16 BH2 rows must be checked");
+
+    // BH3: `select_frozen_candidate` is invariant under arbitrary `official_resolved` labels.
+    let mut c1 = make_candidate_result(1, false);
+    c1.has_source_edit = true;
+    c1.has_test_edit = true;
+    c1.patch_lines = 5;
+    c1.syntax_check_passed = true;
+
+    let mut c2 = make_candidate_result(2, false);
+    c2.has_source_edit = true;
+    c2.has_test_edit = false;
+    c2.patch_lines = 12;
+    c2.syntax_check_passed = false;
+
+    for l1 in [None, Some(false), Some(true)] {
+        for l2 in [None, Some(false), Some(true)] {
+            let mut a = c1.clone();
+            let mut b = c2.clone();
+            a.official_resolved = l1;
+            b.official_resolved = l2;
+            let pool = vec![a, b];
+            let winner = select_frozen_candidate(&pool);
+            assert_eq!(
+                winner.candidate_num, 2,
+                "BH3: source-only edit must win regardless of official_resolved=({l1:?}, {l2:?})"
+            );
+        }
+    }
+}

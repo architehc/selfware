@@ -415,6 +415,7 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
 
     let sep = std::path::MAIN_SEPARATOR_STR;
 
+    let root_path = Path::new(path);
     for entry in WalkDir::new(path)
         .follow_links(false)
         .into_iter()
@@ -422,12 +423,19 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && !e.path_is_symlink())
     {
+        let rel_str = entry
+            .path()
+            .strip_prefix(root_path)
+            .unwrap_or(entry.path())
+            .display()
+            .to_string();
         let path_str = entry.path().display().to_string();
 
-        if path_str.contains(&format!("{sep}."))
-            || path_str.contains(&format!("{sep}target{sep}"))
-            || path_str.contains(&format!("{sep}node_modules{sep}"))
-            || path_str.contains(&format!("{sep}__pycache__{sep}"))
+        if rel_str.starts_with('.')
+            || rel_str.contains(&format!("{sep}."))
+            || rel_str.contains(&format!("{sep}target{sep}"))
+            || rel_str.contains(&format!("{sep}node_modules{sep}"))
+            || rel_str.contains(&format!("{sep}__pycache__{sep}"))
         {
             continue;
         }
@@ -468,16 +476,19 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
         }
 
         let metadata = fs::metadata(entry.path()).ok();
-        let lines = fs::read_to_string(entry.path())
-            .map(|c| c.lines().count())
-            .unwrap_or_else(|err| {
-                debug!(
-                    "Failed to read '{}' when computing garden metrics: {}",
-                    entry.path().display(),
-                    err
-                );
-                0
-            });
+        let lines = crate::tools::file::read_to_string_capped(
+            entry.path(),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .map(|c| c.lines().count())
+        .unwrap_or_else(|err| {
+            debug!(
+                "Failed to read '{}' when computing garden metrics: {}",
+                entry.path().display(),
+                err
+            );
+            0
+        });
 
         let modified = metadata
             .as_ref()
@@ -513,7 +524,7 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
             age_days,
             last_tended_days: age_days,
             growth_stage: GrowthStage::from_metrics(lines, age_days, age_days),
-            plant_type: PlantType::from_path(&path_str),
+            plant_type: PlantType::from_path(&rel_str),
         };
 
         garden.add_plant(plant);
@@ -622,9 +633,12 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
         }
 
         // Read file metadata
-        let lines = std::fs::read_to_string(path)
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
+        let lines = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
 
         let metadata = std::fs::metadata(path).ok();
         let age_days = metadata

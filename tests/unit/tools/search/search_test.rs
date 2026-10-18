@@ -564,3 +564,28 @@ async fn test_symbol_search_skips_oversized_files() {
     assert_eq!(symbols.len(), 1, "{symbols:?}");
     assert_eq!(symbols[0]["name"], "small_helper");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_glob_find_skips_hardlinked_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let normal = dir.path().join("normal.txt");
+    let secret = dir.path().join("outside_secret.txt");
+    let hardlink = dir.path().join("linked.txt");
+    std::fs::write(&normal, "ok").unwrap();
+    std::fs::write(&secret, "secret").unwrap();
+    std::fs::hard_link(&secret, &hardlink).unwrap();
+
+    let tool = GlobFind::with_safety_config(permissive_safety_config());
+    let result = tool
+        .execute(json!({"pattern": "*.txt", "path": dir.path()}))
+        .await
+        .unwrap();
+    let files = result["files"].as_array().unwrap();
+    let names: Vec<&str> = files.iter().map(|v| v["path"].as_str().unwrap()).collect();
+    assert!(names.iter().any(|p| p.ends_with("normal.txt")));
+    assert!(
+        !names.iter().any(|p| p.ends_with("linked.txt")),
+        "hard-linked files (nlink > 1) must be excluded by broad_discovery_file_is_safe: {names:?}"
+    );
+}

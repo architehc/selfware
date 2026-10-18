@@ -175,3 +175,77 @@ fn fox_posture_and_presence_economy_reflect_ledger_and_back_off_when_ignored() {
         PresenceChannel::Ambient
     );
 }
+
+#[test]
+fn rust_phi_policy_twin_matches_lean_formal_table_and_invariants() {
+    use super::policy::derive_fox_posture_from_counts;
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/harness_twin_table.json"
+    ));
+    let rows: Vec<[String; 3]> = serde_json::from_str(raw).expect("valid harness_twin_table.json");
+
+    let parse_phase = |s: &str| -> ActivityPhase {
+        match s {
+            "running" => ActivityPhase::Running,
+            "completed" => ActivityPhase::Completed,
+            "partial" => ActivityPhase::Partial,
+            "failed" => ActivityPhase::Failed,
+            "abandoned" => ActivityPhase::Abandoned,
+            other => panic!("unknown ActivityPhase in formal table: {other}"),
+        }
+    };
+
+    let emotion_name = |e: FoxEmotion| -> &'static str {
+        match e {
+            FoxEmotion::Greeting => "greeting",
+            FoxEmotion::Working => "working",
+            FoxEmotion::Error => "error",
+            FoxEmotion::Flow => "flow",
+            FoxEmotion::Skeptical => "skeptical",
+            FoxEmotion::Unimpressed => "unimpressed",
+            other => panic!("unexpected FoxEmotion: {other:?}"),
+        }
+    };
+
+    let policy = PhiPolicy {
+        debt_gate_lines: 100,
+        ..PhiPolicy::default()
+    };
+
+    let mut checked_posture = 0usize;
+    for [domain, phase_str, expected] in &rows {
+        let Some(state_label) = domain.strip_prefix("phi_posture:") else {
+            continue;
+        };
+        let (outstanding, unreviewed_lines, passed_runs) = match state_label {
+            "clean_verified" => (0usize, 0usize, 1usize),
+            "clean_unverified" => (0usize, 0usize, 0usize),
+            "medium_debt" => (1usize, 55usize, 0usize),
+            "high_debt" => (1usize, 85usize, 0usize),
+            other => panic!("unknown phi_posture state label: {other}"),
+        };
+        let phase = parse_phase(phase_str);
+        let posture = derive_fox_posture_from_counts(
+            outstanding,
+            unreviewed_lines,
+            0,
+            0,
+            passed_runs,
+            phase,
+            &policy,
+            PresenceChannel::Ambient,
+        );
+        assert_eq!(
+            emotion_name(posture.emotion),
+            expected,
+            "Lean PT3 mismatch for ({domain}, {phase_str})"
+        );
+        checked_posture += 1;
+    }
+    assert_eq!(
+        checked_posture, 20,
+        "all 20 PT3 posture rows must be checked"
+    );
+}

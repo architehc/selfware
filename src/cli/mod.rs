@@ -3893,13 +3893,10 @@ max_recovery_attempts = 3
                         cwd.join(".selfware").join("skills")
                     };
 
-                    let denied_paths = crate::config::Config::load(None)
-                        .ok()
-                        .map(|c| c.safety.denied_paths);
                     let res = SkillRegistry::admit_candidate_with_denied(
                         &c_path,
                         &t_dir,
-                        denied_paths.as_deref(),
+                        Some(config.safety.denied_paths.as_slice()),
                     );
                     match res {
                         Ok(admitted) => {

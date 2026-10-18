@@ -21,9 +21,44 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Maximum size of a trusted config or `trusted_repos` file (1 MiB).
+const MAX_TRUST_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Read a regular, non-symlink file capped at `MAX_TRUST_FILE_BYTES`.
+fn read_regular_capped(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return None;
+    }
+    if meta.len() > MAX_TRUST_FILE_BYTES {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    file.take(MAX_TRUST_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > MAX_TRUST_FILE_BYTES {
+        return None;
+    }
+    Some(buf)
+}
+
 /// Hex SHA-256 of the file's current bytes; `None` when it cannot be read.
 fn content_digest(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = read_regular_capped(path)?;
     Some(hex::encode(Sha256::digest(&bytes)))
 }
 
@@ -59,7 +94,10 @@ pub fn is_config_trusted(config_path: &Path) -> bool {
 /// credential-origin gate's refusal names the exact file to trust, so
 /// re-trusting is one command.
 fn is_config_trusted_in(trust_file: &Path, config_path: &Path) -> bool {
-    let Ok(content) = std::fs::read_to_string(trust_file) else {
+    let Some(bytes) = read_regular_capped(trust_file) else {
+        return false;
+    };
+    let Ok(content) = String::from_utf8(bytes) else {
         return false;
     };
     let target = canonical(config_path);
@@ -106,6 +144,14 @@ fn add_trusted_config_to(trust_file: &Path, config_path: &Path) -> Result<()> {
             config_path.join("selfware.toml").display()
         );
     }
+    if let Ok(meta) = std::fs::symlink_metadata(trust_file) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            anyhow::bail!(
+                "refusing to write trust file '{}': symlink or non-regular file",
+                trust_file.display()
+            );
+        }
+    }
     let target = canonical(config_path);
     let target_str = target.to_string_lossy();
     // `trusted_repos` is a newline-delimited list of absolute canonical paths.
@@ -138,7 +184,8 @@ fn add_trusted_config_to(trust_file: &Path, config_path: &Path) -> Result<()> {
     }
     // Drop any earlier line for this path (stale digest or legacy bare path):
     // trust follows the content reviewed now, not every content ever reviewed.
-    let mut existing: String = std::fs::read_to_string(trust_file)
+    let mut existing: String = read_regular_capped(trust_file)
+        .and_then(|b| String::from_utf8(b).ok())
         .unwrap_or_default()
         .lines()
         .filter(|line| {
@@ -148,12 +195,7 @@ fn add_trusted_config_to(trust_file: &Path, config_path: &Path) -> Result<()> {
         .map(|line| format!("{line}\n"))
         .collect();
     existing.push_str(&format!("{digest}  {target_str}\n"));
-    std::fs::write(trust_file, existing)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(trust_file, std::fs::Permissions::from_mode(0o600));
-    }
+    crate::session::checkpoint::write_bytes_atomically(trust_file, existing.as_bytes(), 0o600)?;
     Ok(())
 }
 

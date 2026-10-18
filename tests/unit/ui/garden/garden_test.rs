@@ -604,3 +604,17 @@ fn directory_scan_prunes_private_tool_state() {
         .flat_map(|bed| &bed.plants)
         .all(|plant| !plant.path.contains(".claude")));
 }
+
+#[test]
+fn build_garden_from_path_works_under_dot_prefixed_parent_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let hidden_parent = base.path().join(".tmp_parent").join("project");
+    std::fs::create_dir_all(hidden_parent.join("src")).unwrap();
+    std::fs::write(hidden_parent.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let garden = build_garden_from_path(hidden_parent.to_str().unwrap()).unwrap();
+    assert_eq!(
+        garden.total_plants, 1,
+        "dot-prefixed ancestor directory above garden root must not filter out project files"
+    );
+}

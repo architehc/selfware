@@ -187,7 +187,31 @@ pub(crate) async fn handle_batch_command(
         println!("Results written to: {}", summary_path.display());
     }
 
-    let _ = aggregate;
+    if aggregate {
+        let aggregate_path = std::path::Path::new(&output).join("batch_results.json");
+        let payload = serde_json::json!({
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "results": results.iter().map(|r| serde_json::json!({
+                "index": r.index + 1,
+                "task": r.task,
+                "ok": r.ok,
+                "error": r.error,
+            })).collect::<Vec<_>>(),
+        });
+        std::fs::write(&aggregate_path, serde_json::to_vec_pretty(&payload)?).with_context(
+            || {
+                format!(
+                    "Failed to write aggregated batch JSON to '{}'",
+                    aggregate_path.display()
+                )
+            },
+        )?;
+        if !quiet {
+            println!("Aggregated JSON written to: {}", aggregate_path.display());
+        }
+    }
 
     if failed > 0 {
         anyhow::bail!(
