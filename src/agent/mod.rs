@@ -1788,6 +1788,11 @@ To call a tool, use this EXACT XML structure:
             prompt_builder.add_static(ERROR_RECOVERY_INSTRUCTIONS.to_string());
         }
 
+        const TOOL_MANIFEST_BUDGET_TOKENS: usize = 500;
+        if let Some(manifest) = tools.deferred_manifest(TOOL_MANIFEST_BUDGET_TOKENS) {
+            prompt_builder.add_static(manifest);
+        }
+
         // === DYNAMIC SECTIONS (computed fresh per request) ===
         // Memory files - changes based on working directory. A `.selfware.md`
         // (like the guidance files below) can be shipped by the checkout, so

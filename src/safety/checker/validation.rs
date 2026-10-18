@@ -215,6 +215,44 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "_JAVA_OPTIONS",
 ];
 
+/// Check whether an environment variable entry in `process_start` is denied.
+///
+/// Direct code-injection and config-swap hooks in [`DENIED_ENV_VARS`] are
+/// always rejected. `PATH`, `LD_LIBRARY_PATH`, and `PYTHONPATH` are permitted
+/// for background daemon/server processes when their entries point to standard
+/// system or workspace-relative directories, and rejected when any entry
+/// points into world-writable temp directories (`/tmp`, `/var/tmp`,
+/// `/dev/shm`) or uses `..` traversal.
+pub(crate) fn is_denied_process_env_var(name: &str, value: Option<&str>) -> bool {
+    if name.is_empty()
+        || name.contains('=')
+        || name.contains('\0')
+        || crate::safety::git_exec::is_git_config_env(name)
+    {
+        return true;
+    }
+    if value.is_some_and(|v| v.contains('\0')) {
+        return true;
+    }
+    let upper = name.to_ascii_uppercase();
+    if matches!(upper.as_str(), "PATH" | "LD_LIBRARY_PATH" | "PYTHONPATH") {
+        let Some(val) = value else {
+            return true;
+        };
+        return val.split(':').any(|entry| {
+            let trimmed = entry.trim();
+            trimmed == "/tmp"
+                || trimmed.starts_with("/tmp/")
+                || trimmed == "/var/tmp"
+                || trimmed.starts_with("/var/tmp/")
+                || trimmed == "/dev/shm"
+                || trimmed.starts_with("/dev/shm/")
+                || trimmed.split('/').any(|seg| seg == "..")
+        });
+    }
+    DENIED_ENV_VARS.contains(&upper.as_str())
+}
+
 /// Programs whose `eval $(<program> …)` shell-integration line is a
 /// known-safe everyday pattern (`eval $(ssh-agent)`,
 /// `eval "$(direnv hook bash)"`, prompt and version-manager init).
@@ -974,20 +1012,10 @@ impl SafetyChecker {
                     let mut expanded = full_cmd;
                     let mut referenced = false;
                     for (name, value) in env {
-                        if name.is_empty()
-                            || name.contains('=')
-                            || name.contains('\0')
-                            || name.to_ascii_uppercase().starts_with("GIT_CONFIG_")
-                            || DENIED_ENV_VARS.iter().any(|d| d.eq_ignore_ascii_case(name))
-                        {
+                        if is_denied_process_env_var(name, value.as_str()) {
                             return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
                         }
                         if let Some(val) = value.as_str() {
-                            if val.contains('\0') {
-                                return Err(SelfwareError::Safety(
-                                    SafetyError::BlockedEnvInjection,
-                                ));
-                            }
                             let braced = format!("${{{name}}}");
                             let bare = format!("${name}");
                             if expanded.contains(&braced) || expanded.contains(&bare) {

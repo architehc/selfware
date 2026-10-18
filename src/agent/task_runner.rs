@@ -1696,16 +1696,10 @@ impl Agent {
             }
         }
 
-        // Deferred-tool manifest (capstone: all three completers' #1 ask) —
-        // names + one-liners in the prompt kill the per-capability discovery
-        // tax. Measured budget; pinned critical like the L0 note (the
-        // selfware_context_note marker keeps it alive under trim).
-        const TOOL_MANIFEST_BUDGET_TOKENS: usize = 500;
-        if let Some(manifest) = self.tools.deferred_manifest(TOOL_MANIFEST_BUDGET_TOKENS) {
-            self.messages.push(Message::user(format!(
-                "<selfware_context_note kind=tool_manifest>\n{manifest}\n</selfware_context_note>"
-            )));
-        }
+        // Deferred-tool manifest (`## Deferred tools (...)`) is embedded once in
+        // `<｜System｜>` during `Agent::new` so `<｜User｜>` is never rewritten
+        // from `<selfware_context_note kind=tool_manifest>` to `<turn_context>`
+        // or stripped across turns.
 
         #[cfg(feature = "consolidation")]
         if let Some(memory_note) = self.recall_consolidated_memory_note(task).await {

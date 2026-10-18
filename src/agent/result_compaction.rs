@@ -49,6 +49,12 @@ pub(crate) const RESULT_COMPACTION_METHOD: &str = "result_compaction";
 /// ones can still be compacted.
 pub(crate) const RECENT_RESULTS_KEPT_INTACT: usize = 2;
 
+/// Minimum message-history token count before soft (threshold-based)
+/// tool-result compaction runs. Below 64k tokens (`65,536`), mutating the
+/// oldest tool result at the front of history invalidates the provider KV
+/// prefix cache for all subsequent turns for negligible context savings.
+pub(crate) const MIN_SOFT_RESULT_COMPACTION_TOKENS: usize = 65_536;
+
 /// A result is only worth compacting when it is larger than its stub by at
 /// least this many tokens.
 const MIN_SAVING_TOKENS: usize = 64;
@@ -1311,6 +1317,16 @@ pub(crate) struct ResultCompactionReport {
 }
 
 impl ResultCompactionReport {
+    pub(crate) fn merge_from(&mut self, other: Self) {
+        self.after_tokens = other.after_tokens;
+        self.overviews_removed += other.overviews_removed;
+        self.superseded.extend(other.superseded);
+        self.slimmed.extend(other.slimmed);
+        self.stubbed.extend(other.stubbed);
+        self.truncated.extend(other.truncated);
+        self.notes_repointed += other.notes_repointed;
+    }
+
     pub(crate) fn changed(&self) -> bool {
         !self.stubbed.is_empty()
             || !self.truncated.is_empty()

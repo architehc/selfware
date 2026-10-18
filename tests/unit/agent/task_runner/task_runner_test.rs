@@ -3041,11 +3041,16 @@ async fn deferred_manifest_note_is_injected_at_task_start() {
         .expect("task completes");
 
     assert!(
-        agent.messages.iter().any(|m| m
-            .content
-            .text()
-            .contains("<selfware_context_note kind=tool_manifest>")),
-        "the deferred-tool manifest note must be injected at task start"
+        agent.messages.first().is_some_and(|m| m.role == "system"
+            && m.content.text().contains("## Deferred tools (")),
+        "the deferred-tool manifest must be embedded statically in the system prompt"
+    );
+    assert!(
+        !agent.messages.iter().any(|m| m.role != "system"
+            && m.content
+                .text()
+                .contains("<selfware_context_note kind=tool_manifest>")),
+        "the deferred-tool manifest must not be injected as a mutable user note"
     );
     server.stop().await;
 }

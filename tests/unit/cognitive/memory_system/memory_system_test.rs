@@ -168,7 +168,8 @@ fn test_format_workspace_guidance_for_prompt() {
     assert!(formatted.contains("UNTRUSTED DATA"));
     assert!(formatted.contains("Safety directives"));
     assert!(!formatted.contains("Follow the most local guidance file"));
-    assert!(formatted.contains("### From \"/project/AGENTS.md\""));
+    assert!(formatted.contains("### From \"AGENTS.md\""));
+    assert!(!formatted.contains("/project/AGENTS.md"));
     assert!(formatted.contains("Operate on /tmp/project."));
 }
 
@@ -318,7 +319,7 @@ fn test_workspace_guidance_is_wrapped_in_data_delimiters() {
     let formatted =
         MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/project"));
     let open_at = formatted
-        .find("<workspace_guidance_file path=\"/project/AGENTS.md\">")
+        .find("<workspace_guidance_file path=\"AGENTS.md\">")
         .expect("opening delimiter");
     // Search after the opening tag: the preamble names the tag in backticks.
     let close_at = open_at
@@ -340,7 +341,7 @@ fn test_guidance_content_cannot_close_its_own_block() {
     let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/repo"));
 
     let block_start = formatted
-        .find("<workspace_guidance_file path=\"/repo/AGENTS.md\">")
+        .find("<workspace_guidance_file path=\"AGENTS.md\">")
         .unwrap();
     let block = &formatted[block_start..];
     // Exactly one real opening and one real closing delimiter survive.
@@ -445,7 +446,7 @@ fn test_workspace_guidance_special_tokens_stay_inside_the_block() {
     }];
     let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/repo"));
     let block_start = formatted
-        .find("<workspace_guidance_file path=\"/repo/AGENTS.md\">")
+        .find("<workspace_guidance_file path=\"AGENTS.md\">")
         .unwrap();
     let block = &formatted[block_start..];
     assert!(!block.contains("<|im_start|>"));

@@ -511,10 +511,20 @@ impl Agent {
         let max_message_tokens = Self::per_message_cap(max_context_tokens);
         let mut remaining = estimate_messages_tokens(messages);
         if remaining > max_context_tokens {
+            // Keep `<｜System｜>` (including `<workspace_guidance_file>`) 100%
+            // byte-identical across turns unless the system message by itself
+            // exceeds the entire `max_context_tokens` budget.
             let mut truncate_indices: Vec<usize> = messages
                 .iter()
                 .enumerate()
-                .filter(|(_, msg)| estimate_message_tokens(msg) > max_message_tokens)
+                .filter(|(_, msg)| {
+                    let cap = if msg.role == "system" {
+                        max_context_tokens
+                    } else {
+                        max_message_tokens
+                    };
+                    estimate_message_tokens(msg) > cap
+                })
                 .map(|(i, _)| i)
                 .collect();
 
@@ -712,30 +722,37 @@ impl Agent {
                 break;
             }
 
-            // Find the candidate message with the highest token count.
-            // Prioritize non-system messages over system messages if they are of comparable size,
-            // but allow system messages to be shrunk if they are the largest.
+            // Find the candidate message with the highest shrinkable token count.
+            // Normal-sized `<｜System｜>` messages (<= 3/4 of budget) are ranked
+            // strictly behind non-system messages so `<｜System｜>` stays
+            // byte-identical across turns; a synthetic system message that alone
+            // exceeds 3/4 of the budget can still be clamped so total <= budget.
+            let sys_cap = Self::per_message_cap(max_context_tokens);
             let largest_idx = messages
                 .iter()
                 .enumerate()
                 .filter(|(i, m)| {
-                    m.content.text().len() > 50
+                    let text = m.content.text();
+                    text.len() > 50
                         && (Some(*i) != protected
-                            || estimate_content_tokens(m.content.text()) > anchor_floor)
+                            || (estimate_content_tokens(text) > anchor_floor
+                                && !text.ends_with("...[truncated to fit context budget]")))
                 })
                 .max_by_key(|(i, m)| {
                     // Rank by TEXT tokens: this pass only shrinks text, so a
                     // message whose weight is tool-call arguments must not
                     // win the slot and stall the loop.
                     let tokens = estimate_content_tokens(m.content.text());
-                    if Some(*i) == protected {
+                    let shrinkable = if Some(*i) == protected {
                         // Only the part above the floor is shrinkable.
                         tokens.saturating_sub(anchor_floor)
                     } else if m.role == "system" {
                         tokens.saturating_sub(100)
                     } else {
                         tokens
-                    }
+                    };
+                    let non_system_or_oversized_sys = m.role != "system" || tokens > sys_cap;
+                    (non_system_or_oversized_sys, shrinkable)
                 })
                 .map(|(i, _)| i);
 
@@ -925,13 +942,35 @@ impl Agent {
         let ledger_cap = super::context::work_ledger_token_cap(max_context_tokens);
         let provisional = ledger_for(&request_messages, ledger_cap);
         let tail = Self::build_request_tail(sections.clone(), provisional.clone(), tail_cap);
-        // Measured reservation: the tail as its own message (content +
-        // per-message overhead), plus slack for the join separator.
-        let reserve = tail
-            .as_ref()
-            .map(|t| super::context::estimate_message_tokens(&Message::user(t.clone())) + 8)
-            .unwrap_or(0);
-        let history_budget = max_context_tokens.saturating_sub(reserve);
+        // Only subtract a ledger reservation from `history_budget` when the
+        // message history itself exceeds `max_context_tokens` (or is at/above
+        // the 64k soft-compaction threshold). When `request_messages` already
+        // fits in `max_context_tokens` below 64k, reserving `sections`
+        // (`turn_hints`) would force `fit_request_to_context_budget` to
+        // compact Turn 1's `tool_result` at 9k–16k tokens or shrink
+        // `history_budget` below `<｜System｜>`, invalidating the KV prefix
+        // cache; the retry block below shrinks `sections` and `ledger` to fit
+        // the remaining room instead.
+        let history_tokens = estimate_messages_tokens(&request_messages);
+        let reserve = if history_tokens > max_context_tokens
+            || history_tokens >= super::result_compaction::MIN_SOFT_RESULT_COMPACTION_TOKENS
+        {
+            provisional
+                .as_ref()
+                .and_then(|l| Self::build_request_tail(Vec::new(), Some(l.clone()), tail_cap))
+                .map(|t| super::context::estimate_message_tokens(&Message::user(t)) + 8)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let system_floor: usize = request_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(super::context::estimate_message_tokens)
+            .sum();
+        let history_budget = max_context_tokens
+            .saturating_sub(reserve)
+            .max(system_floor.min(max_context_tokens));
         let mut fitted = Self::fit_request_to_context_budget(
             request_messages,
             history_budget,
@@ -1242,21 +1281,48 @@ impl Agent {
         protect_unseen: bool,
     ) -> Option<super::result_compaction::ResultCompactionReport> {
         use super::result_compaction as rc;
+        use crate::token_count::estimate_messages_tokens;
         self.sync_path_key_root();
+        if estimate_messages_tokens(&self.messages) <= target_tokens {
+            return None;
+        }
         // The full results are recorded (with their symbol digests) before
         // any of them is replaced by a stub.
         self.compressor.observe_work(&self.messages);
         let compressor = &self.compressor;
         let path_keys = compressor.path_keys();
-        let report = rc::compact_tool_results_to_budget_opts(
+        let stub_budget = rc::stub_token_budget(self.max_context_tokens);
+        // Batch-checkpoint pass: compact already-seen old results down to 75%
+        // of `target_tokens` in one batch so the next 10–15 turns reuse a
+        // stable KV prefix cache instead of mutating 1 message at the front
+        // of history on every turn.
+        let batch_target = target_tokens.saturating_mul(3) / 4;
+        let mut report = rc::compact_tool_results_to_budget_opts(
             &mut self.messages,
-            target_tokens,
+            batch_target.max(1),
             rc::RECENT_RESULTS_KEPT_INTACT,
-            rc::stub_token_budget(self.max_context_tokens),
+            stub_budget,
             &|path| compressor.file_finding(path),
-            protect_unseen,
+            true,
             &path_keys,
-        )?;
+        );
+        if !protect_unseen && estimate_messages_tokens(&self.messages) > target_tokens {
+            if let Some(hard_report) = rc::compact_tool_results_to_budget_opts(
+                &mut self.messages,
+                target_tokens,
+                rc::RECENT_RESULTS_KEPT_INTACT,
+                stub_budget,
+                &|path| compressor.file_finding(path),
+                false,
+                &path_keys,
+            ) {
+                match &mut report {
+                    Some(existing) => existing.merge_from(hard_report),
+                    None => report = Some(hard_report),
+                }
+            }
+        }
+        let report = report?;
         self.rebase_summary_backoff();
         let messages = self.messages.len();
         let reason = format!("{why}; {}", report.describe());

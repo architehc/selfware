@@ -570,13 +570,16 @@ fn deepseek_v4_defaults_profile(name: &'static str, pattern: &'static str) -> Mo
 
 /// Per-workload quotas for `deepseek-v4.1-flash` (`deepseek-v4*`).
 ///
-/// - `planning`: thinking OFF, `max_tokens` 16,384 so initial tool selection
-///   and short side calls (`SideCall`) do not burn minutes of deep reasoning.
+/// - `planning`: thinking ON (`max_tokens` 16,384) so `enable_thinking` stays
+///   consistent across Turn 1 and Turn 2+ (DeepSeek-V4.1's chat template
+///   prepends `Reasoning Effort: 75...` in `<｜System｜>` when thinking is on;
+///   toggling false -> true between Turn 1 and Turn 2 shifts every token and
+///   causes a 0% KV prefix-cache hit on Turn 2).
 /// - `mechanical` / `edit`: thinking ON, session `max_tokens` (65,536).
 /// - `synthesis`: thinking ON, `max_tokens` 49,152.
 pub const DEEPSEEK_V4_WORKLOAD_QUOTAS: WorkloadQuotas = WorkloadQuotas {
     planning: WorkloadQuota {
-        enable_thinking: Some(false),
+        enable_thinking: Some(true),
         max_tokens: Some(16_384),
     },
     mechanical: WorkloadQuota {
@@ -617,8 +620,9 @@ pub const DEEPSEEK_V4_MEASURED: &[MeasuredQuota] = &[
     },
     MeasuredQuota {
         name: "workloads.planning",
-        value: "thinking off, max_tokens 16384",
-        basis: "fast initial tool selection and side calls without deep thinking latency",
+        value: "thinking on, max_tokens 16384",
+        basis:
+            "keeps enable_thinking consistent across Turn 1 and Turn 2+ for KV prefix cache reuse",
     },
     MeasuredQuota {
         name: "workloads.synthesis",

@@ -200,8 +200,7 @@ impl Tool for ProcessStart {
                     name
                 );
             }
-            let upper = name.to_ascii_uppercase();
-            if crate::safety::checker::validation::DENIED_ENV_VARS.contains(&upper.as_str()) {
+            if crate::safety::checker::validation::is_denied_process_env_var(name, Some(value)) {
                 anyhow::bail!(
                     "Environment variable '{}' is not allowed in process_start env (injection risk)",
                     name

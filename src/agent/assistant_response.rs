@@ -126,7 +126,10 @@ impl Agent {
         self.trim_message_history();
 
         let compression_threshold = self.compressor.compression_threshold();
-        if self.compressor.should_compress(&self.messages) {
+        if self.compressor.should_compress(&self.messages)
+            && self.compressor.estimate_tokens(&self.messages)
+                >= super::result_compaction::MIN_SOFT_RESULT_COMPACTION_TOKENS
+        {
             info!("Context compression triggered");
             // Stage 1 — no model call, any message count: shrink old large
             // tool results IN PLACE (oldest first, recent reads intact). The
@@ -136,7 +139,9 @@ impl Agent {
             // Soft pass: the results of the last step are not touched
             // before the model has seen them (val083: 9 of 107 file_read
             // results in long_review, 10 of 11 in c24, reached the model
-            // already stubbed or cut).
+            // already stubbed or cut). Gated to >= 64k tokens so short/medium
+            // sessions do not mutate Turn 1 at the front of history and
+            // invalidate the provider KV prefix cache.
             self.compact_tool_results_logged(
                 compression_threshold,
                 "history over the compression threshold",
@@ -158,11 +163,25 @@ impl Agent {
             // the next turn summarized again). The prediction is measured:
             // kept tail + system + task anchor + a p90-sized summary.
             let task_text = self.current_task_text().map(str::to_string);
+            let has_tool_results = self
+                .messages
+                .iter()
+                .any(|m| m.role == "tool" || Self::is_tool_result_user_message(m));
             let kept_reason: Option<String> = match self
                 .compressor
                 .summary_skip_reason(&self.messages, task_text.as_deref())
             {
                 Some(skip) => Some(skip),
+                None if has_tool_results
+                    && before_compression_tokens
+                        < super::result_compaction::MIN_SOFT_RESULT_COMPACTION_TOKENS =>
+                {
+                    Some(format!(
+                        "history ~{before_compression_tokens} tokens is below the {}-token \
+                         soft tool-result compaction floor; no summary call made",
+                        super::result_compaction::MIN_SOFT_RESULT_COMPACTION_TOKENS
+                    ))
+                }
                 None => {
                     let summarizable = self
                         .compressor

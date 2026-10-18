@@ -3507,3 +3507,119 @@ async fn trim_message_history_records_the_work_ledger_before_dropping_reads() {
     assert_eq!(ledger.files()[0].path, "src/evicted.rs");
     server.stop().await;
 }
+
+#[test]
+fn finish_request_with_tail_preserves_system_and_oldest_tool_result_below_64k() {
+    // Regression test for backend KV-cache feedback items #1 and #2:
+    // On c24 (`max_context_tokens = 11_008`), `<｜System｜>` (including
+    // `<workspace_guidance_file path="AGENTS.md">`) is ~5,700 tokens and
+    // Turn 1's tool result brings the history to ~9,200 tokens. A large
+    // per-turn `sections` hint (up to 1/3 of budget = 3,669 tokens) must NOT
+    // shrink `history_budget` below the history size and must NEVER truncate
+    // `<｜System｜>` or Turn 1's `tool_result` at the front of history.
+    let system_text: String = format!(
+        "You are Selfware.\n<workspace_guidance_file path=\"AGENTS.md\">\n{}\n</workspace_guidance_file>",
+        (0..550)
+            .map(|i| format!("rule_{i:04}: stop-the-line CI gate;\n"))
+            .collect::<String>()
+    );
+    let mut call1 = Message::assistant("");
+    call1.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "call_1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        },
+    }]);
+    let tool1_payload = serde_json::json!({
+        "content": (0..180).map(|i| format!("pub fn item_{i}() -> usize {{ {i} }}\n")).collect::<String>(),
+        "total_lines": 180
+    })
+    .to_string();
+
+    let history = vec![
+        Message::system(system_text.clone()),
+        Message::user("Inspect src/lib.rs"),
+        call1,
+        Message::tool(tool1_payload.clone(), "call_1"),
+    ];
+    let history_tokens = crate::token_count::estimate_messages_tokens(&history);
+    assert!(
+        (8_000..10_500).contains(&history_tokens),
+        "expected ~9k history tokens, got {history_tokens}"
+    );
+
+    let big_section = (0..600)
+        .map(|i| format!("src/mod_{i:03}.rs (120 lines)\n"))
+        .collect::<String>();
+    let assembled = Agent::finish_request_with_tail(
+        history,
+        vec![big_section],
+        Some(ledger_fixture()),
+        11_008,
+        None,
+    )
+    .expect("request must fit within 11,008 tokens");
+
+    assert_eq!(
+        assembled[0].content.text(),
+        system_text,
+        "<｜System｜> must remain 100% byte-identical mid-session"
+    );
+    assert_eq!(
+        assembled[3].content.text(),
+        tool1_payload,
+        "Turn 1 tool_result at the front of history must not be compacted below 64k when history fits budget"
+    );
+    assert!(crate::token_count::estimate_messages_tokens(&assembled) <= 11_008);
+}
+
+#[tokio::test]
+async fn compact_tool_results_logged_compacts_seen_results_in_batch_checkpoints() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.max_context_tokens = 20_000;
+    agent.messages = vec![Message::system("sys"), Message::user("task")];
+
+    for i in 0..6 {
+        let id = format!("r{i}");
+        let mut call = Message::assistant("");
+        call.tool_calls = Some(vec![crate::api::types::ToolCall {
+            id: id.clone(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "file_read".to_string(),
+                arguments: format!(r#"{{"path":"src/mod_{i}.rs"}}"#),
+            },
+        }]);
+        agent.messages.push(call);
+        let body: String = (0..500)
+            .map(|j| format!("pub fn f_{i}_{j}() -> usize {{ {j} }}\n"))
+            .collect();
+        agent.messages.push(Message::tool(
+            serde_json::json!({"content": body, "total_lines": 500}).to_string(),
+            id,
+        ));
+    }
+    agent.messages.push(Message::assistant("Reviewed batch"));
+
+    let before = crate::token_count::estimate_messages_tokens(&agent.messages);
+    let target = before - 500;
+    let report = agent
+        .compact_tool_results_logged(target, "batch checkpoint test", true)
+        .expect("should compact in batch");
+
+    assert!(
+        report.stubbed.len() >= 2,
+        "batch checkpoint should compact multiple old results at once instead of 1, got {:?}",
+        report.stubbed
+    );
+    assert!(
+        report.after_tokens <= target * 3 / 4,
+        "after_tokens ({}) should reach the 75% batch target ({})",
+        report.after_tokens,
+        target * 3 / 4
+    );
+    server.stop().await;
+}
