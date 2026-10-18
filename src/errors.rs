@@ -685,7 +685,7 @@ pub fn process_exit_code<T>(
     shutdown: Option<crate::ShutdownReason>,
 ) -> u8 {
     match result {
-        Err(e) => get_exit_code(e),
+        Err(e) => get_exit_code_with_shutdown(e, shutdown.or_else(crate::shutdown_reason)),
         Ok(_) => match shutdown {
             Some(crate::ShutdownReason::SignalTerminate) => EXIT_TERMINATED,
             Some(crate::ShutdownReason::UserInterrupt | crate::ShutdownReason::Timeout) => {
@@ -698,6 +698,10 @@ pub fn process_exit_code<T>(
 
 /// Determine the appropriate process exit code for an error.
 pub fn get_exit_code(e: &anyhow::Error) -> u8 {
+    get_exit_code_with_shutdown(e, crate::shutdown_reason())
+}
+
+fn get_exit_code_with_shutdown(e: &anyhow::Error, shutdown: Option<crate::ShutdownReason>) -> u8 {
     if is_confirmation_error(e) {
         return EXIT_CONFIRMATION_REQUIRED;
     }
@@ -707,7 +711,7 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     // SelfwareError::Safety), and downcast only matches the outermost layer.
     for cause in e.chain() {
         if is_shutdown_api_error(cause) {
-            return match crate::shutdown_reason() {
+            return match shutdown {
                 Some(crate::ShutdownReason::SignalTerminate) => EXIT_TERMINATED,
                 _ => EXIT_INTERRUPTED,
             };
@@ -783,7 +787,9 @@ impl RunEnd {
                 Some(crate::ShutdownReason::SignalTerminate) => RunEnd::Terminated,
                 Some(crate::ShutdownReason::Timeout) => RunEnd::Failed,
             },
-            Err(e) => Self::classify_error(e),
+            Err(e) => {
+                Self::classify_error_with_shutdown(e, shutdown.or_else(crate::shutdown_reason))
+            }
         }
     }
 
@@ -792,6 +798,13 @@ impl RunEnd {
     /// (including the internal wall-clock timeout) is `Failed`. Walks the
     /// whole cause chain, like [`get_exit_code`].
     pub fn classify_error(e: &anyhow::Error) -> Self {
+        Self::classify_error_with_shutdown(e, crate::shutdown_reason())
+    }
+
+    fn classify_error_with_shutdown(
+        e: &anyhow::Error,
+        shutdown: Option<crate::ShutdownReason>,
+    ) -> Self {
         for cause in e.chain() {
             let agent_err = cause.downcast_ref::<AgentError>().or_else(|| {
                 match cause.downcast_ref::<SelfwareError>() {
@@ -811,7 +824,7 @@ impl RunEnd {
                 return RunEnd::Interrupted;
             }
             if is_shutdown_api_error(cause) {
-                return match crate::shutdown_reason() {
+                return match shutdown {
                     Some(crate::ShutdownReason::SignalTerminate) => RunEnd::Terminated,
                     Some(crate::ShutdownReason::Timeout) => RunEnd::Failed,
                     _ => RunEnd::Interrupted,

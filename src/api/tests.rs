@@ -6524,6 +6524,7 @@ async fn test_chat_stream_unreachable_endpoint_includes_diagnostic_and_redacts_q
         !msg.contains("secret-token"),
         "streaming connect error must redact query credentials: {msg}"
     );
+    #[cfg(feature = "resilience")]
     assert_eq!(
         crate::self_healing::recovery_tree::classify(&msg),
         crate::self_healing::FailureKind::LlmUnreachable,

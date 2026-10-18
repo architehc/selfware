@@ -21,11 +21,16 @@ use tree_sitter::{Node as TsNode, Parser};
 pub(crate) const MAX_SYN_ITEM_DEPTH: usize = 32;
 
 /// Upper bound on tree-sitter subtree depth for whole-item (`fn`, `struct`,
-/// `enum`, `trait`) parses and recursive tree walks (`cfg_test_ranges`,
-/// `convert_node`). Real functions and item declarations stay well below 64
-/// tree-sitter levels, while `syn` stack overflow requires ~190 levels even in
-/// unoptimized debug builds.
+/// `enum`, `trait`) parses handed to `syn`. Real functions and item
+/// declarations stay well below 64 tree-sitter levels, while `syn` stack
+/// overflow requires ~190 levels even in unoptimized debug builds.
 pub(crate) const MAX_SYN_BODY_DEPTH: usize = 64;
+
+/// Upper bound on recursive tree-sitter AST walks (`collect_cfg_test_ranges`,
+/// `convert_node`). High enough to preserve 128 levels of module/container
+/// nesting (`2 * 128 = 256` AST levels) for structural summaries while
+/// preventing stack overflow on multi-thousand-deep adversarial syntax trees.
+const MAX_AST_WALK_DEPTH: usize = 512;
 
 /// A language-agnostic node in a parsed syntax tree.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -138,7 +143,7 @@ impl AstAnalyzer {
         ranges: &mut Vec<(usize, usize)>,
         depth: usize,
     ) {
-        if depth >= MAX_SYN_BODY_DEPTH {
+        if depth >= MAX_AST_WALK_DEPTH {
             return;
         }
         let mut cursor = parent.walk();
@@ -341,7 +346,7 @@ impl AstAnalyzer {
             .child_by_field_name("name")
             .and_then(|name| name.utf8_text(source).ok())
             .map(str::to_string);
-        let children = if depth < MAX_SYN_BODY_DEPTH {
+        let children = if depth < MAX_AST_WALK_DEPTH {
             node.children(&mut cursor)
                 .map(|child| Self::convert_node(child, source, depth + 1))
                 .collect()

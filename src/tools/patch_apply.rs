@@ -1,4 +1,3 @@
-use super::process_guard::GroupedOutputExt;
 use super::workspace_root::CommandRootExt;
 use super::Tool;
 use anyhow::{anyhow, Result};
@@ -278,6 +277,25 @@ fn strip_numbered_diff(diff: &str) -> Option<String> {
     changed.then_some(out)
 }
 
+/// Cap on captured `git apply` output (256 KiB).
+const MAX_PATCH_APPLY_OUTPUT_BYTES: usize = 256 * 1024;
+/// Upper bound on each `git apply` invocation (60s).
+const PATCH_APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn run_git_apply_bounded(
+    args: &[&str],
+) -> std::result::Result<
+    crate::tools::process_guard::BoundedCommandOutput,
+    crate::tools::process_guard::CommandRunError,
+> {
+    crate::tools::process_guard::run_command_bounded(
+        git_apply_command(args),
+        PATCH_APPLY_TIMEOUT,
+        MAX_PATCH_APPLY_OUTPUT_BYTES,
+    )
+    .await
+}
+
 /// Every path `git apply` would read or write for the diff in `patch_file`,
 /// taken from git's own parser rather than from a second scan of the text.
 async fn git_patch_paths(patch_file: &str) -> Result<Vec<String>> {
@@ -288,8 +306,7 @@ async fn git_patch_paths(patch_file: &str) -> Result<Vec<String>> {
             args.push("-R");
         }
         args.push(patch_file);
-        let out = git_apply_command(&args)
-            .output_grouped()
+        let out = run_git_apply_bounded(&args)
             .await
             .map_err(|e| anyhow!("failed to run git apply --numstat: {}", e))?;
         if !out.status.success() {
@@ -336,9 +353,10 @@ fn validate_patch_path(path: &str, safety: &crate::config::SafetyConfig) -> Resu
 /// project-controlled diffs, so the child must not inherit host credentials
 /// (see `safety::process_env`), and the repository's own config cannot run
 /// a smudge filter or merge driver unless the repository is trusted
-/// (`safety::git_exec`). Callers run it with `output_grouped` (own process
-/// group + kill-on-drop), so a dropped future (or early return) kills its
-/// whole process group and cannot leave a child holding repo locks.
+/// (`safety::git_exec`). Callers run it with `run_git_apply_bounded` (own
+/// process group + kill-on-drop + timeout + output cap), so a dropped future
+/// (or early return) kills its whole process group and cannot leave a child
+/// holding repo locks.
 fn git_apply_command(args: &[&str]) -> tokio::process::Command {
     let mut cmd = crate::safety::git_exec::git_command_async(
         crate::tools::workspace_root::current().path(),
@@ -464,9 +482,7 @@ impl Tool for PatchApply {
         }
 
         // Try git apply --check first
-        let check_output = git_apply_command(&["apply", "--check", &temp_path_str])
-            .output_grouped()
-            .await;
+        let check_output = run_git_apply_bounded(&["apply", "--check", &temp_path_str]).await;
 
         // A diff built from file_read output may carry its line-number
         // prefixes. Only when the diff does not apply as written, and every
@@ -478,9 +494,7 @@ impl Tool for PatchApply {
                 let mut t = NamedTempFile::new()?;
                 t.write_all(stripped.as_bytes())?;
                 let t_path = t.path().to_string_lossy().to_string();
-                let stripped_check = git_apply_command(&["apply", "--check", &t_path])
-                    .output_grouped()
-                    .await;
+                let stripped_check = run_git_apply_bounded(&["apply", "--check", &t_path]).await;
                 if matches!(stripped_check, Ok(ref out) if out.status.success()) {
                     for path in git_patch_paths(&t_path).await? {
                         validate_patch_path(&path, &safety)?;
@@ -494,9 +508,7 @@ impl Tool for PatchApply {
         let applied = match check_output {
             Ok(ref out) if out.status.success() => {
                 // Check passed — apply for real
-                let apply_out = git_apply_command(&["apply", &temp_path_str])
-                    .output_grouped()
-                    .await;
+                let apply_out = run_git_apply_bounded(&["apply", &temp_path_str]).await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if prefixes_stripped => {
@@ -504,16 +516,12 @@ impl Tool for PatchApply {
                     .as_ref()
                     .map(|t| t.path().to_string_lossy().to_string())
                     .unwrap_or_default();
-                let apply_out = git_apply_command(&["apply", &t_path])
-                    .output_grouped()
-                    .await;
+                let apply_out = run_git_apply_bounded(&["apply", &t_path]).await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if allow_3way => {
                 // Try 3-way merge fallback
-                let apply3_out = git_apply_command(&["apply", "-3", &temp_path_str])
-                    .output_grouped()
-                    .await;
+                let apply3_out = run_git_apply_bounded(&["apply", "-3", &temp_path_str]).await;
                 matches!(apply3_out, Ok(ref o) if o.status.success())
             }
             _ => false,

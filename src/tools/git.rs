@@ -1,5 +1,4 @@
 use super::file::{resolve_safety_config, validate_tool_path};
-use super::process_guard::GroupedOutputExt;
 use super::workspace_root::CommandRootExt;
 use super::Tool;
 use crate::config::SafetyConfig;
@@ -250,6 +249,24 @@ fn validate_git_path(path: &str, safety_config: Option<&SafetyConfig>) -> Result
 
 /// Cap on captured `git push` output.
 const MAX_PUSH_OUTPUT_BYTES: usize = 256 * 1024;
+/// Cap on captured local git command output (256 KiB).
+const MAX_LOCAL_GIT_OUTPUT_BYTES: usize = 256 * 1024;
+/// Default timeout for local git commands (commit, add, checkout, rev-parse, tag, status, remote).
+const LOCAL_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn run_local_git_bounded(
+    cmd: tokio::process::Command,
+    context_msg: &str,
+) -> Result<crate::tools::process_guard::BoundedCommandOutput> {
+    crate::tools::process_guard::run_command_bounded(
+        cmd,
+        LOCAL_GIT_TIMEOUT,
+        MAX_LOCAL_GIT_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{context_msg}: {e}"))
+}
+
 /// Cap on captured `git diff` output (10 MiB, matching `shell_exec`) so a
 /// single commit with a huge diff cannot OOM the agent.
 const MAX_DIFF_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -538,11 +555,9 @@ impl Tool for GitCheckpoint {
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
-        cmd.in_workspace_root();
-        let branch_output = cmd
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output_grouped()
-            .await?;
+        cmd.in_workspace_root()
+            .args(["rev-parse", "--abbrev-ref", "HEAD"]);
+        let branch_output = run_local_git_bounded(cmd, "Failed to get current branch").await?;
         let current_branch = String::from_utf8_lossy(&branch_output.stdout)
             .trim()
             .to_string();
@@ -557,11 +572,10 @@ impl Tool for GitCheckpoint {
                     crate::tools::workspace_root::current().path(),
                     crate::safety::git_exec::GitScope::UserOperation,
                 );
-                cmd.in_workspace_root();
-                let checkout_output = cmd
-                    .args(["checkout", "-b", &agent_branch])
-                    .output_grouped()
-                    .await?;
+                cmd.in_workspace_root()
+                    .args(["checkout", "-b", &agent_branch]);
+                let checkout_output =
+                    run_local_git_bounded(cmd, "Failed to create agent branch").await?;
                 if !checkout_output.status.success() {
                     let stderr = String::from_utf8_lossy(&checkout_output.stderr);
                     anyhow::bail!(
@@ -584,12 +598,8 @@ impl Tool for GitCheckpoint {
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
-        cmd.in_workspace_root();
-        let add_output = cmd
-            .args(["add", "-u"])
-            .output_grouped()
-            .await
-            .context("Failed to stage changes")?;
+        cmd.in_workspace_root().args(["add", "-u"]);
+        let add_output = run_local_git_bounded(cmd, "Failed to stage changes").await?;
         if !add_output.status.success() {
             let stderr = String::from_utf8_lossy(&add_output.stderr);
             anyhow::bail!("git add -u failed: {}", stderr.trim());
@@ -603,31 +613,27 @@ impl Tool for GitCheckpoint {
             crate::safety::git_exec::GitScope::UserOperation,
         );
         cmd.in_workspace_root();
-        let commit_output = if let Some(ref path) = msg_file {
+        if let Some(ref path) = msg_file {
             cmd.arg("commit")
                 .arg("--file")
                 .arg(path)
-                .arg("--allow-empty")
-                .output_grouped()
-                .await
-                .context("Failed to create checkpoint commit")?
+                .arg("--allow-empty");
         } else {
-            cmd.args(["commit", "-m", &full_msg, "--allow-empty"])
-                .output_grouped()
-                .await
-                .context("Failed to create checkpoint commit")?
-        };
+            cmd.args(["commit", "-m", &full_msg, "--allow-empty"]);
+        }
+        let commit_result = run_local_git_bounded(cmd, "Failed to create checkpoint commit").await;
         if let Some(path) = msg_file {
             let _ = std::fs::remove_file(path);
         }
+        let commit_output = commit_result?;
 
         // Get hash
         let mut cmd = crate::safety::git_exec::git_command_async(
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
-        cmd.in_workspace_root();
-        let hash_output = cmd.args(["rev-parse", "HEAD"]).output_grouped().await?;
+        cmd.in_workspace_root().args(["rev-parse", "HEAD"]);
+        let hash_output = run_local_git_bounded(cmd, "Failed to read HEAD hash").await?;
         let hash = String::from_utf8_lossy(&hash_output.stdout)
             .trim()
             .to_string();
@@ -639,11 +645,9 @@ impl Tool for GitCheckpoint {
                     crate::tools::workspace_root::current().path(),
                     crate::safety::git_exec::GitScope::UserOperation,
                 );
-                cmd.in_workspace_root();
-                let tag_output = cmd
-                    .args(["tag", "-f", tag_name, &hash])
-                    .output_grouped()
-                    .await?;
+                cmd.in_workspace_root().args(["tag", "-f", tag_name, &hash]);
+                let tag_output =
+                    run_local_git_bounded(cmd, "Failed to create checkpoint tag").await?;
                 if !tag_output.status.success() {
                     let stderr = String::from_utf8_lossy(&tag_output.stderr);
                     anyhow::bail!("git tag '{}' failed: {}", tag_name, stderr.trim());
@@ -656,8 +660,8 @@ impl Tool for GitCheckpoint {
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
-        cmd.in_workspace_root();
-        let status_output = cmd.args(["status", "--short"]).output_grouped().await?;
+        cmd.in_workspace_root().args(["status", "--short"]);
+        let status_output = run_local_git_bounded(cmd, "Failed to read git status").await?;
         let status = String::from_utf8_lossy(&status_output.stdout);
 
         Ok(serde_json::json!({
@@ -930,14 +934,12 @@ impl Tool for GitCommit {
                 git_config_dir(repo_path),
                 crate::safety::git_exec::GitScope::UserOperation,
             );
-            cmd.in_workspace_root();
-            let add_output = cmd
+            cmd.in_workspace_root()
                 .arg("-C")
                 .arg(repo_path)
                 .arg("add")
-                .arg("-u")
-                .output_grouped()
-                .await?;
+                .arg("-u");
+            let add_output = run_local_git_bounded(cmd, "Failed to stage changes").await?;
             // A failed add must not silently become a partial commit below.
             if !add_output.status.success() {
                 let stderr = String::from_utf8_lossy(&add_output.stderr);
@@ -953,15 +955,14 @@ impl Tool for GitCommit {
                         git_config_dir(repo_path),
                         crate::safety::git_exec::GitScope::UserOperation,
                     );
-                    cmd.in_workspace_root();
-                    let add_output = cmd
+                    cmd.in_workspace_root()
                         .arg("-C")
                         .arg(repo_path)
                         .arg("add")
                         .arg("--")
-                        .arg(f)
-                        .output_grouped()
-                        .await?;
+                        .arg(f);
+                    let add_output =
+                        run_local_git_bounded(cmd, &format!("Failed to stage '{f}'")).await?;
                     // A typo'd/unmatched path makes `git add` exit non-zero;
                     // ignoring it would produce a partial commit reported as
                     // success. Surface the real error instead.
@@ -981,26 +982,24 @@ impl Tool for GitCommit {
             crate::safety::git_exec::GitScope::UserOperation,
         );
         cmd.in_workspace_root();
-        let output = if let Some(ref path) = msg_file {
+        if let Some(ref path) = msg_file {
             cmd.arg("-C")
                 .arg(repo_path)
                 .arg("commit")
                 .arg("--file")
-                .arg(path)
-                .output_grouped()
-                .await?
+                .arg(path);
         } else {
             cmd.arg("-C")
                 .arg(repo_path)
                 .arg("commit")
                 .arg("-m")
-                .arg(message)
-                .output_grouped()
-                .await?
-        };
+                .arg(message);
+        }
+        let commit_res = run_local_git_bounded(cmd, "Failed to execute git commit").await;
         if let Some(path) = msg_file {
             let _ = std::fs::remove_file(path);
         }
+        let output = commit_res?;
 
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1091,12 +1090,9 @@ impl Tool for GitPush {
                 crate::tools::workspace_root::current().path(),
                 crate::safety::git_exec::GitScope::UserOperation,
             );
-            cmd.in_workspace_root();
-            let output = cmd
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output_grouped()
-                .await
-                .context("Failed to get current branch")?;
+            cmd.in_workspace_root()
+                .args(["rev-parse", "--abbrev-ref", "HEAD"]);
+            let output = run_local_git_bounded(cmd, "Failed to get current branch").await?;
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("Failed to detect current branch: {}", err.trim());
@@ -1127,12 +1123,8 @@ impl Tool for GitPush {
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
-        remotes_cmd.in_workspace_root();
-        let remotes_out = remotes_cmd
-            .arg("remote")
-            .output_grouped()
-            .await
-            .context("Failed to list git remotes")?;
+        remotes_cmd.in_workspace_root().arg("remote");
+        let remotes_out = run_local_git_bounded(remotes_cmd, "Failed to list git remotes").await?;
         if !remotes_out.status.success() {
             let err = String::from_utf8_lossy(&remotes_out.stderr);
             anyhow::bail!("Failed to list git remotes: {}", err.trim());

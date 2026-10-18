@@ -589,3 +589,63 @@ fn shutdown_during_a_provider_call_is_an_interrupt_not_a_failure() {
     let net = anyhow::Error::from(ApiError::Network("connection reset".into()));
     assert_eq!(RunEnd::classify_error(&net), RunEnd::Failed);
 }
+
+#[test]
+fn rust_run_end_and_exit_code_match_lean_formal_table() {
+    use crate::ShutdownReason;
+
+    let raw = include_str!("../../../formal/supervision_table.json");
+    let rows: Vec<[String; 3]> =
+        serde_json::from_str(raw).expect("formal/supervision_table.json must parse");
+
+    let mut checked = 0usize;
+    for [state_key, shutdown_key, expected] in &rows {
+        let Some(input_name) = state_key.strip_prefix("run_end:") else {
+            continue;
+        };
+        let shutdown = match shutdown_key.as_str() {
+            "none" => None,
+            "user_interrupt" => Some(ShutdownReason::UserInterrupt),
+            "signal_terminate" => Some(ShutdownReason::SignalTerminate),
+            "timeout" => Some(ShutdownReason::Timeout),
+            other => panic!("unknown shutdown key in formal table: {other}"),
+        };
+        let result: anyhow::Result<()> = match input_name {
+            "ok" => Ok(()),
+            "err:cancelled" => Err(AgentError::Cancelled.into()),
+            "err:cancelled_with_reason" => {
+                Err(AgentError::CancelledWithReason("timeout".into()).into())
+            }
+            "err:terminated" => Err(AgentError::Terminated("SIGTERM".into()).into()),
+            "err:selfware_interrupted" => Err(SelfwareError::Interrupted.into()),
+            "err:shutdown_api" => Err(ApiError::ShutdownRequested("shutdown".into()).into()),
+            "err:config" => Err(SelfwareError::Config("bad config".into()).into()),
+            "err:api" => Err(ApiError::Network("conn reset".into()).into()),
+            "err:safety" => Err(SafetyError::BlockedCommand {
+                command: "rm -rf /".into(),
+                reason: "blocked".into(),
+            }
+            .into()),
+            "err:confirmation" => Err(AgentError::ConfirmationRequired {
+                tool_name: "shell_exec".into(),
+            }
+            .into()),
+            "err:other" => Err(anyhow::anyhow!("unexpected failure")),
+            other => panic!("unknown run_end input in formal table: {other}"),
+        };
+
+        let run_end = RunEnd::classify(&result, shutdown);
+        let code = process_exit_code(&result, shutdown);
+        let actual = format!("{}:{code}", run_end.as_str());
+        assert_eq!(
+            &actual, expected,
+            "Lean/Rust RunEnd + exit_code mismatch for ({state_key}, {shutdown_key})"
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked, 44,
+        "expected all 44 Lean run_end rows to be checked"
+    );
+}

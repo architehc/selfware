@@ -30,7 +30,6 @@
 use super::Tool;
 use crate::config::SafetyConfig;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
-use crate::tools::process_guard::GroupedOutputExt;
 use crate::tools::workspace_root::{self, CommandRootExt, WorkspaceRoot};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -41,6 +40,11 @@ use tracing::{info, warn};
 
 /// Default worktree base directory within .selfware/
 const DEFAULT_WORKTREE_BASE: &str = ".selfware/worktrees";
+
+/// Cap on captured worktree git command output (256 KiB).
+const MAX_WORKTREE_GIT_OUTPUT_BYTES: usize = 256 * 1024;
+/// Upper bound on worktree create/remove commands (60s).
+const WORKTREE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Generate a timestamp-based worktree name
 fn generate_worktree_name() -> String {
@@ -54,12 +58,14 @@ async fn find_git_root(root: &WorkspaceRoot) -> Result<PathBuf> {
         root.path(),
         crate::safety::git_exec::GitScope::Internal,
     );
-    let output = cmd
-        .in_root(root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output_grouped()
-        .await
-        .context("Failed to execute git rev-parse")?;
+    cmd.in_root(root).args(["rev-parse", "--show-toplevel"]);
+    let output = crate::tools::process_guard::run_command_bounded(
+        cmd,
+        PRUNE_GIT_TIMEOUT,
+        MAX_WORKTREE_GIT_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to execute git rev-parse: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,23 +86,32 @@ const PRUNE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 const CREATED_LEDGER: &str = "selfware-created-worktrees";
 
 /// Run a housekeeping git command in `dir` with a sanitized environment, the
-/// hardened git spawn (`safety::git_exec`) and a bounded timeout. It runs via
-/// `output_grouped` (own process group + kill-on-drop), so the timeout drops
-/// the future and the whole process group is killed.
-async fn run_git_bounded(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+/// hardened git spawn (`safety::git_exec`) and a bounded timeout + output cap.
+async fn run_git_bounded(
+    dir: &Path,
+    args: &[&str],
+) -> Result<crate::tools::process_guard::BoundedCommandOutput> {
     let mut cmd = crate::safety::git_exec::git_command_async(
         dir,
         crate::safety::git_exec::GitScope::Internal,
     );
     cmd.args(args);
-    match tokio::time::timeout(PRUNE_GIT_TIMEOUT, cmd.output_grouped()).await {
-        Ok(out) => out.with_context(|| format!("Failed to execute git {}", args.join(" "))),
-        Err(_) => anyhow::bail!(
-            "git {} timed out after {}s",
-            args.join(" "),
-            PRUNE_GIT_TIMEOUT.as_secs()
-        ),
-    }
+    crate::tools::process_guard::run_command_bounded(
+        cmd,
+        PRUNE_GIT_TIMEOUT,
+        MAX_WORKTREE_GIT_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::tools::process_guard::CommandRunError::Timeout(_) => {
+            anyhow::anyhow!(
+                "git {} timed out after {}s",
+                args.join(" "),
+                PRUNE_GIT_TIMEOUT.as_secs()
+            )
+        }
+        other => anyhow::anyhow!("Failed to execute git {}: {other}", args.join(" ")),
+    })
 }
 
 /// The repository's common git dir (shared by all worktrees), absolute.
@@ -472,11 +487,14 @@ impl Tool for EnterWorktreeTool {
             cmd.arg(branch);
         }
 
-        let output = cmd
-            .current_dir(&git_root)
-            .output_grouped()
-            .await
-            .context("Failed to execute git worktree add")?;
+        cmd.current_dir(&git_root);
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            WORKTREE_OP_TIMEOUT,
+            MAX_WORKTREE_GIT_OUTPUT_BYTES,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute git worktree add: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -574,12 +592,18 @@ impl Tool for ExitWorktreeTool {
                     &restored_path,
                     crate::safety::git_exec::GitScope::UserOperation,
                 );
-                let output = cmd
-                    .current_dir(&restored_path)
-                    .args(["worktree", "remove", &worktree_path.to_string_lossy()])
-                    .output_grouped()
-                    .await
-                    .context("Failed to execute git worktree remove")?;
+                cmd.current_dir(&restored_path).args([
+                    "worktree",
+                    "remove",
+                    &worktree_path.to_string_lossy(),
+                ]);
+                let output = crate::tools::process_guard::run_command_bounded(
+                    cmd,
+                    WORKTREE_OP_TIMEOUT,
+                    MAX_WORKTREE_GIT_OUTPUT_BYTES,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to execute git worktree remove: {e}"))?;
 
                 if output.status.success() {
                     removed = true;
@@ -641,12 +665,14 @@ impl Tool for ListWorktreesTool {
             root.path(),
             crate::safety::git_exec::GitScope::Internal,
         );
-        let output = cmd
-            .in_root(&root)
-            .args(["worktree", "list", "--porcelain"])
-            .output_grouped()
-            .await
-            .context("Failed to execute git worktree list")?;
+        cmd.in_root(&root).args(["worktree", "list", "--porcelain"]);
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            PRUNE_GIT_TIMEOUT,
+            MAX_WORKTREE_GIT_OUTPUT_BYTES,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute git worktree list: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

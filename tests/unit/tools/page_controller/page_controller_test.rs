@@ -445,11 +445,10 @@ setInterval(() => {}, 1000);
 
 #[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    !matches!(
+        crate::resources::driver::probe_pid(pid, None),
+        crate::resources::Probe::Gone
+    )
 }
 
 #[cfg(unix)]

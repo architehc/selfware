@@ -125,6 +125,22 @@ static TOKEN_CACHE: Lazy<RwLock<HashMap<(u64, usize), usize>>> =
 /// "tokenizer.json [████] 6.71 MiB" bar over the welcome screen (UX field
 /// test, 0.9.2). Same download and cache, without the bar.
 fn load_hf_tokenizer_quietly(repo: &str) -> Result<Tokenizer, String> {
+    let cache = hf_hub::Cache::from_env();
+    if let Some(cached_path) = cache
+        .repo(hf_hub::Repo::model(repo.to_string()))
+        .get("tokenizer.json")
+    {
+        return Tokenizer::from_file(cached_path).map_err(|e| e.to_string());
+    }
+    let offline = std::env::var("HF_HUB_OFFLINE")
+        .or_else(|_| std::env::var("SELFWARE_OFFLINE"))
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    if offline {
+        return Err(format!(
+            "HF tokenizer '{repo}' not in local cache and offline mode is enabled"
+        ));
+    }
     let api = hf_hub::api::sync::ApiBuilder::from_env()
         .with_progress(false)
         .build()
@@ -222,6 +238,14 @@ fn hf_tokenizer_repo(model: &str) -> Option<&'static str> {
         Some("Xenova/gpt-4")
     } else if lower.contains("gpt-3.5") || lower.contains("gpt-3") {
         Some("Xenova/gpt-3.5-turbo")
+    } else if lower.contains("llama-3")
+        || lower.contains("llama3")
+        || lower.contains("llama-4")
+        || lower.contains("llama4")
+    {
+        // Llama 3/4 use the 128k tiktoken-based vocabulary rather than the
+        // 32k SentencePiece vocabulary of Llama 1/2.
+        Some("NousResearch/Meta-Llama-3-8B")
     } else if lower.contains("llama") {
         Some("hf-internal-testing/llama-tokenizer")
     } else if lower.contains("glm") {

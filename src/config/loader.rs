@@ -625,8 +625,8 @@ impl Config {
         operator_selected: bool,
         sources: &mut ConfigSources,
     ) -> Result<ParsedConfigFile> {
-        Self::warn_unknown_keys(content);
         let mut overlay = Self::parse_toml_table(content, p)?;
+        Self::warn_unknown_keys_in_table(&overlay);
         let path = PathBuf::from(p);
         let home = if !operator_selected
             && config_is_checkout_local(&path)
@@ -639,7 +639,7 @@ impl Config {
             None
         };
         let Some(home) = home else {
-            let config: Config = toml::from_str(content).with_context(|| {
+            let config: Config = overlay.clone().try_into().with_context(|| {
                 format!("Failed to parse config file: {}. Check TOML syntax.", p)
             })?;
             record_toml_sources(sources, &overlay, &path, "");
@@ -656,8 +656,8 @@ impl Config {
         // prevents.
         let home_content = read_config_file(&home.to_string_lossy())
             .with_context(|| format!("Failed to read config from {}", home.display()))?;
-        Self::warn_unknown_keys(&home_content);
         let mut merged = Self::parse_toml_table(&home_content, &home.to_string_lossy())?;
+        Self::warn_unknown_keys_in_table(&merged);
         record_toml_sources(sources, &merged, &home, "");
 
         let ignored = strip_privileged_overlay_keys(&mut overlay, &merged);
@@ -699,29 +699,34 @@ impl Config {
     /// and about unknown SUB-keys inside known fixed sections (a nested typo
     /// like `[agent] max_iteration = 5` is otherwise dropped by serde and the
     /// value silently stays at its default).
+    #[cfg(test)]
     fn warn_unknown_keys(content: &str) {
         if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(content) {
-            for (key, value) in table.iter() {
-                if !TOP_LEVEL_CONFIG_KEYS.contains(&key.as_str()) {
-                    config_warning(&format!(
-                        "Unknown config key [{}] — this section is ignored. \
-                         Check for typos or remove it.",
-                        key
-                    ));
-                    continue;
-                }
-                // Nested check: within a known fixed section, flag sub-keys the
-                // section struct does not define (they deserialize to nothing).
-                if let toml::Value::Table(section_table) = value {
-                    if let Some(known_sub_keys) = known_section_keys(key) {
-                        for sub_key in section_table.keys() {
-                            if !known_sub_keys.contains(sub_key.as_str()) {
-                                config_warning(&format!(
-                                    "Unknown config key [{}].{} — this key is ignored. \
-                                     Check for typos or remove it.",
-                                    key, sub_key
-                                ));
-                            }
+            Self::warn_unknown_keys_in_table(&table);
+        }
+    }
+
+    fn warn_unknown_keys_in_table(table: &toml::value::Table) {
+        for (key, value) in table.iter() {
+            if !TOP_LEVEL_CONFIG_KEYS.contains(&key.as_str()) {
+                config_warning(&format!(
+                    "Unknown config key [{}] — this section is ignored. \
+                     Check for typos or remove it.",
+                    key
+                ));
+                continue;
+            }
+            // Nested check: within a known fixed section, flag sub-keys the
+            // section struct does not define (they deserialize to nothing).
+            if let toml::Value::Table(section_table) = value {
+                if let Some(known_sub_keys) = known_section_keys(key) {
+                    for sub_key in section_table.keys() {
+                        if !known_sub_keys.contains(sub_key.as_str()) {
+                            config_warning(&format!(
+                                "Unknown config key [{}].{} — this key is ignored. \
+                                 Check for typos or remove it.",
+                                key, sub_key
+                            ));
                         }
                     }
                 }

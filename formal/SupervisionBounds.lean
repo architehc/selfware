@@ -654,6 +654,166 @@ theorem abandoned_call_releases_reservation (lim : BudgetLimits) (t : BudgetTrac
     settle lim t reserved none none fallbackTokens =
       { t with reservedTokens := t.reservedTokens - reserved } := rfl
 
+/-! ## Part V: RunEnd & Exit Code Classification (`src/errors.rs`) -/
+
+inductive ShutdownReason where
+  | userInterrupt
+  | signalTerminate
+  | timeout
+  deriving DecidableEq, Repr
+
+def ShutdownReason.optName : Option ShutdownReason → String
+  | none => "none"
+  | some .userInterrupt => "user_interrupt"
+  | some .signalTerminate => "signal_terminate"
+  | some .timeout => "timeout"
+
+inductive ErrorCause where
+  | cancelled
+  | cancelledWithReason
+  | terminated
+  | selfwareInterrupted
+  | shutdownApi
+  | configErr
+  | apiErr
+  | safetyErr
+  | confirmationErr
+  | otherErr
+  deriving DecidableEq, Repr
+
+def ErrorCause.name : ErrorCause → String
+  | .cancelled => "cancelled"
+  | .cancelledWithReason => "cancelled_with_reason"
+  | .terminated => "terminated"
+  | .selfwareInterrupted => "selfware_interrupted"
+  | .shutdownApi => "shutdown_api"
+  | .configErr => "config"
+  | .apiErr => "api"
+  | .safetyErr => "safety"
+  | .confirmationErr => "confirmation"
+  | .otherErr => "other"
+
+inductive RunOutcomeInput where
+  | ok
+  | err (cause : ErrorCause)
+  deriving DecidableEq, Repr
+
+def RunOutcomeInput.name : RunOutcomeInput → String
+  | .ok => "ok"
+  | .err c => s!"err:{c.name}"
+
+inductive RunEnd where
+  | completed
+  | failed
+  | interrupted
+  | terminated
+  deriving DecidableEq, Repr
+
+def RunEnd.name : RunEnd → String
+  | .completed => "completed"
+  | .failed => "failed"
+  | .interrupted => "interrupted"
+  | .terminated => "terminated"
+
+def classifyError (cause : ErrorCause) (shutdown : Option ShutdownReason) : RunEnd :=
+  match cause with
+  | .cancelled => .interrupted
+  | .terminated => .terminated
+  | .selfwareInterrupted => .interrupted
+  | .shutdownApi =>
+    match shutdown with
+    | some .signalTerminate => .terminated
+    | some .timeout => .failed
+    | _ => .interrupted
+  | _ => .failed
+
+def classifyRunEnd (input : RunOutcomeInput) (shutdown : Option ShutdownReason) : RunEnd :=
+  match input with
+  | .ok =>
+    match shutdown with
+    | none => .completed
+    | some .userInterrupt => .interrupted
+    | some .signalTerminate => .terminated
+    | some .timeout => .failed
+  | .err cause => classifyError cause shutdown
+
+def getExitCode (cause : ErrorCause) (shutdown : Option ShutdownReason) : Nat :=
+  match cause with
+  | .confirmationErr => 6
+  | .shutdownApi =>
+    match shutdown with
+    | some .signalTerminate => 143
+    | _ => 130
+  | .configErr => 2
+  | .apiErr => 4
+  | .safetyErr => 5
+  | .selfwareInterrupted => 130
+  | .terminated => 143
+  | .cancelled | .cancelledWithReason => 130
+  | .otherErr => 1
+
+def processExitCode (input : RunOutcomeInput) (shutdown : Option ShutdownReason) : Nat :=
+  match input with
+  | .err cause => getExitCode cause shutdown
+  | .ok =>
+    match shutdown with
+    | some .signalTerminate => 143
+    | some .userInterrupt | some .timeout => 130
+    | none => 0
+
+theorem completed_iff_exit_zero (input : RunOutcomeInput) (shutdown : Option ShutdownReason) :
+    classifyRunEnd input shutdown = .completed ↔ processExitCode input shutdown = 0 := by
+  cases input with
+  | ok =>
+    cases shutdown with
+    | none => simp [classifyRunEnd, processExitCode]
+    | some r => cases r <;> simp [classifyRunEnd, processExitCode]
+  | err cause =>
+    cases cause <;> simp [classifyRunEnd, classifyError, processExitCode, getExitCode]
+    cases shutdown with
+    | none => simp
+    | some r => cases r <;> simp
+
+theorem terminated_iff_exit_143 (input : RunOutcomeInput) (shutdown : Option ShutdownReason) :
+    classifyRunEnd input shutdown = .terminated ↔ processExitCode input shutdown = 143 := by
+  cases input with
+  | ok =>
+    cases shutdown with
+    | none => simp [classifyRunEnd, processExitCode]
+    | some r => cases r <;> simp [classifyRunEnd, processExitCode]
+  | err cause =>
+    cases cause <;> simp [classifyRunEnd, classifyError, processExitCode, getExitCode]
+    cases shutdown with
+    | none => simp
+    | some r => cases r <;> simp
+
+theorem interrupted_implies_exit_130 (input : RunOutcomeInput) (shutdown : Option ShutdownReason)
+    (h : classifyRunEnd input shutdown = .interrupted) :
+    processExitCode input shutdown = 130 := by
+  cases input with
+  | ok =>
+    cases shutdown with
+    | none => simp [classifyRunEnd] at h
+    | some r => cases r <;> simp [classifyRunEnd, processExitCode] at h ⊢
+  | err cause =>
+    cases cause <;> simp [classifyRunEnd, classifyError, processExitCode, getExitCode] at h ⊢
+    cases shutdown with
+    | none => simp at h ⊢
+    | some r => cases r <;> simp at h ⊢
+
+theorem timeout_always_fails_run_end (shutdown : Option ShutdownReason) :
+    classifyRunEnd .ok (some .timeout) = .failed ∧
+    classifyRunEnd (.err .cancelledWithReason) shutdown = .failed ∧
+    classifyRunEnd (.err .shutdownApi) (some .timeout) = .failed := by
+  simp [classifyRunEnd, classifyError]
+
+theorem error_always_nonzero_exit (cause : ErrorCause) (shutdown : Option ShutdownReason) :
+    processExitCode (.err cause) shutdown > 0 := by
+  cases cause <;> simp [processExitCode, getExitCode]
+  cases shutdown with
+  | none => decide
+  | some r => cases r <;> decide
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -730,7 +890,28 @@ def exportTable : String :=
       | some (res, trk') => s!"reserved={res}:r={trk'.reservedTokens}"
     s!"[\"budget_reserve\",\"{label}\",\"{outStr}\"]" :: acc) []
 
-  "[" ++ ",".intercalate (cbRows ++ runUpdateRows ++ abortRows ++ stepDownRows ++ budgetRows) ++ "]"
+  let runOutcomeInputs : List RunOutcomeInput :=
+    [ .ok
+    , .err .cancelled
+    , .err .cancelledWithReason
+    , .err .terminated
+    , .err .selfwareInterrupted
+    , .err .shutdownApi
+    , .err .configErr
+    , .err .apiErr
+    , .err .safetyErr
+    , .err .confirmationErr
+    , .err .otherErr
+    ]
+  let shutdownOpts : List (Option ShutdownReason) :=
+    [none, some .userInterrupt, some .signalTerminate, some .timeout]
+  let runEndRows := runOutcomeInputs.foldr (fun inp acc =>
+    shutdownOpts.foldr (fun sh acc2 =>
+      let re := classifyRunEnd inp sh
+      let code := processExitCode inp sh
+      s!"[\"run_end:{inp.name}\",\"{ShutdownReason.optName sh}\",\"{re.name}:{code}\"]" :: acc2) acc) []
+
+  "[" ++ ",".intercalate (cbRows ++ runUpdateRows ++ abortRows ++ stepDownRows ++ budgetRows ++ runEndRows) ++ "]"
 
 end SupervisionBounds
 
