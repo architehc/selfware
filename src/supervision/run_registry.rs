@@ -18,6 +18,10 @@ pub struct RunRecord {
     pub id: String,
     /// OS process id that started (owns) the run.
     pub pid: u32,
+    /// OS process start time (Unix seconds) of the owning process, when known,
+    /// used to detect PID reuse even across another `selfware` process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_time: Option<u64>,
     /// Human-readable task description.
     pub task: String,
     /// Last persisted status: "Running" | "Completed" | "Failed" | "Aborted".
@@ -30,9 +34,10 @@ pub struct RunRecord {
 
 impl RunRecord {
     /// Effective status accounting for liveness: a record still marked
-    /// "Running" whose owning process is gone is reported as "Stale".
+    /// "Running" whose owning process is gone (or whose PID has been reused)
+    /// is reported as "Stale".
     pub fn effective_status(&self) -> &str {
-        if self.status == "Running" && !pid_alive(self.pid) {
+        if self.status == "Running" && !owner_pid_alive(self.pid, self.process_start_time) {
             "Stale"
         } else {
             self.status.as_str()
@@ -40,18 +45,26 @@ impl RunRecord {
     }
 }
 
-/// Returns true if a process with `pid` currently exists.
+/// Returns true if a non-zombie process with `pid` currently exists.
 ///
-/// Cross-platform via `sysinfo` (already a dependency). The previous version
-/// probed liveness with `nix` on Unix and unconditionally returned `true` on
-/// every other platform — so on Windows a finished run was reported alive
-/// forever and never reclaimed (its status stuck at "Running").
+/// Cross-platform via `sysinfo` (through [`crate::resources::driver::process_start_time`],
+/// which filters out `ProcessStatus::Zombie | ProcessStatus::Dead`).
 pub fn pid_alive(pid: u32) -> bool {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let target = Pid::from_u32(pid);
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
-    sys.process(target).is_some()
+    crate::resources::driver::process_start_time(pid).is_some()
+}
+
+/// Returns true if `pid` is a live (non-zombie) `selfware` process whose OS
+/// start time matches `expected_start_time` (when recorded).
+pub fn owner_pid_alive(pid: u32, expected_start_time: Option<u64>) -> bool {
+    let Some(actual_start_time) = crate::resources::driver::process_start_time(pid) else {
+        return false;
+    };
+    if let Some(expected) = expected_start_time {
+        if actual_start_time != expected {
+            return false;
+        }
+    }
+    pid_is_selfware(pid)
 }
 
 /// Whether a status string is a terminal (final) run state. Terminal
@@ -226,10 +239,10 @@ impl RunRegistry {
         if matches!(rec.status.as_str(), "Completed" | "Failed" | "Aborted") {
             return Ok(AbortOutcome::AlreadyDone);
         }
-        // Only signal if the PID is still alive AND still a selfware
-        // process — never SIGTERM a reused PID belonging to an unrelated
-        // program.
-        let outcome = if pid_alive(rec.pid) && pid_is_selfware(rec.pid) {
+        // Only signal if the PID is still alive, still a selfware process,
+        // and matches the recorded OS process start time — never SIGTERM a
+        // reused PID belonging to an unrelated program or later process.
+        let outcome = if owner_pid_alive(rec.pid, rec.process_start_time) {
             #[cfg(unix)]
             {
                 use nix::errno::Errno;

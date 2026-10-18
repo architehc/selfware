@@ -2254,3 +2254,55 @@ fn test_swarm_complete_task_all_failed_marked_failed() {
     assert_eq!(task.status, TaskStatus::Failed);
     assert_eq!(task.failed_results().len(), 2);
 }
+
+#[test]
+fn test_swarm_prunes_oldest_completed_tasks_beyond_cap() {
+    use super::coordinator::MAX_RETAINED_TASKS;
+
+    let mut swarm = Swarm::new();
+    let coder = swarm.add_agent(Agent::new("C1", AgentRole::Coder));
+
+    let mut first_id = String::new();
+    let mut last_id = String::new();
+    for i in 0..(MAX_RETAINED_TASKS + 10) {
+        let mut task = SwarmTask::new(format!("Task {i}")).with_role(AgentRole::Coder);
+        task.created_at = i as u64;
+        let tid = task.id.clone();
+        if i == 0 {
+            first_id = tid.clone();
+        }
+        last_id = tid.clone();
+        swarm.queue_task(task).unwrap();
+        let assigned = swarm.assign_task(&tid);
+        assert_eq!(assigned.len(), 1);
+        swarm.complete_task(&tid, &coder, "done", true);
+    }
+
+    assert!(
+        swarm.get_task(&first_id).is_none(),
+        "oldest completed task should be evicted once MAX_RETAINED_TASKS is exceeded"
+    );
+    assert!(
+        swarm.get_task(&last_id).is_some(),
+        "newest completed task should be retained"
+    );
+}
+
+#[test]
+fn test_swarm_prunes_resolved_decisions_beyond_cap() {
+    use super::coordinator::MAX_RETAINED_DECISIONS;
+
+    let mut swarm = Swarm::new();
+    let coder = swarm.add_agent(Agent::new("C1", AgentRole::Coder));
+
+    for i in 0..(MAX_RETAINED_DECISIONS + 10) {
+        let did = swarm.create_decision(format!("Q{i}"), vec!["A".into(), "B".into()]);
+        swarm.vote(&did, &coder, "A", 0.9, "ok").unwrap();
+        swarm.resolve_decision(&did).unwrap();
+    }
+
+    assert!(
+        swarm.list_decisions().len() <= MAX_RETAINED_DECISIONS,
+        "resolved decisions should be bounded by MAX_RETAINED_DECISIONS"
+    );
+}

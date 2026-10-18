@@ -52,3 +52,27 @@ fn role_swarm_mirrors_chat_fleet_one_to_one() {
         assert_eq!(agent.status, crate::swarm::AgentStatus::Idle);
     }
 }
+
+#[test]
+fn parse_agent_role_recognizes_all_roles_and_rejects_unknown() {
+    assert_eq!(parse_agent_role("architect"), Some(AgentRole::Architect));
+    assert_eq!(parse_agent_role("  CODER "), Some(AgentRole::Coder));
+    assert_eq!(parse_agent_role("tester"), Some(AgentRole::Tester));
+    assert_eq!(parse_agent_role("reviewer"), Some(AgentRole::Reviewer));
+    assert_eq!(parse_agent_role("documenter"), Some(AgentRole::Documenter));
+    assert_eq!(parse_agent_role("devops"), Some(AgentRole::DevOps));
+    assert_eq!(parse_agent_role("security"), Some(AgentRole::Security));
+    assert_eq!(
+        parse_agent_role("performance"),
+        Some(AgentRole::Performance)
+    );
+    assert_eq!(
+        parse_agent_role("visual-critic"),
+        Some(AgentRole::VisualCritic)
+    );
+    assert_eq!(parse_agent_role("general"), Some(AgentRole::General));
+    assert_eq!(parse_agent_role("unknown"), None);
+    const {
+        assert!(MAX_TOTAL_AGENTS >= MAX_CONCURRENT_AGENTS);
+    };
+}

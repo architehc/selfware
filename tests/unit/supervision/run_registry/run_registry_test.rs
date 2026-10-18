@@ -4,6 +4,7 @@ fn rec(id: &str, pid: u32, status: &str, started: i64) -> RunRecord {
     RunRecord {
         id: id.to_string(),
         pid,
+        process_start_time: None,
         task: format!("task {id}"),
         status: status.to_string(),
         started_unix: started,
@@ -115,13 +116,46 @@ fn abort_live_non_selfware_pid_is_not_signalled() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    reg.write(&rec("live-1", pid, "Running", 100)).unwrap();
+    let live_non_selfware = rec("live-1", pid, "Running", 100);
+    assert_eq!(
+        live_non_selfware.effective_status(),
+        "Stale",
+        "reused non-selfware PID must be reported Stale"
+    );
+    reg.write(&live_non_selfware).unwrap();
     let outcome = reg.abort("live-1", 200).unwrap();
     assert_eq!(outcome, AbortOutcome::WasStale);
     assert_eq!(reg.get("live-1").unwrap().unwrap().status, "Aborted");
     // The unrelated process must be untouched (still alive) — reap it.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[test]
+fn mismatched_process_start_time_prevents_signalling_reused_selfware_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let reg = RunRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+    let self_pid = std::process::id();
+    let actual_start = crate::resources::driver::process_start_time(self_pid)
+        .expect("current process start time must be readable");
+
+    let mut matching = rec("self-match", self_pid, "Running", 100);
+    matching.process_start_time = Some(actual_start);
+    assert_eq!(matching.effective_status(), "Running");
+
+    // Simulate a stale RunRecord whose PID was reused by a later selfware process
+    // with a different OS start time: must report Stale and must NOT signal self_pid!
+    let mut reused = rec("self-reused", self_pid, "Running", 100);
+    reused.process_start_time = Some(actual_start.saturating_sub(10).max(1));
+    if reused.process_start_time == Some(actual_start) {
+        reused.process_start_time = Some(actual_start + 10);
+    }
+    assert_eq!(reused.effective_status(), "Stale");
+
+    reg.write(&reused).unwrap();
+    let outcome = reg.abort("self-reused", 200).unwrap();
+    assert_eq!(outcome, AbortOutcome::WasStale);
+    assert_eq!(reg.get("self-reused").unwrap().unwrap().status, "Aborted");
 }
 
 #[test]

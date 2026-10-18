@@ -13,6 +13,14 @@ use super::types::{
     Agent, AgentRole, AgentStatus, Decision, DecisionStatus, SwarmTask, TaskStatus,
 };
 
+/// Maximum number of completed/failed tasks retained in `Swarm::active_tasks`
+/// before the oldest terminal entries are evicted.
+pub const MAX_RETAINED_TASKS: usize = 512;
+
+/// Maximum number of resolved/timed-out decisions retained in `Swarm::decisions`
+/// before the oldest terminal entries are evicted.
+pub const MAX_RETAINED_DECISIONS: usize = 512;
+
 /// Conflict resolution strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ConflictStrategy {
@@ -83,6 +91,55 @@ impl Swarm {
         }
     }
 
+    fn prune_completed_tasks(&mut self) {
+        if self.active_tasks.len() <= MAX_RETAINED_TASKS {
+            return;
+        }
+        let excess = self.active_tasks.len() - MAX_RETAINED_TASKS;
+        let mut terminal: Vec<(u64, String)> = self
+            .active_tasks
+            .iter()
+            .filter(|(_, task)| {
+                matches!(
+                    task.status,
+                    TaskStatus::Completed | TaskStatus::Partial | TaskStatus::Failed
+                )
+            })
+            .map(|(id, task)| (task.created_at, id.clone()))
+            .collect();
+        terminal.sort_unstable();
+        for (_, id) in terminal.into_iter().take(excess) {
+            self.active_tasks.remove(&id);
+        }
+    }
+
+    fn prune_resolved_decisions(&mut self) {
+        if self.decisions.len() <= MAX_RETAINED_DECISIONS {
+            return;
+        }
+        let excess = self.decisions.len() - MAX_RETAINED_DECISIONS;
+        let mut terminal: Vec<(u64, String)> = self
+            .decisions
+            .iter()
+            .filter(|(_, decision)| {
+                matches!(
+                    decision.status,
+                    DecisionStatus::Resolved | DecisionStatus::TimedOut
+                )
+            })
+            .map(|(id, decision)| {
+                (
+                    decision.resolved_at.unwrap_or(decision.created_at),
+                    id.clone(),
+                )
+            })
+            .collect();
+        terminal.sort_unstable();
+        for (_, id) in terminal.into_iter().take(excess) {
+            self.decisions.remove(&id);
+        }
+    }
+
     /// Set conflict strategy
     pub fn with_conflict_strategy(mut self, strategy: ConflictStrategy) -> Self {
         self.conflict_strategy = strategy;
@@ -130,6 +187,9 @@ impl Swarm {
             }
         }
 
+        if !timed_out.is_empty() {
+            self.prune_resolved_decisions();
+        }
         timed_out
     }
 
@@ -186,6 +246,7 @@ impl Swarm {
     /// resulting winner was deterministic (last finisher) and never used.
     /// The API is retained for embedders and remains covered by swarm tests.
     pub fn create_decision(&mut self, question: impl Into<String>, options: Vec<String>) -> String {
+        self.prune_resolved_decisions();
         let decision = Decision::new(question, options);
         let id = decision.id.clone();
         self.decisions.insert(id.clone(), decision);
@@ -231,12 +292,15 @@ impl Swarm {
 
         let consensus_threshold = self.consensus_threshold;
 
-        let decision = self
-            .decisions
-            .get_mut(decision_id)
-            .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?;
-
-        Ok(decision.resolve_with_threshold(&trust_scores, consensus_threshold))
+        let outcome = {
+            let decision = self
+                .decisions
+                .get_mut(decision_id)
+                .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?;
+            decision.resolve_with_threshold(&trust_scores, consensus_threshold)
+        };
+        self.prune_resolved_decisions();
+        Ok(outcome)
     }
 
     /// List all decisions
@@ -342,6 +406,7 @@ impl Swarm {
             // Keep status as Conflict so callers know human input is still needed.
         }
         decision.resolved_at = Some(now);
+        self.prune_resolved_decisions();
 
         Ok(resolution)
     }
@@ -374,6 +439,7 @@ impl Swarm {
         let task_id = task.id.clone();
         // Move task to active_tasks so it can be assigned and completed
         self.active_tasks.insert(task_id.clone(), task);
+        self.prune_completed_tasks();
         Some(task_id)
     }
 
@@ -386,6 +452,7 @@ impl Swarm {
             if let Some(index) = self.task_queue.iter().position(|t| t.id == *task_id) {
                 let task = self.task_queue.remove(index);
                 self.active_tasks.insert(task_id.to_string(), task);
+                self.prune_completed_tasks();
             } else {
                 tracing::warn!("Task {} not found in active tasks or queue", task_id);
                 return Vec::new();
@@ -500,6 +567,9 @@ impl Swarm {
             // Return to the idle pool so future tasks can be assigned.
             agent.set_idle();
         }
+        if all_done {
+            self.prune_completed_tasks();
+        }
     }
 
     /// Mark a task as failed and return its assigned agents to the idle pool.
@@ -525,6 +595,7 @@ impl Swarm {
                 agent.set_idle();
             }
         }
+        self.prune_completed_tasks();
     }
 
     /// Get swarm statistics

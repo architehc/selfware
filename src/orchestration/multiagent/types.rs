@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 /// Maximum number of concurrent agent streams
 pub const MAX_CONCURRENT_AGENTS: usize = 16;
 
+/// Maximum total number of agents in a multi-agent chat session
+pub const MAX_TOTAL_AGENTS: usize = 32;
+
 /// Agent status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {

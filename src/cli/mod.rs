@@ -342,21 +342,28 @@ fn tui_launch_block_reason(stdin_is_tty: bool, stdout_is_tty: bool) -> Option<&'
 }
 
 fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
+    // ── Global --model override (Claude Code / Codex / Gemini parity) ──
+    // Overrides the config `model` key for this session. Long-only on
+    // purpose: `-m` stays --mode for existing scripts. Applied before
+    // `--profile` so the named session profile overrides the new model's
+    // built-in defaults cleanly.
+    if let Some(ref model) = cli.model {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "--model must not be empty — it overrides the `model` key in the configuration"
+        );
+        config.apply_cli_model_override(model.to_string());
+    }
+
     // ── Apply named configuration profile (if requested) ──
     // `--profile architect|swarm-8|batch-16|batch-32|visual|quick` applies
-    // built-in overrides for max_tokens / temperature from `ProfileManager`.
+    // built-in overrides from `ProfileManager` and records `--profile <name>`
+    // provenance for every modified field.
     if let Some(ref profile_name) = cli.profile {
         let pm = crate::profiles::ProfileManager::new();
         match pm.apply_profile(config, profile_name) {
             Ok(()) => {
-                config.sources.set(
-                    "max_tokens",
-                    crate::config::ConfigSource::CliArg("--profile".into()),
-                );
-                config.sources.set(
-                    "temperature",
-                    crate::config::ConfigSource::CliArg("--profile".into()),
-                );
                 config.sync_default_model_profile();
                 tracing::info!(
                     "Applied configuration profile '{}' (max_tokens={}, \
@@ -373,18 +380,6 @@ fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
                 );
             }
         }
-    }
-
-    // ── Global --model override (Claude Code / Codex / Gemini parity) ──
-    // Overrides the config `model` key for this session. Long-only on
-    // purpose: `-m` stays --mode for existing scripts.
-    if let Some(ref model) = cli.model {
-        let model = model.trim();
-        anyhow::ensure!(
-            !model.is_empty(),
-            "--model must not be empty — it overrides the `model` key in the configuration"
-        );
-        config.apply_cli_model_override(model.to_string());
     }
 
     if cli.profile.is_some() || cli.model.is_some() {
@@ -785,7 +780,7 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Task { command }) => {
             let log = crate::lifecycle::EventLog::default_location();
-            let alive = |pid: u32| crate::supervision::run_registry::pid_alive(pid);
+            let alive = |pid: u32| crate::supervision::run_registry::owner_pid_alive(pid, None);
             let verb = match command {
                 args::TaskCommands::Show { id } => {
                     let description_of = |task_id: &str| {
@@ -3696,9 +3691,11 @@ max_recovery_attempts = 3
                     let id = supervisor.start(task.clone(), config.clone()).await;
                     let composite = format!("{}-{}", std::process::id(), id.0);
                     let now = chrono::Utc::now().timestamp();
+                    let pid = std::process::id();
                     let record = RunRecord {
                         id: composite.clone(),
-                        pid: std::process::id(),
+                        pid,
+                        process_start_time: crate::resources::driver::process_start_time(pid),
                         task: task.clone(),
                         status: "Running".to_string(),
                         started_unix: now,

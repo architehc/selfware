@@ -154,6 +154,8 @@ pub struct ProcessReconcileReport {
     pub reserved_ports: usize,
 }
 
+const LOG_TRUNCATED_SUFFIX: &str = "...[truncated]";
+
 impl ManagedProcess {
     fn new(config: ProcessConfig) -> Self {
         Self {
@@ -174,13 +176,14 @@ impl ManagedProcess {
         if self.log_buffer.len() >= MAX_LOG_LINES {
             self.log_buffer.pop_front();
         }
-        let content = if content.len() > MAX_LOG_LINE_LEN {
-            let mut truncated: String = content.chars().take(MAX_LOG_LINE_LEN).collect();
-            truncated.push_str("...[truncated]");
-            truncated
-        } else {
-            content
-        };
+        let content =
+            if content.len() > MAX_LOG_LINE_LEN && !content.ends_with(LOG_TRUNCATED_SUFFIX) {
+                let mut truncated: String = content.chars().take(MAX_LOG_LINE_LEN).collect();
+                truncated.push_str(LOG_TRUNCATED_SUFFIX);
+                truncated
+            } else {
+                content
+            };
         self.log_buffer.push_back(LogLine {
             timestamp: Utc::now(),
             stream,
@@ -1506,6 +1509,62 @@ async fn force_kill_process_tree(child: &mut Child, _pid: Option<u32>) -> Option
     child.wait().await.ok().and_then(|status| status.code())
 }
 
+/// Read a single line from `reader`, capping buffered bytes at `max_bytes` while
+/// still draining the remainder of an oversized line up to `\n`. Uses lossy UTF-8
+/// conversion so non-UTF-8 bytes in child output do not abort the reader loop and
+/// break the child's pipe.
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() && !truncated {
+                return Ok(None);
+            }
+            break;
+        }
+
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            if !truncated {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                let take = newline_pos.min(remaining);
+                buf.extend_from_slice(&available[..take]);
+                if newline_pos > remaining {
+                    truncated = true;
+                }
+            }
+            reader.consume(newline_pos + 1);
+            break;
+        } else {
+            let len = available.len();
+            if !truncated {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                let take = len.min(remaining);
+                buf.extend_from_slice(&available[..take]);
+                if len > remaining {
+                    truncated = true;
+                }
+            }
+            reader.consume(len);
+        }
+    }
+
+    if !truncated && buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+
+    let mut line = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        line.push_str(LOG_TRUNCATED_SUFFIX);
+    }
+    Ok(Some(line))
+}
+
 /// Collect output from a process stream
 async fn collect_output<R: tokio::io::AsyncRead + Unpin>(
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
@@ -1516,9 +1575,9 @@ async fn collect_output<R: tokio::io::AsyncRead + Unpin>(
     stream: LogStream,
     health_pattern: Option<Regex>,
 ) {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_LOG_LINE_LEN).await {
         debug!("[{}] {:?}: {}", id, stream, line);
 
         // Check health pattern
@@ -1558,6 +1617,8 @@ async fn monitor_process(
     auto_restart: bool,
     max_restarts: u32,
 ) {
+    let mut restart_health_deadline: Option<(u64, tokio::time::Instant)> = None;
+
     loop {
         // Poll for process exit using try_wait() with short lock holds.
         // This avoids holding the child_handle write lock during a blocking
@@ -1579,16 +1640,54 @@ async fn monitor_process(
                 break Some(status);
             }
 
-            // Check if process was marked as stopped by stop()
+            // Check if process was marked as stopped by stop(), or if an
+            // auto-restarted process timed out waiting for its health pattern.
+            let mut health_timed_out = false;
             {
                 let procs = processes.read().await;
                 if let Some(proc) = procs.get(&id).filter(|proc| proc.generation == generation) {
                     if matches!(proc.status, ProcessStatus::Stopped) {
                         break None;
                     }
+                    if let Some((incarnation, deadline)) = restart_health_deadline {
+                        if proc.incarnation != incarnation
+                            || proc.health_matched
+                            || !matches!(proc.status, ProcessStatus::Starting)
+                        {
+                            restart_health_deadline = None;
+                        } else if tokio::time::Instant::now() >= deadline {
+                            health_timed_out = true;
+                        }
+                    }
                 } else {
                     break None;
                 }
+            }
+
+            if health_timed_out {
+                warn!(
+                    "Process '{}' failed health check after auto-restart and will be terminated",
+                    id
+                );
+                {
+                    let mut child_guard = child_handle.write().await;
+                    if let Some(mut child) = child_guard.take() {
+                        let current_pid = child.id();
+                        let _ = force_kill_process_tree(&mut child, current_pid).await;
+                    }
+                }
+                let mut procs = processes.write().await;
+                if let Some(proc) = procs
+                    .get_mut(&id)
+                    .filter(|proc| proc.generation == generation)
+                {
+                    if matches!(proc.status, ProcessStatus::Starting) && !proc.health_matched {
+                        proc.child_handle = None;
+                        proc.pid = None;
+                        proc.status = ProcessStatus::HealthCheckFailed;
+                    }
+                }
+                break None;
             }
 
             // Sleep briefly before polling again
@@ -1751,18 +1850,28 @@ async fn monitor_process(
                             });
                         }
 
-                        // Mark as running after brief startup
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        let mut procs = processes.write().await;
-                        if let Some(proc) = procs.get_mut(&id).filter(|proc| {
-                            proc.generation == generation
-                                && proc.incarnation == u64::from(restart_attempt)
-                        }) {
-                            if matches!(proc.status, ProcessStatus::Starting)
-                                && health_pattern.is_none()
-                            {
-                                proc.status = ProcessStatus::Running;
-                                proc.health_matched = true;
+                        if health_pattern.is_some() {
+                            let health_timeout = config
+                                .health_check_timeout_secs
+                                .unwrap_or(HEALTH_CHECK_TIMEOUT_SECS);
+                            restart_health_deadline = Some((
+                                u64::from(restart_attempt),
+                                tokio::time::Instant::now()
+                                    + tokio::time::Duration::from_secs(health_timeout),
+                            ));
+                        } else {
+                            restart_health_deadline = None;
+                            // Mark as running after brief startup
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            let mut procs = processes.write().await;
+                            if let Some(proc) = procs.get_mut(&id).filter(|proc| {
+                                proc.generation == generation
+                                    && proc.incarnation == u64::from(restart_attempt)
+                            }) {
+                                if matches!(proc.status, ProcessStatus::Starting) {
+                                    proc.status = ProcessStatus::Running;
+                                    proc.health_matched = true;
+                                }
                             }
                         }
 

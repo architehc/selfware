@@ -216,45 +216,79 @@ impl ProfileManager {
         // only max_tokens/temperature were applied, so --profile silently
         // dropped max_iterations, step_timeout, streaming, etc.)
         let o = &profile.config_overrides;
+        let cli_source = crate::config::ConfigSource::CliArg(format!("--profile {profile_name}"));
 
         if let Some(max_tokens) = o.max_tokens {
             config.max_tokens = max_tokens;
+            config.sources.set("max_tokens", cli_source.clone());
             obey_profile_max_tokens(config, profile_name, max_tokens);
         }
         if let Some(temperature) = o.temperature {
             config.temperature = temperature;
+            config.sources.set("temperature", cli_source.clone());
         }
         if let Some(max_iterations) = o.max_iterations {
             config.agent.max_iterations = max_iterations;
+            config
+                .sources
+                .set("agent.max_iterations", cli_source.clone());
         }
         if let Some(step_timeout_secs) = o.step_timeout_secs {
             config.agent.step_timeout_secs = step_timeout_secs;
+            config
+                .sources
+                .set("agent.step_timeout_secs", cli_source.clone());
         }
         if let Some(agent) = &o.agent {
             if let Some(streaming) = agent.streaming {
                 config.agent.streaming = streaming;
+                config.sources.set("agent.streaming", cli_source.clone());
             }
             if let Some(native_fc) = agent.native_function_calling {
                 config.agent.native_function_calling = native_fc;
+                config
+                    .sources
+                    .set("agent.native_function_calling", cli_source.clone());
             }
             if let Some(enable_thinking) = agent.enable_thinking {
                 let extra = config.extra_body.get_or_insert_with(Default::default);
+                if extra.contains_key("enable_thinking") {
+                    extra.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(enable_thinking),
+                    );
+                    config
+                        .sources
+                        .set("extra_body.enable_thinking", cli_source.clone());
+                }
                 let kwargs = extra
                     .entry("chat_template_kwargs".to_string())
                     .or_insert_with(|| serde_json::json!({}));
                 if let Some(obj) = kwargs.as_object_mut() {
-                    obj.entry("enable_thinking".to_string())
-                        .or_insert_with(|| serde_json::Value::Bool(enable_thinking));
+                    obj.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(enable_thinking),
+                    );
                 }
+                config
+                    .sources
+                    .set("extra_body.chat_template_kwargs", cli_source.clone());
+                obey_profile_enable_thinking(config, profile_name, enable_thinking);
             }
         }
         if let Some(concurrency) = &o.concurrency {
             if let Some(max_parallel) = concurrency.max_parallel_requests {
                 config.concurrency.max_streams = max_parallel;
+                config
+                    .sources
+                    .set("concurrency.max_streams", cli_source.clone());
             }
             if o.step_timeout_secs.is_none() {
                 if let Some(timeout_secs) = concurrency.timeout_secs {
                     config.agent.step_timeout_secs = timeout_secs;
+                    config
+                        .sources
+                        .set("agent.step_timeout_secs", cli_source.clone());
                 }
             }
         }
@@ -314,6 +348,47 @@ fn obey_profile_max_tokens(config: &mut Config, profile_name: &str, max_tokens: 
         config.workload_overrides.push(format!(
             "--profile {profile_name} max_tokens = {max_tokens} does not apply to turns with an \
              explicit [workloads.<kind>] max_tokens ({})",
+            kept.join(", ")
+        ));
+    }
+}
+
+/// Mirror [`obey_profile_max_tokens`] for `enable_thinking`: when `--profile`
+/// explicitly sets `enable_thinking`, model-profile-sourced per-turn
+/// `workloads.<kind>.enable_thinking` overrides are cleared so the session
+/// profile applies across every turn unless the user explicitly configured
+/// `[workloads.<kind>] enable_thinking`.
+fn obey_profile_enable_thinking(config: &mut Config, profile_name: &str, enable_thinking: bool) {
+    use crate::config::{ConfigSource, TurnWorkload};
+    let mut dropped = Vec::new();
+    let mut kept = Vec::new();
+    for kind in TurnWorkload::ALL {
+        let key = format!("workloads.{kind}.enable_thinking");
+        let Some(on) = config.workloads.get(kind).enable_thinking else {
+            continue;
+        };
+        if matches!(config.sources.get(&key), Some(ConfigSource::Profile(_))) {
+            config.workloads.get_mut(kind).enable_thinking = None;
+            config.sources.set(
+                key,
+                ConfigSource::CliArg(format!("--profile {profile_name}")),
+            );
+            dropped.push(format!("{kind} {on}"));
+        } else {
+            kept.push(format!("{kind} {on}"));
+        }
+    }
+    if !dropped.is_empty() {
+        config.workload_overrides.push(format!(
+            "per-turn enable_thinking from the model profile not applied ({}): --profile \
+             {profile_name} sets enable_thinking = {enable_thinking} for every turn",
+            dropped.join(", ")
+        ));
+    }
+    if !kept.is_empty() {
+        config.workload_overrides.push(format!(
+            "--profile {profile_name} enable_thinking = {enable_thinking} does not apply to \
+             turns with an explicit [workloads.<kind>] enable_thinking ({})",
             kept.join(", ")
         ));
     }

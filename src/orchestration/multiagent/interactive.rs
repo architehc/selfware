@@ -16,8 +16,26 @@ use super::chat::MultiAgentChat;
 use super::config::MultiAgentConfig;
 use super::types::{
     AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS,
+    MAX_TOTAL_AGENTS,
 };
 use super::view::{agent_color, render_summary_table, AgentLine, MultiChatView};
+
+/// Parse a user-supplied role name into an [`AgentRole`].
+fn parse_agent_role(role_str: &str) -> Option<AgentRole> {
+    match role_str.trim().to_ascii_lowercase().as_str() {
+        "architect" => Some(AgentRole::Architect),
+        "coder" => Some(AgentRole::Coder),
+        "tester" => Some(AgentRole::Tester),
+        "reviewer" => Some(AgentRole::Reviewer),
+        "documenter" => Some(AgentRole::Documenter),
+        "devops" => Some(AgentRole::DevOps),
+        "security" => Some(AgentRole::Security),
+        "performance" => Some(AgentRole::Performance),
+        "visual_critic" | "visual-critic" | "visualcritic" => Some(AgentRole::VisualCritic),
+        "general" => Some(AgentRole::General),
+        _ => None,
+    }
+}
 
 /// Classification of a `stdin().read_line` result for the interactive loops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,24 +349,12 @@ impl MultiAgentChat {
                     println!("Usage: /add <role>");
                     continue;
                 }
-                let role_str = role_str.to_lowercase();
-                let role = match role_str.as_str() {
-                    "architect" => Some(AgentRole::Architect),
-                    "coder" => Some(AgentRole::Coder),
-                    "tester" => Some(AgentRole::Tester),
-                    "reviewer" => Some(AgentRole::Reviewer),
-                    "documenter" => Some(AgentRole::Documenter),
-                    "devops" => Some(AgentRole::DevOps),
-                    "security" => Some(AgentRole::Security),
-                    "performance" => Some(AgentRole::Performance),
-                    "visual_critic" | "visual-critic" | "visualcritic" => {
-                        Some(AgentRole::VisualCritic)
-                    }
-                    "general" => Some(AgentRole::General),
-                    _ => None,
-                };
-                if let Some(role) = role {
+                if let Some(role) = parse_agent_role(role_str) {
                     let mut agents = self.agents.write().await;
+                    if agents.len() >= MAX_TOTAL_AGENTS {
+                        println!("Maximum number of agents ({}) reached", MAX_TOTAL_AGENTS);
+                        continue;
+                    }
                     let id = agents.len();
                     agents.push(AgentInstance {
                         id,
@@ -358,6 +364,7 @@ impl MultiAgentChat {
                         status: AgentStatus::Idle,
                         last_heartbeat: Instant::now(),
                     });
+                    self.config.roles.push(role);
                     println!("Added Agent-{}-{}", id, role.name());
                 } else {
                     println!("Unknown role. Available: architect, coder, tester, reviewer, documenter, devops, security, performance, visual_critic, general");
@@ -372,9 +379,13 @@ impl MultiAgentChat {
                         let mut agents = self.agents.write().await;
                         if id < agents.len() {
                             let removed = agents.remove(id);
+                            if id < self.config.roles.len() {
+                                self.config.roles.remove(id);
+                            }
                             // Re-index remaining agents
                             for (i, agent) in agents.iter_mut().enumerate() {
                                 agent.id = i;
+                                agent.name = format!("Agent-{}-{}", i, agent.role.name());
                             }
                             println!("Removed {}", removed.name);
                         } else {
@@ -503,6 +514,8 @@ impl MultiAgentChat {
                 println!("  /agents      - List swarm agents");
                 println!("  /status      - Show swarm status");
                 println!("  /parallel N  - Set max concurrency (1-16)");
+                println!("  /add <role>  - Add an agent (coder/tester/reviewer/etc)");
+                println!("  /remove N    - Remove agent by ID");
                 println!("  /clear       - Reset swarm and agents");
                 println!("  exit         - Exit chat");
                 continue;
@@ -544,6 +557,71 @@ impl MultiAgentChat {
                         println!("Max concurrency set to {}", n);
                     }
                     Err(_) => println!("Usage: /parallel <1-{}>", MAX_CONCURRENT_AGENTS),
+                }
+                continue;
+            }
+
+            if input == "/add" || input.starts_with("/add ") {
+                let role_str = input.strip_prefix("/add").unwrap_or("").trim();
+                if role_str.is_empty() {
+                    println!("Usage: /add <role>");
+                    continue;
+                }
+                if let Some(role) = parse_agent_role(role_str) {
+                    let mut agents = self.agents.write().await;
+                    if agents.len() >= MAX_TOTAL_AGENTS {
+                        println!("Maximum number of agents ({}) reached", MAX_TOTAL_AGENTS);
+                        continue;
+                    }
+                    let id = agents.len();
+                    let name = format!("Agent-{}-{}", id, role.name());
+                    agents.push(AgentInstance {
+                        id,
+                        role,
+                        name: name.clone(),
+                        messages: vec![crate::api::types::Message::system(role.system_prompt())],
+                        status: AgentStatus::Idle,
+                        last_heartbeat: Instant::now(),
+                    });
+                    self.config.roles.push(role);
+                    let swarm_id = swarm.add_agent(Agent::new(name.clone(), role));
+                    swarm_agent_ids.push(swarm_id);
+                    println!("Added {}", name);
+                } else {
+                    println!("Unknown role. Available: architect, coder, tester, reviewer, documenter, devops, security, performance, visual_critic, general");
+                }
+                continue;
+            }
+
+            if input == "/remove" || input.starts_with("/remove ") {
+                let value = input.strip_prefix("/remove").unwrap_or("").trim();
+                match value.parse::<usize>() {
+                    Ok(id) => {
+                        let mut agents = self.agents.write().await;
+                        if id < agents.len() {
+                            let removed = agents.remove(id);
+                            if id < self.config.roles.len() {
+                                self.config.roles.remove(id);
+                            }
+                            if id < swarm_agent_ids.len() {
+                                let swarm_id = swarm_agent_ids.remove(id);
+                                swarm.remove_agent(&swarm_id);
+                            }
+                            for (i, agent) in agents.iter_mut().enumerate() {
+                                agent.id = i;
+                                agent.name = format!("Agent-{}-{}", i, agent.role.name());
+                                if let Some(swarm_id) = swarm_agent_ids.get(i) {
+                                    if let Some(sa) = swarm.get_agent_mut(swarm_id) {
+                                        sa.name = agent.name.clone();
+                                    }
+                                }
+                            }
+                            println!("Removed {}", removed.name);
+                        } else {
+                            println!("Invalid agent ID");
+                        }
+                    }
+                    Err(_) => println!("Usage: /remove <id>"),
                 }
                 continue;
             }

@@ -2420,3 +2420,79 @@ async fn stderr_health_check_pattern_matches_and_marks_running() {
     assert_eq!(summary.status, ProcessStatus::Running);
     let _ = manager.stop("stderr-ready", true).await;
 }
+
+#[tokio::test]
+async fn read_bounded_line_caps_oversized_lines_and_recovers_from_invalid_utf8() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&vec![b'a'; MAX_LOG_LINE_LEN + 2048]);
+    payload.push(b'\n');
+    payload.extend_from_slice(b"prefix-\xff\xfe-READY\r\n");
+
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(payload));
+
+    let first = read_bounded_line(&mut reader, MAX_LOG_LINE_LEN)
+        .await
+        .unwrap()
+        .expect("first line");
+    assert_eq!(first.len(), MAX_LOG_LINE_LEN + LOG_TRUNCATED_SUFFIX.len());
+    assert!(first.ends_with(LOG_TRUNCATED_SUFFIX));
+
+    let second = read_bounded_line(&mut reader, MAX_LOG_LINE_LEN)
+        .await
+        .unwrap()
+        .expect("second line after invalid UTF-8");
+    assert!(second.starts_with("prefix-"));
+    assert!(second.ends_with("-READY"));
+
+    assert!(
+        read_bounded_line(&mut reader, MAX_LOG_LINE_LEN)
+            .await
+            .unwrap()
+            .is_none(),
+        "EOF expected after two lines"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn auto_restart_enforces_health_check_timeout_when_restarted_child_hangs() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("started_once");
+    let script = format!(
+        "if [ ! -f '{marker}' ]; then touch '{marker}'; echo 'READY'; sleep 0.2; exit 1; else echo 'booting without ready'; sleep 30; fi",
+        marker = marker.display()
+    );
+
+    let manager = ProcessManager::new();
+    let config = ProcessConfig {
+        id: "restart-health-timeout".into(),
+        command: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: Some(dir.path().to_path_buf()),
+        env: HashMap::new(),
+        health_check_pattern: Some("READY".into()),
+        health_check_timeout_secs: Some(1),
+        expected_port: None,
+        auto_restart: true,
+        max_restart_attempts: 2,
+    };
+
+    let summary = manager.start(config).await.expect("initial start succeeds");
+    assert_eq!(summary.status, ProcessStatus::Running);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        let current = manager.get("restart-health-timeout").await.unwrap();
+        if current.status == ProcessStatus::HealthCheckFailed {
+            assert_eq!(current.restart_count, 1);
+            assert!(current.pid.is_none());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restarted process stuck in {:?} instead of failing health check",
+            current.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
