@@ -587,9 +587,9 @@ impl MultiAgentChat {
 /// Spend limits for one fan-out run, read from `config.agent` (where the CLI
 /// merges `--max-budget-tokens` / `--max-cost-usd`).
 #[derive(Debug, Clone, Copy, Default)]
-struct BudgetLimits {
-    max_budget_tokens: Option<usize>,
-    max_cost_usd: Option<f64>,
+pub(super) struct BudgetLimits {
+    pub(super) max_budget_tokens: Option<usize>,
+    pub(super) max_cost_usd: Option<f64>,
 }
 
 /// Cumulative spend accounting shared by all agent tasks of one `run_task`.
@@ -605,29 +605,29 @@ struct BudgetLimits {
 /// Uses `std::sync::Mutex` (not tokio): critical sections are a few integer
 /// ops and are never held across an `.await`.
 #[derive(Debug, Default)]
-struct BudgetTracker {
+pub(super) struct BudgetTracker {
     /// Sum of `usage.total_tokens` reported by completed calls.
-    actual_tokens: usize,
+    pub(super) actual_tokens: usize,
     /// Sum of provider-reported `usage.cost` from completed calls.
-    actual_cost: f64,
+    pub(super) actual_cost: f64,
     /// Pessimistic reservations held by in-flight calls.
-    reserved_tokens: usize,
+    pub(super) reserved_tokens: usize,
     /// Set when `--max-cost-usd` is active and a completed call returns no
     /// provider cost, preventing subsequent waves from bypassing the cost cap.
-    unmetered_cost: bool,
+    pub(super) unmetered_cost: bool,
 }
 
 /// Per-run spend guard passed to every agent task.
 #[derive(Debug, Clone)]
-struct BudgetGuard {
-    tracker: Arc<std::sync::Mutex<BudgetTracker>>,
-    limits: BudgetLimits,
+pub(super) struct BudgetGuard {
+    pub(super) tracker: Arc<std::sync::Mutex<BudgetTracker>>,
+    pub(super) limits: BudgetLimits,
     /// Pessimistic per-call token estimate (the resolved `max_tokens` cap).
-    estimate: usize,
+    pub(super) estimate: usize,
 }
 
 impl BudgetGuard {
-    fn new(limits: BudgetLimits, estimate: usize) -> Self {
+    pub(super) fn new(limits: BudgetLimits, estimate: usize) -> Self {
         Self {
             tracker: Arc::new(std::sync::Mutex::new(BudgetTracker::default())),
             limits,
@@ -637,7 +637,7 @@ impl BudgetGuard {
 
     /// Try to reserve budget for one new call. Returns the reserved token count,
     /// or a human-readable reason when launching the call would exceed a configured limit.
-    fn try_reserve(&self, prompt_tokens: usize) -> Result<usize, String> {
+    pub(super) fn try_reserve(&self, prompt_tokens: usize) -> Result<usize, String> {
         let mut tracker = self.tracker.lock().unwrap();
         let call_estimate = self.estimate + prompt_tokens;
         if let Some(max) = self.limits.max_budget_tokens {

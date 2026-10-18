@@ -121,6 +121,7 @@ check_model ResourceFsm.lean "${FORMAL}/resource_table.json"
 check_model HarnessLoopBounds.lean "${FORMAL}/agent_state_table.json"
 check_model VerificationGateBounds.lean "${FORMAL}/verification_gate_table.json"
 check_model HarnessAndTwinBounds.lean "${FORMAL}/harness_twin_table.json"
+check_model SupervisionBounds.lean "${FORMAL}/supervision_table.json"
 
 # The review pipeline (formal/ReviewBounds.lean): one `#eval` prints the shard
 # state machine, the coverage-gate decision table and the shard circuit

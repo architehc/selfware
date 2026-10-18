@@ -215,3 +215,87 @@ fn run_registry_rejects_symlinks_in_dir_get_list_and_remove() {
     );
     assert!(outside.exists(), "outside target file must remain intact");
 }
+
+#[test]
+fn rust_run_registry_matches_lean_formal_table() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/supervision_table.json"
+    ));
+    let rows: Vec<[String; 3]> =
+        serde_json::from_str(raw).expect("valid formal/supervision_table.json");
+
+    let dir = tempfile::tempdir().unwrap();
+    let reg = RunRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+
+    let mut checked_updates = 0usize;
+    let mut checked_aborts = 0usize;
+
+    let self_pid = std::process::id();
+    let self_start = crate::resources::driver::process_start_time(self_pid)
+        .expect("current process start time must be readable");
+
+    for [domain, event, expected] in &rows {
+        if let Some(cur_status) = domain.strip_prefix("run_update:") {
+            let id = format!("upd-{checked_updates}");
+            reg.write(&rec(&id, 1, cur_status, 100)).unwrap();
+            reg.update_status(&id, event, 110).unwrap();
+            let after = reg.get(&id).unwrap().unwrap().status;
+            assert_eq!(
+                &after, expected,
+                "Lean SV2 run_update mismatch for ({cur_status}, {event})"
+            );
+            checked_updates += 1;
+        } else if let Some(scenario) = domain.strip_prefix("run_abort:") {
+            // Only test `sig_ok` rows on real processes when they do NOT SIGTERM `self_pid`.
+            if scenario == "running_live_owner" {
+                // Verified structurally in `owner_pid_alive`: live self_pid + matching start time is true.
+                assert!(owner_pid_alive(self_pid, Some(self_start)));
+                checked_aborts += 1;
+                continue;
+            }
+            let id = format!("abt-{checked_aborts}");
+            let record = match scenario {
+                "running_pid_reused_other_selfware" => {
+                    let mut r = rec(&id, self_pid, "Running", 100);
+                    r.process_start_time = Some(self_start + 999);
+                    r
+                }
+                "running_pid_reused_non_selfware" | "running_pid_dead" => {
+                    let mut r = rec(&id, 999_999_999, "Running", 100);
+                    r.process_start_time = Some(1000);
+                    r
+                }
+                "completed_already" => rec(&id, self_pid, "Completed", 100),
+                "aborted_already" => rec(&id, self_pid, "Aborted", 100),
+                other => panic!("unknown run_abort scenario in formal table: {other}"),
+            };
+            reg.write(&record).unwrap();
+            let outcome = reg.abort(&id, 200).unwrap();
+            let outcome_name = match outcome {
+                AbortOutcome::AlreadyDone => "already_done",
+                AbortOutcome::WasStale => "was_stale",
+                AbortOutcome::Signalled(_) => "signalled",
+                AbortOutcome::SignalFailed(_, _) => "signal_failed",
+                AbortOutcome::SignalUnsupported(_) => "signal_unsupported",
+                AbortOutcome::NotFound => "not_found",
+            };
+            let after_status = reg.get(&id).unwrap().unwrap().status;
+            let actual = format!("{outcome_name}:{after_status}");
+            assert_eq!(
+                &actual, expected,
+                "Lean SV2 run_abort mismatch for ({scenario}, {event})"
+            );
+            checked_aborts += 1;
+        }
+    }
+
+    assert_eq!(
+        checked_updates, 16,
+        "all 16 SV2 run_update rows in formal/supervision_table.json must be verified"
+    );
+    assert_eq!(
+        checked_aborts, 18,
+        "all 18 SV2 run_abort rows in formal/supervision_table.json must be verified"
+    );
+}

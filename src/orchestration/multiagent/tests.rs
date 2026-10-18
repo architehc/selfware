@@ -1043,3 +1043,132 @@ async fn test_run_task_unmetered_cost_blocks_subsequent_calls() {
 
     server.stop().await;
 }
+
+#[test]
+fn rust_step_down_and_budget_guard_match_lean_formal_table() {
+    use super::chat::{BudgetGuard, BudgetLimits};
+    use crate::api::client::apply_reasoning_step_down;
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/supervision_table.json"
+    ));
+    let rows: Vec<[String; 3]> =
+        serde_json::from_str(raw).expect("valid formal/supervision_table.json");
+
+    let mut checked_step_down = 0usize;
+    let mut checked_budget = 0usize;
+
+    for [domain, input_label, expected] in &rows {
+        if let Some(prof_label) = domain.strip_prefix("step_down:") {
+            let model_name = match prof_label {
+                "standard_honored" => "gpt-5",
+                "qwen_honored" => "Qwen/Qwen3.5-27B",
+                "qwen_unhonored" => "qwen38-flash-next",
+                other => panic!("unknown step_down profile in formal table: {other}"),
+            };
+
+            let mut body = match input_label.as_str() {
+                "top_xhigh" => serde_json::json!({ "reasoning_effort": "xhigh" }),
+                "kwargs_xhigh_thinking" => serde_json::json!({
+                    "chat_template_kwargs": {
+                        "enable_thinking": true,
+                        "reasoning_effort": "xhigh"
+                    }
+                }),
+                "kwargs_low_thinking" => serde_json::json!({
+                    "chat_template_kwargs": {
+                        "enable_thinking": true,
+                        "reasoning_effort": "low"
+                    }
+                }),
+                "unpinned_default" => serde_json::json!({}),
+                "thinking_budget_only" => serde_json::json!({
+                    "thinking": { "type": "enabled", "budget_tokens": 4096 }
+                }),
+                other => panic!("unknown step_down input in formal table: {other}"),
+            };
+
+            let stepped = apply_reasoning_step_down(&mut body, model_name);
+            let actual = if stepped.is_none() {
+                "none".to_string()
+            } else {
+                let top = body
+                    .get("reasoning_effort")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                let kw_e = body
+                    .get("chat_template_kwargs")
+                    .and_then(|k| k.get("reasoning_effort"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                let kw_t = match body
+                    .get("chat_template_kwargs")
+                    .and_then(|k| k.get("enable_thinking"))
+                    .and_then(|v| v.as_bool())
+                {
+                    None => "none",
+                    Some(true) => "true",
+                    Some(false) => "false",
+                };
+                format!("top={top},kwE={kw_e},kwT={kw_t}")
+            };
+
+            assert_eq!(
+                &actual, expected,
+                "Lean SV3 step_down mismatch for ({domain}, {input_label})"
+            );
+            checked_step_down += 1;
+        } else if domain == "budget_reserve" {
+            let guard = BudgetGuard::new(
+                BudgetLimits {
+                    max_budget_tokens: Some(1000),
+                    max_cost_usd: Some(0.0005),
+                },
+                200,
+            );
+            let prompt_tok = match input_label.as_str() {
+                "fresh_ok" => 100usize,
+                "token_cap_exceeded" => {
+                    let mut trk = guard.tracker.lock().unwrap();
+                    trk.actual_tokens = 500;
+                    trk.reserved_tokens = 300;
+                    50usize
+                }
+                "cost_cap_reached" => {
+                    let mut trk = guard.tracker.lock().unwrap();
+                    trk.actual_cost = 0.0005;
+                    50usize
+                }
+                "unmetered_latched" => {
+                    let mut trk = guard.tracker.lock().unwrap();
+                    trk.unmetered_cost = true;
+                    50usize
+                }
+                other => panic!("unknown budget_reserve scenario in formal table: {other}"),
+            };
+
+            let actual = match guard.try_reserve(prompt_tok) {
+                Err(_) => "rejected".to_string(),
+                Ok(res) => {
+                    let r = guard.tracker.lock().unwrap().reserved_tokens;
+                    format!("reserved={res}:r={r}")
+                }
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean SV4 budget_reserve mismatch for {input_label}"
+            );
+            checked_budget += 1;
+        }
+    }
+
+    assert_eq!(
+        checked_step_down, 15,
+        "all 15 SV3 step_down rows in formal/supervision_table.json must be verified"
+    );
+    assert_eq!(
+        checked_budget, 4,
+        "all 4 SV4 budget_reserve rows in formal/supervision_table.json must be verified"
+    );
+}

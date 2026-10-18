@@ -316,3 +316,93 @@ async fn test_half_open_cancelled_future_releases_slot_and_late_open_success_ign
     assert!(second.is_ok());
     assert_eq!(cb.current_state(), CircuitState::Closed);
 }
+
+#[tokio::test]
+async fn rust_circuit_breaker_matches_lean_formal_table() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/formal/supervision_table.json"
+    ));
+    let rows: Vec<[String; 3]> =
+        serde_json::from_str(raw).expect("valid formal/supervision_table.json");
+
+    let mut checked = 0usize;
+    for [domain, outcome_name, expected] in &rows {
+        let Some(state_label) = domain.strip_prefix("cb:") else {
+            continue;
+        };
+
+        let reset_timeout = if state_label == "open_reset_ready" {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(3600)
+        };
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 2,
+            success_threshold: 2,
+            reset_timeout,
+            half_open_max_requests: 1,
+        });
+
+        match state_label {
+            "closed_fresh" => {}
+            "closed_one_fail" => {
+                cb.failure_count.store(1, Ordering::SeqCst);
+            }
+            "open_waiting" | "open_reset_ready" => {
+                cb.state.store(1, Ordering::SeqCst);
+            }
+            "half_open_probe_0" => {
+                cb.state.store(2, Ordering::SeqCst);
+            }
+            "half_open_probe_1" => {
+                cb.state.store(2, Ordering::SeqCst);
+                cb.success_count.store(1, Ordering::SeqCst);
+            }
+            "half_open_saturated" => {
+                cb.state.store(2, Ordering::SeqCst);
+                cb.half_open_requests.store(1, Ordering::SeqCst);
+            }
+            other => panic!("unknown cb state label in formal table: {other}"),
+        }
+
+        let res: Result<i32, CircuitBreakerError<String>> = match outcome_name.as_str() {
+            "counted_success" => cb.call_with_classifier(|| async { Ok(1) }, |_| true).await,
+            "counted_failure" => {
+                cb.call_with_classifier(|| async { Err("counted".to_string()) }, |_| true)
+                    .await
+            }
+            "uncounted_failure" => {
+                cb.call_with_classifier(|| async { Err("uncounted".to_string()) }, |_| false)
+                    .await
+            }
+            other => panic!("unknown cb outcome in formal table: {other}"),
+        };
+
+        let res_name = match res {
+            Ok(_) => "ok",
+            Err(CircuitBreakerError::OperationFailed(_)) => "failed_op",
+            Err(CircuitBreakerError::CircuitOpen) => "circuit_open",
+        };
+        let state_name = match cb.current_state() {
+            CircuitState::Closed => "closed",
+            CircuitState::Open => "open",
+            CircuitState::HalfOpen => "half_open",
+        };
+        let fc = cb.failure_count.load(Ordering::SeqCst);
+        let sc = cb.success_count.load(Ordering::SeqCst);
+        let ho = cb.half_open_requests.load(Ordering::SeqCst);
+        let actual = format!("{res_name}:{state_name}:f{fc}:s{sc}:h{ho}");
+
+        assert_eq!(
+            &actual, expected,
+            "Lean SV1 CircuitBreaker mismatch for ({domain}, {outcome_name})"
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked, 21,
+        "all 21 SV1 CircuitBreaker rows in formal/supervision_table.json must be verified"
+    );
+}
