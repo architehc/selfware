@@ -649,7 +649,9 @@ fn newest_log_file(dir: &Path) -> Option<std::path::PathBuf> {
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|p| {
-            p.is_file()
+            p.symlink_metadata()
+                .map(|m| m.file_type().is_file() && !m.file_type().is_symlink())
+                .unwrap_or(false)
                 && p.file_name()
                     .map(|n| {
                         let n = n.to_string_lossy();
@@ -658,7 +660,7 @@ fn newest_log_file(dir: &Path) -> Option<std::path::PathBuf> {
                     .unwrap_or(false)
         })
         .max_by_key(|p| {
-            p.metadata()
+            p.symlink_metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
         })
@@ -675,7 +677,18 @@ fn analyze_log_file(path: &Path, max_lines: usize) -> Option<(usize, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 
     const MAX_LOG_TAIL_BYTES: u64 = 512 * 1024;
-    let mut file = std::fs::File::open(path).ok()?;
+    let meta = path.symlink_metadata().ok()?;
+    if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+        return None;
+    }
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = open_opts.open(path).ok()?;
     let file_len = file.metadata().ok()?.len();
     let skip_partial_first_line = if file_len > MAX_LOG_TAIL_BYTES {
         file.seek(SeekFrom::End(-(MAX_LOG_TAIL_BYTES as i64)))
@@ -961,7 +974,13 @@ fn endpoint_is_local_or_lan(endpoint: &str) -> bool {
 ///   `~/code/*`          -> `~/code` (caller may expand `~`)
 ///   `**`                -> ``
 pub(crate) fn glob_root(pattern: &str) -> String {
-    let expanded = if let Some(rest) = pattern.strip_prefix("~/") {
+    let expanded = if pattern == "~" {
+        if let Some(home) = dirs::home_dir() {
+            home.to_string_lossy().into_owned()
+        } else {
+            pattern.to_string()
+        }
+    } else if let Some(rest) = pattern.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             home.join(rest).to_string_lossy().into_owned()
         } else {

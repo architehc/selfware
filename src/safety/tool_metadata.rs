@@ -369,7 +369,8 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
 
         // Git operations
         "git_status" | "git_diff" => ToolMetadata::read_only(),
-        "git_commit" | "git_push" | "git_checkpoint" => ToolMetadata::git(),
+        "git_commit" | "git_checkpoint" => ToolMetadata::git(),
+        "git_push" => ToolMetadata::custom(false, false, RiskLevel::High, true, false),
 
         // Cargo operations (safe but modify state)
         "cargo_test" | "cargo_check" | "cargo_clippy" | "cargo_fmt" => {

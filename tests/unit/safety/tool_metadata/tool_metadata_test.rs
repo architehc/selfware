@@ -485,3 +485,20 @@ fn test_cargo_call_injects_flags() {
         &json!({"command": "-x"})
     ));
 }
+
+#[test]
+fn test_git_push_metadata_parity() {
+    let classified = classify_tool_metadata("git_push").expect("git_push must be classified");
+    assert!(!classified.read_only);
+    assert!(!classified.destructive);
+    assert_eq!(classified.risk_level, RiskLevel::High);
+    assert!(classified.network_access);
+    assert!(!classified.shell_execution);
+
+    let registry = crate::tools::ToolRegistry::new();
+    let registered = registry
+        .get("git_push")
+        .expect("git_push is registered")
+        .metadata();
+    assert_eq!(classified, registered);
+}

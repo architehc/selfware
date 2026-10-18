@@ -321,6 +321,22 @@ impl Tool for Arc<dyn Tool> {
     async fn execute(&self, args: Value) -> Result<Value> {
         (**self).execute(args).await
     }
+
+    fn is_readonly(&self) -> bool {
+        (**self).is_readonly()
+    }
+
+    fn is_destructive(&self) -> bool {
+        (**self).is_destructive()
+    }
+
+    fn risk_level(&self) -> crate::safety::RiskLevel {
+        (**self).risk_level()
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        (**self).metadata()
+    }
 }
 
 /// Metadata about a registered tool for search and categorization.

@@ -693,3 +693,97 @@ fn test_runtime_override() {
         "Should use the overridden template"
     );
 }
+
+#[test]
+fn test_runtime_override_supports_template_suffix() {
+    let dir = TempDir::new().unwrap();
+    let override_dir = dir.path().join("overrides");
+    let rust_dir = override_dir.join("rust");
+    std::fs::create_dir_all(&rust_dir).unwrap();
+
+    std::fs::write(
+        rust_dir.join("Cargo.toml.template"),
+        "[package]\nname = \"{{project_name}}\"\nversion = \"42.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+
+    let engine = TemplateEngine::with_override_dir(Some(override_dir));
+    let opts = ScaffoldOptions::default();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    engine
+        .scaffold_project("rust", "suffix_override", &project_dir, &opts)
+        .unwrap();
+
+    let cargo_content = std::fs::read_to_string(project_dir.join("Cargo.toml")).unwrap();
+    assert!(
+        cargo_content.contains("42.1.0"),
+        "Should load Cargo.toml.template from override dir, got: {cargo_content}"
+    );
+}
+
+#[test]
+fn test_scaffold_rejects_unsafe_project_names() {
+    let dir = TempDir::new().unwrap();
+    let engine = TemplateEngine::new();
+    let opts = ScaffoldOptions::default();
+
+    for bad in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "sub/dir",
+        "sub\\dir",
+        "bad\"quote",
+        "bad'quote",
+        "bad\nline",
+    ] {
+        let project_dir = dir.path().join("target");
+        let res = engine.scaffold_project("rust", bad, &project_dir, &opts);
+        assert!(
+            res.is_err(),
+            "scaffold_project must reject unsafe project_name {:?}",
+            bad
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scaffold_rejects_broken_and_live_symlinks() {
+    let dir = TempDir::new().unwrap();
+    let engine = TemplateEngine::new();
+    let opts = ScaffoldOptions::default();
+
+    // 1. Broken symlink at Cargo.toml must be detected as existing/symlink and refused
+    let project_broken = dir.path().join("broken_sym_app");
+    std::fs::create_dir_all(&project_broken).unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("nonexistent_target"),
+        project_broken.join("Cargo.toml"),
+    )
+    .unwrap();
+
+    let res = engine.scaffold_project("rust", "app", &project_broken, &opts);
+    assert!(res.is_err(), "Broken symlink must block scaffold_project");
+
+    // 2. Even scaffold_project_force must refuse to follow a symlink to an outside file
+    let outside_target = dir.path().join("outside_victim.txt");
+    std::fs::write(&outside_target, "DO NOT OVERWRITE").unwrap();
+
+    let project_force = dir.path().join("force_sym_app");
+    std::fs::create_dir_all(&project_force).unwrap();
+    std::os::unix::fs::symlink(&outside_target, project_force.join("Cargo.toml")).unwrap();
+
+    let res_force = engine.scaffold_project_force("rust", "app", &project_force, &opts);
+    assert!(
+        res_force.is_err(),
+        "scaffold_project_force must refuse symlink destination"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_target).unwrap(),
+        "DO NOT OVERWRITE"
+    );
+}

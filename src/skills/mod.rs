@@ -734,6 +734,15 @@ impl SkillRegistry {
                             skill.candidate = true;
                             skill.admitted = true;
                             skill.verified = entry.verified;
+                            if !entry.tools.is_empty() {
+                                skill.tools = entry.tools.clone();
+                            }
+                            if entry.source_origin.is_some() {
+                                skill.origin = entry.source_origin.clone();
+                            }
+                            if entry.scope.is_some() {
+                                skill.scope = entry.scope.clone();
+                            }
                         } else {
                             warn!(
                                 "Ignoring unadmitted candidate skill '{}' in user directory {}: no entry in admission ledger",
@@ -1133,7 +1142,29 @@ impl SkillRegistry {
         if let Err(e) = ledger.save_to_dir(target_skills_dir) {
             // TRANSACTIONAL ROLLBACK: restore previous file content (or delete if newly created)
             let rollback_err = match previous_file_content {
-                Some(prev_bytes) => std::fs::write(&target_file, prev_bytes).err(),
+                Some(prev_bytes) => {
+                    let rb_tmp = target_skills_dir
+                        .join(format!(".{safe_name}.md.rollback.{}", uuid::Uuid::new_v4()));
+                    let res = (|| -> std::io::Result<()> {
+                        let mut open_opts = std::fs::OpenOptions::new();
+                        open_opts.write(true).create_new(true);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::OpenOptionsExt;
+                            open_opts.custom_flags(libc::O_NOFOLLOW);
+                        }
+                        use std::io::Write;
+                        let mut file = open_opts.open(&rb_tmp)?;
+                        file.write_all(&prev_bytes)?;
+                        file.sync_all()?;
+                        crate::session::checkpoint::replace_atomically(&rb_tmp, &target_file)?;
+                        Ok(())
+                    })();
+                    if res.is_err() {
+                        let _ = std::fs::remove_file(&rb_tmp);
+                    }
+                    res.err()
+                }
                 None => std::fs::remove_file(&target_file).err(),
             };
             if let Some(r_err) = rollback_err {

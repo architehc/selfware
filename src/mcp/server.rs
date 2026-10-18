@@ -587,10 +587,10 @@ impl McpServer {
             }
         };
 
-        let arguments = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
+        let arguments = match params.get("arguments") {
+            None | Some(Value::Null) => serde_json::json!({}),
+            Some(v) => v.clone(),
+        };
 
         debug!("tools/call: {} with args: {}", tool_name, arguments);
 
@@ -942,10 +942,22 @@ impl McpServer {
         files
     }
 
-    /// Build a simple directory tree string.
-    #[allow(clippy::only_used_in_recursion)]
+    /// Build a simple directory tree string, bounded in both depth and total entries.
     fn build_directory_tree(&self, path: &Path, depth: usize, max_depth: usize) -> String {
+        const MAX_TREE_ENTRIES: usize = 2_000;
+        let mut remaining = MAX_TREE_ENTRIES;
+        self.build_directory_tree_bounded(path, depth, max_depth, &mut remaining)
+    }
+
+    fn build_directory_tree_bounded(
+        &self,
+        path: &Path,
+        depth: usize,
+        max_depth: usize,
+        remaining: &mut usize,
+    ) -> String {
         if depth >= max_depth
+            || *remaining == 0
             || (depth == 0 && crate::safety::source_context::discovery_root_is_private(path))
         {
             return String::new();
@@ -959,12 +971,16 @@ impl McpServer {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
         result.push_str(&format!("{}{}/\n", indent, dir_name));
+        *remaining = remaining.saturating_sub(1);
 
         if let Ok(entries) = std::fs::read_dir(path) {
             let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
             entries.sort_by_key(|e| e.file_name());
 
             for entry in entries {
+                if *remaining == 0 {
+                    break;
+                }
                 let name = entry.file_name().to_string_lossy().to_string();
                 // Skip hidden, target, node_modules
                 if name.starts_with('.') || name == "target" || name == "node_modules" {
@@ -980,15 +996,21 @@ impl McpServer {
                     }
                 }
 
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    result.push_str(&self.build_directory_tree(
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if ft.is_dir() {
+                    result.push_str(&self.build_directory_tree_bounded(
                         &entry.path(),
                         depth + 1,
                         max_depth,
+                        remaining,
                     ));
-                } else if crate::safety::source_context::broad_discovery_file_is_safe(&entry.path())
+                } else if ft.is_file()
+                    && crate::safety::source_context::broad_discovery_file_is_safe(&entry.path())
                 {
                     result.push_str(&format!("{}  {}\n", indent, name));
+                    *remaining = remaining.saturating_sub(1);
                 }
             }
         }

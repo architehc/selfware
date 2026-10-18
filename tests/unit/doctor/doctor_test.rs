@@ -344,3 +344,36 @@ async fn probes_run_from_the_home_dir_not_the_workspace() {
     let key = key_fut.await;
     assert_eq!(key.as_deref(), Some("unset"));
 }
+
+#[test]
+fn test_glob_root_expands_bare_tilde() {
+    let root = glob_root("~");
+    if let Some(home) = dirs::home_dir() {
+        assert_eq!(root, home);
+    }
+}
+
+#[cfg(all(unix, feature = "log-analysis"))]
+#[test]
+fn test_newest_log_file_and_analyze_log_file_ignore_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let real_target = outside.path().join("target.log");
+    std::fs::write(
+        &real_target,
+        "2026-07-17T00:00:01Z  ERROR selfware: symlinked error\n",
+    )
+    .unwrap();
+
+    let symlink_log = dir.path().join("symlink.log");
+    std::os::unix::fs::symlink(&real_target, &symlink_log).unwrap();
+
+    assert!(
+        newest_log_file(dir.path()).is_none(),
+        "newest_log_file must ignore symlinked .log entries"
+    );
+    assert!(
+        analyze_log_file(&symlink_log, 100).is_none(),
+        "analyze_log_file must reject symlinked log paths"
+    );
+}

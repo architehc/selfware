@@ -1134,3 +1134,32 @@ fn test_admit_candidate_rejects_operator_denied_paths() {
         result
     );
 }
+
+#[test]
+fn test_discover_user_dir_restores_tools_origin_and_scope_from_ledger() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let user_dir = temp.path().join("user_skills");
+    std::fs::create_dir_all(&user_dir).unwrap();
+
+    let skill_file = user_dir.join("admitted_user_skill.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: admitted_user_skill\ndescription: User dir admitted skill\ntools: [file_read, grep_search]\norigin: imported\nscope: src/tools\n---\nInstructions.",
+    )
+    .unwrap();
+
+    SkillRegistry::admit_candidate(&skill_file, &user_dir).unwrap();
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_user_dir(&user_dir);
+
+    let skill = registry
+        .get("admitted_user_skill")
+        .expect("admitted skill in user_dir must be discovered");
+    assert!(skill.admitted);
+    assert_eq!(skill.tools, vec!["file_read", "grep_search"]);
+    assert_eq!(skill.origin.as_deref(), Some("imported"));
+    assert_eq!(skill.scope.as_deref(), Some("src/tools"));
+}

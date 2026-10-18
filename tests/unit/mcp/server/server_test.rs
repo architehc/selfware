@@ -2195,3 +2195,51 @@ async fn test_resources_read_file_redacts_values_and_keeps_code() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn test_tools_call_accepts_null_arguments_as_empty_object() {
+    let server = McpServer::new();
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(301)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "git_status",
+            "arguments": null
+        })),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    assert!(
+        response.error.is_none(),
+        "arguments: null must be treated as empty object {{}}, got error: {:?}",
+        response.error
+    );
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(Value::as_bool), Some(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_build_directory_tree_skips_symlinks() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("regular.txt"), "hello").unwrap();
+    let secret = outside.path().join("outside_secret.txt");
+    std::fs::write(&secret, "secret").unwrap();
+    std::os::unix::fs::symlink(&secret, root.path().join("symlinked.txt")).unwrap();
+
+    let server = McpServer::with_project_root_and_safety_config(
+        root.path().to_path_buf(),
+        crate::config::SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..crate::config::SafetyConfig::default()
+        },
+    );
+
+    let tree = server.build_directory_tree(root.path(), 0, 2);
+    assert!(tree.contains("regular.txt"), "{tree}");
+    assert!(!tree.contains("symlinked.txt"), "{tree}");
+}

@@ -307,12 +307,25 @@ impl TemplateEngine {
     // -----------------------------------------------------------------------
 
     /// Load a template file, preferring a runtime override if present.
+    ///
+    /// Rejects symlinked override files and bounds the read to 1 MiB. Also
+    /// checks `<relative_path>.template` as a fallback so overrides copied
+    /// directly from `templates/rust/Cargo.toml.template` are honored.
     fn load_template(&self, relative_path: &str, embedded: &str) -> String {
         if let Some(ref dir) = self.override_dir {
-            let override_path = dir.join(relative_path);
-            if override_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&override_path) {
-                    return content;
+            let candidates = [
+                dir.join(relative_path),
+                dir.join(format!("{relative_path}.template")),
+            ];
+            for candidate in &candidates {
+                if let Ok(meta) = candidate.symlink_metadata() {
+                    if meta.file_type().is_file() && !meta.file_type().is_symlink() {
+                        if let Ok(content) =
+                            crate::tools::file::read_to_string_capped(candidate, 1024 * 1024)
+                        {
+                            return content;
+                        }
+                    }
                 }
             }
         }
@@ -322,6 +335,25 @@ impl TemplateEngine {
     // -----------------------------------------------------------------------
     // Project scaffolding
     // -----------------------------------------------------------------------
+
+    /// Validate that `project_name` is a single safe identifier without path
+    /// traversal, directory separators, quotes, or control characters.
+    fn validate_project_name(project_name: &str) -> Result<()> {
+        let trimmed = project_name.trim();
+        if trimmed.is_empty()
+            || trimmed == "."
+            || trimmed == ".."
+            || project_name.contains(['/', '\\', '"', '\''])
+            || project_name.contains("..")
+            || project_name.chars().any(|c| c.is_control())
+        {
+            bail!(
+                "invalid project name '{}': expected a plain package name without path separators, '..', quotes, or control characters",
+                project_name
+            );
+        }
+        Ok(())
+    }
 
     /// Scaffold a new project from templates.
     ///
@@ -364,6 +396,7 @@ impl TemplateEngine {
         options: &ScaffoldOptions,
         force: bool,
     ) -> Result<Vec<String>> {
+        Self::validate_project_name(project_name)?;
         let lang = language.to_lowercase();
         match lang.as_str() {
             "rust" => self.scaffold_rust(project_name, project_dir, options, force),
@@ -397,6 +430,40 @@ impl TemplateEngine {
         vars
     }
 
+    /// Ensure no component along `project_dir.join(relative)` is a symlink.
+    fn ensure_no_symlink_in_scaffold_path(project_dir: &Path, relative: &str) -> Result<()> {
+        if project_dir
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            bail!(
+                "refusing to scaffold into symlinked project directory '{}'",
+                project_dir.display()
+            );
+        }
+        let mut cur = project_dir.to_path_buf();
+        for comp in Path::new(relative).components() {
+            match comp {
+                std::path::Component::Normal(seg) => {
+                    cur.push(seg);
+                    if cur
+                        .symlink_metadata()
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                    {
+                        bail!("refusing to scaffold through symlink '{}'", cur.display());
+                    }
+                }
+                _ => {
+                    bail!(
+                        "invalid relative scaffold path '{}': only normal path segments are permitted",
+                        relative
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Write a file and record its relative path.
     fn write_file(
         project_dir: &Path,
@@ -404,32 +471,51 @@ impl TemplateEngine {
         content: &str,
         created: &mut Vec<String>,
     ) -> Result<()> {
+        Self::ensure_no_symlink_in_scaffold_path(project_dir, relative)?;
         let full = project_dir.join(relative);
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating directory {}", parent.display()))?;
         }
-        std::fs::write(&full, content).with_context(|| format!("writing {}", full.display()))?;
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = opts
+            .open(&full)
+            .with_context(|| format!("opening {} for write", full.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("writing {}", full.display()))?;
         created.push(relative.to_string());
         Ok(())
     }
 
     /// Write a whole scaffold's `(relative path, content)` pairs, with an
     /// overwrite preflight: unless `force` is set, ANY existing target file
-    /// rejects the ENTIRE scaffold before anything is written — a partially
-    /// overlapping project must never produce a half-written scaffold, and
-    /// silently clobbering an existing `Cargo.toml` or `src/main.rs` is
-    /// silent data loss.
+    /// (including a broken symlink) rejects the ENTIRE scaffold before
+    /// anything is written — a partially overlapping project must never
+    /// produce a half-written scaffold, and silently clobbering an existing
+    /// `Cargo.toml` or `src/main.rs` is silent data loss.
     fn write_files(
         project_dir: &Path,
         files: &[(String, String)],
         force: bool,
     ) -> Result<Vec<String>> {
+        for (rel, _) in files {
+            Self::ensure_no_symlink_in_scaffold_path(project_dir, rel)?;
+        }
         if !force {
             let existing: Vec<&str> = files
                 .iter()
                 .map(|(rel, _)| rel.as_str())
-                .filter(|rel| project_dir.join(rel).exists())
+                .filter(|rel| {
+                    let p = project_dir.join(rel);
+                    p.exists() || p.symlink_metadata().is_ok()
+                })
                 .collect();
             if !existing.is_empty() {
                 bail!(
@@ -700,7 +786,7 @@ pub fn load_qa_schema(path: Option<&Path>) -> Result<QaSchemaConfig> {
 /// Iterates over all YAML documents and returns the one matching `profile_name`.
 pub fn load_qa_schema_profile(path: Option<&Path>, profile_name: &str) -> Result<QaSchemaConfig> {
     let content = match path {
-        Some(p) => std::fs::read_to_string(p)
+        Some(p) => crate::tools::file::read_to_string_capped(p, 1024 * 1024)
             .with_context(|| format!("reading QA schema from {}", p.display()))?,
         None => QA_SCHEMA_YAML.to_string(),
     };

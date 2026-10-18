@@ -770,3 +770,66 @@ fn search_suggestions_ranks_closest_names_first() {
     );
     assert!(suggestions.len() <= 5);
 }
+
+#[test]
+fn arc_dyn_tool_delegates_metadata_and_risk_methods() {
+    struct CustomRiskTool;
+
+    #[async_trait::async_trait]
+    impl Tool for CustomRiskTool {
+        fn name(&self) -> &str {
+            "unclassified_custom_tool"
+        }
+
+        fn description(&self) -> &str {
+            "custom tool with explicit non-default metadata"
+        }
+
+        fn schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: Value) -> Result<Value> {
+            Ok(serde_json::json!({}))
+        }
+
+        fn is_readonly(&self) -> bool {
+            false
+        }
+
+        fn is_destructive(&self) -> bool {
+            true
+        }
+
+        fn risk_level(&self) -> crate::safety::tool_metadata::RiskLevel {
+            crate::safety::tool_metadata::RiskLevel::High
+        }
+
+        fn metadata(&self) -> crate::safety::tool_metadata::ToolMetadata {
+            crate::safety::tool_metadata::ToolMetadata::custom(
+                false,
+                true,
+                crate::safety::tool_metadata::RiskLevel::High,
+                true,
+                true,
+            )
+        }
+    }
+
+    let arc_tool: Arc<dyn Tool> = Arc::new(CustomRiskTool);
+    assert!(!Tool::is_readonly(&arc_tool));
+    assert!(Tool::is_destructive(&arc_tool));
+    assert_eq!(
+        Tool::risk_level(&arc_tool),
+        crate::safety::tool_metadata::RiskLevel::High
+    );
+    let meta = Tool::metadata(&arc_tool);
+    assert!(!meta.read_only);
+    assert!(meta.destructive);
+    assert_eq!(
+        meta.risk_level,
+        crate::safety::tool_metadata::RiskLevel::High
+    );
+    assert!(meta.network_access);
+    assert!(meta.shell_execution);
+}
