@@ -351,3 +351,20 @@ fn test_is_candidate_better_noise_aware() {
     assert!(is_candidate_better(&cand_tied_sab, 0.80, &base, 0.75));
     assert!(!is_candidate_better(&cand_tied_sab, 0.70, &base, 0.75));
 }
+
+#[test]
+fn test_llm_config_debug_redacts_endpoint_and_api_key() {
+    let cfg = LlmConfig {
+        endpoint: "https://admin:super_secret_pw@llm.example.com/v1?api_key=query_secret".into(),
+        model: "deepseek-v4.1-flash".into(),
+        api_key: Some("sk-live-secret-token-value".into()),
+        max_tokens: 16384,
+        temperature: 0.7,
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(!rendered.contains("super_secret_pw"), "{rendered}");
+    assert!(!rendered.contains("query_secret"), "{rendered}");
+    assert!(!rendered.contains("sk-live"), "{rendered}");
+    assert!(!rendered.contains("secret-token-value"), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+}

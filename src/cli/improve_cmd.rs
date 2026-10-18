@@ -583,7 +583,10 @@ pub(crate) async fn rollback_improve_tree(
         untracked_created_during_run(&snapshot.untracked_before, &untracked_after);
     for created in &rollback.removed_untracked {
         let full = project_root.join(created);
-        if full.is_dir() {
+        let is_real_dir = std::fs::symlink_metadata(&full)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if is_real_dir {
             let _ = std::fs::remove_dir_all(&full);
         } else {
             let _ = std::fs::remove_file(&full);
@@ -684,6 +687,49 @@ pub(crate) async fn rollback_improve_tree(
     rollback
 }
 
+/// Write a report or policy artifact under `<repo_root>/.selfware/<rel_path>`,
+/// refusing symlinks on `.selfware`, any intermediate directory, or the target file.
+pub(crate) fn write_selfware_artifact_checked(
+    repo_root: &std::path::Path,
+    rel_path: &std::path::Path,
+    contents: impl AsRef<[u8]>,
+) -> Result<std::path::PathBuf> {
+    let selfware_dir = repo_root.join(".selfware");
+    let mut current = repo_root.to_path_buf();
+    for component in std::path::Path::new(".selfware")
+        .components()
+        .chain(rel_path.parent().into_iter().flat_map(|p| p.components()))
+    {
+        let std::path::Component::Normal(part) = component else {
+            anyhow::bail!(
+                "Refusing relative/non-normal artifact component in {}",
+                rel_path.display()
+            );
+        };
+        current.push(part);
+        if let Ok(meta) = std::fs::symlink_metadata(&current) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to write artifact through symlinked directory: {}",
+                    current.display()
+                );
+            }
+        }
+    }
+    std::fs::create_dir_all(&current)?;
+    let target = selfware_dir.join(rel_path);
+    if let Ok(meta) = std::fs::symlink_metadata(&target) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to overwrite symlinked artifact file: {}",
+                target.display()
+            );
+        }
+    }
+    std::fs::write(&target, contents)?;
+    Ok(target)
+}
+
 pub(crate) struct EvolveArmsArgs {
     pub(crate) repo_root: std::path::PathBuf,
     pub(crate) arms_file: Option<std::path::PathBuf>,
@@ -709,6 +755,23 @@ pub(crate) async fn run_evolve_arms(a: EvolveArmsArgs) -> Result<()> {
     let arms_file = a
         .arms_file
         .ok_or_else(|| anyhow::anyhow!("--workflow arms needs --arms-file <arms.json>"))?;
+    let arms_meta = std::fs::symlink_metadata(&arms_file)
+        .with_context(|| format!("inspecting {}", arms_file.display()))?;
+    if arms_meta.file_type().is_symlink() {
+        anyhow::bail!(
+            "Refusing to read symlinked arms file: {}",
+            arms_file.display()
+        );
+    }
+    const MAX_ARMS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    if arms_meta.len() > MAX_ARMS_FILE_BYTES {
+        anyhow::bail!(
+            "Arms file '{}' is too large ({} bytes, max {} bytes)",
+            arms_file.display(),
+            arms_meta.len(),
+            MAX_ARMS_FILE_BYTES
+        );
+    }
     let arms: Vec<OptimizationArm> = serde_json::from_str(
         &std::fs::read_to_string(&arms_file)
             .with_context(|| format!("reading {}", arms_file.display()))?,
@@ -765,13 +828,15 @@ pub(crate) async fn run_evolve_arms(a: EvolveArmsArgs) -> Result<()> {
         .run_quarantined(&a.repo_root, "HEAD", &arms, &host, &config)
         .await?;
     println!("{}", report.to_pr_markdown());
-    let dir = a.repo_root.join(".selfware").join("evolve-arms");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!(
+    let rel_report = std::path::PathBuf::from("evolve-arms").join(format!(
         "{}.json",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
     ));
-    std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+    let path = write_selfware_artifact_checked(
+        &a.repo_root,
+        &rel_report,
+        serde_json::to_string_pretty(&report)?,
+    )?;
     println!(
         "   Report: {} (nothing was applied to the repository; the winning diff is in the report)",
         path.display()
@@ -1238,7 +1303,6 @@ pub(crate) async fn handle_evolve_command(
                     kendall_w,
                     beta,
                 );
-                let active_policy_path = repo_root.join(".selfware").join("active_policy.json");
                 let mut tree_digests = Vec::new();
                 let mut tree_files = Vec::new();
                 for (p, _) in &loaded_trees {
@@ -1283,19 +1347,24 @@ pub(crate) async fn handle_evolve_command(
                     "report_digest": report_digest,
                     "evidence_hash": evidence_hash,
                 });
-                if let Ok(json_str) = serde_json::to_string_pretty(&payload) {
-                    if let Err(e) = std::fs::write(&active_policy_path, json_str) {
-                        eprintln!(
-                            "   Warning: failed to persist active policy to {}: {}",
-                            active_policy_path.display(),
-                            e
-                        );
-                    } else {
-                        println!(
-                            "   {} Persisted promoted policy to {}",
-                            Glyphs::leaf(),
-                            active_policy_path.display()
-                        );
+                if dry_run {
+                    println!("   [dry-run] Skipping writing active policy to disk.");
+                } else if let Ok(json_str) = serde_json::to_string_pretty(&payload) {
+                    match write_selfware_artifact_checked(
+                        &repo_root,
+                        std::path::Path::new("active_policy.json"),
+                        json_str,
+                    ) {
+                        Ok(active_policy_path) => {
+                            println!(
+                                "   {} Persisted promoted policy to {}",
+                                Glyphs::leaf(),
+                                active_policy_path.display()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("   Warning: failed to persist active policy: {}", e);
+                        }
                     }
                 }
             }
@@ -1344,11 +1413,21 @@ pub(crate) async fn handle_evolve_command(
         }
 
         // Persist evaluation outcome to .selfware/replay_validation_latest.json
-        let report_path = repo_root
-            .join(".selfware")
-            .join("replay_validation_latest.json");
-        let report_json = serde_json::to_string_pretty(&outcome).unwrap_or_default();
-        let _ = std::fs::write(&report_path, report_json);
+        if dry_run {
+            println!("   [dry-run] Skipping writing replay validation report to disk.");
+        } else {
+            let report_json = serde_json::to_string_pretty(&outcome).unwrap_or_default();
+            if let Err(e) = write_selfware_artifact_checked(
+                &repo_root,
+                std::path::Path::new("replay_validation_latest.json"),
+                report_json,
+            ) {
+                eprintln!(
+                    "   Warning: failed to write replay validation report: {}",
+                    e
+                );
+            }
+        }
 
         return Ok(());
     } else if workflow == "arms" {
@@ -1467,11 +1546,12 @@ pub(crate) async fn handle_evolve_command(
             println!("\n   [dry-run] Skipping writing investigative report to disk.");
         } else if let Some(last_dossier) = dossiers.last() {
             let md = export_markdown(last_dossier);
-            let report_path = repo_root
-                .join(".selfware")
-                .join("investigation_report_latest.md");
-            match std::fs::write(&report_path, md) {
-                Ok(()) => {
+            match write_selfware_artifact_checked(
+                &repo_root,
+                std::path::Path::new("investigation_report_latest.md"),
+                md,
+            ) {
+                Ok(report_path) => {
                     println!(
                         "\n   {} Full investigative dossier exported to {}",
                         Glyphs::bloom(),

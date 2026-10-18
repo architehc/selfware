@@ -337,7 +337,7 @@ pub(crate) fn build_workflow_llm_handler_with_safety(
                 messages.push(assistant_msg);
 
                 // Execute each requested tool call against the allowlist and safety checker
-                for call in extracted_calls {
+                for mut call in extracted_calls {
                     let tool_name = call.function.name.clone();
                     let tool_output = if !requested_tools.iter().any(|t| t == &tool_name) {
                         serde_json::json!({
@@ -349,27 +349,40 @@ pub(crate) fn build_workflow_llm_handler_with_safety(
                             )
                         })
                         .to_string()
-                    } else if let Err(e) = checker.check_tool_call(&call) {
-                        tracing::warn!(
-                            agent = %agent_label,
-                            tool = %tool_name,
-                            error = %e,
-                            "SWL agent tool call blocked by safety policy"
-                        );
-                        serde_json::json!({
-                            "error": format!("Safety policy blocked tool '{}': {}", tool_name, e)
-                        })
-                        .to_string()
                     } else {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&call.function.arguments)
-                                .unwrap_or_else(|_| serde_json::json!({}));
-                        match registry.execute_any(&tool_name, args).await {
-                            Ok(val) => val.to_string(),
-                            Err(err) => serde_json::json!({
-                                "error": format!("Tool '{}' execution failed: {}", tool_name, err)
-                            })
-                            .to_string(),
+                        match parse_workflow_tool_arguments(&tool_name, &call.function.arguments) {
+                            Err(parse_err) => {
+                                tracing::warn!(
+                                    agent = %agent_label,
+                                    tool = %tool_name,
+                                    error = %parse_err,
+                                    "SWL agent emitted malformed tool arguments"
+                                );
+                                serde_json::json!({ "error": parse_err }).to_string()
+                            }
+                            Ok(args) => {
+                                call.function.arguments = args.to_string();
+                                if let Err(e) = checker.check_tool_call(&call) {
+                                    tracing::warn!(
+                                        agent = %agent_label,
+                                        tool = %tool_name,
+                                        error = %e,
+                                        "SWL agent tool call blocked by safety policy"
+                                    );
+                                    serde_json::json!({
+                                        "error": format!("Safety policy blocked tool '{}': {}", tool_name, e)
+                                    })
+                                    .to_string()
+                                } else {
+                                    match registry.execute_any(&tool_name, args).await {
+                                        Ok(val) => val.to_string(),
+                                        Err(err) => serde_json::json!({
+                                            "error": format!("Tool '{}' execution failed: {}", tool_name, err)
+                                        })
+                                        .to_string(),
+                                    }
+                                }
+                            }
                         }
                     };
                     messages.push(Message::tool(tool_output, call.id));
@@ -383,6 +396,43 @@ pub(crate) fn build_workflow_llm_handler_with_safety(
             )
         })
     })
+}
+
+/// Parse tool arguments for an SWL workflow agent tool call.
+///
+/// Empty or JSON `null` arguments normalize to `{}`; malformed JSON or
+/// non-object JSON values (arrays, numbers, booleans, strings) return `Err`
+/// rather than silently coercing to `{}` and running the tool with default
+/// arguments.
+pub(crate) fn parse_workflow_tool_arguments(
+    tool_name: &str,
+    raw_arguments: &str,
+) -> std::result::Result<serde_json::Value, String> {
+    let trimmed = raw_arguments.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Object(map)) => Ok(serde_json::Value::Object(map)),
+        Ok(serde_json::Value::Null) => Ok(serde_json::json!({})),
+        Ok(other) => {
+            let kind = match other {
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                _ => "non-object",
+            };
+            Err(format!(
+                "Invalid arguments for tool '{}': expected JSON object, got {}",
+                tool_name, kind
+            ))
+        }
+        Err(err) => Err(format!(
+            "Invalid JSON arguments for tool '{}': {}",
+            tool_name, err
+        )),
+    }
 }
 
 /// Build a [`ToolHandler`](crate::workflows::ToolHandler) that dispatches Tool
@@ -562,7 +612,11 @@ pub(crate) async fn handle_workflow_command(
                         file.as_str().path_local()
                     );
 
-                    let source = std::fs::read_to_string(path)?;
+                    let source = super::subcommands::read_bounded_cli_file(
+                        path,
+                        4 * 1024 * 1024,
+                        "SWL workflow file",
+                    )?;
                     let doc = match parse_document(&source) {
                         Ok(d) => d,
                         Err(e) => {
@@ -611,7 +665,11 @@ pub(crate) async fn handle_workflow_command(
                         file.as_str().path_local()
                     );
 
-                    let source = std::fs::read_to_string(path)?;
+                    let source = super::subcommands::read_bounded_cli_file(
+                        path,
+                        4 * 1024 * 1024,
+                        "YAML workflow file",
+                    )?;
                     let workflow: crate::workflows::Workflow = serde_yaml::from_str(&source)
                         .map_err(|e| anyhow::anyhow!("Failed to parse workflow YAML: {}", e))?;
 
@@ -643,7 +701,11 @@ pub(crate) async fn handle_workflow_command(
                 anyhow::bail!("Workflow file not found: {}", file.display());
             }
 
-            let source = std::fs::read_to_string(&file)?;
+            let source = super::subcommands::read_bounded_cli_file(
+                &file,
+                4 * 1024 * 1024,
+                "SWL workflow file",
+            )?;
             let doc = match parse_document(&source) {
                 Ok(d) => d,
                 Err(e) => {
@@ -682,7 +744,11 @@ pub(crate) async fn handle_workflow_command(
                 Some(WorkflowFileKind::Swl) => {
                     use crate::swl::{lower_document, parse_document};
 
-                    let source = std::fs::read_to_string(path)?;
+                    let source = super::subcommands::read_bounded_cli_file(
+                        path,
+                        4 * 1024 * 1024,
+                        "SWL workflow file",
+                    )?;
                     let doc = match parse_document(&source) {
                         Ok(d) => d,
                         Err(e) => {
@@ -849,7 +915,11 @@ pub(crate) async fn handle_workflow_command(
                     }
                 }
                 Some(WorkflowFileKind::Yaml) => {
-                    let source = std::fs::read_to_string(path)?;
+                    let source = super::subcommands::read_bounded_cli_file(
+                        path,
+                        4 * 1024 * 1024,
+                        "YAML workflow file",
+                    )?;
                     let workflow_name = serde_yaml::from_str::<crate::workflows::Workflow>(&source)
                         .map(|workflow| workflow.name)
                         .unwrap_or_else(|_| default_workflow_name(path));
@@ -1002,7 +1072,11 @@ pub(crate) async fn handle_workflow_command(
                             swl_files.push(path.to_path_buf());
                         } else if all && (ext == "yaml" || ext == "yml") {
                             // Try to parse as workflow file
-                            if let Ok(content) = std::fs::read_to_string(path) {
+                            if let Ok(content) = super::subcommands::read_bounded_cli_file(
+                                path,
+                                4 * 1024 * 1024,
+                                "YAML workflow file",
+                            ) {
                                 if content.contains("workflows:") || content.contains("steps:") {
                                     yaml_files.push(path.to_path_buf());
                                 }

@@ -242,6 +242,51 @@ fn test_git_checkpoint_always_allowed() {
 }
 
 #[test]
+fn test_git_commit_blocks_denied_file_and_secret_message() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    let denied_file_call = create_test_call(
+        "git_commit",
+        r#"{"message": "stage env", "files": [".env"]}"#,
+    );
+    assert!(checker.check_tool_call(&denied_file_call).is_err());
+
+    let traversal_call = create_test_call(
+        "git_commit",
+        r#"{"message": "escape", "files": ["../../etc/passwd"]}"#,
+    );
+    assert!(checker.check_tool_call(&traversal_call).is_err());
+
+    let secret_msg_call = create_test_call(
+        "git_commit",
+        r#"{"message": "token ghp_1234567890abcdefghijklmnopqrstuvwx"}"#,
+    );
+    assert!(checker.check_tool_call(&secret_msg_call).is_err());
+
+    let checkpoint_secret_call = create_test_call(
+        "git_checkpoint",
+        r#"{"message": "token ghp_1234567890abcdefghijklmnopqrstuvwx"}"#,
+    );
+    assert!(checker.check_tool_call(&checkpoint_secret_call).is_err());
+}
+
+#[test]
+fn test_git_status_and_git_diff_block_denied_or_escaped_paths() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    let status_escape = create_test_call("git_status", r#"{"repo_path": "/etc"}"#);
+    assert!(checker.check_tool_call(&status_escape).is_err());
+
+    let diff_denied = create_test_call("git_diff", r#"{"path": ".env"}"#);
+    assert!(checker.check_tool_call(&diff_denied).is_err());
+
+    let diff_escape = create_test_call("git_diff", r#"{"path": "../../etc/passwd"}"#);
+    assert!(checker.check_tool_call(&diff_escape).is_err());
+}
+
+#[test]
 fn test_git_push_normal_allowed() {
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);

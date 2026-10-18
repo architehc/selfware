@@ -717,7 +717,21 @@ impl SafetyChecker {
                 }
             }
             "git_commit" | "git_checkpoint" => {
-                // Git operations are generally safe
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
+                    for file in files {
+                        if let Some(path) = file.as_str() {
+                            if !path.is_empty() {
+                                self.check_path(path)?;
+                            }
+                        }
+                    }
+                }
+                if let Some(message) = args.get("message").and_then(|v| v.as_str()) {
+                    if !message.is_empty() {
+                        self.check_content_for_secrets(message)?;
+                    }
+                }
             }
             "git_push" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
@@ -1152,12 +1166,22 @@ impl SafetyChecker {
                     }
                 }
             }
+            "git_status" | "git_diff" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                for key in ["repo_path", "path"] {
+                    if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
+                        if !path.is_empty() {
+                            self.check_path(path)?;
+                        }
+                    }
+                }
+            }
             // Read-only operations that take no filesystem path. The search
             // tools (grep_search / glob_find / symbol_search) walked and read
             // arbitrary paths here — they now live in their own arm below that
             // runs `check_path` on their `path` argument, so `/etc/passwd`,
             // `..` escapes, and symlink escapes are rejected like `file_read`.
-            "git_status" | "git_diff" | "tool_search" | "process_list" | "process_logs"
+            "tool_search" | "process_list" | "process_logs"
             | "port_check" | "pip_list" | "container_list"
             | "container_logs" | "container_images" | "knowledge_query" | "knowledge_stats" => {
                 // These are read-only operations, safe to execute

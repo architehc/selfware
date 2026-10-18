@@ -1022,3 +1022,78 @@ async fn git_diff_caps_large_output_instead_of_buffering_unbounded() {
     assert_eq!(res["truncated"], true);
     assert!(res["diff"].as_str().unwrap().len() <= MAX_DIFF_OUTPUT_BYTES + 1024);
 }
+
+#[tokio::test]
+async fn checkpoint_excludes_untracked_files() {
+    let (_guard, dir) = isolated_git_repo();
+    std::fs::write(dir.path().join("f.txt"), "modified tracked").unwrap();
+    std::fs::write(dir.path().join("untracked_secret.txt"), "ghp_secret").unwrap();
+
+    let tool = GitCheckpoint::new();
+    let res = tool
+        .execute(serde_json::json!({
+            "message": "checkpoint tracked only",
+            "auto_branch": false
+        }))
+        .await
+        .expect("checkpoint should succeed");
+    assert_eq!(res["success"], true);
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let status_str = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_str.contains("untracked_secret.txt"),
+        "GitCheckpoint must leave untracked files untracked; status: {status_str}"
+    );
+    assert!(
+        !status_str.contains("f.txt"),
+        "tracked modification should have been committed; status: {status_str}"
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_invalid_tag_before_creating_commit() {
+    let (_guard, dir) = isolated_git_repo();
+    let before = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let before_sha = String::from_utf8_lossy(&before.stdout).trim().to_string();
+
+    let tool = GitCheckpoint::new();
+    let err = tool
+        .execute(serde_json::json!({
+            "message": "bad tag checkpoint",
+            "tag": "-bad-flag-tag",
+            "auto_branch": false
+        }))
+        .await
+        .expect_err("invalid tag must fail");
+    assert!(err.to_string().contains("Tag name"), "{err}");
+
+    let after = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let after_sha = String::from_utf8_lossy(&after.stdout).trim().to_string();
+    assert_eq!(
+        before_sha, after_sha,
+        "invalid tag must be rejected before creating a commit"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_commit_message_file_sets_0600_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = write_commit_message_file("secret commit note").expect("temp file created");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(mode, 0o600, "expected 0600 permissions, got {:o}", mode);
+}

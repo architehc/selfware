@@ -21,13 +21,26 @@ pub fn create_shadow_worktree_named_at(
     worktree_name: &str,
     commit_or_ref: Option<&str>,
 ) -> Result<PathBuf, WorktreeError> {
+    if worktree_name.is_empty()
+        || worktree_name.starts_with('-')
+        || worktree_name.contains('/')
+        || worktree_name.contains('\\')
+        || worktree_name.contains('\0')
+        || worktree_name.contains("..")
+    {
+        return Err(WorktreeError::GitFailed(format!(
+            "Invalid worktree name: '{worktree_name}'"
+        )));
+    }
     let worktree_path = repo_root.join(".worktrees").join(worktree_name);
     let target_ref = commit_or_ref.unwrap_or("HEAD");
+    crate::tools::git::validate_git_ref_name(target_ref)
+        .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
 
     let output = Command::new("git")
         .sanitized_git(repo_root, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
-        .args(["worktree", "add", "--detach"])
+        .args(["worktree", "add", "--detach", "--"])
         .arg(&worktree_path)
         .arg(target_ref)
         .current_dir(repo_root)
@@ -181,6 +194,36 @@ impl std::fmt::Display for WorktreeError {
 
 impl std::error::Error for WorktreeError {}
 
+fn write_temp_patch_file(dir: &Path, prefix: &str, patch: &str) -> Option<PathBuf> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    for _ in 0..8 {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = dir.join(format!("{prefix}-{}-{seq}.patch", uuid_short()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&candidate) {
+            Ok(mut file) => {
+                if file.write_all(patch.as_bytes()).is_ok() {
+                    return Some(candidate);
+                }
+                let _ = std::fs::remove_file(&candidate);
+                return None;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Apply a patch strictly: supports JSON search-replace edits and strict `git apply`.
 /// Does not fall back to fuzzy patching with `patch -p1 -F3`.
 pub fn apply_strict_patch(dir: &Path, patch: &str) -> bool {
@@ -200,14 +243,13 @@ pub fn apply_strict_patch(dir: &Path, patch: &str) -> bool {
     }
 
     // Unified diff format: strict git apply
-    let patch_file = dir.join(format!(".restore-patch-{}", uuid_short()));
-    if std::fs::write(&patch_file, patch).is_err() {
+    let Some(patch_file) = write_temp_patch_file(dir, ".restore-patch", patch) else {
         return false;
-    }
+    };
     let status = Command::new("git")
         .sanitized_git(dir, GitScope::Internal)
         .env_remove("GIT_INDEX_FILE")
-        .args(["apply", "--whitespace=nowarn"])
+        .args(["apply", "--whitespace=nowarn", "--"])
         .arg(&patch_file)
         .current_dir(dir)
         .output();
@@ -234,6 +276,8 @@ pub fn restore_worktree_parent_state(
     // ensure the worktree is detached at that base commit so today's HEAD commits do not bleed in.
     if worktree.join(".git").exists() {
         if let Some(ref bc) = resolve_parent_base_commit(attempts_file, parent_id) {
+            crate::tools::git::validate_git_ref_name(bc)
+                .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
             let out = Command::new("git")
                 .sanitized_git(worktree, GitScope::Internal)
                 .env_remove("GIT_INDEX_FILE")
@@ -409,12 +453,11 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
     }
 
     // Unified diff format: check with git apply -R --check
-    let temp_patch = dir.join(format!(".test-check-{}.patch", uuid_short()));
-    if std::fs::write(&temp_patch, patch).is_ok() {
+    if let Some(temp_patch) = write_temp_patch_file(dir, ".test-check", patch) {
         let status = std::process::Command::new("git")
             .sanitized_git(dir, GitScope::Internal)
             .env_remove("GIT_INDEX_FILE")
-            .args(["apply", "-R", "--check"])
+            .args(["apply", "-R", "--check", "--"])
             .arg(&temp_patch)
             .current_dir(dir)
             .output();

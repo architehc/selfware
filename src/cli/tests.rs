@@ -3673,3 +3673,104 @@ fn config_show_rows_redacts_endpoint_credentials() {
     assert_eq!(ep_row.1, "http://REDACTED@127.0.0.1:8000/v1");
     assert!(!ep_row.1.contains("topsecret") && !ep_row.1.contains("leak"));
 }
+
+#[test]
+fn parse_workflow_tool_arguments_rejects_malformed_or_non_object_json() {
+    use super::workflow_cmd::parse_workflow_tool_arguments;
+
+    assert_eq!(
+        parse_workflow_tool_arguments("file_read", "").unwrap(),
+        serde_json::json!({})
+    );
+    assert_eq!(
+        parse_workflow_tool_arguments("file_read", "null").unwrap(),
+        serde_json::json!({})
+    );
+    assert_eq!(
+        parse_workflow_tool_arguments("file_read", "{\"path\":\"src/lib.rs\"}").unwrap(),
+        serde_json::json!({"path": "src/lib.rs"})
+    );
+    assert!(
+        parse_workflow_tool_arguments("file_read", "{broken").is_err(),
+        "malformed JSON must be rejected"
+    );
+    assert!(
+        parse_workflow_tool_arguments("file_read", "[1, 2]").is_err(),
+        "array JSON must be rejected"
+    );
+    assert!(
+        parse_workflow_tool_arguments("file_read", "\"str\"").is_err(),
+        "string JSON must be rejected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_file_helpers_enforce_size_and_symlink_guards() {
+    use super::subcommands::{read_bounded_cli_file, write_cli_file_no_symlink};
+
+    let dir = tempfile::tempdir().unwrap();
+    let regular = dir.path().join("tasks.txt");
+    write_cli_file_no_symlink(&regular, "echo hi\n").unwrap();
+    assert_eq!(
+        read_bounded_cli_file(&regular, 1024, "batch file").unwrap(),
+        "echo hi\n"
+    );
+    assert!(
+        read_bounded_cli_file(&regular, 4, "batch file").is_err(),
+        "oversized CLI input must be rejected"
+    );
+
+    let target = dir.path().join("secret.txt");
+    std::fs::write(&target, "top-secret").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    assert!(
+        read_bounded_cli_file(&link, 1024, "batch file").is_err(),
+        "symlinked CLI input must be rejected"
+    );
+    assert!(
+        write_cli_file_no_symlink(&link, "overwritten").is_err(),
+        "symlinked CLI output must be rejected"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "top-secret");
+}
+
+#[cfg(all(unix, feature = "self-improvement"))]
+#[test]
+fn write_selfware_artifact_checked_rejects_symlinks() {
+    use super::improve_cmd::write_selfware_artifact_checked;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_selfware_artifact_checked(dir.path(), Path::new("arms/run-1/summary.json"), b"{}")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".selfware/arms/run-1/summary.json")).unwrap(),
+        "{}"
+    );
+
+    // Symlinked target file inside .selfware must be refused
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "preserve-me").unwrap();
+    let symlink_target = dir.path().join(".selfware/active_policy.json");
+    std::os::unix::fs::symlink(&outside, &symlink_target).unwrap();
+    assert!(
+        write_selfware_artifact_checked(dir.path(), Path::new("active_policy.json"), b"clobbered")
+            .is_err(),
+        "symlinked target inside .selfware must be refused"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "preserve-me");
+
+    // Symlinked .selfware root directory must be refused
+    let dir2 = tempfile::tempdir().unwrap();
+    let outside_dir = dir2.path().join("outside_dir");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, dir2.path().join(".selfware")).unwrap();
+    assert!(
+        write_selfware_artifact_checked(dir2.path(), Path::new("active_policy.json"), b"{}")
+            .is_err(),
+        "symlinked .selfware directory must be refused"
+    );
+    assert!(!outside_dir.join("active_policy.json").exists());
+}

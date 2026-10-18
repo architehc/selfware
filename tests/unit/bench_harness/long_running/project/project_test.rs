@@ -37,3 +37,31 @@ fn test_project_status_from_results() {
         ProjectStatus::Fail
     );
 }
+
+#[test]
+fn test_scaffold_template_rejects_traversal_and_symlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let templates_dir = tmp.path().join("templates");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+
+    for bad in ["", "../escape", "nested/tpl", "nested\\tpl"] {
+        let err = scaffold_template(bad, &templates_dir, &dst);
+        assert!(err.is_err(), "template name '{bad}' must be rejected");
+    }
+
+    #[cfg(unix)]
+    {
+        let tpl = templates_dir.join("with_link");
+        std::fs::create_dir_all(&tpl).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, tpl.join("leak.txt")).unwrap();
+
+        let err = scaffold_template("with_link", &templates_dir, &dst);
+        assert!(
+            err.is_err(),
+            "scaffold_template must refuse symlink entries inside template"
+        );
+    }
+}

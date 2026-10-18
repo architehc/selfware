@@ -38,6 +38,44 @@ fn validate_tag_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a git reference or commit identifier (`HEAD`, branch name, tag, or SHA)
+/// against flag injection (`-`), range/reflog syntax (`..`, `@{`), and invalid
+/// `git check-ref-format` characters.
+pub(crate) fn validate_git_ref_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Git ref must not be empty");
+    }
+    if name.len() > 255 {
+        anyhow::bail!("Git ref too long (max 255 characters)");
+    }
+    if name.starts_with('-') {
+        anyhow::bail!("Git ref must not start with '-': {name:?}");
+    }
+    let bad_char = |c: char| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                '~' | '^' | ':' | '?' | '*' | '[' | '\\' | ';' | '&' | '|' | '$' | '`' | '<' | '>'
+            )
+    };
+    if name.chars().any(bad_char)
+        || name.contains("..")
+        || name.contains("@{")
+        || name == "@"
+        || name.contains("//")
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.ends_with('.')
+        || name
+            .split('/')
+            .any(|c| c.is_empty() || c.starts_with('.') || c.ends_with(".lock"))
+    {
+        anyhow::bail!("Invalid git ref name: {name:?}");
+    }
+    Ok(())
+}
+
 /// Validate and normalise a model-supplied `git_push` `branch`.
 ///
 /// The branch reaches git after `--`, so it cannot become a flag, but git
@@ -159,24 +197,49 @@ fn repository_hooks_note(dir: &std::path::Path) -> &'static str {
 /// Returns `Some(path)` on success, or `None` if writing fails (caller should
 /// fall back to `-m`).
 fn write_commit_message_file(message: &str) -> Option<PathBuf> {
-    let seq = COMMIT_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    use std::io::Write as _;
     let temp_dir = std::env::temp_dir();
-    let msg_file = temp_dir.join(format!(
-        "selfware_commit_msg_{}_{}.txt",
-        std::process::id(),
-        seq
-    ));
-    match std::fs::write(&msg_file, message) {
-        Ok(()) => Some(msg_file),
-        Err(e) => {
-            warn!(
-                "Failed to write commit message to temp file {}: {}. Falling back to -m.",
-                msg_file.display(),
-                e
-            );
-            None
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for _ in 0..8 {
+        let seq = COMMIT_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let msg_file = temp_dir.join(format!("selfware_commit_msg_{pid}_{nanos}_{seq}.txt"));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        match opts.open(&msg_file) {
+            Ok(mut file) => match file.write_all(message.as_bytes()) {
+                Ok(()) => return Some(msg_file),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&msg_file);
+                    warn!(
+                        "Failed to write commit message to temp file {}: {}. Falling back to -m.",
+                        msg_file.display(),
+                        e
+                    );
+                    return None;
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                warn!(
+                    "Failed to create commit message temp file {}: {}. Falling back to -m.",
+                    msg_file.display(),
+                    e
+                );
+                return None;
+            }
         }
     }
+    warn!("Exhausted attempts creating commit message temp file. Falling back to -m.");
+    None
 }
 
 /// Validate that a repo/working-directory path is within the allowed paths.
@@ -463,6 +526,10 @@ impl Tool for GitCheckpoint {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        if let Some(tag_name) = tag {
+            validate_tag_name(tag_name)?;
+        }
+
         // Validate cwd is within allowed paths
         validate_git_path(".", self.safety_config.as_ref())?;
 
@@ -491,9 +558,18 @@ impl Tool for GitCheckpoint {
                     crate::safety::git_exec::GitScope::UserOperation,
                 );
                 cmd.in_workspace_root();
-                cmd.args(["checkout", "-b", &agent_branch])
+                let checkout_output = cmd
+                    .args(["checkout", "-b", &agent_branch])
                     .output_grouped()
                     .await?;
+                if !checkout_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+                    anyhow::bail!(
+                        "git checkout -b '{}' failed: {}",
+                        agent_branch,
+                        stderr.trim()
+                    );
+                }
 
                 info!("Created agent branch: {}", agent_branch);
                 agent_branch
@@ -501,16 +577,23 @@ impl Tool for GitCheckpoint {
                 current_branch
             };
 
-        // Stage all changes
+        // Stage tracked modifications/deletions only (`-u`), matching GitCommit:
+        // `git add -A` would sweep in untracked `.env` files, build artifacts,
+        // or spilled secrets into the checkpoint commit.
         let mut cmd = crate::safety::git_exec::git_command_async(
             crate::tools::workspace_root::current().path(),
             crate::safety::git_exec::GitScope::UserOperation,
         );
         cmd.in_workspace_root();
-        cmd.args(["add", "-A"])
+        let add_output = cmd
+            .args(["add", "-u"])
             .output_grouped()
             .await
             .context("Failed to stage changes")?;
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            anyhow::bail!("git add -u failed: {}", stderr.trim());
+        }
 
         // Commit with checkpoint marker
         let full_msg = format!("[AGENT CHECKPOINT] {}", msg);
@@ -549,17 +632,23 @@ impl Tool for GitCheckpoint {
             .trim()
             .to_string();
 
-        // Create or move tag
-        if let Some(tag_name) = tag {
-            validate_tag_name(tag_name)?;
-            let mut cmd = crate::safety::git_exec::git_command_async(
-                crate::tools::workspace_root::current().path(),
-                crate::safety::git_exec::GitScope::UserOperation,
-            );
-            cmd.in_workspace_root();
-            cmd.args(["tag", "-f", tag_name, &hash])
-                .output_grouped()
-                .await?;
+        // Create or move tag only when the checkpoint commit succeeded.
+        if commit_output.status.success() {
+            if let Some(tag_name) = tag {
+                let mut cmd = crate::safety::git_exec::git_command_async(
+                    crate::tools::workspace_root::current().path(),
+                    crate::safety::git_exec::GitScope::UserOperation,
+                );
+                cmd.in_workspace_root();
+                let tag_output = cmd
+                    .args(["tag", "-f", tag_name, &hash])
+                    .output_grouped()
+                    .await?;
+                if !tag_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&tag_output.stderr);
+                    anyhow::bail!("git tag '{}' failed: {}", tag_name, stderr.trim());
+                }
+            }
         }
 
         // Get status summary
@@ -578,7 +667,7 @@ impl Tool for GitCheckpoint {
             "message": full_msg,
             "success": commit_output.status.success(),
             "files_changed": !status.is_empty(),
-            "tag": tag
+            "tag": tag.filter(|_| commit_output.status.success())
         }))
     }
 

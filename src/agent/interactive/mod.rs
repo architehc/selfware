@@ -272,14 +272,17 @@ impl Agent {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
                     let (shell, flag) = crate::tools::shell_exec::default_shell();
-                    let status = tokio::process::Command::new(shell)
+                    let root_path = self.tools.workspace_root().path();
+                    let mut command = tokio::process::Command::new(shell);
+                    command
                         .in_root(self.tools.workspace_root())
                         .args([flag, cmd])
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit())
-                        .stdin(std::process::Stdio::inherit())
-                        .status()
-                        .await;
+                        .stdin(std::process::Stdio::inherit());
+                    crate::safety::process_env::sanitize_command_env(&mut command);
+                    crate::safety::git_exec::apply_shell_git_env(&mut command, &root_path);
+                    let status = command.status().await;
                     match status {
                         Ok(s) if !s.success() => {
                             println!(
@@ -2328,6 +2331,12 @@ impl Agent {
 
         if args.starts_with("enter") {
             let branch_arg = args.strip_prefix("enter").map(str::trim).unwrap_or("");
+            if !branch_arg.is_empty() {
+                if let Err(e) = crate::tools::git_worktree::validate_branch_name(branch_arg) {
+                    println!("{} Invalid branch name: {}", "✗".bright_red(), e);
+                    return;
+                }
+            }
 
             // Generate a unique worktree name
             let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");

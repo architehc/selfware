@@ -2157,7 +2157,13 @@ To call a tool, use this EXACT XML structure:
             escalated_edit_args_hashes: VecDeque::new(),
             hook_registry,
             plan_mode,
-            plan_mode_manager: plan_mode::PlanModeManager::new(),
+            plan_mode_manager: {
+                let mut mgr = plan_mode::PlanModeManager::new();
+                if plan_mode {
+                    mgr.enter_plan_mode();
+                }
+                mgr
+            },
             audit_logger,
             session_logger,
             pending_failure_hint: None,
@@ -3459,13 +3465,22 @@ To call a tool, use this EXACT XML structure:
 
     /// Toggle plan mode on/off and return the new state.
     pub fn toggle_plan_mode(&mut self) -> bool {
-        self.plan_mode = !self.plan_mode;
+        let next = !self.plan_mode;
+        self.set_plan_mode(next);
         self.plan_mode
     }
 
-    /// Set plan mode explicitly.
+    /// Set plan mode explicitly, keeping `plan_mode_manager` in sync when
+    /// entering or leaving the read-only planning phase.
     pub fn set_plan_mode(&mut self, enabled: bool) {
         self.plan_mode = enabled;
+        if enabled {
+            if !self.plan_mode_manager.is_in_plan_mode() {
+                self.plan_mode_manager.enter_plan_mode();
+            }
+        } else if self.plan_mode_manager.is_planning() {
+            self.plan_mode_manager.exit_plan_mode();
+        }
     }
 
     // === Plan Mode Manager API ===
@@ -3473,12 +3488,14 @@ To call a tool, use this EXACT XML structure:
     /// Enter structured plan mode - restricts tools to read-only
     pub fn enter_plan_mode(&mut self) {
         self.plan_mode_manager.enter_plan_mode();
+        self.plan_mode = true;
         info!("Entered plan mode - only read-only tools allowed");
     }
 
     /// Exit structured plan mode - return to normal execution
     pub fn exit_plan_mode(&mut self) {
         self.plan_mode_manager.exit_plan_mode();
+        self.plan_mode = false;
         info!("Exited plan mode");
     }
 
@@ -3490,6 +3507,7 @@ To call a tool, use this EXACT XML structure:
     /// Approve the current plan and switch to executing
     pub fn approve_plan(&mut self) {
         self.plan_mode_manager.approve_plan();
+        self.plan_mode = false;
         info!("Plan approved - switching to execution");
     }
 
@@ -3516,6 +3534,7 @@ To call a tool, use this EXACT XML structure:
     /// Clear the current plan and exit plan mode
     pub fn clear_plan(&mut self) {
         self.plan_mode_manager.clear_plan();
+        self.plan_mode = false;
     }
 
     /// Get a reference to the hook registry.
@@ -3836,11 +3855,15 @@ To call a tool, use this EXACT XML structure:
     pub async fn shell_passthrough(&mut self, cmd: &str) -> String {
         const MAX_SHELL_OUT_CHARS: usize = 4_000;
         let (shell, flag) = crate::tools::shell_exec::default_shell();
-        let output = tokio::process::Command::new(shell)
+        let root_path = self.tools.workspace_root().path();
+        let mut command = tokio::process::Command::new(shell);
+        command
             .args([flag, cmd])
-            .current_dir(self.tools.workspace_root().path())
-            .output()
-            .await;
+            .current_dir(&root_path)
+            .stdin(std::process::Stdio::null());
+        crate::safety::process_env::sanitize_command_env(&mut command);
+        crate::safety::git_exec::apply_shell_git_env(&mut command, &root_path);
+        let output = command.output().await;
         let out = match output {
             Ok(out) => out,
             Err(e) => return format!("$ {cmd} — failed to start: {e}"),
@@ -3860,8 +3883,10 @@ To call a tool, use this EXACT XML structure:
         } else {
             format!(" (exit {})", out.status.code().unwrap_or(-1))
         };
+        let redacted_cmd = crate::safety::redact::redact_secrets(cmd);
+        let redacted_text = crate::safety::redact::redact_secrets(&text);
         self.push_user_message(format!(
-            "<shell_command>{cmd}</shell_command>\n<output{truncated_attr}>{text}</output>",
+            "<shell_command>{redacted_cmd}</shell_command>\n<output{truncated_attr}>{redacted_text}</output>",
             truncated_attr = if truncated { " truncated=\"true\"" } else { "" },
         ));
         format!("$ {cmd}{status_note}\n{text}")

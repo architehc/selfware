@@ -94,17 +94,11 @@ pub struct LlmConfig {
 impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print credentials — dry-run and log output include this struct.
+        let redacted_endpoint = crate::config::redact_endpoint(&self.endpoint);
         f.debug_struct("LlmConfig")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &redacted_endpoint)
             .field("model", &self.model)
-            .field(
-                "api_key",
-                &self.api_key.as_ref().map(|k| {
-                    let mut m: String = k.chars().take(4).collect();
-                    m.push_str("…[redacted]");
-                    m
-                }),
-            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .finish()

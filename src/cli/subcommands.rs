@@ -9,6 +9,53 @@ use super::args::DemoScenarioKind;
 use super::args::{StateCommands, StateOutputFormat};
 use super::{journal_title, ONE_SHOT_CONFIRM_TIMEOUT};
 
+const MAX_BATCH_TASK_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_STATE_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) fn read_bounded_cli_file(
+    path: &std::path::Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String> {
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Cannot inspect {label} '{}'", path.display()))?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("Refusing to read symlinked {label} '{}'", path.display());
+    }
+    if meta.len() > max_bytes {
+        anyhow::bail!(
+            "Refusing to read {label} '{}': size {} bytes exceeds {} byte limit",
+            path.display(),
+            meta.len(),
+            max_bytes
+        );
+    }
+    std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {label} '{}'", path.display()))
+}
+
+pub(crate) fn write_cli_file_no_symlink(
+    path: &std::path::Path,
+    contents: impl AsRef<[u8]>,
+) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(meta) = std::fs::symlink_metadata(parent) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to write into symlinked directory '{}'",
+                    parent.display()
+                );
+            }
+        }
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("Refusing to overwrite symlinked file '{}'", path.display());
+        }
+    }
+    std::fs::write(path, contents).with_context(|| format!("Failed to write '{}'", path.display()))
+}
+
 /// Parse task-file contents into a list of tasks.
 ///
 /// Each non-empty, non-comment line is a task.  Lines starting with `#`
@@ -38,7 +85,11 @@ pub(crate) async fn handle_batch_command(
     }
 
     // ── Read and parse the task file ──
-    let contents = match std::fs::read_to_string(&file) {
+    let contents = match read_bounded_cli_file(
+        std::path::Path::new(&file),
+        MAX_BATCH_TASK_FILE_BYTES,
+        "batch task file",
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("✗ Cannot read task file '{}': {}", file, e);
@@ -162,9 +213,18 @@ pub(crate) async fn handle_batch_command(
     println!("{}", "─".repeat(60));
 
     // ── Write results to output directory ──
-    std::fs::create_dir_all(&output)
+    let output_path = std::path::Path::new(&output);
+    if let Ok(meta) = std::fs::symlink_metadata(output_path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to write into symlinked output directory '{}'",
+                output
+            );
+        }
+    }
+    std::fs::create_dir_all(output_path)
         .with_context(|| format!("Failed to create output directory '{}'", output))?;
-    let summary_path = std::path::Path::new(&output).join("batch_summary.txt");
+    let summary_path = output_path.join("batch_summary.txt");
     let mut summary = format!(
         "Batch Summary: {} total, {} passed, {} failed\n\n",
         total, passed, failed
@@ -177,7 +237,7 @@ pub(crate) async fn handle_batch_command(
         }
         summary.push('\n');
     }
-    std::fs::write(&summary_path, &summary).with_context(|| {
+    write_cli_file_no_symlink(&summary_path, &summary).with_context(|| {
         format!(
             "Failed to write batch summary to '{}'",
             summary_path.display()
@@ -188,7 +248,7 @@ pub(crate) async fn handle_batch_command(
     }
 
     if aggregate {
-        let aggregate_path = std::path::Path::new(&output).join("batch_results.json");
+        let aggregate_path = output_path.join("batch_results.json");
         let payload = serde_json::json!({
             "total": total,
             "passed": passed,
@@ -200,14 +260,13 @@ pub(crate) async fn handle_batch_command(
                 "error": r.error,
             })).collect::<Vec<_>>(),
         });
-        std::fs::write(&aggregate_path, serde_json::to_vec_pretty(&payload)?).with_context(
-            || {
+        write_cli_file_no_symlink(&aggregate_path, serde_json::to_vec_pretty(&payload)?)
+            .with_context(|| {
                 format!(
                     "Failed to write aggregated batch JSON to '{}'",
                     aggregate_path.display()
                 )
-            },
-        )?;
+            })?;
         if !quiet {
             println!("Aggregated JSON written to: {}", aggregate_path.display());
         }
@@ -306,7 +365,7 @@ pub(crate) async fn handle_state_command(command: StateCommands) -> Result<()> {
             let mut manager = StateManager::new_file_based(&workflow, base_dir)?;
             manager.load().await?;
             let payload = serde_json::to_string_pretty(manager.get_all())?;
-            std::fs::write(&output, payload)?;
+            write_cli_file_no_symlink(std::path::Path::new(&output), payload)?;
             println!("Exported state for '{}' to {}.", workflow, output);
         }
         StateCommands::Import {
@@ -324,7 +383,11 @@ pub(crate) async fn handle_state_command(command: StateCommands) -> Result<()> {
                 );
             }
 
-            let content = std::fs::read_to_string(&input)?;
+            let content = read_bounded_cli_file(
+                std::path::Path::new(&input),
+                MAX_STATE_IMPORT_BYTES,
+                "workflow state import file",
+            )?;
             let state: std::collections::HashMap<String, serde_json::Value> =
                 serde_json::from_str(&content)?;
 

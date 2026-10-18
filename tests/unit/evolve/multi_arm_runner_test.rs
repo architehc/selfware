@@ -362,7 +362,7 @@ mod quarantined {
             "[package]\nname = \"cand\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
         )
         .unwrap();
-        std::fs::write(repo.join("src/lib.rs"), lib_rs(400, true)).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib_rs(800, true)).unwrap();
         std::fs::write(
             repo.join("examples/bench.rs"),
             "fn main() { cand::work(); }\n",

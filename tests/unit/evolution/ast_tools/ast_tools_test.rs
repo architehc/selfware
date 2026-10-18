@@ -1152,3 +1152,19 @@ fn test_apply_strict_patch_and_is_patch_already_applied_reject_protected_and_esc
     assert!(!apply_strict_patch(root, &escaping_json));
     assert!(!is_patch_already_applied(root, &escaping_json));
 }
+
+#[test]
+fn test_create_shadow_worktree_rejects_traversal_and_flag_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    for bad_name in ["", "-flag", "../escape", "sub/dir", "sub\\dir"] {
+        let err = create_shadow_worktree_named_at(root, bad_name, None);
+        assert!(err.is_err(), "worktree name '{bad_name}' must be rejected");
+    }
+
+    for bad_ref in ["--upload-pack=evil", "-b", "HEAD..origin", "ref with space"] {
+        let err = create_shadow_worktree_named_at(root, "valid_wt", Some(bad_ref));
+        assert!(err.is_err(), "commit/ref '{bad_ref}' must be rejected");
+    }
+}

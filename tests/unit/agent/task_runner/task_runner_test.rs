@@ -3185,6 +3185,47 @@ async fn shell_passthrough_marks_truncation_and_exit_codes() {
     server.stop().await;
 }
 
+#[tokio::test]
+async fn shell_passthrough_redacts_secrets_in_context_and_plan_mode_stays_synced() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut cfg = mock_agent_config(format!("{}/v1", server.url()), false);
+    cfg.plan_mode = true;
+    let mut agent = Agent::new(cfg).await.unwrap();
+
+    // Initial config.plan_mode = true must initialize both plan_mode and plan_mode_manager
+    assert!(agent.plan_mode);
+    assert!(agent.is_in_plan_mode());
+
+    agent.exit_plan_mode();
+    assert!(!agent.plan_mode);
+    assert!(!agent.is_in_plan_mode());
+
+    agent.enter_plan_mode();
+    assert!(agent.plan_mode);
+    assert!(agent.is_in_plan_mode());
+
+    agent.approve_plan();
+    assert!(
+        !agent.plan_mode,
+        "approving plan must clear execution-gate plan_mode bool"
+    );
+    assert!(agent.is_plan_approved());
+
+    agent.clear_plan();
+    assert!(!agent.plan_mode);
+    assert!(!agent.is_in_plan_mode());
+
+    let fake_key = format!("sk-{}", "a".repeat(48));
+    let _ = agent.shell_passthrough(&format!("echo {fake_key}")).await;
+    let last = &agent.messages[agent.messages.len() - 1];
+    assert!(
+        !last.content.text().contains(&fake_key),
+        "conversation context must redact secrets from shell passthrough: {}",
+        last.content.text()
+    );
+    server.stop().await;
+}
+
 // =========================================================================
 // Swarm phase orchestration (review finding 16): a failed phase must not
 // become overall success, and dependent phases must be blocked.

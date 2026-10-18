@@ -1,6 +1,6 @@
 //! Project types and scaffolding for long-running tests.
 
-use crate::safety::process_env::SanitizedEnvExt;
+use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use std::path::Path;
 use std::process::Command;
 
@@ -69,6 +69,39 @@ impl ProjectType {
     }
 }
 
+fn init_scaffold_git_repo(dir: &Path, initial_commit: bool) {
+    let _ = Command::new("git")
+        .sanitized_git(dir, GitScope::Internal)
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .output();
+
+    if initial_commit {
+        let _ = Command::new("git")
+            .sanitized_git(dir, GitScope::Internal)
+            .args(["add", "-A"])
+            .current_dir(dir)
+            .output();
+
+        let _ = Command::new("git")
+            .sanitized_git(dir, GitScope::Internal)
+            .args([
+                "-c",
+                "user.name=selfware",
+                "-c",
+                "user.email=selfware@local",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir)
+            .output();
+    }
+}
+
 /// Scaffolds a new greenfield Rust project.
 pub fn scaffold_rust(name: &str, dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir.join("src"))?;
@@ -87,24 +120,7 @@ edition = "2021"
     // src/lib.rs
     std::fs::write(dir.join("src/lib.rs"), "// Implement here\n")?;
 
-    // Initialize git
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["init", "-q"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["add", "-A"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(dir)
-        .output();
+    init_scaffold_git_repo(dir, true);
 
     Ok(())
 }
@@ -113,12 +129,7 @@ edition = "2021"
 pub fn scaffold_python(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
 
-    // Initialize git
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["init", "-q"])
-        .current_dir(dir)
-        .output();
+    init_scaffold_git_repo(dir, false);
 
     Ok(())
 }
@@ -137,30 +148,24 @@ go 1.21
     );
     std::fs::write(dir.join("go.mod"), go_mod)?;
 
-    // Initialize git
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["init", "-q"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["add", "-A"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(dir)
-        .output();
+    init_scaffold_git_repo(dir, true);
 
     Ok(())
 }
 
 /// Copies a template project.
 pub fn scaffold_template(template: &str, templates_dir: &Path, dir: &Path) -> std::io::Result<()> {
+    if template.is_empty()
+        || template.contains('/')
+        || template.contains('\\')
+        || template.contains('\0')
+        || template.contains("..")
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid template name: {}", template),
+        ));
+    }
     let src = templates_dir.join(template);
     if !src.exists() {
         return Err(std::io::Error::new(
@@ -172,40 +177,42 @@ pub fn scaffold_template(template: &str, templates_dir: &Path, dir: &Path) -> st
     // Copy template
     copy_dir_all(&src, dir)?;
 
-    // Clean up build artifacts
+    // Clean up build artifacts and any embedded git metadata
+    let _ = std::fs::remove_dir_all(dir.join(".git"));
     let _ = std::fs::remove_dir_all(dir.join("target"));
     let _ = std::fs::remove_file(dir.join("Cargo.lock"));
     let _ = std::fs::remove_dir_all(dir.join("node_modules"));
 
-    // Initialize git
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["init", "-q"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["add", "-A"])
-        .current_dir(dir)
-        .output();
-
-    let _ = Command::new("git")
-        .sanitized_env()
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(dir)
-        .output();
+    init_scaffold_git_repo(dir, true);
 
     Ok(())
 }
 
-/// Recursively copy a directory.
+/// Recursively copy a directory, refusing symlinks.
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    let src_meta = std::fs::symlink_metadata(&src)?;
+    if src_meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Refusing to copy symlink template directory: {}",
+                src.as_ref().display()
+            ),
+        ));
+    }
     std::fs::create_dir_all(&dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
-        if ty.is_dir() {
+        if ty.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Refusing to copy symlink in template: {}",
+                    entry.path().display()
+                ),
+            ));
+        } else if ty.is_dir() {
             copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
         } else {
             std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;

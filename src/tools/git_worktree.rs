@@ -278,8 +278,8 @@ pub fn startup_prune(workspace: &Path) {
     });
 }
 
-/// Validate a branch name to prevent shell injection
-fn validate_branch_name(name: &str) -> Result<()> {
+/// Validate a branch name to prevent flag/shell injection and invalid git refs
+pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!("Branch name must not be empty");
     }
@@ -299,6 +299,7 @@ fn validate_branch_name(name: &str) -> Result<()> {
         anyhow::bail!("Branch name must not start with '-'");
     }
 
+    crate::tools::git::validate_git_ref_name(name)?;
     Ok(())
 }
 
