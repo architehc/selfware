@@ -96,7 +96,7 @@ fn should_skip_trial(opts: &SwebenchProOpts, trial: Option<&TrialManifest>) -> b
     let Some(t) = trial else {
         return false;
     };
-    match t.state {
+    let skip = match t.state {
         TrialState::Evaluated => !opts.force_rerun,
         TrialState::PatchCaptured => true, // agent already ran; eval runs at end if needed
         TrialState::Planned
@@ -104,12 +104,20 @@ fn should_skip_trial(opts: &SwebenchProOpts, trial: Option<&TrialManifest>) -> b
         | TrialState::CloneFailed
         | TrialState::AgentFailed
         | TrialState::Running => false,
-    }
+    };
+    // Lean BH1 formal invariant (`formal/HarnessAndTwinBounds.lean`):
+    // Only PatchCaptured or Evaluated (when !force_rerun) may be skipped.
+    debug_assert!(
+        !skip || matches!(t.state, TrialState::PatchCaptured | TrialState::Evaluated),
+        "BH1 invariant violated: non-terminal trial state {:?} skipped",
+        t.state
+    );
+    skip
 }
 
 /// Derive the manifest state from a completed run result.
 fn trial_state_from_result(result: &PerRunResult) -> (TrialState, Option<String>) {
-    if !result.error.is_empty() {
+    let (state, err) = if !result.error.is_empty() {
         if result.error.contains("boot failed") {
             (TrialState::BootFailed, Some(result.error.clone()))
         } else if result.error.contains("clone failed") {
@@ -125,7 +133,19 @@ fn trial_state_from_result(result: &PerRunResult) -> (TrialState, Option<String>
         (TrialState::PatchCaptured, None)
     } else {
         (TrialState::AgentFailed, None)
-    }
+    };
+    // Lean BH2 formal invariants (`formal/HarnessAndTwinBounds.lean`):
+    // - `error_never_patch_captured`: non-empty error never maps to PatchCaptured.
+    // - `nonempty_patch_without_error_captured`: error.is_empty() && patch_bytes > 0 maps to PatchCaptured.
+    debug_assert!(
+        result.error.is_empty() || state != TrialState::PatchCaptured,
+        "BH2 invariant violated: result with non-empty error mapped to PatchCaptured"
+    );
+    debug_assert!(
+        !result.error.is_empty() || result.patch_bytes == 0 || state == TrialState::PatchCaptured,
+        "BH2 invariant violated: non-empty patch without error failed to map to PatchCaptured"
+    );
+    (state, err)
 }
 
 /// Reconstruct a `PerRunResult` from disk for a trial that is being skipped
@@ -1760,8 +1780,7 @@ fn merge_official_metrics_into_result(
             serde_json::Value::from(metrics.overall_pass),
         );
     }
-    std::fs::write(result_path, serde_json::to_vec_pretty(&value)?)
-        .with_context(|| format!("writing {}", result_path.display()))?;
+    write_json_atomic(result_path, &value)?;
     Ok(())
 }
 

@@ -607,3 +607,40 @@ async fn container_run_that_returns_records_the_cidfile_id_as_live() {
         "{entry:?}"
     );
 }
+
+#[tokio::test]
+async fn container_exec_and_build_reject_invalid_env_and_build_arg_keys() {
+    let bad_exec_key = ContainerExec
+        .execute(serde_json::json!({
+            "container": "app",
+            "command": ["echo", "ok"],
+            "env": {"BAD-KEY": "1"}
+        }))
+        .await;
+    assert!(bad_exec_key.is_err());
+    assert!(bad_exec_key
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid env var name"));
+
+    let bad_exec_val = ContainerExec
+        .execute(serde_json::json!({
+            "container": "app",
+            "command": ["echo", "ok"],
+            "env": {"GOOD_KEY": "bad\0val"}
+        }))
+        .await;
+    assert!(bad_exec_val.is_err());
+
+    let bad_build_key = ContainerBuild
+        .execute(serde_json::json!({
+            "tag": "myapp:latest",
+            "build_args": {"BAD=KEY": "1"}
+        }))
+        .await;
+    assert!(bad_build_key.is_err());
+    assert!(bad_build_key
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid build arg name"));
+}

@@ -33,6 +33,13 @@
     (`reconstruct_trial_pool_from_disk`):
     - Both live execution and resume reconstruction contribute exactly
       `1 + candidates.length` entries to `all_runs` (`pool_size_conserved`).
+  * BH5 official metric cross-multiplication ordering (`cmp_official_metrics`):
+    - Cross-multiplication comparison is irreflexive (`rateBetter_irrefl`,
+      `metricBetter_irrefl`).
+    - Any measured `fail_to_pass` pool outranks an unmeasured `0/0` pool
+      (`measured_f2p_beats_unmeasured`).
+    - Full `fail_to_pass` resolution strictly beats zero resolution
+      (`full_f2p_beats_zero_f2p`).
   * PT1 orthogonality of review and testing (`EvidenceKind::discharges`):
     - Passing tests never discharge `unreviewedChange`
       (`tests_never_discharge_review`).
@@ -55,10 +62,18 @@
   * PT4 attention-economy monotonic backoff (`PhiPresence::ignore`):
     - Ignoring a signal strictly increases its observation quota whenever
       `base > 0` (`ignore_strictly_increases_quota`).
+  * PT5 outbound mediation hierarchy & Steward priority (`PhiMediator::evaluate_outbound`,
+    `PhiSteward::propose`):
+    - Operator override (`gateOverridden = true`) unconditionally suppresses
+      `gate:debt` so Phi never asks twice (`override_suppresses_debt_gate`).
+    - Whenever `narrowLines ≤ gateLines`, firing `gate:debt` implies
+      `NarrowScope` augmentation is also active (`debt_gate_implies_narrow_scope`).
+    - Any failing run or broken removal obligation strictly prioritizes
+      `.repair` over `.verify` and `.orient` (`repair_dominates_steward`).
 
   `exportTable` emits a deterministic 3-column JSON table
   (`formal/harness_twin_table.json`) covering both the benchmark harness
-  trial decision space and the Fox Digital Twin posture decision space,
+  trial decision space and the Fox Digital Twin posture/steward decision space,
   checked against the Rust implementation by conformance tests.
 -/
 
@@ -213,6 +228,81 @@ theorem pool_size_conserved (promoted reconstructed : Candidate) (candidates : L
     (resumedTrialPool reconstructed candidates).length = 1 + candidates.length := by
   simp [liveTrialPool, resumedTrialPool, Nat.add_comm]
 
+/-! ### BH5 — Official Metric Cross-Multiplication Ordering (`cmp_official_metrics`) -/
+
+structure RatePair where
+  passed : Nat
+  total : Nat
+  deriving DecidableEq, Repr
+
+/-- Strict greater-than on `RatePair` via cross-multiplication (`cmp_official_metrics` in `runner.rs`). -/
+def rateBetter (a b : RatePair) : Bool :=
+  if a.total == 0 && b.total == 0 then false
+  else if a.total == 0 then false
+  else if b.total == 0 then true
+  else decide (a.passed * b.total > b.passed * a.total)
+
+def rateEq (a b : RatePair) : Bool :=
+  if a.total == 0 && b.total == 0 then true
+  else if a.total == 0 || b.total == 0 then false
+  else decide (a.passed * b.total = b.passed * a.total)
+
+structure OfficialMetrics where
+  f2p : RatePair
+  p2p : RatePair
+  overallPass : Bool
+  deriving DecidableEq, Repr
+
+def metricBetter (a b : OfficialMetrics) : Bool :=
+  if !rateEq a.f2p b.f2p then rateBetter a.f2p b.f2p
+  else if !rateEq a.p2p b.p2p then rateBetter a.p2p b.p2p
+  else a.overallPass && !b.overallPass
+
+theorem rateBetter_irrefl (r : RatePair) : rateBetter r r = false := by
+  unfold rateBetter
+  by_cases h0 : r.total == 0 <;> simp [h0]
+
+theorem rateEq_refl (r : RatePair) : rateEq r r = true := by
+  unfold rateEq
+  by_cases h0 : r.total == 0 <;> simp [h0]
+
+theorem metricBetter_irrefl (m : OfficialMetrics) : metricBetter m m = false := by
+  unfold metricBetter
+  rw [rateEq_refl m.f2p, rateEq_refl m.p2p]
+  cases m.overallPass <;> rfl
+
+theorem measured_f2p_beats_unmeasured (a b : OfficialMetrics)
+    (ha : a.f2p.total > 0) (hb : b.f2p.total = 0) :
+    metricBetter a b = true := by
+  have ha0 : (a.f2p.total == 0) = false := by
+    cases h : a.f2p.total == 0
+    · rfl
+    · have : a.f2p.total = 0 := eq_of_beq h
+      omega
+  have hb0 : (b.f2p.total == 0) = true := by
+    simp [hb]
+  simp [metricBetter, rateEq, rateBetter, ha0, hb0]
+
+theorem full_f2p_beats_zero_f2p (a b : OfficialMetrics)
+    (ha : a.f2p.total > 0) (hb : b.f2p.total > 0)
+    (hpA : a.f2p.passed = a.f2p.total) (hpB : b.f2p.passed = 0) :
+    metricBetter a b = true := by
+  have ha0 : (a.f2p.total == 0) = false := by
+    cases h : a.f2p.total == 0
+    · rfl
+    · have : a.f2p.total = 0 := eq_of_beq h
+      omega
+  have hb0 : (b.f2p.total == 0) = false := by
+    cases h : b.f2p.total == 0
+    · rfl
+    · have : b.f2p.total = 0 := eq_of_beq h
+      omega
+  have hmul : a.f2p.passed * b.f2p.total > b.f2p.passed * a.f2p.total := by
+    rw [hpA, hpB, Nat.zero_mul]
+    exact Nat.mul_pos ha hb
+  have hneq : ¬ (a.f2p.passed * b.f2p.total = b.f2p.passed * a.f2p.total) := by omega
+  simp [metricBetter, rateEq, rateBetter, ha0, hb0, hmul, hneq]
+
 /-! ## Part II — Fox Policy Digital Twin & Evidence Ledger (`PhiPolicyTwin`) -/
 
 inductive ObligationKind where
@@ -364,6 +454,90 @@ theorem ignore_strictly_increases_quota (quota base ignored : Nat) (hb : base > 
   have h1 : 1 ≤ base * (ignored + 1) := Nat.mul_pos hb (by omega)
   omega
 
+/-! ### PT5 — Outbound Mediation Hierarchy & Steward Proposal Priority -/
+
+structure OutboundDecision where
+  demandDisproof : Bool
+  requireEvidence : Bool
+  narrowScope : Bool
+  gateDebt : Bool
+  deriving DecidableEq, Repr
+
+/-- `PhiMediator::evaluate_outbound` in `src/phi/policy.rs`. -/
+def evaluateOutbound (capitulations capThreshold unreviewedCount unrevThreshold
+    unverifiedLines narrowLines gateLines debtPct : Nat)
+    (gateOverridden : Bool) : OutboundDecision :=
+  { demandDisproof := decide (capitulations ≥ capThreshold)
+    requireEvidence := decide (unreviewedCount ≥ unrevThreshold)
+    narrowScope := decide (unverifiedLines ≥ narrowLines) || decide (debtPct > 55)
+    gateDebt := (decide (unverifiedLines ≥ gateLines) || decide (debtPct > 72)) && !gateOverridden }
+
+theorem override_suppresses_debt_gate
+    (cap capT unrev unrevT unvLines narrowL gateL debtPct : Nat) :
+    (evaluateOutbound cap capT unrev unrevT unvLines narrowL gateL debtPct true).gateDebt = false := by
+  simp [evaluateOutbound]
+
+theorem debt_gate_implies_narrow_scope
+    (cap capT unrev unrevT unvLines narrowL gateL debtPct : Nat)
+    (overridden : Bool)
+    (hlines : narrowL ≤ gateL)
+    (hgate : (evaluateOutbound cap capT unrev unrevT unvLines narrowL gateL debtPct overridden).gateDebt = true) :
+    (evaluateOutbound cap capT unrev unrevT unvLines narrowL gateL debtPct overridden).narrowScope = true := by
+  unfold evaluateOutbound at hgate ⊢
+  simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq] at hgate ⊢
+  rcases hgate.1 with hl | hd
+  · left; omega
+  · right; omega
+
+inductive ProposalKind where
+  | repair
+  | verify
+  | repay
+  | orient
+  | explore
+  deriving DecidableEq, Repr
+
+def ProposalKind.rank : ProposalKind → Nat
+  | .repair => 0
+  | .verify => 1
+  | .repay => 2
+  | .orient => 3
+  | .explore => 4
+
+def ProposalKind.name : ProposalKind → String
+  | .repair => "repair"
+  | .verify => "verify"
+  | .repay => "repay"
+  | .orient => "orient"
+  | .explore => "explore"
+
+/-- Top proposal kind returned by `PhiSteward::propose` when no proposals are dismissed. -/
+def stewardTopKind (hasFailedRun hasBrokenRemoval hasUnreviewed hasUntested hasOpaque : Bool) :
+    Option ProposalKind :=
+  if hasFailedRun || hasBrokenRemoval then some .repair
+  else if hasUnreviewed || hasUntested then some .verify
+  else if hasOpaque then some .orient
+  else none
+
+theorem repair_dominates_steward
+    (hasFailedRun hasBrokenRemoval hasUnreviewed hasUntested hasOpaque : Bool)
+    (h : hasFailedRun = true ∨ hasBrokenRemoval = true) :
+    stewardTopKind hasFailedRun hasBrokenRemoval hasUnreviewed hasUntested hasOpaque = some .repair := by
+  rcases h with hf | hb
+  · simp [stewardTopKind, hf]
+  · simp [stewardTopKind, hb]
+
+theorem verify_when_no_repair
+    (hasUnreviewed hasUntested hasOpaque : Bool)
+    (h : hasUnreviewed = true ∨ hasUntested = true) :
+    stewardTopKind false false hasUnreviewed hasUntested hasOpaque = some .verify := by
+  rcases h with hu | ht
+  · simp [stewardTopKind, hu]
+  · simp [stewardTopKind, ht]
+
+theorem clean_books_no_proposal :
+    stewardTopKind false false false false false = none := rfl
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -385,7 +559,18 @@ def exportTable : String :=
       allPhases.foldr (fun ph acc2 =>
         let em := deriveFoxEmotion debtPct noOut hasEv ph
         s!"[\"phi_posture:{stateLabel}\",\"{ph.name}\",\"{em.name}\"]" :: acc2) acc) []
-  "[" ++ ",".intercalate (skipRows ++ resultRows ++ postureRows) ++ "]"
+  let stewardRows := [(true, false, true, true, true, "failed_run_plus_debt"),
+                      (false, true, true, true, false, "broken_removal_plus_debt"),
+                      (false, false, true, false, true, "unreviewed_plus_opaque"),
+                      (false, false, false, true, true, "untested_plus_opaque"),
+                      (false, false, false, false, true, "opaque_only"),
+                      (false, false, false, false, false, "all_clear")].foldr
+    (fun (fr, br, ur, ut, op, label) acc =>
+      let out := match stewardTopKind fr br ur ut op with
+        | some k => k.name
+        | none => "none"
+      s!"[\"phi_steward\",\"{label}\",\"{out}\"]" :: acc) []
+  "[" ++ ",".intercalate (skipRows ++ resultRows ++ postureRows ++ stewardRows) ++ "]"
 
 end HarnessAndTwin
 

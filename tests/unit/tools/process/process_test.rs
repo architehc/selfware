@@ -621,3 +621,39 @@ async fn task_teardown_cancels_managed_restart_backoff_before_release() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_process_start_rejects_cwd_traversal_and_denied_env() {
+    let tool = ProcessStart;
+
+    let traversal = tool
+        .execute(serde_json::json!({
+            "id": "traversal-proc",
+            "command": "sleep",
+            "args": ["10"],
+            "cwd": "../outside"
+        }))
+        .await;
+    assert!(traversal.is_err());
+    assert!(traversal
+        .unwrap_err()
+        .to_string()
+        .contains("path traversal"));
+
+    for bad_env in [
+        serde_json::json!({"LD_PRELOAD": "/tmp/evil.so"}),
+        serde_json::json!({"DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib"}),
+        serde_json::json!({"GIT_CONFIG_COUNT": "1"}),
+        serde_json::json!({"SAFE_KEY": "bad\0value"}),
+    ] {
+        let res = tool
+            .execute(serde_json::json!({
+                "id": "env-injection-proc",
+                "command": "sleep",
+                "args": ["10"],
+                "env": bad_env
+            }))
+            .await;
+        assert!(res.is_err(), "expected error for env={bad_env}");
+    }
+}

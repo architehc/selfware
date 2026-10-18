@@ -46,6 +46,18 @@ fn validate_container_path(tool: &str, field: &str, path: &str) -> Result<()> {
         .with_context(|| format!("{tool} `{field}` is outside the allowed paths"))
 }
 
+fn validate_container_kv(field_label: &str, key: &str, val: &str) -> Result<()> {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!(
+            "Invalid {field_label} name '{key}'. Only alphanumeric and underscores allowed."
+        );
+    }
+    if val.contains('\0') {
+        anyhow::bail!("{field_label} value for '{key}' must not contain null bytes");
+    }
+    Ok(())
+}
+
 /// Build the container-runtime isolation flags for a run request's `profile`
 /// (default: "hardened"). Pure and validated so it is unit-tested without a
 /// container runtime. See docs/redteam_boundary_lab.md for the threat model and
@@ -865,6 +877,14 @@ impl Tool for ContainerExec {
             }
         }
 
+        if let Some(env) = args.get("env").and_then(|v| v.as_object()) {
+            for (key, val) in env {
+                if let Some(v) = val.as_str() {
+                    validate_container_kv("env var", key, v)?;
+                }
+            }
+        }
+
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
@@ -989,6 +1009,13 @@ impl Tool for ContainerBuild {
         validate_container_path("container_build", "path", path)?;
         if let Some(dockerfile) = args.get("dockerfile").and_then(|v| v.as_str()) {
             validate_container_path("container_build", "dockerfile", dockerfile)?;
+        }
+        if let Some(build_args) = args.get("build_args").and_then(|v| v.as_object()) {
+            for (key, val) in build_args {
+                if let Some(v) = val.as_str() {
+                    validate_container_kv("build arg", key, v)?;
+                }
+            }
         }
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;

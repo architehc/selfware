@@ -673,7 +673,11 @@ impl ToolRegistry {
         registry.register_deferred(graph::DupsTool::new(project_root));
 
         // Deferred: Patch apply tool
-        registry.register_deferred(PatchApply);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            PatchApply::with_safety_config(cfg.clone())
+        } else {
+            PatchApply::new()
+        });
 
         // Deferred: Hot-reload tool for dynamic plugin loading
         #[cfg(feature = "hot-reload")]

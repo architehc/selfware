@@ -750,3 +750,35 @@ fn requirements_scan_follows_includes_and_accepts_registry_files() {
         );
     }
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn pip_freeze_does_not_overwrite_output_file_on_command_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = path_env_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let req_path = dir.path().join("requirements.txt");
+    std::fs::write(&req_path, "pinned==1.0.0\n").unwrap();
+
+    for bin in ["python3", "python"] {
+        let stub = dir.path().join(bin);
+        std::fs::write(&stub, "#!/bin/sh\necho 'broken env' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    env.set("PATH", dir.path().display().to_string());
+    let tool = PipFreeze::with_safety_config(permissive_package_safety());
+    let out = tool
+        .execute(json!({"output_file": req_path.to_string_lossy()}))
+        .await
+        .expect("pip_freeze returns structured output on non-zero exit");
+
+    assert_eq!(out["success"], false);
+    assert!(out["written_to"].is_null());
+    assert_eq!(
+        std::fs::read_to_string(&req_path).unwrap(),
+        "pinned==1.0.0\n",
+        "failed pip_freeze must not overwrite existing output_file"
+    );
+}

@@ -4120,7 +4120,7 @@ fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String
 /// model-produced edit paths (write) so `selfware evolve` can never read or
 /// overwrite files outside the repository. Purely lexical (no canonicalize) so
 /// it also works for not-yet-existing write targets.
-fn contained_path(base: &Path, candidate: &Path) -> Option<PathBuf> {
+pub(crate) fn contained_path(base: &Path, candidate: &Path) -> Option<PathBuf> {
     use std::path::Component;
     if candidate.is_absolute() {
         return None;
@@ -4786,7 +4786,7 @@ fn push_unique_diff_path(paths: &mut Vec<PathBuf>, raw: &str, prefix: &str) {
     }
 }
 
-fn patch_edited_paths(patch: &str) -> Vec<PathBuf> {
+pub(crate) fn patch_edited_paths(patch: &str) -> Vec<PathBuf> {
     // Search-and-replace format (mirrors apply_edits' dispatch).
     if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
         if !edits.is_empty() && edits[0].get("search").is_some() {
@@ -5124,12 +5124,15 @@ fn apply_patch_to_worktree(worktree: &Path, patch: &str) -> bool {
 #[allow(dead_code)] // safety gate reserved for the direct repo-apply path
 fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
     // Final protected-path gate at the highest-blast-radius point: refuse
-    // to apply ANY patch that edits protected files to the real repo, even
-    // if a future caller bypasses the hypothesis safety filter.
+    // to apply ANY patch that edits protected files or paths outside the repo,
+    // even if a future caller bypasses the hypothesis safety filter.
     let edited = patch_edited_paths(patch);
-    if let Some(p) = edited.iter().find(|f| is_protected(f)) {
+    if let Some(p) = edited
+        .iter()
+        .find(|f| is_protected(f) || contained_path(repo_root, f).is_none())
+    {
         log_error(&format!(
-            "Refusing to apply patch to repo: edits protected path {}",
+            "Refusing to apply patch to repo: edits protected or out-of-bounds path {}",
             p.display()
         ));
         return false;
@@ -5280,9 +5283,12 @@ pub(crate) async fn commit_winner_to_repo(
 /// The protected-path gate runs on the tested diff itself.
 fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
     let edited = patch_edited_paths(tested_diff);
-    if let Some(p) = edited.iter().find(|f| is_protected(f)) {
+    if let Some(p) = edited
+        .iter()
+        .find(|f| is_protected(f) || contained_path(repo_root, f).is_none())
+    {
         log_error(&format!(
-            "Refusing to apply tested diff to repo: edits protected path {}",
+            "Refusing to apply tested diff to repo: edits protected or out-of-bounds path {}",
             p.display()
         ));
         return false;

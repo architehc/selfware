@@ -191,6 +191,14 @@ pub fn apply_strict_patch(dir: &Path, patch: &str) -> bool {
         }
     }
 
+    for edited in crate::evolution::daemon::patch_edited_paths(patch) {
+        if crate::evolution::is_protected(&edited)
+            || crate::evolution::daemon::contained_path(dir, &edited).is_none()
+        {
+            return false;
+        }
+    }
+
     // Unified diff format: strict git apply
     let patch_file = dir.join(format!(".restore-patch-{}", uuid_short()));
     if std::fs::write(&patch_file, patch).is_err() {
@@ -368,13 +376,19 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
                 let Some(file) = edit["file"].as_str() else {
                     return false;
                 };
+                if crate::evolution::is_protected(Path::new(file)) {
+                    return false;
+                }
+                let Some(target) = crate::evolution::daemon::contained_path(dir, Path::new(file))
+                else {
+                    return false;
+                };
                 let Some(search) = edit["search"].as_str() else {
                     return false;
                 };
                 let Some(replace) = edit["replace"].as_str() else {
                     return false;
                 };
-                let target = dir.join(file);
                 let Ok(content) = std::fs::read_to_string(&target) else {
                     return false;
                 };
@@ -383,6 +397,14 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
                 }
             }
             return true;
+        }
+    }
+
+    for edited in crate::evolution::daemon::patch_edited_paths(patch) {
+        if crate::evolution::is_protected(&edited)
+            || crate::evolution::daemon::contained_path(dir, &edited).is_none()
+        {
+            return false;
         }
     }
 

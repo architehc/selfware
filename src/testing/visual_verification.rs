@@ -166,6 +166,8 @@ pub struct VisualVerifier {
     api_key: Option<crate::config::RedactedString>,
     /// HTTP request timeout in seconds.
     timeout_secs: u64,
+    /// Minimum confidence threshold for passing (0.0 to 1.0).
+    confidence_threshold: f64,
     /// Default max response tokens for ad hoc requests.
     default_max_tokens: usize,
     /// Deterministic JSON prompts use a low temperature by default.
@@ -189,6 +191,7 @@ impl VisualVerifier {
             model: model.into(),
             api_key: None,
             timeout_secs: default_visual_timeout(),
+            confidence_threshold: default_confidence_threshold(),
             default_max_tokens: 4096,
             temperature: JSON_TEMPERATURE,
             image_detail: DEFAULT_IMAGE_DETAIL.to_string(),
@@ -198,7 +201,9 @@ impl VisualVerifier {
 
     /// Create a verifier from a [`VisualVerificationConfig`].
     pub fn from_config(config: &VisualVerificationConfig) -> Self {
-        Self::new(&config.endpoint, &config.model).with_timeout(config.timeout_secs)
+        Self::new(&config.endpoint, &config.model)
+            .with_timeout(config.timeout_secs)
+            .with_confidence_threshold(config.confidence_threshold)
     }
 
     /// Create a verifier from a named model profile.
@@ -233,6 +238,12 @@ impl VisualVerifier {
     /// Override the request timeout.
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    /// Override the minimum confidence threshold required for `visual_check` to pass.
+    pub fn with_confidence_threshold(mut self, threshold: f64) -> Self {
+        self.confidence_threshold = threshold.clamp(0.0, 1.0);
         self
     }
 
@@ -324,61 +335,11 @@ impl VisualVerifier {
         let start = std::time::Instant::now();
         let result = self.verify_screenshot(image_base64, expected).await;
         let duration_ms = start.elapsed().as_millis() as u64;
-
-        match result {
-            Ok(vr) => {
-                let errors: Vec<super::verification::VerificationError> = vr
-                    .issues
-                    .iter()
-                    .map(|issue| super::verification::VerificationError {
-                        file: String::new(),
-                        line: None,
-                        column: None,
-                        message: issue.clone(),
-                        code: None,
-                        severity: super::verification::ErrorSeverity::Error,
-                        suggestion: None,
-                    })
-                    .collect();
-
-                let passed = vr.passed && errors.is_empty();
-
-                Ok(super::verification::CheckResult {
-                    not_run: false,
-                    check_type: super::verification::CheckType::Custom,
-                    passed,
-                    duration_ms,
-                    output: vr.description,
-                    errors,
-                    warnings: vec![],
-                    suggestions: if !passed {
-                        vec!["Visual verification failed -- review screenshot against expected layout".to_string()]
-                    } else {
-                        vec![]
-                    },
-                })
-            }
-            Err(e) => Ok(super::verification::CheckResult {
-                not_run: false,
-                check_type: super::verification::CheckType::Custom,
-                passed: false,
-                duration_ms,
-                output: format!("Visual verification error: {}", e),
-                errors: vec![super::verification::VerificationError {
-                    file: String::new(),
-                    line: None,
-                    column: None,
-                    message: e.to_string(),
-                    code: None,
-                    severity: super::verification::ErrorSeverity::Error,
-                    suggestion: None,
-                }],
-                warnings: vec![],
-                suggestions: vec![
-                    "Ensure VLM endpoint is reachable and the model supports vision".to_string(),
-                ],
-            }),
-        }
+        Ok(evaluate_visual_check_result(
+            result,
+            self.confidence_threshold,
+            duration_ms,
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -670,13 +631,97 @@ fn extract_json_from_response(raw: &str) -> &str {
     trimmed
 }
 
+fn preview_raw_response(raw: &str) -> &str {
+    let end = raw.floor_char_boundary(raw.len().min(200));
+    &raw[..end]
+}
+
+fn evaluate_visual_check_result(
+    result: Result<VisualVerificationResult>,
+    confidence_threshold: f64,
+    duration_ms: u64,
+) -> super::verification::CheckResult {
+    match result {
+        Ok(vr) => {
+            let mut errors: Vec<super::verification::VerificationError> = vr
+                .issues
+                .iter()
+                .map(|issue| super::verification::VerificationError {
+                    file: String::new(),
+                    line: None,
+                    column: None,
+                    message: issue.clone(),
+                    code: None,
+                    severity: super::verification::ErrorSeverity::Error,
+                    suggestion: None,
+                })
+                .collect();
+
+            if vr.confidence < confidence_threshold {
+                errors.push(super::verification::VerificationError {
+                    file: String::new(),
+                    line: None,
+                    column: None,
+                    message: format!(
+                        "VLM confidence {:.2} is below threshold {:.2}",
+                        vr.confidence, confidence_threshold
+                    ),
+                    code: None,
+                    severity: super::verification::ErrorSeverity::Error,
+                    suggestion: None,
+                });
+            }
+
+            let passed = vr.passed && vr.confidence >= confidence_threshold && errors.is_empty();
+
+            super::verification::CheckResult {
+                not_run: false,
+                check_type: super::verification::CheckType::Custom,
+                passed,
+                duration_ms,
+                output: vr.description,
+                errors,
+                warnings: vec![],
+                suggestions: if !passed {
+                    vec![
+                        "Visual verification failed -- review screenshot against expected layout"
+                            .to_string(),
+                    ]
+                } else {
+                    vec![]
+                },
+            }
+        }
+        Err(e) => super::verification::CheckResult {
+            not_run: false,
+            check_type: super::verification::CheckType::Custom,
+            passed: false,
+            duration_ms,
+            output: format!("Visual verification error: {}", e),
+            errors: vec![super::verification::VerificationError {
+                file: String::new(),
+                line: None,
+                column: None,
+                message: e.to_string(),
+                code: None,
+                severity: super::verification::ErrorSeverity::Error,
+                suggestion: None,
+            }],
+            warnings: vec![],
+            suggestions: vec![
+                "Ensure VLM endpoint is reachable and the model supports vision".to_string(),
+            ],
+        },
+    }
+}
+
 /// Parse a verification response from the VLM.
 fn parse_verification_response(raw: &str) -> Result<VisualVerificationResult> {
     let json_str = extract_json_from_response(raw);
     let parsed: Value = serde_json::from_str(json_str).with_context(|| {
         format!(
             "Failed to parse VLM verification response as JSON: {}",
-            &raw[..raw.len().min(200)]
+            preview_raw_response(raw)
         )
     })?;
 
@@ -715,7 +760,7 @@ fn parse_diff_response(raw: &str) -> Result<VisualDiffResult> {
     let parsed: Value = serde_json::from_str(json_str).with_context(|| {
         format!(
             "Failed to parse VLM diff response as JSON: {}",
-            &raw[..raw.len().min(200)]
+            preview_raw_response(raw)
         )
     })?;
 
@@ -766,7 +811,7 @@ fn parse_elements_response(raw: &str, elements: &[UiElement]) -> Result<Vec<Elem
     let parsed: Value = serde_json::from_str(json_str).with_context(|| {
         format!(
             "Failed to parse VLM elements response as JSON: {}",
-            &raw[..raw.len().min(200)]
+            preview_raw_response(raw)
         )
     })?;
 
@@ -816,7 +861,7 @@ fn parse_layout_response(raw: &str) -> Result<LayoutAnalysis> {
     let parsed: Value = serde_json::from_str(json_str).with_context(|| {
         format!(
             "Failed to parse VLM layout response as JSON: {}",
-            &raw[..raw.len().min(200)]
+            preview_raw_response(raw)
         )
     })?;
 
@@ -1024,10 +1069,12 @@ impl VisualStateTracker {
         };
 
         // Add to history
-        if self.history.len() >= self.max_history {
-            self.history.pop_front();
+        if self.max_history > 0 {
+            if self.history.len() >= self.max_history {
+                self.history.pop_front();
+            }
+            self.history.push_back(state);
         }
-        self.history.push_back(state);
 
         result
     }
@@ -1150,6 +1197,9 @@ pub fn compute_perceptual_hash(screenshot_path: &Path) -> Result<String> {
 /// Compare two perceptual hashes using Hamming distance
 /// Returns similarity score 0.0-1.0 where 1.0 is identical
 pub fn compute_hash_similarity(hash1: &str, hash2: &str) -> f32 {
+    if hash1.is_empty() && hash2.is_empty() {
+        return 1.0;
+    }
     if hash1.len() != hash2.len() {
         // Different lengths - compute similarity based on common prefix
         let min_len = hash1.len().min(hash2.len());

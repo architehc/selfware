@@ -945,12 +945,46 @@ impl SafetyChecker {
                             .collect()
                     })
                     .unwrap_or_default();
+                let full_cmd = if argv.is_empty() {
+                    cmd.clone()
+                } else {
+                    format!("{} {}", cmd, argv.join(" "))
+                };
                 if !argv.is_empty() {
-                    let joined = format!("{} {}", cmd, argv.join(" "));
-                    self.check_shell_command_in(&joined, cwd)?;
+                    self.check_shell_command_in(&full_cmd, cwd)?;
                 }
                 if let Some(cwd) = cwd {
                     self.check_path(cwd)?;
+                }
+                if let Some(env) = args.get("env").and_then(|v| v.as_object()) {
+                    let mut expanded = full_cmd;
+                    let mut referenced = false;
+                    for (name, value) in env {
+                        if name.is_empty()
+                            || name.contains('=')
+                            || name.contains('\0')
+                            || name.to_ascii_uppercase().starts_with("GIT_CONFIG_")
+                            || DENIED_ENV_VARS.iter().any(|d| d.eq_ignore_ascii_case(name))
+                        {
+                            return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+                        }
+                        if let Some(val) = value.as_str() {
+                            if val.contains('\0') {
+                                return Err(SelfwareError::Safety(
+                                    SafetyError::BlockedEnvInjection,
+                                ));
+                            }
+                            let braced = format!("${{{name}}}");
+                            let bare = format!("${name}");
+                            if expanded.contains(&braced) || expanded.contains(&bare) {
+                                referenced = true;
+                                expanded = expanded.replace(&braced, val).replace(&bare, val);
+                            }
+                        }
+                    }
+                    if referenced {
+                        self.check_shell_command_in(&expanded, cwd)?;
+                    }
                 }
             }
             "http_request" => {
@@ -1161,9 +1195,33 @@ impl SafetyChecker {
             "process_stop" | "process_restart" => {
                 // These affect running processes by ID, no shell injection risk
             }
-            "container_stop" | "container_remove" | "container_pull" | "container_build"
-            | "compose_up" | "compose_down" => {
+            "container_stop" | "container_remove" | "container_pull" => {
                 // Container management by name/ID
+            }
+            "container_build" | "compose_up" | "compose_down" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                let base_path = args.get("path").and_then(|v| v.as_str());
+                if let Some(path) = base_path {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
+                if let Some(dockerfile) = args.get("dockerfile").and_then(|v| v.as_str()) {
+                    if !dockerfile.is_empty() {
+                        self.check_path(dockerfile)?;
+                    }
+                }
+                if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+                    if !file.is_empty() {
+                        let resolved = match base_path.filter(|p| !p.is_empty() && *p != ".") {
+                            Some(base) if !std::path::Path::new(file).is_absolute() => {
+                                format!("{}/{}", base.trim_end_matches('/'), file)
+                            }
+                            _ => file.to_string(),
+                        };
+                        self.check_path(&resolved)?;
+                    }
+                }
             }
             "vision_analyze" | "vision_compare" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
@@ -6019,6 +6077,58 @@ mod outbound_credential_shape_tests {
         assert!(
             checker.check_tool_call(&symbol_call).is_ok(),
             "context_action targeting a symbol identifier must pass path check"
+        );
+    }
+
+    #[test]
+    fn process_start_and_container_build_compose_enforced_in_safety_checker() {
+        use super::{SafetyChecker, SafetyConfig, ToolCall};
+        use crate::api::ToolFunction;
+
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // 1. process_start with LD_PRELOAD env injection must be blocked.
+        let env_inject_call = ToolCall {
+            id: "ps1".into(),
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "process_start".into(),
+                arguments: r#"{"id":"p1","command":"sleep","args":["10"],"env":{"LD_PRELOAD":"/tmp/evil.so"}}"#
+                    .into(),
+            },
+        };
+        assert!(
+            checker.check_tool_call(&env_inject_call).is_err(),
+            "process_start with LD_PRELOAD must be blocked by SafetyChecker"
+        );
+
+        // 2. container_build with path outside workspace (/etc) must be blocked.
+        let build_outside = ToolCall {
+            id: "cb1".into(),
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "container_build".into(),
+                arguments: r#"{"tag":"myapp:latest","path":"/etc"}"#.into(),
+            },
+        };
+        assert!(
+            checker.check_tool_call(&build_outside).is_err(),
+            "container_build targeting /etc must be blocked by SafetyChecker"
+        );
+
+        // 3. compose_up with file traversal must be blocked.
+        let compose_outside = ToolCall {
+            id: "cu1".into(),
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "compose_up".into(),
+                arguments: r#"{"path":".","file":"../../etc/docker-compose.yml"}"#.into(),
+            },
+        };
+        assert!(
+            checker.check_tool_call(&compose_outside).is_err(),
+            "compose_up targeting ../../etc/docker-compose.yml must be blocked by SafetyChecker"
         );
     }
 }

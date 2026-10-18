@@ -150,12 +150,20 @@ impl Tool for ProcessStart {
         }
 
         // A relative `cwd` (and the default) resolve against the agent's
-        // workspace root, not the process cwd.
-        let cwd = args
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|s| crate::tools::workspace_root::anchor_path(std::path::Path::new(s)))
-            .or_else(|| crate::tools::workspace_root::current().command_dir());
+        // workspace root, not the process cwd. Reject `..` traversal
+        // consistently with `shell_exec`.
+        let cwd = match args.get("cwd").and_then(|v| v.as_str()) {
+            Some(s) => {
+                let cwd_path = std::path::Path::new(s);
+                for component in cwd_path.components() {
+                    if let std::path::Component::ParentDir = component {
+                        anyhow::bail!("cwd must not contain path traversal (..): {}", s);
+                    }
+                }
+                Some(crate::tools::workspace_root::anchor_path(cwd_path))
+            }
+            None => crate::tools::workspace_root::current().command_dir(),
+        };
 
         let env: HashMap<String, String> = args
             .get("env")
@@ -166,6 +174,40 @@ impl Tool for ProcessStart {
                     .collect()
             })
             .unwrap_or_default();
+
+        for (name, value) in &env {
+            if name.is_empty() || name.contains('=') {
+                anyhow::bail!(
+                    "Environment variable name must not be empty or contain '=': {}",
+                    name
+                );
+            }
+            if name.contains('\0') {
+                anyhow::bail!(
+                    "Environment variable name must not contain null bytes: {}",
+                    name
+                );
+            }
+            if value.contains('\0') {
+                anyhow::bail!(
+                    "Environment variable value must not contain null bytes (var: {})",
+                    name
+                );
+            }
+            if crate::safety::git_exec::is_git_config_env(name) {
+                anyhow::bail!(
+                    "Environment variable '{}' is not allowed in process_start env (git config override)",
+                    name
+                );
+            }
+            let upper = name.to_ascii_uppercase();
+            if crate::safety::checker::validation::DENIED_ENV_VARS.contains(&upper.as_str()) {
+                anyhow::bail!(
+                    "Environment variable '{}' is not allowed in process_start env (injection risk)",
+                    name
+                );
+            }
+        }
 
         let health_check_pattern = args
             .get("health_check_pattern")

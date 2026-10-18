@@ -65,6 +65,35 @@ where
     run_reaped_env(program, args, cwd, timeout_secs, &[]).await
 }
 
+/// Maximum stdout/stderr bytes buffered per stream by a verification command
+/// (10 MiB). Bytes beyond this cap are drained and discarded so a chatty or
+/// runaway check cannot OOM the harness or block the child on a full OS pipe.
+const MAX_VERIFICATION_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(
+    mut pipe: Option<R>,
+    max_bytes: usize,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 8192];
+    if let Some(ref mut s) = pipe {
+        loop {
+            match s.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if bytes.len() < max_bytes {
+                        let take = n.min(max_bytes - bytes.len());
+                        bytes.extend_from_slice(&buf[..take]);
+                    }
+                    // Beyond the cap: keep draining so the child never blocks on a full pipe.
+                }
+            }
+        }
+    }
+    bytes
+}
+
 /// [`run_reaped_args`] plus task-specific environment variables, set AFTER
 /// the sanitizer clears the inherited environment (e.g.
 /// `PYTHONDONTWRITEBYTECODE=1` for the Python syntax check).
@@ -79,8 +108,6 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    use tokio::io::AsyncReadExt;
-
     let mut cmd = Command::new(program);
     crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.envs(env.iter().copied());
@@ -104,22 +131,12 @@ where
     // `rustc`/test binaries/npm workers do not outlive the check.
     let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(pid);
 
-    let mut so = child.stdout.take();
-    let mut se = child.stderr.take();
-    let mut so_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        if let Some(ref mut s) = so {
-            let _ = s.read_to_end(&mut b).await;
-        }
-        b
-    });
-    let mut se_task = tokio::spawn(async move {
-        let mut b = Vec::new();
-        if let Some(ref mut s) = se {
-            let _ = s.read_to_end(&mut b).await;
-        }
-        b
-    });
+    let so = child.stdout.take();
+    let se = child.stderr.take();
+    let mut so_task =
+        tokio::spawn(async move { read_pipe_capped(so, MAX_VERIFICATION_OUTPUT_BYTES).await });
+    let mut se_task =
+        tokio::spawn(async move { read_pipe_capped(se, MAX_VERIFICATION_OUTPUT_BYTES).await });
 
     let timeout = tokio::time::Duration::from_secs(timeout_secs.max(1));
     // ONE absolute deadline covers BOTH the wait and the output collection:

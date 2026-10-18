@@ -780,38 +780,50 @@ fn derive_fox_posture_with_debt(
 ) -> FoxPosture {
     // Debt overrides optimistic expressions: a session can be green and still
     // be unverified, and the Fox Digital Twin's body should say so.
-    if debt_ratio > 0.70 {
-        return FoxPosture {
-            emotion: FoxEmotion::Unimpressed,
-            note: Some("nothing here is verified".to_string()),
-            debt_ratio,
-            channel,
-        };
-    }
-    if debt_ratio > 0.45 {
-        return FoxPosture {
-            emotion: FoxEmotion::Skeptical,
-            note: Some("more written than read".to_string()),
-            debt_ratio,
-            channel,
-        };
-    }
-
-    let (emotion, note) = match phase {
-        ActivityPhase::Failed => (FoxEmotion::Error, Some("something is red".to_string())),
-        ActivityPhase::Partial | ActivityPhase::Abandoned => (
+    let (emotion, note) = if debt_ratio > 0.70 {
+        (
+            FoxEmotion::Unimpressed,
+            Some("nothing here is verified".to_string()),
+        )
+    } else if debt_ratio > 0.45 {
+        (
             FoxEmotion::Skeptical,
-            Some("nothing verified this".to_string()),
-        ),
-        ActivityPhase::Running => (FoxEmotion::Working, None),
-        ActivityPhase::Completed => {
-            if no_outstanding && has_evidence {
-                (FoxEmotion::Flow, None)
-            } else {
-                (FoxEmotion::Greeting, None)
+            Some("more written than read".to_string()),
+        )
+    } else {
+        match phase {
+            ActivityPhase::Failed => (FoxEmotion::Error, Some("something is red".to_string())),
+            ActivityPhase::Partial | ActivityPhase::Abandoned => (
+                FoxEmotion::Skeptical,
+                Some("nothing verified this".to_string()),
+            ),
+            ActivityPhase::Running => (FoxEmotion::Working, None),
+            ActivityPhase::Completed => {
+                if no_outstanding && has_evidence {
+                    (FoxEmotion::Flow, None)
+                } else {
+                    (FoxEmotion::Greeting, None)
+                }
             }
         }
     };
+
+    // Lean PT4 formal invariants (`formal/HarnessAndTwinBounds.lean`):
+    // - `flow_requires_clean_verified`: Flow is never emitted unless debt <= 0.45,
+    //   no obligations remain, evidence is present, and the phase is Completed.
+    // - `high_debt_overrides_phase`: debt > 0.70 always forces Unimpressed.
+    debug_assert!(
+        emotion != FoxEmotion::Flow
+            || (debt_ratio <= 0.45
+                && no_outstanding
+                && has_evidence
+                && matches!(phase, ActivityPhase::Completed)),
+        "PT4 invariant violated: Flow posture emitted without clean verified completion"
+    );
+    debug_assert!(
+        debt_ratio <= 0.70 || emotion == FoxEmotion::Unimpressed,
+        "PT4 invariant violated: debt_ratio > 0.70 must produce Unimpressed posture"
+    );
 
     FoxPosture {
         emotion,

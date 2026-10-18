@@ -350,7 +350,23 @@ fn git_apply_command(args: &[&str]) -> tokio::process::Command {
 }
 
 /// Apply a unified diff using `git apply` with validation and optional 3-way fallback.
-pub struct PatchApply;
+#[derive(Default)]
+pub struct PatchApply {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<crate::config::SafetyConfig>,
+}
+
+impl PatchApply {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(cfg: crate::config::SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(cfg),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for PatchApply {
@@ -416,12 +432,13 @@ impl Tool for PatchApply {
         // `+++`/`---` names the text scan found, then — authoritatively —
         // every name git's own parser reports for the file that will be
         // applied (see `git_patch_paths`).
-        let safety = crate::tools::file::resolve_safety_config(None);
+        let safety = crate::tools::file::resolve_safety_config(self.safety_config.as_ref());
         for path in &targets {
             validate_patch_path(path, &safety)?;
         }
-        for path in git_patch_paths(&temp_path_str).await? {
-            validate_patch_path(&path, &safety)?;
+        let git_paths = git_patch_paths(&temp_path_str).await?;
+        for path in &git_paths {
+            validate_patch_path(path, &safety)?;
         }
 
         if let Err(msg) = check_diff_header_safety(diff) {
@@ -432,7 +449,11 @@ impl Tool for PatchApply {
         // secret marker, an entity-escaped character) would corrupt it.
         for (path, removed, added) in diff_sides_by_target(diff) {
             let resolved = crate::tools::workspace_root::anchor(&path);
-            let original = std::fs::read_to_string(&resolved).ok();
+            let original = crate::tools::file::read_to_string_capped(
+                std::path::Path::new(&resolved),
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .ok();
             crate::tools::file::refuse_display_artifacts(
                 "patch_apply",
                 &path,
@@ -507,6 +528,9 @@ impl Tool for PatchApply {
         }
 
         for path in &targets {
+            crate::tools::file::clear_file_snapshot(path);
+        }
+        for path in &git_paths {
             crate::tools::file::clear_file_snapshot(path);
         }
 

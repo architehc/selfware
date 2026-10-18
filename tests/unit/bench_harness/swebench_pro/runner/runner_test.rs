@@ -1157,4 +1157,43 @@ fn rust_bench_harness_matches_lean_formal_table_and_invariants() {
             );
         }
     }
+
+    // BH5: Official metric ordering (`measured_f2p_beats_unmeasured`, `full_f2p_beats_zero_f2p`)
+    // and atomic result merge.
+    let cand1 = make_candidate_result(1, false);
+    let cand2 = make_candidate_result(2, false);
+    let cand3 = make_candidate_result(3, false);
+    let mut metrics = BTreeMap::new();
+    // cand1: unmeasured (total=0), cand2: 1/4 f2p, cand3: 2/2 f2p.
+    metrics.insert(1, OfficialEvalMetrics::default());
+    metrics.insert(
+        2,
+        OfficialEvalMetrics {
+            fail_to_pass_passed: 1,
+            fail_to_pass_total: 4,
+            pass_to_pass_passed: 0,
+            pass_to_pass_total: 0,
+            overall_pass: false,
+        },
+    );
+    assert_eq!(
+        select_oracle_candidate(&[cand1.clone(), cand2.clone()], &metrics).candidate_num,
+        2,
+        "BH5: measured positive f2p must beat unmeasured 0/0"
+    );
+    metrics.insert(
+        3,
+        OfficialEvalMetrics {
+            fail_to_pass_passed: 2,
+            fail_to_pass_total: 2,
+            pass_to_pass_passed: 0,
+            pass_to_pass_total: 0,
+            overall_pass: true,
+        },
+    );
+    assert_eq!(
+        select_oracle_candidate(&[cand1, cand2, cand3], &metrics).candidate_num,
+        3,
+        "BH5: 100% f2p must beat partial or unmeasured f2p"
+    );
 }

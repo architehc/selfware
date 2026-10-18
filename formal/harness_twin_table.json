@@ -48,5 +48,11 @@
   ["phi_posture:high_debt", "completed", "unimpressed"],
   ["phi_posture:high_debt", "partial", "unimpressed"],
   ["phi_posture:high_debt", "failed", "unimpressed"],
-  ["phi_posture:high_debt", "abandoned", "unimpressed"]
+  ["phi_posture:high_debt", "abandoned", "unimpressed"],
+  ["phi_steward", "failed_run_plus_debt", "repair"],
+  ["phi_steward", "broken_removal_plus_debt", "repair"],
+  ["phi_steward", "unreviewed_plus_opaque", "verify"],
+  ["phi_steward", "untested_plus_opaque", "verify"],
+  ["phi_steward", "opaque_only", "orient"],
+  ["phi_steward", "all_clear", "none"]
 ]

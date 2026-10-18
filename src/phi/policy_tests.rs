@@ -248,4 +248,106 @@ fn rust_phi_policy_twin_matches_lean_formal_table_and_invariants() {
         checked_posture, 20,
         "all 20 PT3 posture rows must be checked"
     );
+
+    // PT5: Check all 6 `phi_steward` proposal priority rows exported from Lean.
+    let kind_name = |k: Option<ProposalKind>| -> &'static str {
+        match k {
+            Some(ProposalKind::Repair) => "repair",
+            Some(ProposalKind::Verify) => "verify",
+            Some(ProposalKind::Repay) => "repay",
+            Some(ProposalKind::Orient) => "orient",
+            Some(ProposalKind::Explore) => "explore",
+            None => "none",
+        }
+    };
+
+    let mut checked_steward = 0usize;
+    for [domain, scenario, expected] in &rows {
+        if domain != "phi_steward" {
+            continue;
+        }
+        let steward = PhiSteward::new(4);
+        let mut ledger = Ledger::new();
+        let mut observations = Vec::new();
+
+        match scenario.as_str() {
+            "failed_run_plus_debt" => {
+                ledger.record_change(PathBuf::from("src/a.rs"), Some(20), 1, 1000);
+                observations.push(ObservationRecord {
+                    turn: 1,
+                    tool: "cargo_test".to_string(),
+                    command: Some("cargo test --lib".to_string()),
+                    kind: "run_finished".to_string(),
+                    outcome: Some("Failed".to_string()),
+                    may_have_mutated: true,
+                    reason: None,
+                    call_id: None,
+                });
+            }
+            "broken_removal_plus_debt" => {
+                ledger.record_change(PathBuf::from("src/a.rs"), Some(20), 1, 1000);
+                ledger.record_deletion(PathBuf::from("src/old.rs"), None, 2, 2000);
+            }
+            "unreviewed_plus_opaque" => {
+                ledger.record_change(PathBuf::from("src/a.rs"), Some(20), 1, 1000);
+                observations.push(ObservationRecord {
+                    turn: 1,
+                    tool: "shell_exec".to_string(),
+                    command: Some("sed -i '' 's/a/b/' src/a.rs".to_string()),
+                    kind: "run_finished".to_string(),
+                    outcome: Some("Passed".to_string()),
+                    may_have_mutated: true,
+                    reason: None,
+                    call_id: None,
+                });
+            }
+            "untested_plus_opaque" => {
+                ledger.record_change(PathBuf::from("src/a.rs"), Some(20), 1, 1000);
+                let snap = ledger.snapshot();
+                ledger.record_human_review(
+                    snap,
+                    vec![PathBuf::from("src/a.rs")],
+                    Outcome::Passed,
+                    None,
+                    1500,
+                );
+                observations.push(ObservationRecord {
+                    turn: 2,
+                    tool: "shell_exec".to_string(),
+                    command: Some("touch build.stamp".to_string()),
+                    kind: "run_finished".to_string(),
+                    outcome: Some("Passed".to_string()),
+                    may_have_mutated: true,
+                    reason: None,
+                    call_id: None,
+                });
+            }
+            "opaque_only" => {
+                observations.push(ObservationRecord {
+                    turn: 1,
+                    tool: "shell_exec".to_string(),
+                    command: Some("touch build.stamp".to_string()),
+                    kind: "run_finished".to_string(),
+                    outcome: Some("Passed".to_string()),
+                    may_have_mutated: true,
+                    reason: None,
+                    call_id: None,
+                });
+            }
+            "all_clear" => {}
+            other => panic!("unknown phi_steward scenario in formal table: {other}"),
+        }
+
+        let top_kind = steward
+            .propose(&ledger, &observations)
+            .first()
+            .map(|p| p.kind);
+        assert_eq!(
+            kind_name(top_kind),
+            expected,
+            "Lean PT5 steward mismatch for scenario `{scenario}`"
+        );
+        checked_steward += 1;
+    }
+    assert_eq!(checked_steward, 6, "all 6 PT5 steward rows must be checked");
 }

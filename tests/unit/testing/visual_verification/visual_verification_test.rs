@@ -1013,3 +1013,75 @@ fn test_garbage_image_control_and_unconditioned_response_rejected() {
         "raw unconditioned text must fail parsing"
     );
 }
+
+#[test]
+fn test_confidence_threshold_wired_and_enforced_in_visual_check() {
+    let config = VisualVerificationConfig {
+        enabled: true,
+        endpoint: "http://myhost:5000/v1".to_string(),
+        model: "llava".to_string(),
+        timeout_secs: 30,
+        confidence_threshold: 0.85,
+    };
+    let verifier = VisualVerifier::from_config(&config);
+    assert!((verifier.confidence_threshold - 0.85).abs() < f64::EPSILON);
+
+    // A result with passed: true but confidence 0.60 (< 0.85) must NOT pass visual_check.
+    let low_conf = VisualVerificationResult {
+        passed: true,
+        confidence: 0.60,
+        description: "Looks mostly right".to_string(),
+        issues: vec![],
+    };
+    let check_low = evaluate_visual_check_result(Ok(low_conf), verifier.confidence_threshold, 15);
+    assert!(
+        !check_low.passed,
+        "visual_check must fail when confidence < confidence_threshold"
+    );
+    assert_eq!(check_low.errors.len(), 1);
+    assert!(check_low.errors[0].message.contains("below threshold"));
+
+    // A result with passed: true and confidence 0.90 (>= 0.85) passes.
+    let high_conf = VisualVerificationResult {
+        passed: true,
+        confidence: 0.90,
+        description: "Exact match".to_string(),
+        issues: vec![],
+    };
+    let check_high = evaluate_visual_check_result(Ok(high_conf), verifier.confidence_threshold, 12);
+    assert!(check_high.passed);
+    assert!(check_high.errors.is_empty());
+}
+
+#[test]
+fn test_parse_responses_do_not_panic_on_multibyte_utf8_at_byte_200() {
+    // 199 ASCII bytes followed by a 4-byte emoji straddling byte index 200.
+    let mut raw = "x".repeat(199);
+    raw.push('🦀');
+    raw.push_str("trailing non-json");
+
+    assert!(parse_verification_response(&raw).is_err());
+    assert!(parse_diff_response(&raw).is_err());
+    assert!(parse_elements_response(&raw, &[]).is_err());
+    assert!(parse_layout_response(&raw).is_err());
+}
+
+#[test]
+fn test_empty_hash_similarity_and_zero_max_history() {
+    let sim = compute_hash_similarity("", "");
+    assert!(!sim.is_nan(), "empty hashes must not produce NaN");
+    assert!((sim - 1.0).abs() < f32::EPSILON);
+
+    let mut tracker = VisualStateTracker::new(0, 2);
+    tracker.record_state_with_hash(
+        "abc123".to_string(),
+        "Page".to_string(),
+        "click".to_string(),
+        false,
+    );
+    assert_eq!(
+        tracker.history_size(),
+        0,
+        "tracker with max_history == 0 must not retain entries"
+    );
+}

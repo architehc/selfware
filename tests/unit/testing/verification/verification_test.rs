@@ -3613,3 +3613,15 @@ async fn fast_gate_does_not_run_python_test_discovery() {
         report.checks
     );
 }
+
+#[tokio::test]
+async fn read_pipe_capped_truncates_and_drains_to_eof() {
+    let payload: Vec<u8> = (0..20_000usize).map(|i| b'a' + (i % 26) as u8).collect();
+    let cursor = std::io::Cursor::new(payload.clone());
+    let captured = read_pipe_capped(Some(cursor), 128).await;
+    assert_eq!(captured.len(), 128);
+    assert_eq!(captured, &payload[..128]);
+
+    let empty: Option<std::io::Cursor<Vec<u8>>> = None;
+    assert!(read_pipe_capped(empty, 128).await.is_empty());
+}

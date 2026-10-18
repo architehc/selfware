@@ -41,13 +41,13 @@ fn test_parse_diff_stats_multi_file() {
 
 #[test]
 fn test_patch_apply_name() {
-    let tool = PatchApply;
+    let tool = PatchApply::new();
     assert_eq!(tool.name(), "patch_apply");
 }
 
 #[test]
 fn test_patch_apply_schema() {
-    let tool = PatchApply;
+    let tool = PatchApply::new();
     let schema = tool.schema();
     assert_eq!(schema["type"], "object");
     assert!(schema["properties"]["diff"].is_object());
@@ -105,7 +105,9 @@ async fn test_deletion_of_denied_path_rejected() {
     // `.env` is in the default denied_paths; a patch deleting it must be
     // rejected even though the diff's new-file is /dev/null.
     let diff = "--- a/.env\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let result = PatchApply::new()
+        .execute(serde_json::json!({"diff": diff}))
+        .await;
     let err = result.expect_err("deletion of denied path must be rejected");
     assert!(
         err.to_string().contains(".env"),
@@ -116,7 +118,9 @@ async fn test_deletion_of_denied_path_rejected() {
 #[tokio::test]
 async fn test_deletion_with_parent_escape_rejected() {
     let diff = "--- a/../outside.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let result = PatchApply::new()
+        .execute(serde_json::json!({"diff": diff}))
+        .await;
     let err = result.expect_err("parent-escape deletion must be rejected");
     assert!(
         err.to_string().contains("parent-directory"),
@@ -132,8 +136,7 @@ async fn test_deletion_with_parent_escape_rejected() {
 /// denied_paths, so each of these must be refused and must name `.env`.
 #[tokio::test]
 async fn test_denied_path_reached_through_git_only_header_forms_rejected() {
-    let (_dir, repo) = patch_repo_with(".env", "DB_PASSWORD=x\n");
-    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let (_dir, repo, _state) = patch_repo_with(".env", "DB_PASSWORD=x\n");
     let diffs = [
         // C-quoted header names (`\056` is `.`).
         "--- \"a/\\056env\"\n+++ \"b/\\056env\"\n@@ -1 +1 @@\n-DB_PASSWORD=x\n+DB_PASSWORD=y\n",
@@ -150,7 +153,7 @@ async fn test_denied_path_reached_through_git_only_header_forms_rejected() {
         "diff --git a/.env b/.env\nold mode 100644\nnew mode 100755\n",
     ];
     for diff in diffs {
-        let result = PatchApply
+        let result = PatchApply::new()
             .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
             .await;
         let err = result.expect_err("diff touching a denied path must be rejected");
@@ -168,9 +171,8 @@ async fn test_denied_path_reached_through_git_only_header_forms_rejected() {
 
 #[tokio::test]
 async fn test_unparseable_diff_rejected_before_apply() {
-    let (_dir, repo) = patch_repo_with("f.txt", "x\n");
-    let _state = crate::test_support::CwdGuard::enter(&repo);
-    let result = PatchApply
+    let (_dir, _repo, _state) = patch_repo_with("f.txt", "x\n");
+    let result = PatchApply::new()
         .execute(serde_json::json!({"diff": "not a diff\n"}))
         .await;
     let err = result.expect_err("a diff git cannot parse must be refused");
@@ -183,11 +185,10 @@ async fn test_unparseable_diff_rejected_before_apply() {
 /// A rename of an allowed file still applies: both of its names pass.
 #[tokio::test]
 async fn test_rename_of_allowed_file_still_applies() {
-    let (_dir, repo) = patch_repo_with("old.txt", "hello\n");
-    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let (_dir, repo, _state) = patch_repo_with("old.txt", "hello\n");
     let diff =
         "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n";
-    PatchApply
+    PatchApply::new()
         .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
         .await
         .expect("rename between allowed paths must apply");
@@ -228,7 +229,9 @@ fn test_diff_touches_symlink_mode_detection() {
 async fn test_symlink_creation_diff_rejected() {
     let diff =
         "--- /dev/null\n+++ b/evil\nnew file mode 120000\n@@ -0,0 +1 @@\n+link:/etc/shadow\n";
-    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let result = PatchApply::new()
+        .execute(serde_json::json!({"diff": diff}))
+        .await;
     let err = result.expect_err("symlink-creating diff must be refused");
     assert!(
         err.to_string().contains("symlink"),
@@ -239,7 +242,9 @@ async fn test_symlink_creation_diff_rejected() {
 #[tokio::test]
 async fn test_existing_file_converted_to_symlink_rejected() {
     let diff = "diff --git a/conf b/conf\nold mode 100644\nnew mode 120000\nindex 111..222 100644\n--- a/conf\n+++ b/conf\n@@ -1 +1 @@\n-x\n+link:/etc/shadow\n";
-    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let result = PatchApply::new()
+        .execute(serde_json::json!({"diff": diff}))
+        .await;
     let err = result.expect_err("mode-converting diff must be refused");
     assert!(
         err.to_string().contains("symlink"),
@@ -256,6 +261,7 @@ async fn test_regular_file_creation_diff_still_applies() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
+    let _state = crate::test_support::CwdGuard::enter(&repo);
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(&repo)
@@ -263,8 +269,9 @@ async fn test_regular_file_creation_diff_still_applies() {
         .unwrap();
 
     let diff = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello world\n";
-    let _state = crate::test_support::CwdGuard::enter(&repo);
-    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let result = PatchApply::new()
+        .execute(serde_json::json!({"diff": diff}))
+        .await;
     let value = result.expect("regular file-creation diff must apply");
     assert_eq!(value["files_changed"], 1);
     assert_eq!(
@@ -367,25 +374,32 @@ fn strip_numbered_diff_requires_every_context_and_removed_line_prefixed() {
     assert_eq!(strip_numbered_diff(plain), None);
 }
 
-fn patch_repo_with(file: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+fn patch_repo_with(
+    file: &str,
+    content: &str,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    crate::test_support::CwdGuard,
+) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
+    let state = crate::test_support::CwdGuard::enter(&repo);
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(&repo)
         .status()
         .unwrap();
     std::fs::write(repo.join(file), content).unwrap();
-    (dir, repo)
+    (dir, repo, state)
 }
 
 #[tokio::test]
 async fn numbered_diff_applies_with_prefixes_stripped_and_says_so() {
-    let (_dir, repo) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
+    let (_dir, repo, _state) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
     let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n      1\talpha\n-     2\tbeta\n+     2\tBETA\n      3\tgamma\n";
-    let _state = crate::test_support::CwdGuard::enter(&repo);
-    let value = PatchApply
+    let value = PatchApply::new()
         .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
         .await
         .expect("de-numbered diff must apply");
@@ -404,10 +418,9 @@ async fn numbered_diff_applies_with_prefixes_stripped_and_says_so() {
 async fn diff_of_genuinely_numbered_content_applies_as_written() {
     // The file itself has `N<TAB>` lines: the diff matches as written and
     // must never be de-numbered.
-    let (_dir, repo) = patch_repo_with("ids.tsv", "1\tone\n2\ttwo\n");
+    let (_dir, repo, _state) = patch_repo_with("ids.tsv", "1\tone\n2\ttwo\n");
     let diff = "--- a/ids.tsv\n+++ b/ids.tsv\n@@ -1,2 +1,2 @@\n 1\tone\n-2\ttwo\n+2\tTWO\n";
-    let _state = crate::test_support::CwdGuard::enter(&repo);
-    let value = PatchApply
+    let value = PatchApply::new()
         .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
         .await
         .expect("diff matching as written must apply");
@@ -506,8 +519,7 @@ copy to src/copied.rs
 
 #[tokio::test]
 async fn patch_apply_clears_file_snapshot_allowing_subsequent_file_edit() {
-    let (_dir, repo) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
-    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let (_dir, repo, _state) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
 
     // 1. Read the file via FileRead (which anchors "f.txt" to the absolute repo path).
     crate::tools::file::FileRead::new()
@@ -515,9 +527,9 @@ async fn patch_apply_clears_file_snapshot_allowing_subsequent_file_edit() {
         .await
         .expect("initial file_read must succeed");
 
-    // 2. Apply a patch via PatchApply (which clears "f.txt" in FILE_SNAPSHOTS).
+    // 2. Apply a patch via PatchApply::new() (which clears "f.txt" in FILE_SNAPSHOTS).
     let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
-    PatchApply
+    PatchApply::new()
         .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
         .await
         .expect("patch_apply must succeed");
@@ -530,10 +542,32 @@ async fn patch_apply_clears_file_snapshot_allowing_subsequent_file_edit() {
             "new_str": "BETA_EDITED"
         }))
         .await
-        .expect("FileEdit after PatchApply must not fail with FileStale");
+        .expect("FileEdit after PatchApply::new() must not fail with FileStale");
 
     assert_eq!(
         std::fs::read_to_string(repo.join("f.txt")).unwrap(),
         "alpha\nBETA_EDITED\ngamma\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_apply_with_safety_config_honors_custom_denied_paths() {
+    let (_dir, repo, _state) = patch_repo_with("custom_locked.txt", "before\n");
+
+    let mut cfg = crate::config::SafetyConfig::default();
+    cfg.denied_paths.push("**/custom_locked.txt".to_string());
+    let tool = PatchApply::with_safety_config(cfg);
+
+    let diff = "--- a/custom_locked.txt\n+++ b/custom_locked.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    let res = tool
+        .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+        .await;
+    assert!(
+        res.is_err(),
+        "expected custom denied_paths to block patch_apply"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("custom_locked.txt")).unwrap(),
+        "before\n"
     );
 }

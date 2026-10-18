@@ -1103,3 +1103,52 @@ async fn test_promote_open_root_promote() {
         "Stale candidate rooted at pre-promotion baseline must be rejected by tree verification"
     );
 }
+
+#[test]
+fn test_apply_strict_patch_and_is_patch_already_applied_reject_protected_and_escaping_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src/safety")).unwrap();
+    std::fs::write(root.join("src/safety/checker.rs"), "pub fn safe() {}\n").unwrap();
+
+    // 1. Unified diff targeting a protected path must be rejected before invoking git apply.
+    let protected_diff = "--- a/src/safety/checker.rs\n+++ b/src/safety/checker.rs\n@@ -1 +1 @@\n-pub fn safe() {}\n+pub fn pwned() {}\n";
+    assert!(
+        !apply_strict_patch(root, protected_diff),
+        "apply_strict_patch must reject unified diff touching protected path"
+    );
+    assert!(
+        !is_patch_already_applied(root, protected_diff),
+        "is_patch_already_applied must reject unified diff touching protected path"
+    );
+
+    // 2. Unified diff escaping the directory via `..` must be rejected.
+    let escaping_diff = "--- a/../outside.rs\n+++ b/../outside.rs\n@@ -1 +1 @@\n-a\n+b\n";
+    assert!(
+        !apply_strict_patch(root, escaping_diff),
+        "apply_strict_patch must reject unified diff escaping directory"
+    );
+    assert!(
+        !is_patch_already_applied(root, escaping_diff),
+        "is_patch_already_applied must reject unified diff escaping directory"
+    );
+
+    // 3. JSON search-replace targeting a protected or escaping path must be rejected.
+    let protected_json = serde_json::json!([{
+        "file": "src/safety/checker.rs",
+        "search": "pub fn pwned() {}",
+        "replace": "pub fn safe() {}"
+    }])
+    .to_string();
+    assert!(!apply_strict_patch(root, &protected_json));
+    assert!(!is_patch_already_applied(root, &protected_json));
+
+    let escaping_json = serde_json::json!([{
+        "file": "../outside.rs",
+        "search": "old",
+        "replace": "new"
+    }])
+    .to_string();
+    assert!(!apply_strict_patch(root, &escaping_json));
+    assert!(!is_patch_already_applied(root, &escaping_json));
+}

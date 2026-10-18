@@ -727,23 +727,28 @@ impl Tool for PipFreeze {
 
         let packages: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
-        if let Some(file_path) = output_file.as_deref() {
-            // Arbitrary-write fix (2026-09-21 review): `output_file` was
-            // forwarded to fs::write unvalidated, so `pip_freeze` could
-            // overwrite any path the process could write. The write target
-            // now obeys the same atomic, symlink-rejecting workspace path
-            // policy as file_write.
-            crate::tools::file::write_atomic_checked(Path::new(file_path), &stdout, &safety)
-                .await
-                .context("Failed to write requirements file")?;
-        }
+        let written_to = if output.success() {
+            if let Some(file_path) = output_file.as_deref() {
+                // Arbitrary-write fix (2026-09-21 review): `output_file` was
+                // forwarded to fs::write unvalidated, so `pip_freeze` could
+                // overwrite any path the process could write. The write target
+                // now obeys the same atomic, symlink-rejecting workspace path
+                // policy as file_write.
+                crate::tools::file::write_atomic_checked(Path::new(file_path), &stdout, &safety)
+                    .await
+                    .context("Failed to write requirements file")?;
+            }
+            output_file
+        } else {
+            None
+        };
 
         Ok(json!({
             "success": output.success(),
             "python": python,
             "requirements": stdout.trim(),
             "count": packages.len(),
-            "written_to": output_file,
+            "written_to": written_to,
             "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
         }))
     }
