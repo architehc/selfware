@@ -251,6 +251,44 @@ class PhiTmuxGameTests(unittest.TestCase):
         self.assertIn("phi_tmux_game.py", proc.stdout)
         self.assertIn("observed_signals", proc.stdout)
 
+    def test_boss_battle_drills_achievements_and_profile_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp).resolve()
+            (ws / "src").mkdir()
+            (ws / "src" / "alpha.rs").write_text("pub fn alpha_sentinel_gate() {}\n", encoding="utf-8")
+            (ws / "src" / "beta.rs").write_text("pub struct BetaLedger {}\n", encoding="utf-8")
+            (ws / "src" / "gamma.rs").write_text("pub enum GammaOutcome { Observed }\n", encoding="utf-8")
+
+            app = game.PhiTmuxArenaApp(ws)
+            app.refresh()
+            for _ in range(3):
+                drill = app.start_boss_drill()
+                hit = app.answer_boss_drill(drill["correct_index"])
+                self.assertTrue(hit)
+
+            self.assertEqual(app.profile["drills_completed"], 3)
+            self.assertGreaterEqual(app.profile["xp"], 105)
+            self.assertIn("first_laser_lock", app.profile["achievements"])
+            self.assertIn("debt_slayer_i", app.profile["achievements"])
+            self.assertIn("golden_spiral", app.profile["achievements"])
+            self.assertIn("drill_master", app.profile["achievements"])
+            self.assertIsNotNone(app.code_preview)
+
+            reloaded = game.load_arena_profile(ws)
+            self.assertEqual(reloaded["drills_completed"], 3)
+
+            # Reject path traversal outside workspace_root
+            self.assertIsNone(game.inspect_citation_preview(ws, "../outside.rs:1"))
+
+            # Reject symlinked arena_profile.json
+            target = ws / ".selfware" / "phi" / "arena_profile.json"
+            target.unlink()
+            outside = ws / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            os.symlink(outside, target)
+            self.assertFalse(game.save_arena_profile(ws, app.profile))
+            self.assertEqual(game.load_arena_profile(ws)["xp"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

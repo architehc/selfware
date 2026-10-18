@@ -46,6 +46,8 @@ pub enum PaneType {
     Logs,
     /// Full interactive garden view with tree navigation
     GardenView,
+    /// Interactive Phi Fox Arena & Debt Slayer HUD
+    PhiArena,
 }
 
 impl PaneType {
@@ -64,6 +66,7 @@ impl PaneType {
             PaneType::ActiveTools => "🔧",
             PaneType::Logs => "📜",
             PaneType::GardenView => "🌳",
+            PaneType::PhiArena => "🦊",
         }
     }
 
@@ -82,6 +85,7 @@ impl PaneType {
             PaneType::ActiveTools => "Active Tools",
             PaneType::Logs => "Logs",
             PaneType::GardenView => "Garden View",
+            PaneType::PhiArena => "Phi Fox Arena",
         }
     }
 }

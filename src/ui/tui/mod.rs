@@ -12,6 +12,7 @@ pub mod layout;
 mod markdown;
 pub mod multichat;
 pub mod palette;
+pub mod phi_arena;
 pub mod status_line;
 pub mod tasks_view;
 mod widgets;
@@ -26,6 +27,9 @@ pub use garden_view::{render_garden_view, GardenFocus, GardenItem, GardenView};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
+pub use phi_arena::{
+    render_phi_arena, render_phi_arena_modal, PhiArenaAction, PhiArenaPane, PhiArenaProfile,
+};
 pub use status_line::{StatusLine, StatusMode};
 pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
 
@@ -584,6 +588,9 @@ pub fn run_tui_dashboard_with_events(
     let mut tasks_inputs = tasks_view::TasksInputs::default();
     let mut tasks_refreshed = Instant::now();
     let (reap_tx, reap_rx) = std::sync::mpsc::channel::<String>();
+    // The Phi Fox Arena & Debt Slayer pane (Ctrl+F or /phi).
+    let mut phi_arena_pane: Option<phi_arena::PhiArenaPane> = None;
+    let mut phi_arena_refreshed = Instant::now();
 
     // Discover user skills
     let skill_registry = crate::skills::SkillRegistry::discover();
@@ -668,6 +675,13 @@ pub fn run_tui_dashboard_with_events(
             tasks_refreshed = Instant::now();
             needs_redraw = true;
         }
+        if let Some(pane) = phi_arena_pane.as_mut() {
+            if phi_arena_refreshed.elapsed() >= Duration::from_millis(250) {
+                pane.refresh();
+                phi_arena_refreshed = Instant::now();
+                needs_redraw = true;
+            }
+        }
 
         // Process any pending events from the agent (non-blocking)
         loop {
@@ -733,6 +747,15 @@ pub fn run_tui_dashboard_with_events(
                                     pane.focused,
                                 );
                             }
+                            PaneType::PhiArena => {
+                                let mut inline_arena = phi_arena::PhiArenaPane::new(cwd.clone());
+                                phi_arena::render_phi_arena(
+                                    frame,
+                                    *pane_area,
+                                    &mut inline_arena,
+                                    pane.focused,
+                                );
+                            }
                             PaneType::Editor => {
                                 render_editor_pane(frame, *pane_area, pane);
                             }
@@ -776,6 +799,10 @@ pub fn run_tui_dashboard_with_events(
                         pane.editor.as_ref(),
                         pane.status.as_deref(),
                     );
+                }
+
+                if let Some(pane) = phi_arena_pane.as_mut() {
+                    phi_arena::render_phi_arena_modal(frame, area, pane);
                 }
 
                 if let Some(prompt) = &pending_permission {
@@ -823,6 +850,31 @@ pub fn run_tui_dashboard_with_events(
                     }
                 }
                 continue;
+            }
+
+            // Ctrl+F opens / closes the Phi Fox Arena & Debt Slayer modal.
+            if key.code == KeyCode::Char('f') && key.modifiers == KeyModifiers::CONTROL {
+                if phi_arena_pane.take().is_none() {
+                    phi_arena_refreshed = Instant::now();
+                    phi_arena_pane = Some(phi_arena::PhiArenaPane::new(cwd.clone()));
+                }
+                continue;
+            }
+            if let Some(pane) = phi_arena_pane.as_mut() {
+                let ctrl_c =
+                    key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+                if !ctrl_c {
+                    match pane.on_key(key) {
+                        Some(phi_arena::PhiArenaAction::Close) => phi_arena_pane = None,
+                        Some(phi_arena::PhiArenaAction::Log(msg)) => {
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(LogLevel::Info, &msg);
+                            });
+                        }
+                        None => {}
+                    }
+                    continue;
+                }
             }
 
             // Ctrl+T opens / closes the Tasks pane.
@@ -1354,6 +1406,17 @@ pub fn run_tui_dashboard_with_events(
                                     app.add_system_message(&workers_msg);
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Displayed worker status");
+                                    });
+                                }
+                                "/phi" | "/arena" => {
+                                    phi_arena_refreshed = Instant::now();
+                                    phi_arena_pane =
+                                        Some(phi_arena::PhiArenaPane::new(cwd.clone()));
+                                    app.add_system_message(
+                                        "🦊 Opened Phi Fox Arena & Debt Slayer (Ctrl+F or Esc to close).",
+                                    );
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Opened Phi Fox Arena");
                                     });
                                 }
                                 "/execute" => {

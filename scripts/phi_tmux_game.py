@@ -573,6 +573,257 @@ def render_fox_sprite(
     ]
 
 
+MAX_PROFILE_BYTES = 64 * 1024
+
+ACHIEVEMENT_TITLES: Dict[str, str] = {
+    "first_laser_lock": "🏆 Optical Lock",
+    "debt_slayer_i": "🏆 Debt Slayer I",
+    "hydra_hunter": "🏆 Hydra Hunter",
+    "golden_spiral": "🏆 Golden Spiral (1.61x φ)",
+    "drill_master": "🏆 Drill Master",
+}
+
+
+def default_arena_profile() -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "xp": 0,
+        "level": 1,
+        "best_streak": 1.0,
+        "bosses_slain": 0,
+        "drills_completed": 0,
+        "citations_inspected": 0,
+        "achievements": [],
+    }
+
+
+def recompute_profile_achievements(
+    profile: Dict[str, Any],
+    current_streak: float,
+    drained_hp: int = 0,
+    cleared_failing_run: bool = False,
+) -> Dict[str, Any]:
+    profile["best_streak"] = round(max(float(profile.get("best_streak", 1.0)), current_streak), 2)
+    profile["level"] = max(1, 1 + int(profile.get("xp", 0)) // 100)
+    unlocked: List[str] = list(profile.get("achievements") or [])
+
+    def _unlock(ach_id: str) -> None:
+        if ach_id not in unlocked:
+            unlocked.append(ach_id)
+
+    if int(profile.get("citations_inspected", 0)) >= 1:
+        _unlock("first_laser_lock")
+    if drained_hp >= 100 or int(profile.get("xp", 0)) >= 100:
+        _unlock("debt_slayer_i")
+    if cleared_failing_run:
+        _unlock("hydra_hunter")
+    if float(profile.get("best_streak", 1.0)) >= 1.61:
+        _unlock("golden_spiral")
+    if int(profile.get("drills_completed", 0)) >= 3:
+        _unlock("drill_master")
+
+    profile["achievements"] = unlocked
+    return profile
+
+
+def load_arena_profile(workspace_root: Path) -> Dict[str, Any]:
+    """Load `.selfware/phi/arena_profile.json` with symlink, hardlink, and size guards."""
+    try:
+        canon = workspace_root.resolve(strict=True)
+    except Exception:
+        return default_arena_profile()
+
+    curr = canon
+    for part in (".selfware", "phi"):
+        curr = curr / part
+        try:
+            st = os.lstat(curr)
+        except OSError:
+            return default_arena_profile()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return default_arena_profile()
+
+    target = curr / "arena_profile.json"
+    open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(target, open_flags)
+    except OSError:
+        return default_arena_profile()
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_PROFILE_BYTES:
+            return default_arena_profile()
+        raw = os.read(fd, MAX_PROFILE_BYTES + 1)
+        if len(raw) > MAX_PROFILE_BYTES:
+            return default_arena_profile()
+        parsed = json.loads(raw.decode("utf-8"))
+        if not isinstance(parsed, dict) or parsed.get("schema_version") != 1:
+            return default_arena_profile()
+        base = default_arena_profile()
+        base.update(parsed)
+        return base
+    except Exception:
+        return default_arena_profile()
+    finally:
+        os.close(fd)
+
+
+def save_arena_profile(workspace_root: Path, profile: Dict[str, Any]) -> bool:
+    """Atomically write `.selfware/phi/arena_profile.json` rejecting symlinks."""
+    try:
+        canon = workspace_root.resolve(strict=True)
+    except Exception:
+        return False
+
+    for rel in (Path(".selfware"), Path(".selfware/phi")):
+        dir_path = canon / rel
+        if dir_path.exists() or dir_path.is_symlink():
+            try:
+                st = os.lstat(dir_path)
+            except OSError:
+                return False
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                return False
+        else:
+            try:
+                dir_path.mkdir(mode=0o700)
+            except OSError:
+                return False
+
+    phi_dir = canon / ".selfware" / "phi"
+    target = phi_dir / "arena_profile.json"
+    if target.exists() or target.is_symlink():
+        try:
+            st = os.lstat(target)
+            if stat.S_ISLNK(st.st_mode):
+                return False
+        except OSError:
+            return False
+
+    tmp_path = phi_dir / f".tmp-arena-profile-{os.getpid()}.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+        try:
+            payload = json.dumps(profile, indent=2).encode("utf-8")
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, target)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
+def collect_workspace_landmarks(workspace_root: Path, limit: int = 24) -> List[Dict[str, Any]]:
+    """Collect real `pub fn` / `pub struct` / `pub enum` landmarks in `src/`."""
+    landmarks: List[Dict[str, Any]] = []
+    src_dir = workspace_root / "src"
+    if not src_dir.is_dir() or src_dir.is_symlink():
+        return landmarks
+    for candidate in sorted(src_dir.rglob("*.rs")):
+        if len(landmarks) >= limit:
+            break
+        try:
+            st = os.lstat(candidate)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size > 128 * 1024:
+                continue
+            rel = str(candidate.relative_to(workspace_root)).replace("\\", "/")
+            with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
+                for idx, line in enumerate(f, start=1):
+                    stripped = line.strip()
+                    for prefix in ("pub fn ", "pub async fn ", "pub struct ", "pub enum "):
+                        if stripped.startswith(prefix):
+                            rest = stripped[len(prefix):]
+                            sym = re.match(r"^[A-Za-z0-9_]+", rest)
+                            if sym and len(sym.group(0)) >= 4:
+                                landmarks.append(
+                                    {
+                                        "rel_path": rel,
+                                        "line": idx,
+                                        "symbol": sym.group(0),
+                                        "snippet": stripped[:72],
+                                    }
+                                )
+                                break
+                    if len(landmarks) >= limit:
+                        break
+        except OSError:
+            continue
+    return landmarks
+
+
+def generate_workspace_drill(workspace_root: Path, seed: int = 0) -> Dict[str, Any]:
+    """Generate a 3-option multiple-choice Boss Battle drill from real workspace symbols."""
+    landmarks = collect_workspace_landmarks(workspace_root, limit=24)
+    if len(landmarks) >= 3:
+        target = landmarks[seed % len(landmarks)]
+        distractors: List[str] = []
+        for cand in landmarks:
+            if cand["rel_path"] != target["rel_path"] and cand["rel_path"] not in distractors:
+                distractors.append(cand["rel_path"])
+                if len(distractors) == 2:
+                    break
+        while len(distractors) < 2:
+            fb = "src/safety/redact.rs" if not distractors else "src/evolve/ontology.rs"
+            if fb != target["rel_path"] and fb not in distractors:
+                distractors.append(fb)
+            else:
+                distractors.append("src/main.rs")
+
+        correct_slot = seed % 3
+        options = ["", "", ""]
+        options[correct_slot] = f"{target['rel_path']}:{target['line']}"
+        options[(correct_slot + 1) % 3] = f"{distractors[0]}:1"
+        options[(correct_slot + 2) % 3] = f"{distractors[1]}:1"
+        return {
+            "question": f"BOSS DRILL: Which workspace file & line defines `{target['symbol']}`?",
+            "symbol": target["symbol"],
+            "citation": f"{target['rel_path']}:{target['line']}",
+            "snippet": target["snippet"],
+            "options": options,
+            "correct_index": correct_slot,
+        }
+
+    return {
+        "question": 'BOSS DRILL: What does `trust_state: "observed_signals"` guarantee?',
+        "symbol": "observed_signals",
+        "citation": "src/evolve/server/phi_activity.rs:1",
+        "snippet": "Honest status over optimistic success (AGENTS.md Rule 3)",
+        "options": [
+            "Observed telemetry only — never fabricates green for unrun checks",
+            "All unit and integration tests were executed and passed",
+            "Static types were skipped to save tokens",
+        ],
+        "correct_index": 0,
+    }
+
+
+def inspect_citation_preview(workspace_root: Path, citation: str) -> Optional[str]:
+    """Safely read a 1-line preview around `path:line` strictly inside `workspace_root`."""
+    try:
+        canon_root = workspace_root.resolve(strict=True)
+        path_part, _, line_part = citation.partition(":")
+        line_no = max(1, int(line_part or "1"))
+        target = (canon_root / path_part).resolve(strict=True)
+        rel = target.relative_to(canon_root)
+        st = os.lstat(target)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size > 256 * 1024:
+            return None
+        with open(target, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, raw in enumerate(f, start=1):
+                if idx == line_no:
+                    return f"{rel}:{line_no} │ {raw.strip()[:68]}"
+    except Exception:
+        return None
+    return None
+
+
 def render_cockpit_frame(
     *,
     workspace_root: Path,
@@ -585,6 +836,9 @@ def render_cockpit_frame(
     laser_target: Optional[str] = None,
     chat_turns: Optional[List[Dict[str, str]]] = None,
     input_buffer: Optional[str] = None,
+    active_drill: Optional[Dict[str, Any]] = None,
+    achievements: Optional[List[str]] = None,
+    code_preview: Optional[str] = None,
     width: int = 76,
 ) -> str:
     """Render a complete, flicker-free ANSI frame for the tmux Phi Fox HUD pane."""
@@ -598,7 +852,7 @@ def render_cockpit_frame(
     rule = "─" * max(40, width - 2)
     lines: List[str] = []
     lines.append(f"{gold}╭{rule}╮{reset}")
-    title = f" φ SELFWARE · PHI FOX TMUX COCKPIT & DEBT SLAYER "
+    title = " φ SELFWARE · PHI FOX TMUX COCKPIT & DEBT SLAYER "
     badge = f"[TRUST: {boss.trust_state.upper()}]"
     lines.append(f"{gold}│{reset}{bold}{title}{reset}{cyan}{badge:>24}{reset} {gold}│{reset}")
     lines.append(f"{gold}├{rule}┤{reset}")
@@ -619,19 +873,32 @@ def render_cockpit_frame(
     )
     lines.append(f"  {bold}♥ DEBT:{reset} {render_hp_bar(boss.current_hp, boss.max_hp)}")
     lines.append(f"  {dim}📡 {boss.status_label}{reset}")
+    badge_str = (
+        " · ".join(ACHIEVEMENT_TITLES.get(a, a) for a in (achievements or []))
+        if achievements
+        else "None yet — press [h], [o], or [b] to unlock"
+    )
+    lines.append(f"  {bold}🏅 BADGES:{reset} {gold}{badge_str}{reset}")
+    if code_preview:
+        lines.append(f"  {cyan}🔎 LASER:{reset} {code_preview}")
 
     lines.append(f"{gold}├{rule}┤{reset}")
-    lines.append(f"  {bold}📜 ACTIVE QUESTS & VERIFICATION OBLIGATIONS:{reset}")
-    for q in boss.quests[:3]:
-        lines.append(f"   • {q}")
+    if active_drill:
+        lines.append(f"  {bold}{cyan}⚡ {active_drill['question']}{reset}")
+        for idx, opt in enumerate(active_drill.get("options", [])):
+            lines.append(f"   {gold}[{idx + 1}]{reset} {opt}")
+    else:
+        lines.append(f"  {bold}📜 ACTIVE QUESTS & VERIFICATION OBLIGATIONS:{reset}")
+        for q in boss.quests[:3]:
+            lines.append(f"   • {q}")
 
     lines.append(f"{gold}├{rule}┤{reset}")
     lines.append(f"  {bold}💬 PHI FOX BOT CHANNEL:{reset}")
     turns = (chat_turns or [])[-3:]
     if not turns:
         lines.append(
-            f"   {cyan}Phi:{reset} Ready on perch. Press {bold}[r]{reset} What's red, "
-            f"{bold}[d]{reset} Debt check, {bold}[h]{reset} Hunt, or {bold}[c]{reset} Chat."
+            f"   {cyan}Phi:{reset} Ready on perch. Press {bold}[r]{reset} Red?, "
+            f"{bold}[d]{reset} Debt, {bold}[h]{reset} Hunt, {bold}[b]{reset} Boss Drill, or {bold}[c]{reset} Chat."
         )
     else:
         for turn in turns:
@@ -648,8 +915,8 @@ def render_cockpit_frame(
     else:
         lines.append(
             f"  {bold}Keys:{reset} {gold}[r]{reset} Red?  {gold}[d]{reset} Debt  "
-            f"{gold}[h]{reset} Hunt  {gold}[g]{reset} GodMode  {gold}[c]{reset} Chat  "
-            f"{gold}[o]{reset} Open Cite  {gold}[q]{reset} Quit"
+            f"{gold}[h]{reset} Hunt  {gold}[b]{reset} Drill  {gold}[1-3]{reset} Strike  "
+            f"{gold}[g]{reset} GodMode  {gold}[c]{reset} Chat  {gold}[o]{reset} Open  {gold}[q]{reset} Quit"
         )
     lines.append(f"{gold}╰{rule}╯{reset}")
     return "\n".join(lines)
@@ -690,36 +957,69 @@ def query_phi_bot_server(
         return None
 
 
-def scan_workspace_target(workspace_root: Path) -> Optional[str]:
+def scan_workspace_target(workspace_root: Path, seed: int = 0) -> Optional[str]:
     """Find a concrete `path:line` landmark in `src/` for Phi's optical laser."""
-    src_dir = workspace_root / "src"
-    if not src_dir.is_dir():
+    landmarks = collect_workspace_landmarks(workspace_root, limit=16)
+    if not landmarks:
         return None
-    for candidate in sorted(src_dir.rglob("*.rs"))[:16]:
-        try:
-            rel = candidate.relative_to(workspace_root)
-            with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
-                for idx, line in enumerate(f, start=1):
-                    stripped = line.strip()
-                    if stripped.startswith(("pub fn ", "pub async fn ", "pub struct ")):
-                        return f"{rel}:{idx}"
-        except OSError:
-            continue
-    return None
+    chosen = landmarks[seed % len(landmarks)]
+    return f"{chosen['rel_path']}:{chosen['line']}"
 
 
 def jump_tmux_to_citation(
     citation: str,
+    workspace_root: Optional[Path] = None,
     tmux_session: Optional[str] = None,
     editor_pane: Optional[str] = None,
 ) -> bool:
-    """If inside tmux, display a navigation status banner for `path:line`."""
+    """Validate `path:line` inside `workspace_root` and jump editor pane or show tmux banner."""
+    safe_rel = None
+    line_no = 1
+    if workspace_root is not None:
+        try:
+            canon_root = workspace_root.resolve(strict=True)
+            path_part, _, line_part = citation.partition(":")
+            line_no = max(1, int(line_part or "1"))
+            resolved = (canon_root / path_part).resolve(strict=True)
+            rel_path = str(resolved.relative_to(canon_root)).replace("\\", "/")
+            if re.match(r"^[A-Za-z0-9_./-]+$", rel_path):
+                safe_rel = rel_path
+        except Exception:
+            safe_rel = None
+
     if not (os.environ.get("TMUX") or tmux_session) or not shutil.which("tmux"):
         return False
     try:
+        target_pane = f"{tmux_session}:{editor_pane}" if (tmux_session and editor_pane) else None
+        if target_pane and safe_rel:
+            probe = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", target_pane, "#{pane_current_command}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            active_cmd = probe.stdout.strip().lower()
+            if active_cmd in ("nvim", "vim", "vi"):
+                subprocess.run(
+                    [
+                        "tmux",
+                        "send-keys",
+                        "-t",
+                        target_pane,
+                        "Escape",
+                        f":e +{line_no} {safe_rel}",
+                        "Enter",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+
         cmd = ["tmux", "display-message"]
-        if tmux_session and editor_pane:
-            cmd.extend(["-t", f"{tmux_session}:{editor_pane}"])
+        if target_pane:
+            cmd.extend(["-t", target_pane])
         cmd.append(f"🦊 Phi Laser locked on {citation}")
         subprocess.run(
             cmd,
@@ -752,18 +1052,26 @@ class PhiTmuxArenaApp:
         self.frame_tick = 0
         self.god_mode = False
         self.laser_target: Optional[str] = None
+        self.code_preview: Optional[str] = None
+        self.profile = load_arena_profile(workspace_root)
         self.peak_hp = 100
-        self.xp = 0
-        self.streak = 1.0
+        self.drill_damage = 0
+        self.drill_seed = 0
+        self.active_drill: Optional[Dict[str, Any]] = None
+        self.xp = int(self.profile.get("xp", 0))
+        self.streak = float(self.profile.get("best_streak", 1.0))
         self.chat_turns: List[Dict[str, str]] = []
         self.viseme_queue: List[Tuple[str, str]] = []
         self.input_buffer: Optional[str] = None
         self.activity: Dict[str, Any] = {}
-        self.boss: DebtBossState = compute_debt_boss_state({"status": "unavailable", "reason": "no_capture", "agents": []})
+        self.boss: DebtBossState = compute_debt_boss_state(
+            {"status": "unavailable", "reason": "no_capture", "agents": []}
+        )
         self.emotion = "curious"
         self.last_poll = 0.0
 
     def refresh(self, now_ms: Optional[int] = None) -> None:
+        prev_hp = self.boss.current_hp
         self.activity = read_workspace_activity(self.workspace_root, now_ms=now_ms)
         self.boss = compute_debt_boss_state(
             self.activity,
@@ -771,9 +1079,24 @@ class PhiTmuxArenaApp:
             xp=self.xp,
             streak=self.streak,
         )
+        if self.drill_damage > 0 and self.boss.current_hp > 0:
+            self.boss.current_hp = max(0, self.boss.current_hp - self.drill_damage)
+            self.boss.debt_ratio = min(1.0, self.boss.current_hp / float(max(1, self.boss.max_hp)))
+
         self.peak_hp = max(self.peak_hp, self.boss.current_hp)
-        self.xp = self.boss.xp
-        self.streak = self.boss.streak
+        self.xp = max(self.xp, self.boss.xp)
+        self.streak = max(self.streak, self.boss.streak)
+        self.boss.xp = self.xp
+        self.boss.level = max(1, 1 + self.xp // 100)
+        self.boss.streak = self.streak
+
+        if prev_hp > self.boss.current_hp:
+            drained = prev_hp - self.boss.current_hp
+            self.profile["xp"] = self.xp
+            if self.boss.current_hp == 0:
+                self.profile["bosses_slain"] = int(self.profile.get("bosses_slain", 0)) + 1
+            recompute_profile_achievements(self.profile, self.streak, drained_hp=drained)
+            save_arena_profile(self.workspace_root, self.profile)
 
         agents = [a for a in self.activity.get("agents", []) if isinstance(a, dict) and a.get("status") != "stale"]
         if agents:
@@ -786,10 +1109,58 @@ class PhiTmuxArenaApp:
         self.emotion = emotion
         if citation:
             self.laser_target = citation
+            self.code_preview = inspect_citation_preview(self.workspace_root, citation)
+            self.profile["citations_inspected"] = int(self.profile.get("citations_inspected", 0)) + 1
+            recompute_profile_achievements(self.profile, self.streak)
+            save_arena_profile(self.workspace_root, self.profile)
         self.viseme_queue = text_to_viseme_frames(reply, max_frames=20)
         self.chat_turns.append({"role": "assistant", "content": reply, "citation": citation or ""})
 
+    def start_boss_drill(self) -> Dict[str, Any]:
+        drill = generate_workspace_drill(self.workspace_root, seed=self.drill_seed)
+        self.drill_seed += 1
+        self.active_drill = drill
+        msg = f"{drill['question']} Press [1], [2], or [3] to strike the Debt Boss!"
+        self.speak(msg, emotion="working")
+        return drill
+
+    def answer_boss_drill(self, choice_index: int) -> bool:
+        if not self.active_drill:
+            return False
+        drill = self.active_drill
+        self.active_drill = None
+        if choice_index == drill["correct_index"]:
+            self.drill_damage += 50
+            self.xp += 35
+            self.streak = round(min(3.0, self.streak + 0.25), 2)
+            self.profile["xp"] = self.xp
+            self.profile["drills_completed"] = int(self.profile.get("drills_completed", 0)) + 1
+            recompute_profile_achievements(self.profile, self.streak, drained_hp=50)
+            save_arena_profile(self.workspace_root, self.profile)
+            self.refresh()
+            msg = (
+                f"CRITICAL HIT! `{drill['symbol']}` verified at `{drill['citation']}` "
+                f"(+35 XP, -50 Boss HP, {self.streak:.2f}x φ streak)!"
+            )
+            self.speak(msg, emotion="analytical", citation=drill["citation"])
+            return True
+
+        self.streak = 1.0
+        msg = f"Glancing blow! `{drill['symbol']}` actually lives at `{drill['citation']}` (`{drill['snippet']}`)."
+        self.speak(msg, emotion="skeptical", citation=drill["citation"])
+        return False
+
     def handle_intent(self, intent: str, user_prompt: str) -> Dict[str, Any]:
+        if intent == "drill":
+            drill = self.start_boss_drill()
+            return {
+                "reply": drill["question"],
+                "emotion": "working",
+                "trust_state": "observed_signals",
+                "citation": drill["citation"],
+                "drill": drill,
+            }
+
         self.chat_turns.append({"role": "user", "content": user_prompt})
         server_reply = query_phi_bot_server(
             self.server_url,
@@ -809,7 +1180,8 @@ class PhiTmuxArenaApp:
 
         # Deterministic local fallback (honest observed_signals status)
         self.refresh()
-        landmark = scan_workspace_target(self.workspace_root)
+        landmark = scan_workspace_target(self.workspace_root, seed=self.drill_seed)
+        self.drill_seed += 1
         if intent == "whats_red":
             if self.boss.current_hp > 0:
                 reply = f"Observed signals: {self.boss.status_label}. Debt Boss HP is {self.boss.current_hp}/{self.boss.max_hp}."
@@ -826,7 +1198,7 @@ class PhiTmuxArenaApp:
         elif intent == "hunt":
             target = landmark or "src/lib.rs:1"
             self.laser_target = target
-            reply = f"Optical laser locked onto `{target}`. Press [o] to ping tmux or inspect unreviewed lines."
+            reply = f"Optical laser locked onto `{target}`. Press [o] to open in tmux or [b] for a Boss Drill."
             emotion = "analytical"
         else:
             target = landmark or "src/lib.rs:1"
@@ -861,6 +1233,9 @@ class PhiTmuxArenaApp:
             laser_target=self.laser_target,
             chat_turns=self.chat_turns,
             input_buffer=self.input_buffer,
+            active_drill=self.active_drill,
+            achievements=self.profile.get("achievements", []),
+            code_preview=self.code_preview,
         )
 
 
@@ -873,7 +1248,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--editor-pane", default="0.0", help="Optional tmux target pane for [o] open citation")
     parser.add_argument("--once", action="store_true", help="Render a single frame and exit")
     parser.add_argument("--json", action="store_true", help="Print activity + Debt Boss JSON state and exit")
-    parser.add_argument("--intent", choices=["whats_red", "check_debt", "hunt", "chat"], help="Run one bot intent")
+    parser.add_argument(
+        "--intent",
+        choices=["whats_red", "check_debt", "hunt", "drill", "chat"],
+        help="Run one bot intent",
+    )
     parser.add_argument("--prompt", default="", help="Prompt message when --intent is provided")
     parser.add_argument("--fps", type=float, default=8.0, help="Animation refresh rate")
     args = parser.parse_args(argv)
@@ -894,6 +1273,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "whats_red": "What checks or agent runs are red?",
             "check_debt": "Check verification debt and Boss HP.",
             "hunt": "Lock laser on the next code target.",
+            "drill": "Start a Boss Battle verification drill.",
             "chat": args.prompt or "Status report",
         }
         app.handle_intent(args.intent, args.prompt or default_prompts[args.intent])
@@ -914,8 +1294,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "trust_state": app.boss.trust_state,
                         "quests": app.boss.quests,
                     },
+                    "profile": app.profile,
+                    "active_drill": app.active_drill,
                     "emotion": app.emotion,
                     "laser_target": app.laser_target,
+                    "code_preview": app.code_preview,
                     "chat_turns": app.chat_turns,
                 },
                 indent=2,
@@ -968,6 +1351,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 app.handle_intent("check_debt", "Check agent debt")
             elif ch in ("h", "H"):
                 app.handle_intent("hunt", "Hunt next target")
+            elif ch in ("b", "B"):
+                app.start_boss_drill()
+            elif ch in ("1", "2", "3") and app.active_drill is not None:
+                app.answer_boss_drill(int(ch) - 1)
             elif ch in ("g", "G"):
                 app.god_mode = not app.god_mode
                 app.speak(
@@ -975,7 +1362,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     emotion="god_mode" if app.god_mode else "curious",
                 )
             elif ch in ("o", "O") and app.laser_target:
-                jump_tmux_to_citation(app.laser_target)
+                app.code_preview = inspect_citation_preview(app.workspace_root, app.laser_target)
+                jump_tmux_to_citation(
+                    app.laser_target,
+                    workspace_root=app.workspace_root,
+                    tmux_session=app.tmux_session,
+                    editor_pane=app.editor_pane,
+                )
             elif ch in ("c", "C", "/"):
                 app.input_buffer = ""
     finally:

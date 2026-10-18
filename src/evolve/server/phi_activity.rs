@@ -119,6 +119,10 @@ fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+pub(crate) fn read_workspace_activity(root: &Path) -> Value {
+    read_activity(root, now_ms())
+}
+
 fn empty(now: u64, reason: &str) -> Value {
     json!({"status":"unavailable","reason":reason,"observed_at_ms":now,
         "agents":[],"truncated":false})

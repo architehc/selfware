@@ -40,6 +40,8 @@ mod friction;
 mod phi_activity;
 mod speech;
 
+pub(crate) use phi_activity::read_workspace_activity;
+
 /// Opt-in for UI iteration: names the `src/evolve/web` of a selfware source
 /// checkout to serve from disk instead of the embedded assets. Never derived
 /// from the working directory: that is the project under analysis, and a
