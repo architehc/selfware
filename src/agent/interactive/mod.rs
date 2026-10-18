@@ -262,7 +262,8 @@ impl Agent {
                 break;
             }
 
-            // Shell escape: !command runs via sh -c
+            // Shell escape: !command runs via shared shell_passthrough (same
+            // context capture + secret redaction + 4K cap as TUI and basic REPL)
             if input.starts_with('!') {
                 let Some(cmd) = input.strip_prefix('!').map(str::trim) else {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
@@ -271,29 +272,8 @@ impl Agent {
                 if cmd.is_empty() {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
-                    let (shell, flag) = crate::tools::shell_exec::default_shell();
-                    let root_path = self.tools.workspace_root().path();
-                    let mut command = tokio::process::Command::new(shell);
-                    command
-                        .in_root(self.tools.workspace_root())
-                        .args([flag, cmd])
-                        .stdout(std::process::Stdio::inherit())
-                        .stderr(std::process::Stdio::inherit())
-                        .stdin(std::process::Stdio::inherit());
-                    crate::safety::process_env::sanitize_command_env(&mut command);
-                    crate::safety::git_exec::apply_shell_git_env(&mut command, &root_path);
-                    let status = command.status().await;
-                    match status {
-                        Ok(s) if !s.success() => {
-                            println!(
-                                "{} exit code: {}",
-                                "⚠".bright_yellow(),
-                                s.code().unwrap_or(-1)
-                            );
-                        }
-                        Err(e) => println!("{} Shell error: {}", "✗".bright_red(), e),
-                        _ => {}
-                    }
+                    let rendered = self.shell_passthrough(cmd).await;
+                    println!("{rendered}");
                 }
                 continue;
             }

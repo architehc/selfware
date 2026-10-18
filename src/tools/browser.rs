@@ -670,10 +670,14 @@ async fn fetch_with_curl(
     }
 
     cmd.arg(&target.url);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
 
-    let output = cmd.output().await.context("Failed to run curl")?;
+    let output = crate::tools::process_guard::run_command_bounded(
+        cmd,
+        std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
+        2 * 1024 * 1024,
+    )
+    .await
+    .context("Failed to run curl")?;
 
     let html = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

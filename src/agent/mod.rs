@@ -3854,18 +3854,25 @@ To call a tool, use this EXACT XML structure:
     /// TUI loop, the interactive REPL, and the basic-mode stdin loop — one
     /// implementation, one format.
     pub async fn shell_passthrough(&mut self, cmd: &str) -> String {
+        use crate::tools::workspace_root::CommandRootExt;
         const MAX_SHELL_OUT_CHARS: usize = 4_000;
+        const MAX_SHELL_OUT_BYTES: usize = 64 * 1024;
         let (shell, flag) = crate::tools::shell_exec::default_shell();
         let root_path = self.tools.workspace_root().path();
         let mut command = tokio::process::Command::new(shell);
         command
+            .in_root(self.tools.workspace_root())
             .args([flag, cmd])
-            .current_dir(&root_path)
             .stdin(std::process::Stdio::null());
         crate::safety::process_env::sanitize_command_env(&mut command);
         crate::safety::git_exec::apply_shell_git_env(&mut command, &root_path);
-        let output = command.output().await;
-        let out = match output {
+        let out = match crate::tools::process_guard::run_command_bounded(
+            command,
+            std::time::Duration::from_secs(60),
+            MAX_SHELL_OUT_BYTES,
+        )
+        .await
+        {
             Ok(out) => out,
             Err(e) => return format!("$ {cmd} — failed to start: {e}"),
         };
@@ -3874,7 +3881,9 @@ To call a tool, use this EXACT XML structure:
         if !stderr.trim().is_empty() {
             text.push_str(&format!("\n[stderr]\n{stderr}"));
         }
-        let truncated = text.chars().count() > MAX_SHELL_OUT_CHARS;
+        let truncated = out.stdout.len() >= MAX_SHELL_OUT_BYTES
+            || out.stderr.len() >= MAX_SHELL_OUT_BYTES
+            || text.chars().count() > MAX_SHELL_OUT_CHARS;
         let mut text: String = text.chars().take(MAX_SHELL_OUT_CHARS).collect();
         if truncated {
             text.push_str("\n…[truncated]");

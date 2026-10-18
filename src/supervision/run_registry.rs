@@ -133,8 +133,45 @@ impl RunRegistry {
 
     /// Registry rooted at an explicit directory (used by tests).
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to use symlinked run registry dir {}",
+                    dir.display()
+                );
+            }
+            if !meta.is_dir() {
+                anyhow::bail!(
+                    "Refusing to use non-directory run registry path {}",
+                    dir.display()
+                );
+            }
+        }
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create run registry dir {}", dir.display()))?;
+        let meta = std::fs::symlink_metadata(&dir)
+            .with_context(|| format!("stat run registry dir {}", dir.display()))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            anyhow::bail!(
+                "Refusing to use non-directory or symlinked run registry dir {}",
+                dir.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let _dir_fd = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(&dir)
+                .with_context(|| {
+                    format!(
+                        "Refusing to open symlinked run registry dir {}",
+                        dir.display()
+                    )
+                })?;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         Ok(Self { dir })
     }
 
@@ -165,11 +202,13 @@ impl RunRegistry {
     /// Read a single record by id, or `None` if absent.
     pub fn get(&self, id: &str) -> Result<Option<RunRecord>> {
         let path = self.record_path(id);
-        if !path.exists() {
-            return Ok(None);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
         }
-        let data =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::session::checkpoint::read_regular_checkpoint_file(&path, "run record")
+            .with_context(|| format!("read {}", path.display()))?;
         let rec =
             serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))?;
         Ok(Some(rec))
@@ -205,11 +244,20 @@ impl RunRegistry {
         for entry in std::fs::read_dir(&self.dir)
             .with_context(|| format!("read dir {}", self.dir.display()))?
         {
-            let path = entry?.path();
+            let entry = entry?;
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() || !ft.is_file() {
+                continue;
+            }
+            let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(data) =
+                crate::session::checkpoint::read_regular_checkpoint_file(&path, "run record")
+            {
                 if let Ok(rec) = serde_json::from_str::<RunRecord>(&data) {
                     out.push(rec);
                 }
@@ -222,8 +270,19 @@ impl RunRegistry {
     /// Remove a record file. Ok even if already gone.
     pub fn remove(&self, id: &str) -> Result<()> {
         let path = self.record_path(id);
-        if path.exists() {
-            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    anyhow::bail!(
+                        "Refusing to remove non-regular or symlinked run record {}",
+                        path.display()
+                    );
+                }
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
         }
         Ok(())
     }

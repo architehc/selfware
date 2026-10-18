@@ -1389,6 +1389,9 @@ impl Tool for DirectoryTree {
                     if !crate::evolve::graph::retain_repository_entry(e) {
                         return false;
                     }
+                    if validate_tool_path(&e.path().to_string_lossy(), &safety).is_err() {
+                        return false;
+                    }
                     if include_hidden {
                         return true;
                     }

@@ -2436,3 +2436,37 @@ fn read_checked_handle_and_stale_guard_enforce_size_caps() {
     assert_eq!(is_file_stale(path_str), Some(true));
     clear_file_snapshot(path_str);
 }
+
+#[tokio::test]
+async fn test_directory_tree_excludes_denied_child_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let allowed_dir = temp_dir.path().join("public");
+    let denied_dir = temp_dir.path().join("private_vault");
+    fs::create_dir_all(&allowed_dir).unwrap();
+    fs::create_dir_all(&denied_dir).unwrap();
+    fs::write(allowed_dir.join("visible.txt"), "ok").unwrap();
+    fs::write(denied_dir.join("secret.txt"), "nope").unwrap();
+
+    let mut safety = permissive_safety_config();
+    safety.denied_paths.push("**/private_vault/**".to_string());
+    safety.denied_paths.push("**/private_vault".to_string());
+
+    let tool = DirectoryTree::with_safety_config(safety);
+    let args = serde_json::json!({
+        "path": temp_dir.path().to_str().unwrap(),
+        "max_depth": 3
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    let entries = flatten_tree(&result["tree"]);
+    assert!(
+        entries.iter().any(|(name, _)| name == "visible.txt"),
+        "allowed child file should appear in directory_tree"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|(name, _)| name == "private_vault" || name == "secret.txt"),
+        "denied child directory and its contents must not appear in directory_tree: {entries:?}"
+    );
+}

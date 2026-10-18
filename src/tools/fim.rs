@@ -276,7 +276,9 @@ impl Tool for FileFimEdit {
                 workspace.join(file_path)
             };
             let edition = crate::testing::rust_edition::resolve_rust_edition(&file_path);
-            let check = Command::new("rustfmt").sanitized_env()
+            let mut check = Command::new("rustfmt");
+            check
+                .sanitized_env()
                 // rustfmt discovers rustfmt.toml from its cwd: the workspace root.
                 .current_dir(&workspace)
                 .args(["--edition", edition.edition.as_str(), "--check"])
@@ -285,18 +287,31 @@ impl Tool for FileFimEdit {
                 // the classifier needs both to tell them apart.
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .spawn();
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            check.process_group(0);
 
-            if let Ok(mut child) = check {
-                if let Some(ref mut stdin) = child.stdin {
+            if let Ok(mut child) = check.spawn() {
+                let mut group_guard =
+                    crate::tools::process_guard::ProcessGroupGuard::new(child.id());
+                if let Some(mut stdin) = child.stdin.take() {
                     use tokio::io::AsyncWriteExt;
-                    let _ = stdin.write_all(new_content.as_bytes()).await;
+                    let bytes = new_content.clone().into_bytes();
+                    tokio::spawn(async move {
+                        let _ = stdin.write_all(&bytes).await;
+                    });
                 }
                 // rustfmt exits 1 for parse errors AND (on some versions) for
                 // formatting diffs; the old `exit >= 2` test never fired, so
                 // parse errors were written anyway. Classify by output instead,
                 // the same way the verification syntax gate does.
-                if let Ok(out) = child.wait_with_output().await {
+                if let Ok(Ok(out)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    child.wait_with_output(),
+                )
+                .await
+                {
+                    group_guard.disarm();
                     let combined = format!(
                         "{}\n{}",
                         String::from_utf8_lossy(&out.stdout),

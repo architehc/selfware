@@ -175,3 +175,43 @@ fn update_status_terminal_states_are_sticky() {
     reg.update_status("r3", "Running", 130).unwrap();
     assert_eq!(reg.get("r3").unwrap().unwrap().status, "Completed");
 }
+
+#[cfg(unix)]
+#[test]
+fn run_registry_rejects_symlinks_in_dir_get_list_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let target_dir = dir.path().join("real_runs");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let symlink_dir = dir.path().join("linked_runs");
+    std::os::unix::fs::symlink(&target_dir, &symlink_dir).unwrap();
+
+    assert!(
+        RunRegistry::with_dir(symlink_dir).is_err(),
+        "RunRegistry::with_dir must reject symlinked directory"
+    );
+
+    let reg = RunRegistry::with_dir(target_dir.clone()).unwrap();
+    reg.write(&rec("good-1", 1, "Completed", 100)).unwrap();
+
+    let outside = dir.path().join("outside.json");
+    let fake_json = serde_json::to_string_pretty(&rec("evil-1", 1, "Running", 200)).unwrap();
+    std::fs::write(&outside, fake_json).unwrap();
+    let linked_rec = target_dir.join("evil-1.json");
+    std::os::unix::fs::symlink(&outside, &linked_rec).unwrap();
+
+    assert!(
+        reg.get("evil-1").is_err(),
+        "RunRegistry::get must reject symlinked record file"
+    );
+    let listed: Vec<String> = reg.list().unwrap().into_iter().map(|r| r.id).collect();
+    assert_eq!(
+        listed,
+        vec!["good-1"],
+        "RunRegistry::list must skip symlinked record files"
+    );
+    assert!(
+        reg.remove("evil-1").is_err(),
+        "RunRegistry::remove must refuse to unlink a symlinked record file"
+    );
+    assert!(outside.exists(), "outside target file must remain intact");
+}

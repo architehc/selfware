@@ -22,6 +22,7 @@ fn make_output(exit_code: i32, stdout: &str, stderr: &str) -> Output {
         exit_code
     );
     Command::new("sh")
+        .current_dir(std::env::temp_dir())
         .arg("-c")
         .arg(&cmd_str)
         .output()
