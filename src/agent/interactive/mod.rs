@@ -1173,13 +1173,29 @@ impl Agent {
                     if idx < timeline.len() {
                         let checkpoint_id = timeline[idx].id;
                         if let Some(checkpoint) = self.edit_history.goto(checkpoint_id) {
-                            let restored = restore_checkpoint_guarded(&checkpoint.files).await;
-                            println!(
-                                "{} Restored checkpoint {} ({} file(s))",
-                                "⏪".bright_green(),
-                                idx,
-                                restored
+                            let outcomes =
+                                crate::session::edit_history::restore_checkpoint_guarded(
+                                    &checkpoint.files,
+                                )
+                                .await;
+                            let summary = super::render_restore_outcomes(
+                                &format!("Restored checkpoint {}", idx),
+                                &checkpoint.action.description(),
+                                &outcomes,
                             );
+                            let any_failed = outcomes.iter().any(|(_, o)| {
+                                matches!(
+                                    o,
+                                    crate::session::edit_history::RestoreOutcome::SkippedCorrupt
+                                        | crate::session::edit_history::RestoreOutcome::WriteFailed
+                                )
+                            });
+                            let badge = if any_failed {
+                                "⚠".bright_yellow()
+                            } else {
+                                "⏪".bright_green()
+                            };
+                            println!("{} {}", badge, summary);
                         } else {
                             println!("{} Failed to navigate to checkpoint", "✗".bright_red());
                         }
@@ -1224,55 +1240,6 @@ impl Agent {
                 );
                 println!();
                 continue;
-            }
-
-            // ── Guarded checkpoint restore (shared by /undo and /restore <n>) ──
-
-            /// Restore a checkpoint's files with an integrity guard: the
-            /// snapshot's recorded hash must match its own content before it
-            /// is written back (atomic temp+rename). Files already holding
-            /// the snapshot content count as restored without a rewrite.
-            /// Returns the number of files actually restored.
-            async fn restore_checkpoint_guarded(
-                files: &std::collections::HashMap<
-                    std::path::PathBuf,
-                    crate::session::edit_history::FileSnapshot,
-                >,
-            ) -> usize {
-                let mut restored = 0;
-                for (path, snapshot) in files {
-                    if crate::session::edit_history::compute_hash(&snapshot.content)
-                        != snapshot.hash
-                    {
-                        println!(
-                            "  {} Skipped {} (snapshot hash mismatch — corrupt checkpoint)",
-                            "✗".bright_red(),
-                            path.display().to_string().bright_white()
-                        );
-                        continue;
-                    }
-                    if let Ok(current) = tokio::fs::read_to_string(path).await {
-                        if current == snapshot.content {
-                            restored += 1;
-                            continue;
-                        }
-                    }
-                    let written = crate::session::checkpoint::write_bytes_atomically(
-                        path,
-                        snapshot.content.as_bytes(),
-                        0o666,
-                    )
-                    .is_ok();
-                    if written {
-                        println!(
-                            "  {} Restored {}",
-                            "✓".bright_green(),
-                            path.display().to_string().bright_white()
-                        );
-                        restored += 1;
-                    }
-                }
-                restored
             }
 
             // /execute - Approve plan and execute
@@ -2177,7 +2144,12 @@ impl Agent {
             return;
         }
 
-        let content = match tokio::fs::read_to_string(&file_path).await {
+        let content = match crate::tools::file::read_to_string_capped_async(
+            &file_path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        {
             Ok(c) => self.sanitize_context_data(&file_path, &c),
             Err(e) => {
                 println!("{} Cannot read file: {}", "!!".bright_red(), e);

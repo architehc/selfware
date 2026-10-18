@@ -159,6 +159,34 @@ impl HookContext {
             affected_paths: Vec::new(),
         }
     }
+
+    /// Derive a concise human-readable description for `{description}` hook placeholders.
+    pub fn description(&self) -> Option<String> {
+        if let Some(ref args_str) = self.tool_args {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(args_str) {
+                for key in ["description", "message"] {
+                    if let Some(text) = value
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(ref tool) = self.tool_name {
+            if !self.affected_paths.is_empty() {
+                return Some(format!("{} {}", tool, self.affected_paths.join(" ")));
+            }
+            if let Some(ref path) = self.affected_path {
+                return Some(format!("{} {}", tool, path));
+            }
+            return Some(tool.clone());
+        }
+        None
+    }
 }
 
 /// Every file path a tool call affects: the written paths of a file-mutating

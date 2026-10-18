@@ -111,18 +111,24 @@ impl DreamState {
     pub fn load(base_dir: &Path) -> Result<Self> {
         let path = Self::state_file_path(base_dir);
         let lock_path = base_dir.join("dream.lock");
-        if !path.exists() {
-            return Ok(Self {
-                consolidation_lock: lock_path.exists(),
-                owns_lock: false,
-                lock_file_path: Some(lock_path),
-                ..Self::default()
-            });
+        let lock_exists = std::fs::symlink_metadata(&lock_path).is_ok();
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    consolidation_lock: lock_exists,
+                    owns_lock: false,
+                    lock_file_path: Some(lock_path),
+                    ..Self::default()
+                });
+            }
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content =
+            crate::session::checkpoint::read_regular_checkpoint_file(&path, "dream state")?;
         let mut state: DreamState = serde_json::from_str(&content)?;
-        state.consolidation_lock = lock_path.exists();
+        state.consolidation_lock = lock_exists;
         state.owns_lock = false;
         state.lock_file_path = Some(lock_path);
 
@@ -132,7 +138,7 @@ impl DreamState {
     /// Save dream state to disk
     pub fn save(&self, base_dir: &Path) -> Result<()> {
         let path = Self::state_file_path(base_dir);
-        std::fs::create_dir_all(base_dir)?;
+        crate::session::checkpoint::ensure_private_checkpoint_dir(base_dir)?;
 
         let json = serde_json::to_string_pretty(self)?;
         crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o600)?;
@@ -148,17 +154,37 @@ impl DreamState {
             return false;
         }
 
-        // Try to create lock file for cross-process coordination
+        // Try to create lock file atomically for cross-process coordination
         if let Some(ref lock_path) = self.lock_file_path {
-            if lock_path.exists() {
-                return false;
-            }
             if let Some(parent) = lock_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = crate::session::checkpoint::ensure_private_checkpoint_dir(parent) {
+                    warn!("Failed to prepare dream lock directory: {}", e);
+                    return false;
+                }
             }
-            if let Err(e) = std::fs::write(lock_path, std::process::id().to_string()) {
-                warn!("Failed to create dream lock file: {}", e);
-                return false;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(lock_path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(std::process::id().to_string().as_bytes()) {
+                        warn!("Failed to write dream lock file: {}", e);
+                        let _ = std::fs::remove_file(lock_path);
+                        return false;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return false;
+                }
+                Err(e) => {
+                    warn!("Failed to create dream lock file: {}", e);
+                    return false;
+                }
             }
         }
 

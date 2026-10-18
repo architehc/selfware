@@ -1773,7 +1773,10 @@ impl SelfImprovementEngine {
 
     /// Load engine state from a JSON file
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::session::checkpoint::read_regular_checkpoint_file(
+            path,
+            "self-improvement engine",
+        )?;
 
         // Migrate legacy files written before at-rest hardening: tighten to
         // owner-only on load so an existing world-readable learning file
@@ -1814,14 +1817,28 @@ impl Default for SelfImprovementEngine {
 /// it to 0600 (Unix) before it is visible under the real name, then rename
 /// over the target. The parent directory is created 0700 on Unix.
 fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        match std::fs::symlink_metadata(parent) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => anyhow::bail!(
+                "refusing self-improvement directory that is a symlink or non-directory: {:?}",
+                parent
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir_all(parent)?;
+            }
+            Err(err) => return Err(err.into()),
+        }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let dir = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(parent)?;
             // Best-effort: tighten the dir to owner-only. Ignore errors on
-            // pre-existing dirs we may not own.
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            // pre-existing system temp roots (e.g. /tmp or sandboxed TMPDIR).
+            let _ = dir.set_permissions(std::fs::Permissions::from_mode(0o700));
         }
     }
 

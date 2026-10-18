@@ -592,7 +592,7 @@ struct FileReadState {
 /// Render the result of an undo/redo restore: restored count plus honest
 /// notes for files already current or skipped (corrupt snapshots), never
 /// claiming restores that the guards refused.
-fn render_restore_outcomes(
+pub(super) fn render_restore_outcomes(
     verb: &str,
     description: &str,
     outcomes: &[(
@@ -1600,12 +1600,13 @@ impl Agent {
 
         // Initialize cognitive state and load global episodic memory if available
         let mut cognitive_state = CognitiveState::new();
-        let global_memory_path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware")
-            .join("global_episodic_memory.json");
+        let global_memory_path =
+            learning::default_learning_data_dir().join("global_episodic_memory.json");
 
-        if let Ok(content) = tokio::fs::read_to_string(&global_memory_path).await {
+        if let Ok(content) = crate::session::checkpoint::read_regular_checkpoint_file(
+            &global_memory_path,
+            "global episodic memory",
+        ) {
             if let Ok(loaded_memory) =
                 serde_json::from_str::<crate::cognitive::EpisodicMemory>(&content)
             {
@@ -3921,7 +3922,12 @@ To call a tool, use this EXACT XML structure:
             if !tip.files.is_empty() {
                 let mut snapshots = std::collections::HashMap::new();
                 for path in tip.files.keys() {
-                    if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    if let Ok(content) = crate::tools::file::read_to_string_capped_async(
+                        path,
+                        crate::tools::file::MAX_SOURCE_READ_SIZE,
+                    )
+                    .await
+                    {
                         snapshots.insert(path.clone(), FileSnapshot::new(path.clone(), content));
                     }
                 }

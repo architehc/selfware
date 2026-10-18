@@ -211,9 +211,49 @@ async fn test_spawn_autodream_runs_in_process_and_returns_real_result() {
         .unwrap();
 
     // The handle returns the REAL DreamResult — not a fabricated
-    // all-phases success with a hardcoded 0 consolidation count.
+    // all-phases success with a fabricated 0 consolidation count.
     assert!(result.success, "spawn result: {:?}", result.errors);
     assert_eq!(result.memories_consolidated, 1);
     assert!(!handle.is_running().await);
     let _ = (memory_dir, server);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_orient_and_prune_reject_symlinks() {
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let secret = outside.path().join("secret_session.json");
+    std::fs::write(&secret, "- [2026-07-01] leaked secret\n").unwrap();
+
+    // 1. Symlinked session file inside .selfware is skipped by orient_phase
+    let sw_dir = dir.path().join(".selfware");
+    std::fs::create_dir(&sw_dir).unwrap();
+    std::os::unix::fs::symlink(&secret, sw_dir.join("session_symlink.json")).unwrap();
+    std::fs::write(sw_dir.join("session_real.json"), "{}").unwrap();
+
+    let files = orient_phase(dir.path()).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].ends_with("session_real.json"));
+
+    // 2. Symlinked .selfware directory itself is rejected by orient_phase
+    let dir2 = tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir2.path().join(".selfware")).unwrap();
+    let files2 = orient_phase(dir2.path()).await.unwrap();
+    assert!(files2.is_empty());
+
+    // 3. Symlinked MEMORY.md is rejected by prune_and_index_phase
+    let mem_base = tempdir().unwrap();
+    let dream_config = DreamConfig::new().with_base_dir(mem_base.path());
+    let mem_path = dream_config.memory_file_path("test_project");
+    std::fs::create_dir_all(mem_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&secret, &mem_path).unwrap();
+
+    let err = prune_and_index_phase("test_project", &dream_config, Some("- fact"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("dream memory file"),
+        "expected symlink rejection for dream memory file, got: {err}"
+    );
 }

@@ -395,3 +395,36 @@ async fn hook_runs_in_the_entered_worktree_root() {
         std::fs::canonicalize(worktree.path()).unwrap()
     );
 }
+
+#[test]
+fn test_expand_description_placeholder_and_quoting() {
+    let ctx_explicit = HookContext::post_tool(
+        "file_edit",
+        r#"{"path": "src/lib.rs", "description": "fix $(touch /tmp/pwned) and 'quotes'"}"#,
+        true,
+        "ok",
+    );
+    let cmd = expand_placeholders("git commit -m {description}", &ctx_explicit).unwrap();
+    assert_eq!(
+        cmd,
+        "git commit -m 'fix $(touch /tmp/pwned) and '\\''quotes'\\'''"
+    );
+
+    let cmd_dq =
+        expand_placeholders("git commit -m \"[hook] {description}\"", &ctx_explicit).unwrap();
+    assert_eq!(
+        cmd_dq,
+        "git commit -m \"[hook] fix \\$(touch /tmp/pwned) and 'quotes'\""
+    );
+
+    // Fallback when no explicit description/message field is present in tool_args
+    let ctx_fallback =
+        HookContext::post_tool("file_write", r#"{"path": "src/main.rs"}"#, true, "ok");
+    let cmd_fb = expand_placeholders("echo {description}", &ctx_fallback).unwrap();
+    assert_eq!(cmd_fb, "echo 'file_write src/main.rs'");
+
+    // Refuses unquotable contexts (backticks / heredocs) just like {path} and {tool}
+    let err = expand_placeholders("echo `printf %s {description}`", &ctx_explicit).unwrap_err();
+    assert!(err.to_string().contains("{description}"), "{err}");
+    assert!(err.to_string().contains("backticks"), "{err}");
+}

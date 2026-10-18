@@ -334,11 +334,20 @@ pub async fn run_dream_consolidation(
 async fn orient_phase(project_path: &Path) -> Result<Vec<PathBuf>> {
     let mut session_files = Vec::new();
 
-    // Look for session log files in .selfware directory
+    // Look for regular session/memory log files in .selfware directory
     let selfware_dir = project_path.join(".selfware");
-    if selfware_dir.exists() {
+    let is_real_dir = std::fs::symlink_metadata(&selfware_dir)
+        .map(|m| m.is_dir() && !m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_real_dir {
         let mut entries = tokio::fs::read_dir(&selfware_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if !ft.is_file() || ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             if let Some(ext) = path.extension() {
                 if ext == "json" || ext == "jsonl" {
@@ -353,8 +362,8 @@ async fn orient_phase(project_path: &Path) -> Result<Vec<PathBuf>> {
 
     // Sort by modification time (most recent first)
     session_files.sort_by(|a, b| {
-        let meta_a = std::fs::metadata(a).ok();
-        let meta_b = std::fs::metadata(b).ok();
+        let meta_a = std::fs::symlink_metadata(a).ok();
+        let meta_b = std::fs::symlink_metadata(b).ok();
         match (meta_a, meta_b) {
             (Some(ma), Some(mb)) => {
                 let time_a = ma.modified().ok();
@@ -377,7 +386,12 @@ async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<
     for file in session_files.iter().take(max_sessions) {
         debug!("Gathering from session file: {:?}", file);
 
-        let content = match tokio::fs::read_to_string(file).await {
+        let content = match crate::tools::file::read_to_string_capped_async(
+            file,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 warn!("Failed to read session file {:?}: {}", file, e);
@@ -498,13 +512,18 @@ async fn prune_and_index_phase(
     let memory_path = dream_config.memory_file_path(project_key);
 
     // Load existing MEMORY.md or create new
-    let mut store = if memory_path.exists() {
-        let content = tokio::fs::read_to_string(&memory_path).await?;
-        MemoryStore::parse(&content)
-    } else {
-        MemoryStore {
+    let mut store = match std::fs::symlink_metadata(&memory_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => MemoryStore {
             entries: Vec::new(),
             sections: std::collections::HashMap::new(),
+        },
+        Err(e) => return Err(e.into()),
+        Ok(_) => {
+            let content = crate::session::checkpoint::read_regular_checkpoint_file(
+                &memory_path,
+                "dream memory file",
+            )?;
+            MemoryStore::parse(&content)
         }
     };
 
@@ -539,7 +558,7 @@ async fn prune_and_index_phase(
     // Save back to MEMORY.md
     let output = store.format();
     if let Some(parent) = memory_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        crate::session::checkpoint::ensure_private_checkpoint_dir(parent)?;
     }
 
     crate::session::checkpoint::write_bytes_atomically(&memory_path, output.as_bytes(), 0o600)?;

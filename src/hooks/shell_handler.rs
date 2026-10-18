@@ -186,9 +186,9 @@ async fn run_shell_command_in(
     }
 }
 
-/// Replace `{path}`, `{tool}` placeholders in a hook command string.
+/// Replace `{path}`, `{tool}`, `{description}` placeholders in a hook command string.
 ///
-/// A file path is untrusted data (the repository names its files), so each
+/// A file path or tool description is untrusted data, so each
 /// value is quoted for the `sh` context the placeholder stands in, and never
 /// as a fixed `'…'` token: inside `"…"` single quotes are literal and a
 /// `$(…)` in a file name would run (`git commit -m "auto-commit: {path}"`).
@@ -207,6 +207,8 @@ fn expand_placeholders(command: &str, ctx: &HookContext) -> Result<String> {
         ctx.affected_path.iter().map(String::as_str).collect()
     };
     let tool: Vec<&str> = ctx.tool_name.iter().map(String::as_str).collect();
+    let desc_owned = ctx.description();
+    let description: Vec<&str> = desc_owned.iter().map(String::as_str).collect();
 
     // Single left-to-right scan tracking the quoting `sh` will apply at each
     // byte. Substituted values are never re-scanned, so a value containing
@@ -219,14 +221,16 @@ fn expand_placeholders(command: &str, ctx: &HookContext) -> Result<String> {
 
     while !rest.is_empty() {
         let current = *quoting.last().unwrap_or(&Quoting::Unquoted);
-        let values = if rest.starts_with("{path}") {
-            Some(&paths)
+        let placeholder = if rest.starts_with("{path}") {
+            Some(("{path}", &paths))
         } else if rest.starts_with("{tool}") {
-            Some(&tool)
+            Some(("{tool}", &tool))
+        } else if rest.starts_with("{description}") {
+            Some(("{description}", &description))
         } else {
             None
         };
-        if let Some(values) = values {
+        if let Some((token, values)) = placeholder {
             let fragment = if heredoc {
                 None
             } else {
@@ -235,7 +239,7 @@ fn expand_placeholders(command: &str, ctx: &HookContext) -> Result<String> {
             let Some(fragment) = fragment else {
                 anyhow::bail!(
                     "{} stands {}, where no quoting makes its value inert",
-                    &rest[..6],
+                    token,
                     if heredoc {
                         "after a here-document operator"
                     } else {
@@ -244,7 +248,7 @@ fn expand_placeholders(command: &str, ctx: &HookContext) -> Result<String> {
                 );
             };
             result.push_str(&fragment);
-            rest = &rest[6..];
+            rest = &rest[token.len()..];
             word_start = false;
             continue;
         }

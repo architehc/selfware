@@ -736,7 +736,12 @@ async fn full_compact_with_safety(
             if validator.validate(&anchored).is_err() {
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(&anchored).await {
+            if let Ok(content) = crate::tools::file::read_to_string_capped_async(
+                std::path::Path::new(&anchored),
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .await
+            {
                 let args = serde_json::json!({"path": anchored}).to_string();
                 let content = super::tool_dispatch::sanitize_tool_context(
                     "compact_file",

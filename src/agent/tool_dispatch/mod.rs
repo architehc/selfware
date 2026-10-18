@@ -2095,12 +2095,13 @@ impl Agent {
                         .workspace_root()
                         .anchor_path(std::path::Path::new(path));
                     let file_read = if let Err(error) = self.validate_context_path(&anchored) {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            error.to_string(),
-                        ))
+                        Err(anyhow::anyhow!(error))
                     } else {
-                        tokio::fs::read_to_string(&anchored).await
+                        crate::tools::file::read_to_string_capped_async(
+                            &anchored,
+                            crate::tools::file::MAX_SOURCE_READ_SIZE,
+                        )
+                        .await
                     };
                     let read_result = match file_read {
                         Ok(content) => {
@@ -2123,7 +2124,10 @@ impl Agent {
                                 )
                             }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Err(e)
+                            if e.downcast_ref::<std::io::Error>()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                        {
                             format!("File {} does not exist. Use file_write to create it.", path)
                         }
                         Err(e) => format!("Could not read {}: {}", path, e),
@@ -4274,7 +4278,12 @@ impl Agent {
         };
         history.create_checkpoint(action);
         for path in &paths {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if let Ok(content) = crate::tools::file::read_to_string_capped_async(
+                path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .await
+            {
                 history.add_file_to_current(FileSnapshot::new(path.clone(), content));
             }
         }
@@ -4464,7 +4473,12 @@ impl Agent {
                 // root (no-op unless a worktree was entered).
                 let path_anchored = self.tools.workspace_root().anchor_str(path);
                 let path = path_anchored.as_str();
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                if let Ok(content) = crate::tools::file::read_to_string_capped_async(
+                    std::path::Path::new(path),
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                )
+                .await
+                {
                     use crate::session::edit_history::{EditAction, FileSnapshot};
                     let snapshot =
                         FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
@@ -4583,7 +4597,12 @@ impl Agent {
                 if let Some((ref path, ref old_content)) = pre_edit_content {
                     if tool_success && matches!(name, "file_edit" | "file_write" | "file_fim_edit")
                     {
-                        if let Ok(new_content) = tokio::fs::read_to_string(path).await {
+                        if let Ok(new_content) = crate::tools::file::read_to_string_capped_async(
+                            std::path::Path::new(path),
+                            crate::tools::file::MAX_SOURCE_READ_SIZE,
+                        )
+                        .await
+                        {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }
                     }

@@ -1527,15 +1527,9 @@ impl Agent {
         let content = memory_content;
         tokio::spawn(async move {
             if let Some(parent) = memory_path.parent() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                if let Err(e) = crate::session::checkpoint::ensure_private_checkpoint_dir(parent) {
                     tracing::warn!("Failed to create episodic memory dir: {}", e);
                     return;
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
                 }
             }
             if let Err(e) = crate::session::checkpoint::write_bytes_atomically(

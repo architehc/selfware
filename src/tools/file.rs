@@ -245,12 +245,29 @@ fn read_checked_handle(mut file: std::fs::File, limit: Option<u64>) -> Result<(S
 /// than `limit` (checked on the descriptor's size and bounded while reading).
 pub(crate) fn read_handle_to_string_capped(file: std::fs::File, limit: u64) -> Result<String> {
     use std::io::Read;
-    let size = file.metadata()?.len();
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to read non-regular file",
+        )
+        .into());
+    }
+    let size = meta.len();
     if size > limit {
         return Err(ToolError::FileTooLarge { size, limit }.into());
     }
     let mut text = String::new();
-    file.take(limit).read_to_string(&mut text)?;
+    file.take(limit.saturating_add(1))
+        .read_to_string(&mut text)?;
+    let read_size = text.len() as u64;
+    if read_size > limit {
+        return Err(ToolError::FileTooLarge {
+            size: read_size,
+            limit,
+        }
+        .into());
+    }
     Ok(text)
 }
 
@@ -260,6 +277,23 @@ pub(crate) fn read_handle_to_string_capped(file: std::fs::File, limit: u64) -> R
 /// off rather than loaded whole). For the tools that read source content
 /// whole after their own path check; see [`MAX_SOURCE_READ_SIZE`].
 pub(crate) fn read_to_string_capped(path: &Path, limit: u64) -> Result<String> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to read non-regular file: {}", path.display()),
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
     let file = std::fs::File::open(path)?;
     read_handle_to_string_capped(file, limit)
 }

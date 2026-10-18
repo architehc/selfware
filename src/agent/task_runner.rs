@@ -1914,9 +1914,12 @@ impl Agent {
             .anchor_path(std::path::Path::new(file_path));
         let root = self.tools.workspace_root().clone();
         crate::tools::workspace_root::sync_scope(root, || self.validate_context_path(&anchored))?;
-        let content = tokio::fs::read_to_string(&anchored)
-            .await
-            .with_context(|| format!("Failed to read file: {}", file_path))?;
+        let content = crate::tools::file::read_to_string_capped_async(
+            &anchored,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        .with_context(|| format!("Failed to read file: {}", file_path))?;
 
         let content = self.sanitize_context_data(&anchored, &content);
         let task = Planner::review_prompt(file_path, &content);

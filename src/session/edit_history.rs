@@ -513,7 +513,12 @@ pub(crate) async fn restore_checkpoint_guarded(
             outcomes.push((path.clone(), RestoreOutcome::SkippedCorrupt));
             continue;
         }
-        if let Ok(current) = tokio::fs::read_to_string(path).await {
+        if let Ok(current) = crate::tools::file::read_to_string_capped_async(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .await
+        {
             if current == snapshot.content {
                 outcomes.push((path.clone(), RestoreOutcome::AlreadyCurrent));
                 continue;

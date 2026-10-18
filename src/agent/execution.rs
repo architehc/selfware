@@ -2203,8 +2203,9 @@ impl Agent {
                 // Check if src/lib.rs already has substantial content (template project).
                 // If so, do NOT overwrite with scaffold — nudge targeted edits instead.
                 // Relative to the agent's workspace root, not the process cwd.
-                let existing_content = tokio::fs::read_to_string(
-                    crate::tools::workspace_root::current_path().join("src/lib.rs"),
+                let existing_content = crate::tools::file::read_to_string_capped_async(
+                    &crate::tools::workspace_root::current_path().join("src/lib.rs"),
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
                 )
                 .await
                 .unwrap_or_default();
