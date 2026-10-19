@@ -392,7 +392,10 @@ impl GuardrailSummary {
     pub fn warnings(&self) -> Vec<&GuardrailOutcome> {
         self.outcomes
             .iter()
-            .filter(|o| matches!(o.action, ViolationAction::Warn) && o.result.is_fail())
+            .filter(|o| {
+                matches!(o.action, ViolationAction::Warn)
+                    && (o.result.is_fail() || o.result.is_error())
+            })
             .collect()
     }
 }

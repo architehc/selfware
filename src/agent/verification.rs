@@ -898,6 +898,11 @@ pub(crate) struct FreshPassProof {
 /// lexical pass handles prospective paths; the safety normalizer additionally
 /// canonicalizes an existing artifact after it has been written.
 fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
+    let base_root = crate::tools::workspace_root::current_path();
+    normalize_checkpoint_path_with_root(raw, &base_root)
+}
+
+fn normalize_checkpoint_path_with_root(raw: &str, base_root: &Path) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() || raw.contains('\0') {
         return None;
@@ -907,7 +912,7 @@ fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        crate::tools::workspace_root::current_path().join(path)
+        base_root.join(path)
     };
     let lexical = crate::safety::path_validator::lexical_normalize_path(&absolute);
     Some(crate::safety::checker::normalize_path(&lexical))
@@ -2106,6 +2111,7 @@ impl Agent {
     /// stale until another read occurs.
     fn non_code_artifact_readback(&self) -> Option<NonCodeArtifactReadback> {
         let checkpoint = self.current_checkpoint.as_ref()?;
+        let base_root = crate::tools::workspace_root::current_path();
         let task = if self.current_task_context.trim().is_empty() {
             checkpoint.task_description.as_str()
         } else {
@@ -2156,7 +2162,8 @@ impl Agent {
             }
 
             for raw_path in paths {
-                let Some(normalized) = normalize_checkpoint_path(&raw_path) else {
+                let Some(normalized) = normalize_checkpoint_path_with_root(&raw_path, &base_root)
+                else {
                     artifact_only = false;
                     continue;
                 };
@@ -2208,7 +2215,7 @@ impl Agent {
                         return args
                             .get("path")
                             .and_then(Value::as_str)
-                            .and_then(normalize_checkpoint_path)
+                            .and_then(|p| normalize_checkpoint_path_with_root(p, &base_root))
                             .is_some_and(|read_path| read_path == normalized_write);
                     }
                     // (b) A shell/PTY read of the same file (cat/grep/head/tail/…)

@@ -9,10 +9,10 @@
 //! - `coverage`: left `None`; real coverage requires tarpaulin/llvm-cov integration.
 
 use anyhow::Result;
-use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use super::Node;
 use crate::safety::process_env::SanitizedEnvExt;
@@ -21,7 +21,7 @@ pub struct QualityAnalyzer {
     /// Compiler warning counts keyed by source file (e.g. "src/agent/mod.rs"),
     /// collected lazily from a single `cargo check` run. `None` when `cargo
     /// check` could not run (e.g. cargo not on PATH); metrics degrade to `None`.
-    warnings: OnceCell<Option<HashMap<String, usize>>>,
+    warnings: OnceLock<Option<HashMap<String, usize>>>,
     /// Command used to run `cargo check`; overridable for tests.
     cargo_cmd: String,
     collect_compiler_warnings: bool,
@@ -34,7 +34,7 @@ impl QualityAnalyzer {
 
     pub fn with_cargo_cmd(cmd: &str) -> Self {
         Self {
-            warnings: OnceCell::new(),
+            warnings: OnceLock::new(),
             cargo_cmd: cmd.to_string(),
             collect_compiler_warnings: true,
         }
@@ -45,7 +45,7 @@ impl QualityAnalyzer {
     /// graph is being built or refreshed.
     pub fn static_only() -> Self {
         Self {
-            warnings: OnceCell::new(),
+            warnings: OnceLock::new(),
             cargo_cmd: "cargo".to_string(),
             collect_compiler_warnings: false,
         }
@@ -86,10 +86,10 @@ impl QualityAnalyzer {
     /// Number of compiler warnings in files under `path` (e.g. "src/agent").
     /// Returns `None` if `cargo check` is unavailable or failed.
     fn warnings_for(&self, path: &str) -> Option<usize> {
-        if self.warnings.get().is_none() {
-            let _ = self.warnings.set(collect_warnings_from(&self.cargo_cmd));
-        }
-        let map = self.warnings.get()?.as_ref()?;
+        let map = self
+            .warnings
+            .get_or_init(|| collect_warnings_from(&self.cargo_cmd))
+            .as_ref()?;
         let prefix = format!("{}/", path.trim_end_matches('/'));
         Some(
             map.iter()

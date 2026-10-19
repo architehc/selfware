@@ -779,7 +779,7 @@ pub fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value 
     })
 }
 
-/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA16 and PT1–PT5.
+/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA20 and PT1–PT5.
 ///
 /// Honest status (`AGENTS.md` Rule 3): `trust_state` is `"table_conformance_verified"` because
 /// Lean 4 kernel elaboration runs in `scripts/check_formal.sh` while the live binary verifies
@@ -903,6 +903,30 @@ pub fn verify_phi_formal_invariants() -> Value {
                 "title": "Phi Viseme Time-Window Lookup & Rest Fallback",
                 "theorems": ["active_viseme_inside_single_span", "active_viseme_outside_single_span_is_rest", "active_viseme_degenerate_span_is_rest"],
                 "rust_citation": "src/phi/viseme.rs:86",
+            },
+            {
+                "id": "PA17",
+                "title": "Self-Healing Failure Classification Priority Lattice",
+                "theorems": ["context_overflow_prefix_dominates_all", "hook_error_never_llm_unreachable", "llm_unreachable_dominates_generic_timeout"],
+                "rust_citation": "src/self_healing/recovery_tree.rs:99",
+            },
+            {
+                "id": "PA18",
+                "title": "Computer Control ActionRateLimiter Window & Clock-Skew Safety",
+                "theorems": ["rate_limiter_clock_skew_stays_in_current_window", "rate_limiter_new_window_resets_count_to_one", "rate_limiter_within_window_blocks_above_max"],
+                "rust_citation": "src/computer/mod.rs:62",
+            },
+            {
+                "id": "PA19",
+                "title": "Hook Lifecycle Fail-Closed Semantics & SkipKind Provenance",
+                "theorems": ["pre_tool_use_never_continues_on_hook_error", "post_and_stop_hook_errors_non_fatal", "skip_kind_tags_disjoint"],
+                "rust_citation": "src/hooks/mod.rs:51",
+            },
+            {
+                "id": "PA20",
+                "title": "SWL Guardrail Enforcer Honest Accounting & Fail-Closed Block",
+                "theorems": ["guardrail_eval_error_with_block_blocks", "guardrail_step_conserves_total", "guardrail_blocked_increments_iff_should_block"],
+                "rust_citation": "src/swl/guardrails/types.rs:371",
             },
             {
                 "id": "PT1-PT5",
@@ -1051,6 +1075,42 @@ pub fn generate_formal_drill(seed: usize) -> BossBattleDrill {
             correct: "Viseme::Rest — spans are half-open `[start_ms, end_ms)` so `t == end_ms` falls back to Rest (or the next span)",
             wrong_a: "Retains the previous span's Viseme indefinitely",
             wrong_b: "Always returns Viseme::Etc on boundary timestamps",
+        },
+        ProofQuestion {
+            id: "PA17:context_overflow_prefix_dominates_all",
+            question: "PROOF DRILL [PA17]: Under `context_overflow_prefix_dominates_all`, how is `\"Context overflow: 4035 tokens including 12 in the tools\"` classified?",
+            citation: "src/self_healing/recovery_tree.rs:108",
+            snippet: "theorem context_overflow_prefix_dominates_all : classifyFailureSignals true hk ht hllm ha hr htl hctx hcfg hdsk = .contextOverflow",
+            correct: "FailureKind::ContextOverflow — prefix takes priority over '403' (AuthError) and 'tool' (ToolTimeout)",
+            wrong_a: "FailureKind::AuthError because '4035' contains '403'",
+            wrong_b: "FailureKind::ToolTimeout because it mentions 'tools'",
+        },
+        ProofQuestion {
+            id: "PA18:rate_limiter_clock_skew_stays_in_current_window",
+            question: "PROOF DRILL [PA18]: Under `rate_limiter_clock_skew_stays_in_current_window`, what happens if `now_ms <= last_ms` when the window is already at `max_actions`?",
+            citation: "src/computer/mod.rs:62",
+            snippet: "theorem rate_limiter_clock_skew_stays_in_current_window (hSkew : nowMs ≤ lastMs) : ...",
+            correct: "Remains in the current window and blocks — saturating subtraction prevents clock skew from opening a new window",
+            wrong_a: "Resets the window counter to 1 due to negative elapsed time",
+            wrong_b: "Panics on unsigned underflow",
+        },
+        ProofQuestion {
+            id: "PA19:pre_tool_use_never_continues_on_hook_error",
+            question: "PROOF DRILL [PA19]: Under `pre_tool_use_never_continues_on_hook_error`, how does `HookRegistry::fire` handle a `PreToolUse` hook timeout/spawn error?",
+            citation: "src/hooks/mod.rs:51",
+            snippet: "theorem pre_tool_use_never_continues_on_hook_error : resolveHookStep .preToolUse .errorNonFatal = .skip .hookFailure",
+            correct: "Fails closed as HookAction::Skip { kind: SkipKind::HookFailure } while tagging audit as 'hook_failure'",
+            wrong_a: "Logs a warning and allows the tool to run like PostToolUse",
+            wrong_b: "Reports a false 'hook_policy' block to the model",
+        },
+        ProofQuestion {
+            id: "PA20:guardrail_eval_error_with_block_blocks",
+            question: "PROOF DRILL [PA20]: Under `guardrail_eval_error_with_block_blocks`, what does `GuardrailSummary::should_block()` return when a `Block` guardrail returns `EvaluationResult::Error`?",
+            citation: "src/swl/guardrails/types.rs:373",
+            snippet: "theorem guardrail_eval_error_with_block_blocks : outcomeShouldBlock .evalError .block = true",
+            correct: "true — Block guardrails fail closed on evaluation errors and conserve total = passed + failed + errors",
+            wrong_a: "false — only EvaluationResult::Fail triggers ViolationAction::Block",
+            wrong_b: "Omits evaluation errors from total_checked",
         },
         ProofQuestion {
             id: "PT1:tests_never_discharge_review",

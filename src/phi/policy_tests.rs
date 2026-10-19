@@ -1095,6 +1095,178 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
                 "Lean PA16 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if domain.starts_with("recovery_classify:") {
+            use crate::self_healing::recovery_tree::{classify, FailureKind};
+            let actual = match classify(spec) {
+                FailureKind::LlmUnreachable => "llm_unreachable",
+                FailureKind::AuthError => "auth_error",
+                FailureKind::RateLimited => "rate_limited",
+                FailureKind::ToolTimeout => "tool_timeout",
+                FailureKind::ToolError => "tool_error",
+                FailureKind::ContextOverflow => "context_overflow",
+                FailureKind::Deadlock => "deadlock",
+                FailureKind::ConfigInvalid => "config_invalid",
+                FailureKind::DiskFull => "disk_full",
+                FailureKind::Unknown => "unknown",
+            };
+            assert_eq!(
+                actual, expected,
+                "Lean PA17 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain.starts_with("rate_limiter:") {
+            let kv = parse_kv(spec);
+            let max_actions: u32 = kv["max"].parse().unwrap();
+            let window_ms: u64 = kv["win"].parse().unwrap();
+            let last_ms: u64 = kv["last"].parse().unwrap();
+            let count_prev: u32 = kv["count"].parse().unwrap();
+            let now_ms: u64 = kv["now"].parse().unwrap();
+            let (allowed, next_last, next_count) = if now_ms.saturating_sub(last_ms) > window_ms {
+                (true, now_ms, 1)
+            } else {
+                let c = count_prev + 1;
+                (c <= max_actions, last_ms, c)
+            };
+            let actual = format!(
+                "{}:last={next_last}:count={next_count}",
+                if allowed { "allow" } else { "block" }
+            );
+            assert_eq!(
+                &actual, expected,
+                "Lean PA18 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain.starts_with("hook_fire:") {
+            use crate::hooks::{pre_tool_skip_message, HookAction, HookEvent, SkipKind};
+            let (event, raw_outcome) = match spec.as_str() {
+                "PreToolUse:SkipPolicy" => (
+                    HookEvent::PreToolUse,
+                    HookAction::Skip {
+                        reason: "policy block".into(),
+                        kind: SkipKind::Policy,
+                    },
+                ),
+                "PreToolUse:Error" => (
+                    HookEvent::PreToolUse,
+                    HookAction::Error {
+                        message: "timed out".into(),
+                    },
+                ),
+                "PostToolUse:Error" => (
+                    HookEvent::PostToolUse,
+                    HookAction::Error {
+                        message: "timed out".into(),
+                    },
+                ),
+                "Stop:Error" => (
+                    HookEvent::Stop,
+                    HookAction::Error {
+                        message: "timed out".into(),
+                    },
+                ),
+                other => panic!("unknown hook_fire spec: {other}"),
+            };
+            let resolved = match raw_outcome {
+                HookAction::Error { message } => {
+                    if event == HookEvent::PreToolUse {
+                        HookAction::Skip {
+                            reason: message,
+                            kind: SkipKind::HookFailure,
+                        }
+                    } else {
+                        HookAction::Continue
+                    }
+                }
+                other => other,
+            };
+            let actual = match resolved {
+                HookAction::Continue => "continue".to_string(),
+                HookAction::Skip { reason, kind } => {
+                    let (_, _, tag) = pre_tool_skip_message("file_edit", &reason, kind);
+                    let prefix = match kind {
+                        SkipKind::Policy => "skip_policy",
+                        SkipKind::HookFailure => "skip_failure",
+                    };
+                    format!("{prefix}:{tag}")
+                }
+                HookAction::Error { .. } => "error".to_string(),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA19 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain.starts_with("swl_guardrail:") {
+            use crate::swl::guardrails::types::{
+                EvaluationResult, GuardrailOutcome, GuardrailSummary, GuardrailType,
+                ViolationAction,
+            };
+            let kv = parse_kv(spec);
+            let res = match kv["res"].as_str() {
+                "pass" => EvaluationResult::Pass,
+                "fail" => EvaluationResult::Fail {
+                    reason: "violation".into(),
+                },
+                "error" => EvaluationResult::Error {
+                    message: "eval error".into(),
+                },
+                other => panic!("unknown guardrail res: {other}"),
+            };
+            let act = match kv["act"].as_str() {
+                "block" => ViolationAction::Block,
+                "warn" => ViolationAction::Warn,
+                "log" => ViolationAction::Log,
+                other => panic!("unknown guardrail act: {other}"),
+            };
+            let outcome = GuardrailOutcome {
+                guardrail_name: "g1".into(),
+                guardrail_type: GuardrailType::PreTool,
+                result: res.clone(),
+                action: act,
+                timestamp: std::time::Instant::now(),
+                evaluation_duration_ms: 1,
+            };
+            let mut summary = GuardrailSummary {
+                total_checked: 1,
+                outcomes: vec![outcome],
+                ..Default::default()
+            };
+            match &res {
+                EvaluationResult::Pass => summary.passed += 1,
+                EvaluationResult::Fail { .. } => {
+                    summary.failed += 1;
+                    match act {
+                        ViolationAction::Block => summary.blocked += 1,
+                        ViolationAction::Warn => summary.warnings += 1,
+                        _ => {}
+                    }
+                }
+                EvaluationResult::Error { .. } => {
+                    summary.errors += 1;
+                    match act {
+                        ViolationAction::Block => summary.blocked += 1,
+                        ViolationAction::Warn => summary.warnings += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(summary.blocking_violations().len(), summary.blocked);
+            assert_eq!(summary.warnings().len(), summary.warnings);
+            let actual = format!(
+                "total={}:pass={}:fail={}:err={}:blk={}:warn={}:block={}",
+                summary.total_checked,
+                summary.passed,
+                summary.failed,
+                summary.errors,
+                summary.blocked,
+                summary.warnings,
+                summary.should_block()
+            );
+            assert_eq!(
+                &actual, expected,
+                "Lean PA20 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -1104,5 +1276,5 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 88, "all 88 PA1–PA16 rows must be checked");
+    assert_eq!(checked, 107, "all 107 PA1–PA20 rows must be checked");
 }

@@ -72,62 +72,92 @@ impl GraphBuilder {
             .collect::<Vec<_>>();
         let test_partition = discover_test_sources(project_root, &source_files)?;
         let mut content_by_rel: HashMap<String, String> = HashMap::with_capacity(inventory.len());
-        for entry in inventory {
-            let path = entry.path;
-            let relative = path.strip_prefix(project_root).unwrap_or(&path);
-            let rel_str = path_string(relative);
-            let classification = if test_partition.files.contains(&path) {
-                RepositoryFileClass::Test
-            } else {
-                entry.classification
-            };
-            let source_set = match classification {
-                RepositoryFileClass::Test => SourceSet::Test,
-                RepositoryFileClass::Example => SourceSet::Example,
-                RepositoryFileClass::Production if relative.starts_with("src") => SourceSet::Code,
-                RepositoryFileClass::Production => SourceSet::Tooling,
-            };
-            let id = file_node_id(relative, source_set);
-            let file_class = classify_file(relative);
-            // Implementation sources under `src` count as Code: Rust plus the
-            // other common implementation languages (Python, JS/TS, Go), so a
-            // non-Rust project still gets Code nodes and the context tiers
-            // ship something. Web assets, data, config, scripts, and vendored
-            // files — even under `src` — become Auxiliary so they don't
-            // inflate the code token tiers.
-            // Tooling vs product logic. Product context tiers exist to let a
-            // model reason about the product; these layers are presentation,
-            // operations, or scaffolding that a review agent does not need in
-            // bulk (they remain in the graph and are reachable on demand via
-            // expand). bench/vlm/swl are tooling runtimes; the rest are the
-            // presentation+ops layer (DEBLOAT_STATE.md).
-            let is_tooling_module = is_tooling_module_path(relative);
-            let is_code = matches!(source_set, SourceSet::Code)
-                && is_production_source_class(file_class)
-                && !is_tooling_module;
-            let mut node = match source_set {
-                SourceSet::Test | SourceSet::Example => {
-                    let mut n = Node::test(&id, &rel_str);
-                    n.classification = file_class.to_string();
-                    n
+        let worker_count = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4)
+            .clamp(1, 8)
+            .min(inventory.len().max(1));
+        let chunk_size = inventory.len().div_ceil(worker_count).max(1);
+        let test_files = &test_partition.files;
+
+        type ScannedFileEntry = (Node, Option<(String, String)>);
+        let chunk_results: Vec<Result<Vec<ScannedFileEntry>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = inventory
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let analyzer = &analyzer;
+                    let partitioner = &partitioner;
+                    scope.spawn(move || -> Result<Vec<ScannedFileEntry>> {
+                        let mut out = Vec::with_capacity(chunk.len());
+                        for entry in chunk {
+                            let path = &entry.path;
+                            let relative = path.strip_prefix(project_root).unwrap_or(path);
+                            let rel_str = path_string(relative);
+                            let classification = if test_files.contains(path) {
+                                RepositoryFileClass::Test
+                            } else {
+                                entry.classification
+                            };
+                            let source_set = match classification {
+                                RepositoryFileClass::Test => SourceSet::Test,
+                                RepositoryFileClass::Example => SourceSet::Example,
+                                RepositoryFileClass::Production if relative.starts_with("src") => {
+                                    SourceSet::Code
+                                }
+                                RepositoryFileClass::Production => SourceSet::Tooling,
+                            };
+                            let id = file_node_id(relative, source_set);
+                            let file_class = classify_file(relative);
+                            let is_tooling_module = is_tooling_module_path(relative);
+                            let is_code = matches!(source_set, SourceSet::Code)
+                                && is_production_source_class(file_class)
+                                && !is_tooling_module;
+                            let mut node = match source_set {
+                                SourceSet::Test | SourceSet::Example => {
+                                    let mut n = Node::test(&id, &rel_str);
+                                    n.classification = file_class.to_string();
+                                    n
+                                }
+                                SourceSet::Code if is_code => {
+                                    let mut n = Node::code(&id, &rel_str);
+                                    n.classification = file_class.to_string();
+                                    n
+                                }
+                                SourceSet::Code | SourceSet::Tooling => {
+                                    Node::auxiliary(&id, &rel_str, file_class)
+                                }
+                            };
+                            let content = read_broad_discovery_utf8(path)?;
+                            populate_metrics_with_content(&mut node, path, &content, partitioner)?;
+                            let rust_entry = if is_rust_source(path) {
+                                analyzer.analyze_node_with_content(&mut node, &content);
+                                Some((rel_str, content))
+                            } else {
+                                None
+                            };
+                            out.push((node, rust_entry));
+                        }
+                        Ok(out)
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("graph scan worker panicked")))
+                })
+                .collect()
+        });
+
+        for chunk_res in chunk_results {
+            for (node, rust_entry) in chunk_res? {
+                if let Some((rel_str, content)) = rust_entry {
+                    content_by_rel.insert(rel_str, content);
                 }
-                SourceSet::Code if is_code => {
-                    let mut n = Node::code(&id, &rel_str);
-                    n.classification = file_class.to_string();
-                    n
-                }
-                // Non-source files under src (web assets, markup, shell
-                // scripts) and everything outside src (data, scripts, config,
-                // vendored) stay out of the code tiers.
-                SourceSet::Code | SourceSet::Tooling => Node::auxiliary(&id, &rel_str, file_class),
-            };
-            let content = read_broad_discovery_utf8(&path)?;
-            populate_metrics_with_content(&mut node, &path, &content, &partitioner)?;
-            if is_rust_source(&path) {
-                analyzer.analyze_node_with_content(&mut node, &content);
-                content_by_rel.insert(rel_str, content);
+                nodes.push(node);
             }
-            nodes.push(node);
         }
         let hierarchy_edges = add_repository_hierarchy(&mut nodes, project_root);
         nodes.sort_by(|left, right| left.id.cmp(&right.id));

@@ -1231,6 +1231,213 @@ def sampleVisemeSchedule : List VisemeSpan :=
   , { startMs := 450, endMs := 600, viseme := .o }
   ]
 
+/-! ## Part XVII — PA17: Self-Healing Failure Classification Priority Lattice (`src/self_healing/recovery_tree.rs`) -/
+
+inductive FailureKindModel where
+  | llmUnreachable
+  | authError
+  | rateLimited
+  | toolTimeout
+  | toolError
+  | contextOverflow
+  | configInvalid
+  | diskFull
+  | unknown
+  deriving DecidableEq, Repr
+
+def FailureKindModel.name : FailureKindModel → String
+  | .llmUnreachable => "llm_unreachable"
+  | .authError => "auth_error"
+  | .rateLimited => "rate_limited"
+  | .toolTimeout => "tool_timeout"
+  | .toolError => "tool_error"
+  | .contextOverflow => "context_overflow"
+  | .configInvalid => "config_invalid"
+  | .diskFull => "disk_full"
+  | .unknown => "unknown"
+
+/-- Mirrors `crate::self_healing::recovery_tree::classify` (`src/self_healing/recovery_tree.rs:99-198`). -/
+def classifyFailureSignals
+    (startsWithContextOverflow hasHook hasTimeout hasLlmUnreachable hasAuth hasRateLimit hasTool hasContext hasConfig hasDisk : Bool)
+    : FailureKindModel :=
+  if startsWithContextOverflow then
+    .contextOverflow
+  else if hasHook then
+    if hasTimeout then .toolTimeout else .toolError
+  else if hasLlmUnreachable then
+    .llmUnreachable
+  else if hasAuth then
+    .authError
+  else if hasRateLimit then
+    .rateLimited
+  else if hasTool || hasTimeout then
+    .toolTimeout
+  else if hasContext then
+    .contextOverflow
+  else if hasConfig then
+    .configInvalid
+  else if hasDisk then
+    .diskFull
+  else
+    .unknown
+
+theorem context_overflow_prefix_dominates_all
+    (hk ht hllm ha hr htl hctx hcfg hdsk : Bool) :
+    classifyFailureSignals true hk ht hllm ha hr htl hctx hcfg hdsk = .contextOverflow := rfl
+
+theorem hook_error_never_llm_unreachable
+    (ht hllm ha hr htl hctx hcfg hdsk : Bool) :
+    classifyFailureSignals false true ht hllm ha hr htl hctx hcfg hdsk ≠ .llmUnreachable := by
+  cases ht <;> intro h <;> cases h
+
+theorem llm_unreachable_dominates_generic_timeout
+    (ht ha hr htl hctx hcfg hdsk : Bool) :
+    classifyFailureSignals false false ht true ha hr htl hctx hcfg hdsk = .llmUnreachable := rfl
+
+theorem auth_dominates_generic_timeout
+    (ht hr htl hctx hcfg hdsk : Bool) :
+    classifyFailureSignals false false ht false true hr htl hctx hcfg hdsk = .authError := rfl
+
+/-! ## Part XVIII — PA18: Computer Control `ActionRateLimiter` Window & Clock-Skew Safety (`src/computer/mod.rs`) -/
+
+/-- Mirrors `ActionRateLimiter::check` (`src/computer/mod.rs:62-91`).
+    Returns `(allowed, nextLastMs, nextActionsInWindow)`. -/
+def stepRateLimiter
+    (maxActions windowMs lastMs actionsInWindow nowMs : Nat) : Bool × Nat × Nat :=
+  if nowMs - lastMs > windowMs then
+    (true, nowMs, 1)
+  else
+    let count := actionsInWindow + 1
+    (decide (count ≤ maxActions), lastMs, count)
+
+theorem rate_limiter_clock_skew_stays_in_current_window
+    (maxActions windowMs lastMs actionsInWindow nowMs : Nat)
+    (hSkew : nowMs ≤ lastMs) :
+    stepRateLimiter maxActions windowMs lastMs actionsInWindow nowMs =
+      (decide (actionsInWindow + 1 ≤ maxActions), lastMs, actionsInWindow + 1) := by
+  have hDiff : ¬ (nowMs - lastMs > windowMs) := by omega
+  simp [stepRateLimiter, hDiff]
+
+theorem rate_limiter_new_window_resets_count_to_one
+    (maxActions windowMs lastMs actionsInWindow nowMs : Nat)
+    (hNew : nowMs - lastMs > windowMs) :
+    stepRateLimiter maxActions windowMs lastMs actionsInWindow nowMs = (true, nowMs, 1) := by
+  simp [stepRateLimiter, hNew]
+
+theorem rate_limiter_within_window_blocks_above_max
+    (maxActions windowMs lastMs actionsInWindow nowMs : Nat)
+    (hWin : nowMs - lastMs ≤ windowMs)
+    (hCap : actionsInWindow ≥ maxActions) :
+    (stepRateLimiter maxActions windowMs lastMs actionsInWindow nowMs).1 = false := by
+  have hNotGt : ¬ (nowMs - lastMs > windowMs) := by omega
+  have hNotLe : ¬ (actionsInWindow + 1 ≤ maxActions) := by omega
+  simp [stepRateLimiter, hNotGt, hNotLe]
+
+/-! ## Part XIX — PA19: Hook Lifecycle Fail-Closed Semantics & `SkipKind` Provenance (`src/hooks/mod.rs`) -/
+
+inductive HookEventModel where
+  | preToolUse
+  | postToolUse
+  | stop
+  deriving DecidableEq, Repr
+
+inductive SkipKindModel where
+  | policy
+  | hookFailure
+  deriving DecidableEq, Repr
+
+inductive HookOutcomeModel where
+  | continueExec
+  | skip (kind : SkipKindModel)
+  | errorNonFatal
+  deriving DecidableEq, Repr
+
+def skipFailureTag : SkipKindModel → String
+  | .policy => "hook_policy"
+  | .hookFailure => "hook_failure"
+
+def resolveHookStep (ev : HookEventModel) (raw : HookOutcomeModel) : HookOutcomeModel :=
+  match raw with
+  | .errorNonFatal =>
+      if ev = .preToolUse then .skip .hookFailure else .continueExec
+  | other => other
+
+theorem pre_tool_use_never_continues_on_hook_error :
+    resolveHookStep .preToolUse .errorNonFatal = .skip .hookFailure := rfl
+
+theorem post_and_stop_hook_errors_non_fatal
+    (ev : HookEventModel) (h : ev ≠ .preToolUse) :
+    resolveHookStep ev .errorNonFatal = .continueExec := by
+  cases ev <;> simp_all [resolveHookStep]
+
+theorem skip_kind_tags_disjoint :
+    skipFailureTag .policy ≠ skipFailureTag .hookFailure := by decide
+
+/-! ## Part XX — PA20: SWL Guardrail Enforcer Honest Accounting & Fail-Closed Block (`src/swl/guardrails/enforcer.rs`) -/
+
+inductive EvalResultKind where
+  | pass
+  | fail
+  | evalError
+  deriving DecidableEq, Repr
+
+inductive GuardActionKind where
+  | block
+  | warn
+  | log
+  | alert
+  deriving DecidableEq, Repr
+
+structure GuardSummaryCounts where
+  total : Nat := 0
+  passed : Nat := 0
+  failed : Nat := 0
+  errors : Nat := 0
+  blocked : Nat := 0
+  warnings : Nat := 0
+  deriving DecidableEq, Repr
+
+def outcomeShouldBlock (res : EvalResultKind) (act : GuardActionKind) : Bool :=
+  decide (act = .block) && (decide (res = .fail) || decide (res = .evalError))
+
+def stepGuardSummary
+    (s : GuardSummaryCounts) (res : EvalResultKind) (act : GuardActionKind) : GuardSummaryCounts :=
+  match res with
+  | .pass =>
+      { s with total := s.total + 1, passed := s.passed + 1 }
+  | .fail =>
+      { s with
+        total := s.total + 1
+        failed := s.failed + 1
+        blocked := s.blocked + (if act = .block then 1 else 0)
+        warnings := s.warnings + (if act = .warn then 1 else 0) }
+  | .evalError =>
+      { s with
+        total := s.total + 1
+        errors := s.errors + 1
+        blocked := s.blocked + (if act = .block then 1 else 0)
+        warnings := s.warnings + (if act = .warn then 1 else 0) }
+
+theorem guardrail_eval_error_with_block_blocks :
+    outcomeShouldBlock .evalError .block = true := rfl
+
+theorem guardrail_pass_never_blocks (act : GuardActionKind) :
+    outcomeShouldBlock .pass act = false := by
+  cases act <;> rfl
+
+theorem guardrail_step_conserves_total
+    (s : GuardSummaryCounts) (res : EvalResultKind) (act : GuardActionKind) :
+    let s' := stepGuardSummary s res act
+    s'.total = s.total + 1 ∧
+      s'.passed + s'.failed + s'.errors = (s.passed + s.failed + s.errors) + 1 := by
+  cases res <;> simp [stepGuardSummary] <;> omega
+
+theorem guardrail_blocked_increments_iff_should_block
+    (s : GuardSummaryCounts) (res : EvalResultKind) (act : GuardActionKind) :
+    (stepGuardSummary s res act).blocked =
+      s.blocked + (if outcomeShouldBlock res act then 1 else 0) := by
+  cases res <;> cases act <;> rfl
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -1437,9 +1644,51 @@ def exportTable : String :=
     , s!"[\"phi_viseme:lookup\",\"after_600ms\",\"{(activeVisemeAt sampleVisemeSchedule 600).asCode}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows) ++ "]"
+  -- 17–20. PA17–PA20 rows
+  let wave4Rows : List String :=
+    [ s!"[\"recovery_classify:context_overflow_with_403_and_tool\",\"Context overflow: 4035 tokens including 12 in the tools\",\"{(classifyFailureSignals true false false false true false true true false false).name}\"]"
+    , s!"[\"recovery_classify:hook_timeout\",\"PreToolUse hook timed out after 30s\",\"{(classifyFailureSignals false true true false false false false false false false).name}\"]"
+    , s!"[\"recovery_classify:hook_nonzero\",\"PreToolUse hook exited with status 1\",\"{(classifyFailureSignals false true false false false false false false false false).name}\"]"
+    , s!"[\"recovery_classify:timed_out_connecting\",\"timed out connecting to endpoint\",\"{(classifyFailureSignals false false true true false false false false false false).name}\"]"
+    , s!"[\"recovery_classify:http_403_with_timeout_text\",\"HTTP 403 forbidden after request timeout\",\"{(classifyFailureSignals false false true false true false false false false false).name}\"]"
+    , s!"[\"recovery_classify:disk_full_enospc\",\"write failed: No space left on device (os error 28)\",\"{(classifyFailureSignals false false false false false false false false false true).name}\"]"
+    , let (ok1, l1, c1) := stepRateLimiter 10 1000 0 10 1500
+      s!"[\"rate_limiter:new_window_opens\",\"max=10,win=1000,last=0,count=10,now=1500\",\"{if ok1 then "allow" else "block"}:last={l1}:count={c1}\"]"
+    , let (ok2, l2, c2) := stepRateLimiter 10 1000 1500 9 1800
+      s!"[\"rate_limiter:within_window_allowed\",\"max=10,win=1000,last=1500,count=9,now=1800\",\"{if ok2 then "allow" else "block"}:last={l2}:count={c2}\"]"
+    , let (ok3, l3, c3) := stepRateLimiter 10 1000 1500 10 1800
+      s!"[\"rate_limiter:within_window_exceeded\",\"max=10,win=1000,last=1500,count=10,now=1800\",\"{if ok3 then "allow" else "block"}:last={l3}:count={c3}\"]"
+    , let (ok4, l4, c4) := stepRateLimiter 10 1000 1500 10 1200
+      s!"[\"rate_limiter:clock_skew_no_reset\",\"max=10,win=1000,last=1500,count=10,now=1200\",\"{if ok4 then "allow" else "block"}:last={l4}:count={c4}\"]"
+    , s!"[\"hook_fire:pre_tool_policy_skip\",\"PreToolUse:SkipPolicy\",\"skip_policy:{skipFailureTag .policy}\"]"
+    , let hPreErr := match resolveHookStep .preToolUse .errorNonFatal with
+        | .skip .hookFailure => s!"skip_failure:{skipFailureTag .hookFailure}"
+        | _ => "unexpected"
+      s!"[\"hook_fire:pre_tool_error_fails_closed\",\"PreToolUse:Error\",\"{hPreErr}\"]"
+    , let hPostErr := match resolveHookStep .postToolUse .errorNonFatal with
+        | .continueExec => "continue"
+        | _ => "unexpected"
+      s!"[\"hook_fire:post_tool_error_continues\",\"PostToolUse:Error\",\"{hPostErr}\"]"
+    , let hStopErr := match resolveHookStep .stop .errorNonFatal with
+        | .continueExec => "continue"
+        | _ => "unexpected"
+      s!"[\"hook_fire:stop_error_continues\",\"Stop:Error\",\"{hStopErr}\"]"
+    , let g1 := stepGuardSummary {} .pass .block
+      s!"[\"swl_guardrail:pass_block_action\",\"res=pass,act=block\",\"total={g1.total}:pass={g1.passed}:fail={g1.failed}:err={g1.errors}:blk={g1.blocked}:warn={g1.warnings}:block={outcomeShouldBlock .pass .block}\"]"
+    , let g2 := stepGuardSummary {} .fail .block
+      s!"[\"swl_guardrail:fail_block_action\",\"res=fail,act=block\",\"total={g2.total}:pass={g2.passed}:fail={g2.failed}:err={g2.errors}:blk={g2.blocked}:warn={g2.warnings}:block={outcomeShouldBlock .fail .block}\"]"
+    , let g3 := stepGuardSummary {} .evalError .block
+      s!"[\"swl_guardrail:error_block_action_fails_closed\",\"res=error,act=block\",\"total={g3.total}:pass={g3.passed}:fail={g3.failed}:err={g3.errors}:blk={g3.blocked}:warn={g3.warnings}:block={outcomeShouldBlock .evalError .block}\"]"
+    , let g4 := stepGuardSummary {} .evalError .warn
+      s!"[\"swl_guardrail:error_warn_action_warns\",\"res=error,act=warn\",\"total={g4.total}:pass={g4.passed}:fail={g4.failed}:err={g4.errors}:blk={g4.blocked}:warn={g4.warnings}:block={outcomeShouldBlock .evalError .warn}\"]"
+    , let g5 := stepGuardSummary {} .fail .log
+      s!"[\"swl_guardrail:fail_log_action\",\"res=fail,act=log\",\"total={g5.total}:pass={g5.passed}:fail={g5.failed}:err={g5.errors}:blk={g5.blocked}:warn={g5.warnings}:block={outcomeShouldBlock .fail .log}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 
 #eval PhiArenaAndTrustBounds.exportTable
+
 
