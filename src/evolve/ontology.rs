@@ -54,7 +54,25 @@ impl OntologyStore {
         if !std::fs::symlink_metadata(&self.path)?.file_type().is_file() {
             anyhow::bail!("refusing to load symlinked or non-regular ontology store");
         }
-        let yaml = std::fs::read_to_string(&self.path)?;
+        const MAX_ONTOLOGY_BYTES: u64 = 32 * 1024 * 1024;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = opts.open(&self.path)?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("refusing to load symlinked or non-regular ontology store");
+        }
+        let mut yaml = String::new();
+        use std::io::Read;
+        file.take(MAX_ONTOLOGY_BYTES + 1)
+            .read_to_string(&mut yaml)?;
+        if yaml.len() as u64 > MAX_ONTOLOGY_BYTES {
+            anyhow::bail!("ontology store exceeds 32 MiB limit");
+        }
         Ok(serde_yaml::from_str(&yaml)?)
     }
 }

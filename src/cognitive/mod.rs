@@ -43,3 +43,27 @@ pub use dream_subprocess::{
     check_and_spawn_autodream, get_dream_status, run_dream_consolidation, spawn_autodream,
     AutoDreamConfig, AutoDreamHandle,
 };
+
+#[cfg(feature = "consolidation")]
+pub use crate::consolidation;
+pub use crate::memory as hierarchical_memory;
+pub use compilation_manager::{CompilationSandbox, CompileResult};
+pub use intelligence::{
+    DependencyGraph, FileIndex, PatternDetector, ProjectIntelligence, SymbolIndex,
+};
+pub use knowledge_graph::SemanticLinker;
+pub use learning::{CodeExplainer, ConceptExtractor, Curriculum, ExplanationLevel};
+pub use memory_system::{
+    frame_untrusted_file, neutralize_data_tag, MemoryFile, MemorySystem, WorkspaceGuidanceFile,
+};
+#[cfg(feature = "self-improvement")]
+pub use meta_learning::{MetaLearner, StrategyScore};
+#[cfg(feature = "self-improvement")]
+pub use metrics::{MetricsStore, PerformanceSnapshot, TerminalOutcome, TerminalRunStats};
+pub use rag::{ContextBuilder, RagConfig, RagEngine, RagStats, RetrievedContext};
+#[cfg(feature = "self-improvement")]
+pub use rsi_orchestrator::{BenchmarkReport, CycleOutcome, RSIOrchestrator, RSIState};
+pub use self_improvement::{
+    ErrorPatternLearner, PromptOptimizer, SelfImprovementEngine, ToolSelectionLearner,
+    UsageAnalyzer,
+};

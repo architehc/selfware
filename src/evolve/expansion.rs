@@ -34,7 +34,7 @@ fn read_document(project_root: &Path, stem: &str) -> Option<Value> {
         return None;
     }
     let path = project_root.join(CATALOG_DIR).join(format!("{stem}.json"));
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = super::graph::read_broad_discovery_utf8(&path).ok()?;
     serde_json::from_str(&text).ok()
 }
 

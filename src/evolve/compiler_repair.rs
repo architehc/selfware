@@ -156,7 +156,7 @@ impl DiagnosticRepairEngine {
                     continue;
                 }
             };
-            let content = fs::read_to_string(&path).with_context(|| {
+            let content = super::graph::read_broad_discovery_utf8(&path).with_context(|| {
                 format!("failed to read {} for compiler repair", path.display())
             })?;
 

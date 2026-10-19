@@ -570,7 +570,7 @@ theorem git_status_diff_dropped_in_active_worktree
     (hGit : e.tool.isGitScoped = true) :
     retainsAfterPathAndGitInvalidation ws e = false := by
   unfold retainsAfterPathAndGitInvalidation
-  cases hTree : e.tool.isTreeScoped <;> simp [hSame, hTree, hGit]
+  cases e.tool.isTreeScoped <;> simp [hSame, hGit]
 
 /-! ## Part VIII — `EditHistory` Undo/Redo & `RestoreOutcome` Honesty (`src/session/edit_history.rs`) -/
 
@@ -616,6 +616,230 @@ theorem corrupt_snapshot_never_restores (m w : Bool) :
 theorem restored_iff_valid_dirty_and_written (v m w : Bool) :
     evaluateRestoreOutcome v m w = .restored ↔ (v = true ∧ m = false ∧ w = true) := by
   cases v <;> cases m <;> cases w <;> decide
+
+/-! ## Part IX — `PhiArenaProfile` XP-to-Level Monotonicity (`src/phi/arena.rs`) -/
+
+/-- Matches `PhiArenaProfile::recompute_level_and_achievements`: `1 + (xp / 100)`. -/
+def levelForXp (xp : Nat) : Nat :=
+  1 + xp / 100
+
+theorem level_at_least_one (xp : Nat) :
+    1 ≤ levelForXp xp := by
+  unfold levelForXp
+  omega
+
+theorem level_monotone {xp₁ xp₂ : Nat} (h : xp₁ ≤ xp₂) :
+    levelForXp xp₁ ≤ levelForXp xp₂ := by
+  unfold levelForXp
+  have hdiv : xp₁ / 100 ≤ xp₂ / 100 := Nat.div_le_div_right h
+  omega
+
+/-! ## Part X — `ContextTrust` Provenance & Gate Decision Lattice (`src/evolve/context_trust.rs`) -/
+
+inductive SourceKindModel where
+  | workspace
+  | toolOutput
+  | modelOutput
+  | external
+  | memory
+  | user
+  deriving DecidableEq, Repr
+
+def SourceKindModel.name : SourceKindModel → String
+  | .workspace => "workspace"
+  | .toolOutput => "tool_output"
+  | .modelOutput => "model_output"
+  | .external => "external"
+  | .memory => "memory"
+  | .user => "user"
+
+inductive TrustLevelModel where
+  | trusted
+  | semiTrusted
+  | untrusted
+  deriving DecidableEq, Repr
+
+def TrustLevelModel.name : TrustLevelModel → String
+  | .trusted => "trusted"
+  | .semiTrusted => "semi_trusted"
+  | .untrusted => "untrusted"
+
+inductive GateDecisionModel where
+  | allow
+  | review
+  | quarantine
+  deriving DecidableEq, Repr
+
+def GateDecisionModel.name : GateDecisionModel → String
+  | .allow => "allow"
+  | .review => "review"
+  | .quarantine => "quarantine"
+
+/-- Matches `crate::evolve::context_trust::trust_level`. -/
+def classifyTrustLevel (src : SourceKindModel) (isCodeOrTest : Bool) : TrustLevelModel :=
+  match src with
+  | .external | .modelOutput => .untrusted
+  | .toolOutput | .memory => .semiTrusted
+  | .user => .trusted
+  | .workspace => if isCodeOrTest then .trusted else .semiTrusted
+
+/-- Matches `crate::evolve::context_trust::gate_decision`. -/
+def evaluateGateDecision (hasAnyFinding hasHighFinding : Bool) (trust : TrustLevelModel) : GateDecisionModel :=
+  if hasHighFinding && trust != .trusted then
+    .quarantine
+  else if hasAnyFinding || trust != .trusted then
+    .review
+  else
+    .allow
+
+theorem external_and_model_always_untrusted (c : Bool) :
+    classifyTrustLevel .external c = .untrusted ∧ classifyTrustLevel .modelOutput c = .untrusted :=
+  ⟨rfl, rfl⟩
+
+theorem non_trusted_never_auto_allowed
+    (any high : Bool) (trust : TrustLevelModel) (h : trust ≠ .trusted) :
+    evaluateGateDecision any high trust ≠ .allow := by
+  cases any <;> cases high <;> cases trust <;> simp_all [evaluateGateDecision]
+
+theorem allow_iff_trusted_and_clean (any : Bool) (trust : TrustLevelModel) :
+    evaluateGateDecision any false trust = .allow ↔ (trust = .trusted ∧ any = false) := by
+  cases any <;> cases trust <;> decide
+
+theorem non_trusted_high_always_quarantined
+    (any : Bool) (trust : TrustLevelModel) (h : trust ≠ .trusted) :
+    evaluateGateDecision any true trust = .quarantine := by
+  cases any <;> cases trust <;> simp_all [evaluateGateDecision]
+
+/-! ## Part XI — `ContextFit` Tier Ladder & Honest Fit Bounds (`src/evolve/context_fit.rs`) -/
+
+inductive ContextTierModel where
+  | fullExtended
+  | full
+  | compact
+  | lite
+  | map
+  deriving DecidableEq, Repr
+
+def ContextTierModel.name : ContextTierModel → String
+  | .fullExtended => "full_extended"
+  | .full => "full"
+  | .compact => "compact"
+  | .lite => "lite"
+  | .map => "map"
+
+structure FitOutcomeModel where
+  mode : ContextTierModel
+  measuredTokens : Nat
+  budgetTokens : Nat
+  fits : Bool
+  deriving DecidableEq, Repr
+
+/-- Matches `crate::evolve::context_fit::fit_tier` across `TIER_LADDER`. -/
+def fitTierLadder (fe f c l m usable : Nat) : FitOutcomeModel :=
+  if fe ≤ usable then
+    { mode := .fullExtended, measuredTokens := fe, budgetTokens := usable, fits := true }
+  else if f ≤ usable then
+    { mode := .full, measuredTokens := f, budgetTokens := usable, fits := true }
+  else if c ≤ usable then
+    { mode := .compact, measuredTokens := c, budgetTokens := usable, fits := true }
+  else if l ≤ usable then
+    { mode := .lite, measuredTokens := l, budgetTokens := usable, fits := true }
+  else if m ≤ usable then
+    { mode := .map, measuredTokens := m, budgetTokens := usable, fits := true }
+  else
+    { mode := .map, measuredTokens := m, budgetTokens := usable, fits := false }
+
+theorem fits_implies_measured_le_budget
+    (fe f c l m u : Nat)
+    (h : (fitTierLadder fe f c l m u).fits = true) :
+    (fitTierLadder fe f c l m u).measuredTokens ≤ (fitTierLadder fe f c l m u).budgetTokens := by
+  unfold fitTierLadder at h ⊢
+  by_cases hfe : fe ≤ u
+  · simp [hfe]
+  · by_cases hf : f ≤ u
+    · simp [hfe, hf]
+    · by_cases hc : c ≤ u
+      · simp [hfe, hf, hc]
+      · by_cases hl : l ≤ u
+        · simp [hfe, hf, hc, hl]
+        · by_cases hm : m ≤ u
+          · simp [hfe, hf, hc, hl, hm]
+          · simp [hfe, hf, hc, hl, hm] at h
+
+theorem overflow_reports_map_and_fits_false
+    (fe f c l m u : Nat)
+    (hfe : u < fe) (hf : u < f) (hc : u < c) (hl : u < l) (hm : u < m) :
+    (fitTierLadder fe f c l m u).mode = .map ∧ (fitTierLadder fe f c l m u).fits = false := by
+  unfold fitTierLadder
+  have nfe : ¬(fe ≤ u) := by omega
+  have nf : ¬(f ≤ u) := by omega
+  have nc : ¬(c ≤ u) := by omega
+  have nl : ¬(l ≤ u) := by omega
+  have nm : ¬(m ≤ u) := by omega
+  simp [nfe, nf, nc, nl, nm]
+
+/-! ## Part XII — `ApplyStatus` Shadow Worktree & Compile-Gate Lifecycle (`src/evolve/apply.rs`) -/
+
+inductive ApplyStatusModel where
+  | running
+  | staged
+  | rejected
+  | succeeded
+  | failed
+  deriving DecidableEq, Repr
+
+def ApplyStatusModel.name : ApplyStatusModel → String
+  | .running => "running"
+  | .staged => "staged"
+  | .rejected => "rejected"
+  | .succeeded => "succeeded"
+  | .failed => "failed"
+
+inductive ApplyEventModel where
+  | exitNonZero
+  | diffInvalid
+  | compileFailed
+  | verifiedAndCompiled
+  | commitDigestMatch
+  | commitDigestMismatch
+  deriving DecidableEq, Repr
+
+def ApplyEventModel.name : ApplyEventModel → String
+  | .exitNonZero => "exit_nonzero"
+  | .diffInvalid => "diff_invalid"
+  | .compileFailed => "compile_failed"
+  | .verifiedAndCompiled => "verified_and_compiled"
+  | .commitDigestMatch => "commit_digest_match"
+  | .commitDigestMismatch => "commit_digest_mismatch"
+
+def stepApplyStatus (st : ApplyStatusModel) (ev : ApplyEventModel) : ApplyStatusModel :=
+  match st, ev with
+  | .running, .exitNonZero => .failed
+  | .running, .diffInvalid => .rejected
+  | .running, .compileFailed => .rejected
+  | .running, .verifiedAndCompiled => .staged
+  | .staged, .commitDigestMatch => .succeeded
+  | .staged, .commitDigestMismatch => .staged
+  | _, _ => st
+
+theorem staged_from_running_iff_verified_and_compiled (ev : ApplyEventModel) :
+    stepApplyStatus .running ev = .staged ↔ ev = .verifiedAndCompiled := by
+  cases ev <;> decide
+
+theorem compile_failed_rejects_run :
+    stepApplyStatus .running .compileFailed = .rejected := rfl
+
+theorem succeeded_only_from_staged_or_succeeded
+    (st : ApplyStatusModel) (ev : ApplyEventModel)
+    (h : stepApplyStatus st ev = .succeeded) :
+    st = .staged ∨ st = .succeeded := by
+  cases st <;> cases ev <;> simp_all [stepApplyStatus]
+
+theorem terminal_apply_states_absorbing
+    (st : ApplyStatusModel) (ev : ApplyEventModel)
+    (h : st = .rejected ∨ st = .succeeded ∨ st = .failed) :
+    stepApplyStatus st ev = st := by
+  rcases h with rfl | rfl | rfl <;> cases ev <;> rfl
 
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
@@ -727,7 +951,57 @@ def exportTable : String :=
     let spec := s!"valid={v},matches={m},written={w}"
     s!"[\"restore_outcome:{label}\",\"{spec}\",\"{out.name}\"]" :: acc) []
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows) ++ "]"
+  -- 9. ArenaProfile XP-to-Level rows
+  let profileScenarios : List (String × Nat) :=
+    [ ("initial_zero_xp", 0)
+    , ("just_below_level_two", 99)
+    , ("exact_level_two_boundary", 100)
+    , ("level_four_veteran", 350)
+    ]
+  let profileRows := profileScenarios.foldr (fun (label, xp) acc =>
+    let lvl := levelForXp xp
+    s!"[\"arena_profile:{label}\",\"xp={xp}\",\"level={lvl}\"]" :: acc) []
+
+  -- 10. ContextTrust provenance & gate decision rows
+  let contextTrustScenarios : List (String × SourceKindModel × Bool × Bool × Bool) :=
+    [ ("workspace_rust_clean", .workspace, true, false, false)
+    , ("workspace_rust_finding", .workspace, true, true, false)
+    , ("workspace_config_clean", .workspace, false, false, false)
+    , ("tool_output_clean", .toolOutput, false, false, false)
+    , ("external_high_finding", .external, false, true, true)
+    ]
+  let contextTrustRows := contextTrustScenarios.foldr (fun (label, src, isCode, anyF, highF) acc =>
+    let tl := classifyTrustLevel src isCode
+    let gd := evaluateGateDecision anyF highF tl
+    let spec := s!"src={src.name},code={isCode},any={anyF},high={highF}"
+    s!"[\"context_trust:{label}\",\"{spec}\",\"{tl.name}:{gd.name}\"]" :: acc) []
+
+  -- 11. ContextFit tier ladder rows
+  let contextFitScenarios : List (String × Nat × Nat × Nat × Nat × Nat × Nat) :=
+    [ ("fits_full_extended", 500, 400, 300, 150, 50, 600)
+    , ("falls_back_to_compact", 500, 400, 300, 150, 50, 320)
+    , ("falls_back_to_lite", 500, 400, 300, 150, 50, 180)
+    , ("overflow_honest_map_false", 500, 400, 300, 150, 50, 30)
+    ]
+  let contextFitRows := contextFitScenarios.foldr (fun (label, fe, f, c, l, m, usable) acc =>
+    let res := fitTierLadder fe f c l m usable
+    let spec := s!"fe={fe},f={f},c={c},l={l},m={m},usable={usable}"
+    s!"[\"context_fit:{label}\",\"{spec}\",\"{res.mode.name}:measured={res.measuredTokens}:fits={res.fits}\"]" :: acc) []
+
+  -- 12. ApplyStatus shadow worktree lifecycle rows
+  let applyScenarios : List (String × ApplyStatusModel × ApplyEventModel) :=
+    [ ("running_verified_to_staged", .running, .verifiedAndCompiled)
+    , ("running_compile_failed_rejected", .running, .compileFailed)
+    , ("running_exit_nonzero_failed", .running, .exitNonZero)
+    , ("staged_digest_match_succeeded", .staged, .commitDigestMatch)
+    , ("rejected_absorbing", .rejected, .commitDigestMatch)
+    ]
+  let applyRows := applyScenarios.foldr (fun (label, st, ev) acc =>
+    let next := stepApplyStatus st ev
+    let spec := s!"state={st.name},event={ev.name}"
+    s!"[\"apply_lifecycle:{label}\",\"{spec}\",\"{next.name}\"]" :: acc) []
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

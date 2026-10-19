@@ -75,7 +75,7 @@ impl AstAnalyzer {
 
     /// Read `path` and parse it into an [`AstNode`] tree rooted at the file.
     pub fn parse_file(&self, path: &str) -> Result<AstNode> {
-        let content = std::fs::read_to_string(path)?;
+        let content = super::graph::read_broad_discovery_utf8(std::path::Path::new(path))?;
         self.parse_source(&content)
             .with_context(|| format!("failed to parse {path}"))
     }
