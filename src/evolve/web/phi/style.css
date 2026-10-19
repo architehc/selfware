@@ -736,4 +736,15 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .phi-bot-input { flex: 1; min-width: 0; font-size: 12px; padding: 7px 10px; }
 .phi-bot-send { flex: 0 0 auto; font-size: 11px; padding: 7px 12px; }
 .phi-bot-status { margin-top: 6px; overflow-wrap: anywhere; }
-
+.phi-bot-arena-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; padding: 6px 8px; border-radius: 7px; background: rgba(251, 191, 36, 0.06); border: 1px solid rgba(251, 191, 36, 0.22); min-width: 0; }
+.phi-bot-arena-stat { font: 700 10.5px var(--font-mono); color: var(--accent-bright-gold); margin-right: auto; white-space: nowrap; }
+.phi-bot-drill-btn, .phi-bot-voice-btn { font-size: 10px; padding: 4px 8px; }
+.phi-bot-voice-btn[aria-pressed="true"] { border-color: var(--accent-emerald); color: var(--accent-emerald); background: rgba(16, 185, 129, 0.12); }
+.phi-bot-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; min-width: 0; }
+.phi-bot-achievement-pill { font: 600 9.5px var(--font-mono); color: #fde68a; background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(251, 191, 36, 0.35); border-radius: 999px; padding: 2px 7px; }
+.phi-bot-drill-card { border-left: 3px solid var(--accent-bright-gold); background: rgba(245, 158, 11, 0.06); }
+.phi-bot-drill-options { display: flex; flex-direction: column; gap: 5px; margin: 7px 0; min-width: 0; }
+.phi-bot-drill-option { width: 100%; text-align: left; font: 11px var(--font-mono); padding: 6px 9px; overflow-wrap: anywhere; white-space: normal; }
+.phi-bot-drill-option.drill-correct { border-color: var(--accent-emerald) !important; background: rgba(16, 185, 129, 0.18) !important; color: #a7f3d0 !important; opacity: 1 !important; }
+.phi-bot-drill-option.drill-wrong { border-color: var(--accent-rose) !important; background: rgba(244, 63, 94, 0.18) !important; color: #fda4af !important; opacity: 0.9 !important; }
+.phi-bot-drill-feedback { margin: 5px 0 2px; color: var(--accent-bright-gold); }

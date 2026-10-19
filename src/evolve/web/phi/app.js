@@ -85,10 +85,25 @@ export class PhiApp {
       onFocusCitation: cite => this.focusBotCitation(cite),
       onSpeakReply: (reply, emotion, cite) => this.speakBotReply(reply, emotion, cite),
       onSetEmotion: emotion => { if (!this.narrationOwnsPose()) this.rig.setEmotion(emotion); },
-      onDispatchAction: (action, turn) => this.dispatchBotAction(action, turn)
+      onDispatchAction: (action, turn) => this.dispatchBotAction(action, turn),
+      onToggleFormantVoice: enabled => this.toggleBotFormantVoice(enabled)
     });
     this.viseme.onStateChange = state => this.speechState(state);
     this.bindUI(); this.startLoop(); this.connect(); this.dock();
+  }
+  toggleBotFormantVoice(enabled) {
+    if (enabled) {
+      this.speechEnabled = true;
+      this.viseme.setAudioEnabled?.(true);
+      this.viseme.setEngine?.('formant');
+      this.expressionVoice?.setEnabled?.(true);
+      if ($('voice-choice')) $('voice-choice').value = 'formant';
+      if ($('btn-toggle-audio')) { $('btn-toggle-audio').textContent = 'Voice on'; $('btn-toggle-audio').setAttribute('aria-pressed', 'true'); }
+      if ($('btn-expression-sounds')) { $('btn-expression-sounds').textContent = 'Sounds on'; $('btn-expression-sounds').setAttribute('aria-pressed', 'true'); }
+    } else {
+      this.expressionVoice?.setEnabled?.(false);
+      if ($('btn-expression-sounds')) { $('btn-expression-sounds').textContent = 'Sounds off'; $('btn-expression-sounds').setAttribute('aria-pressed', 'false'); }
+    }
   }
   dock() {
     const perch = $('phi-perch'), workspace = document.querySelector('.phi-workspace'), deck = document.querySelector('.phi-deck');
@@ -141,6 +156,7 @@ export class PhiApp {
       this.companion.connect();
       this.activity.connect();
       void this.refreshPolicy();
+      void this.bot?.refreshArena?.();
       this.refreshSpeechCapabilities();
       $('workspace-name').textContent = info.name;
       $('model-info').textContent = `${info.model} · ${info.endpoint_host}`;

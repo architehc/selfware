@@ -45,6 +45,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.reply({'root': '/fixture/phi', 'name': 'Phi browser fixture', 'session_token': 'fixture-session', 'model': 'fixture-model', 'endpoint_host': 'fixture.local'})
         if path == '/api/phi/policy':
             return self.reply({'mode': 'advise', 'debt_gate_lines': 250, 'bulk_generation_lines': 500, 'capitulation_threshold': 2, 'interrupt_budget': 3, 'steward_quiet_ms': 12000, 'quiet_after_activity_ms': 4000, 'glance_cooldown_ms': 45000})
+        if path == '/api/phi/arena':
+            return self.reply({
+                'profile': {'xp': 50, 'level': 1, 'best_streak': 1.25, 'citations_inspected': 1, 'drills_completed': 1, 'achievement_badges': [{'id': 'first_laser_lock', 'title': '🏆 Optical Lock'}]},
+                'drill': {'seed': 0, 'question': 'Which workspace file defines `greeting`?', 'symbol_name': 'greeting', 'citation': 'src/lib.rs:1', 'path': 'src/lib.rs', 'start_line': 1, 'end_line': 3, 'options': ['src/lib.rs:1', 'src/safety/redact.rs', 'src/evolve/ontology.rs'], 'correct_index': 0},
+            })
         if path == '/api/ide/files':
             return self.reply([{'path': 'src/lib.rs', 'is_dir': False}])
         if path == '/api/ide/document':
@@ -65,6 +70,16 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
         if self.headers.get('x-selfware-session') != 'fixture-session':
             return self.reply({'error': 'session_required'}, 401)
+        if self.path == '/api/phi/arena/drill':
+            correct = body.get('choice_index') == body.get('correct_index')
+            return self.reply({
+                'action': body.get('action', 'answer_drill'),
+                'correct': correct,
+                'xp_gained': 35 if correct else 0,
+                'unlocked': [{'id': 'debt_slayer_i', 'title': '🏆 Debt Slayer I'}] if correct else [],
+                'profile': {'xp': 85 if correct else 50, 'level': 1, 'best_streak': 1.5 if correct else 1.25, 'citations_inspected': 1, 'drills_completed': 2 if correct else 1, 'achievement_badges': [{'id': 'first_laser_lock', 'title': '🏆 Optical Lock'}, {'id': 'debt_slayer_i', 'title': '🏆 Debt Slayer I'}]},
+                'drill': {'seed': 1, 'question': 'Which workspace file defines `greeting`?', 'symbol_name': 'greeting', 'citation': 'src/lib.rs:1', 'path': 'src/lib.rs', 'start_line': 1, 'end_line': 3, 'options': ['src/lib.rs:1', 'src/safety/redact.rs', 'src/evolve/ontology.rs'], 'correct_index': 0},
+            })
         state['posts'].append({'path': self.path, 'body': body})
         if body.get('expected_hash') != document(state['content'])['hash']:
             return self.reply({'error': 'document_changed'}, 409)
@@ -235,6 +250,13 @@ class PhiWorkspaceTests(unittest.TestCase):
         self.page.wait_for_function('phiApp.bot.turns.length === 5')
         self.assertEqual(len(self.server.state['posts']), 2)
         self.assertEqual(len(self.server.state['posts'][1]['body']['history']), 2)
+
+        # Verify Boss Battle Drill card & XP progression in browser UI
+        self.page.locator('#btn-phi-bot-drill').click()
+        self.page.wait_for_function("document.querySelectorAll('.phi-bot-drill-card').length === 1")
+        self.page.locator('.phi-bot-drill-option[data-drill-choice="0"]').click()
+        self.page.wait_for_function("document.getElementById('phi-bot-arena-badge').textContent.includes('85 XP')")
+        self.assertIn('CRITICAL HIT', self.page.locator('.phi-bot-drill-feedback').inner_text())
 
 
 if __name__ == '__main__':

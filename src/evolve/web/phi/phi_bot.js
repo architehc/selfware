@@ -164,6 +164,46 @@ export function synthesizeOfflineBotReply({ message = '', document = null, selec
   });
 }
 
+export function parseArenaPayload(raw) {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Arena payload must be a JSON object');
+  }
+  const prof = raw.profile && typeof raw.profile === 'object' ? raw.profile : {};
+  const xp = Number.isFinite(prof.xp) && prof.xp >= 0 ? Math.floor(prof.xp) : 0;
+  const level = Number.isFinite(prof.level) && prof.level >= 1 ? Math.floor(prof.level) : 1 + Math.floor(xp / 100);
+  const bestStreak = Number.isFinite(prof.best_streak) && prof.best_streak >= 1 ? Number(prof.best_streak) : 1.0;
+  const badges = Array.isArray(prof.achievement_badges)
+    ? prof.achievement_badges.filter(b => b && typeof b.id === 'string' && typeof b.title === 'string')
+    : [];
+  const drill = raw.drill && typeof raw.drill === 'object' && Array.isArray(raw.drill.options)
+    ? {
+        seed: Number.isInteger(raw.drill.seed) ? raw.drill.seed : 0,
+        question: String(raw.drill.question || 'Which workspace file defines this symbol?'),
+        symbol_name: String(raw.drill.symbol_name || 'PhiPolicy'),
+        citation: String(raw.drill.citation || 'src/phi/policy.rs:1'),
+        path: String(raw.drill.path || 'src/phi/policy.rs'),
+        start_line: Number.isInteger(raw.drill.start_line) ? raw.drill.start_line : 1,
+        end_line: Number.isInteger(raw.drill.end_line) ? raw.drill.end_line : 10,
+        options: raw.drill.options.slice(0, 3).map(String),
+        correct_index: Number.isInteger(raw.drill.correct_index) ? raw.drill.correct_index : 0
+      }
+    : null;
+  return {
+    profile: {
+      xp,
+      level,
+      best_streak: bestStreak,
+      citations_inspected: Number.isFinite(prof.citations_inspected) ? prof.citations_inspected : 0,
+      drills_completed: Number.isFinite(prof.drills_completed) ? prof.drills_completed : 0,
+      achievement_badges: badges
+    },
+    drill,
+    correct: Boolean(raw.correct),
+    xp_gained: Number.isFinite(raw.xp_gained) ? raw.xp_gained : 0,
+    unlocked: Array.isArray(raw.unlocked) ? raw.unlocked : []
+  };
+}
+
 function el(tag, text = null, className = null) {
   const node = document.createElement(tag);
   if (text !== null && text !== undefined) node.textContent = text;
@@ -182,6 +222,7 @@ export class PhiBotUI {
     onSpeakReply,
     onSetEmotion,
     onDispatchAction,
+    onToggleFormantVoice = null,
     fetchImpl = null
   }) {
     this.container = container;
@@ -193,11 +234,15 @@ export class PhiBotUI {
     this.onSpeakReply = onSpeakReply;
     this.onSetEmotion = onSetEmotion;
     this.onDispatchAction = onDispatchAction;
+    this.onToggleFormantVoice = onToggleFormantVoice;
     this.fetch = fetchImpl || ((...args) => globalThis.fetch(...args));
     this.history = [];
     this.turns = [];
     this.sending = false;
     this.destroyed = false;
+    this.formantActive = false;
+    this.arenaProfile = { xp: 0, level: 1, best_streak: 1.0, achievement_badges: [] };
+    this.currentDrill = null;
     this.initDOM();
   }
 
@@ -221,6 +266,30 @@ export class PhiBotUI {
       chipsBar.append(btn);
     }
 
+    const arenaRow = el('div', null, 'phi-bot-arena-row');
+    this.arenaBadge = el('span', '⚡ Lv.1 · 0 XP · 1.00x φ', 'phi-bot-arena-stat');
+    this.arenaBadge.id = 'phi-bot-arena-badge';
+    this.drillBtn = el('button', '⚔ Boss Drill', 'btn-cyber phi-bot-drill-btn');
+    this.drillBtn.id = 'btn-phi-bot-drill';
+    this.drillBtn.type = 'button';
+    this.drillBtn.addEventListener('click', () => void this.launchBossDrill());
+
+    this.voiceBtn = el('button', '🔊 Formant Voice', 'btn-cyber phi-bot-voice-btn');
+    this.voiceBtn.id = 'btn-phi-bot-voice';
+    this.voiceBtn.type = 'button';
+    this.voiceBtn.setAttribute('aria-pressed', 'false');
+    this.voiceBtn.addEventListener('click', () => {
+      this.formantActive = !this.formantActive;
+      this.voiceBtn.setAttribute('aria-pressed', String(this.formantActive));
+      this.voiceBtn.textContent = this.formantActive ? '🔊 Formant On' : '🔊 Formant Voice';
+      this.onToggleFormantVoice?.(this.formantActive);
+    });
+    arenaRow.append(this.arenaBadge, this.drillBtn, this.voiceBtn);
+
+    this.badgesRow = el('div', null, 'phi-bot-badges');
+    this.badgesRow.id = 'phi-bot-badges';
+    this.badgesRow.hidden = true;
+
     const modeRow = el('div', null, 'phi-bot-mode-row');
     const modeLabel = el('label', 'Bot mode ', 'phi-bot-mode-label');
     modeLabel.setAttribute('for', 'phi-bot-mode');
@@ -243,7 +312,7 @@ export class PhiBotUI {
     this.input = el('input', null, 'phi-bot-input');
     this.input.id = 'phi-bot-input';
     this.input.type = 'text';
-    this.input.placeholder = 'Ask Phi about this file, selection, or red checks…';
+    this.input.placeholder = 'Ask Phi about any file, symbol (e.g. Viseme), or red checks…';
     this.input.autocomplete = 'off';
     this.input.setAttribute('aria-label', 'Ask Phi Fox Bot');
     this.sendBtn = el('button', 'Ask Phi', 'btn-cyber primary phi-bot-send');
@@ -261,11 +330,11 @@ export class PhiBotUI {
     this.statusEl = el('p', 'Grounded in local snapshots and observed activity captures.', 'deck-hint phi-bot-status');
     this.statusEl.id = 'phi-bot-status';
 
-    this.container.append(header, chipsBar, modeRow, this.log, this.form, this.statusEl);
+    this.container.append(header, chipsBar, arenaRow, this.badgesRow, modeRow, this.log, this.form, this.statusEl);
 
     this.appendTurn({
       role: 'assistant',
-      reply: "Hi! Use a quick chip above or ask me about the open file, selected lines, or live agent debt. Every citation aims my optical laser at the exact code lines.",
+      reply: "Hi! Use a quick chip above, launch a ⚔ Boss Drill, or ask me about any file or symbol in the repo. Every citation aims my optical laser at the exact code lines.",
       emotion: 'curious',
       trust_state: 'observed_signals',
       verification_note: 'Ready for grounded workspace queries.',
@@ -431,6 +500,181 @@ export class PhiBotUI {
     } finally {
       this.sending = false;
       if (this.sendBtn) this.sendBtn.disabled = false;
+    }
+  }
+
+  renderArenaProfile(profile) {
+    if (!profile || this.destroyed) return;
+    this.arenaProfile = profile;
+    if (this.arenaBadge) {
+      this.arenaBadge.textContent = `⚡ Lv.${profile.level} · ${profile.xp} XP · ${Number(profile.best_streak || 1).toFixed(2)}x φ`;
+    }
+    if (this.badgesRow) {
+      this.badgesRow.replaceChildren();
+      const badges = profile.achievement_badges || [];
+      this.badgesRow.hidden = badges.length === 0;
+      for (const b of badges) {
+        const pill = el('span', b.title, 'phi-bot-achievement-pill');
+        pill.dataset.achievementId = b.id;
+        this.badgesRow.append(pill);
+      }
+    }
+  }
+
+  async refreshArena() {
+    if (this.destroyed || this.isExampleMode?.()) return null;
+    const workspace = this.getWorkspace?.();
+    if (!workspace?.token) return null;
+    try {
+      const response = await this.fetch('/api/phi/arena', {
+        headers: { 'x-selfware-session': workspace.token }
+      });
+      if (!response.ok) return null;
+      const body = await response.json();
+      const parsed = parseArenaPayload(body);
+      this.renderArenaProfile(parsed.profile);
+      if (parsed.drill) this.currentDrill = parsed.drill;
+      return parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  fallbackDrill(seed = 0) {
+    const doc = this.getDocument?.();
+    const targetPath = doc?.path || 'src/lib.rs';
+    return {
+      seed,
+      question: `Which workspace file defines the primary entry point in \`${targetPath}\`?`,
+      symbol_name: 'greeting',
+      citation: `${targetPath}:1`,
+      path: targetPath,
+      start_line: 1,
+      end_line: 3,
+      options: [`${targetPath}:1`, 'src/safety/redact.rs', 'src/evolve/ontology.rs'],
+      correct_index: 0
+    };
+  }
+
+  async launchBossDrill() {
+    if (this.destroyed || !this.log) return null;
+    const synced = await this.refreshArena();
+    const drill = synced?.drill || this.currentDrill || this.fallbackDrill(this.arenaProfile.drills_completed || 0);
+    this.currentDrill = drill;
+
+    const card = el('article', null, 'phi-bot-turn phi-bot-turn-assistant phi-bot-drill-card');
+    card.dataset.role = 'assistant';
+    card.dataset.drillSeed = String(drill.seed);
+
+    const meta = el('div', null, 'phi-bot-turn-meta');
+    meta.append(
+      el('span', 'Phi · Boss Battle Drill', 'phi-bot-role'),
+      el('span', '+35 XP', 'phi-bot-trust-pill')
+    );
+    card.append(meta);
+    card.append(el('p', `⚔ ${drill.question}`, 'phi-bot-msg-text'));
+
+    const optionsWrap = el('div', null, 'phi-bot-drill-options');
+    const feedback = el('p', 'Select the grounded source file to drain Boss HP and earn +35 XP.', 'deck-hint phi-bot-drill-feedback');
+
+    drill.options.forEach((optText, idx) => {
+      const btn = el('button', `[${idx + 1}] ${optText}`, 'btn-cyber phi-bot-drill-option');
+      btn.type = 'button';
+      btn.dataset.drillChoice = String(idx);
+      btn.addEventListener('click', () => {
+        void this.submitDrillChoice(drill, idx, optionsWrap, feedback);
+      });
+      optionsWrap.append(btn);
+    });
+
+    const actionsBar = el('div', null, 'phi-bot-actions');
+    const laserBtn = el('button', `↗ Aim laser at ${drill.path}:${drill.start_line}`, 'btn-cyber phi-bot-action-btn');
+    laserBtn.type = 'button';
+    laserBtn.addEventListener('click', () => {
+      this.onFocusCitation?.({
+        id: 'DRILL_E1',
+        path: drill.path,
+        start_line: drill.start_line,
+        end_line: drill.end_line
+      });
+    });
+    actionsBar.append(laserBtn);
+
+    card.append(optionsWrap, feedback, actionsBar);
+    this.log.append(card);
+    this.log.scrollTop = this.log.scrollHeight;
+    this.onSetEmotion?.('focused');
+    return drill;
+  }
+
+  async submitDrillChoice(drill, choiceIdx, optionsWrap, feedbackEl) {
+    if (this.destroyed) return;
+    const buttons = optionsWrap.querySelectorAll('button');
+    buttons.forEach(b => { b.disabled = true; });
+
+    let correct = choiceIdx === drill.correct_index;
+    let xpGained = correct ? 35 : 0;
+    let unlocked = [];
+
+    const workspace = this.getWorkspace?.();
+    if (!this.isExampleMode?.() && workspace?.token) {
+      try {
+        const res = await this.fetch('/api/phi/arena/drill', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-selfware-session': workspace.token
+          },
+          body: JSON.stringify({
+            action: 'answer_drill',
+            choice_index: choiceIdx,
+            correct_index: drill.correct_index,
+            seed: drill.seed
+          })
+        });
+        if (res.ok) {
+          const parsed = parseArenaPayload(await res.json());
+          correct = parsed.correct;
+          xpGained = parsed.xp_gained;
+          unlocked = parsed.unlocked;
+          this.renderArenaProfile(parsed.profile);
+          if (parsed.drill) this.currentDrill = parsed.drill;
+        }
+      } catch (_) {
+        // Offline fallback updates local counter only
+      }
+    } else if (correct) {
+      const nextXp = (this.arenaProfile.xp || 0) + 35;
+      this.renderArenaProfile({
+        ...this.arenaProfile,
+        xp: nextXp,
+        level: 1 + Math.floor(nextXp / 100),
+        best_streak: Math.min(3.0, Number((this.arenaProfile.best_streak || 1) + 0.25))
+      });
+    }
+
+    buttons.forEach((b, idx) => {
+      if (idx === drill.correct_index) b.classList.add('drill-correct');
+      else if (idx === choiceIdx && !correct) b.classList.add('drill-wrong');
+    });
+
+    if (correct) {
+      const badgeNote = unlocked.length > 0
+        ? ` Unlocked: ${unlocked.map(u => u.title).join(', ')}!`
+        : '';
+      const msg = `CRITICAL HIT! \`${drill.symbol_name}\` verified at \`${drill.citation}\` (+${xpGained} XP).${badgeNote}`;
+      feedbackEl.textContent = msg;
+      this.onSetEmotion?.('happy');
+      this.onSpeakReply?.(msg, 'happy', {
+        id: 'DRILL_E1',
+        path: drill.path,
+        start_line: drill.start_line,
+        end_line: drill.end_line
+      });
+    } else {
+      const msg = `Missed! \`${drill.symbol_name}\` is anchored at \`${drill.citation}\`. Inspect the source and try another drill!`;
+      feedbackEl.textContent = msg;
+      this.onSetEmotion?.('skeptical');
     }
   }
 

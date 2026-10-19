@@ -27,7 +27,7 @@ class ActivityContracts(unittest.TestCase):
             self.skipTest('Node is required')
         source = ("import assert from 'node:assert/strict';\n"
                   f"import {{parseActivity, parsePolicy, activityMood, activityPosture, PhiActivity}} from {json.dumps(MODULE.as_uri())};\n"
-                  f"import {{parseBotResponse, formatBotCitation, buildQuickChips, synthesizeOfflineBotReply}} from {json.dumps(BOT_MODULE.as_uri())};\n"
+                  f"import {{parseBotResponse, parseArenaPayload, formatBotCitation, buildQuickChips, synthesizeOfflineBotReply}} from {json.dumps(BOT_MODULE.as_uri())};\n"
                   + JS_FIXTURE + body)
         result = subprocess.run(['node', '--input-type=module', '-'], input=source,
                                 text=True, capture_output=True, timeout=15)
@@ -152,6 +152,15 @@ assert.equal(valid.prompt_tokens_measured,28);
 const preview=synthesizeOfflineBotReply({message:'Explain sample',document:{path:'sample.rs',content:'fn main() {}\\n'}});
 assert.equal(preview.trust_state,'example_preview');
 assert.equal(preview.citations[0].path,'sample.rs');
+const arena=parseArenaPayload({
+  profile:{xp:135,level:2,best_streak:1.5,citations_inspected:2,drills_completed:3,achievement_badges:[{id:'drill_master',title:'🏆 Drill Master'}]},
+  drill:{seed:1,question:'Which file?',symbol_name:'Viseme',citation:'src/ui/tui/phi_arena.rs:34',path:'src/ui/tui/phi_arena.rs',start_line:34,end_line:45,options:['a','b','c'],correct_index:1},
+  correct:true,xp_gained:35
+});
+assert.equal(arena.profile.level,2);
+assert.equal(arena.profile.achievement_badges[0].id,'drill_master');
+assert.equal(arena.drill.symbol_name,'Viseme');
+assert.equal(arena.correct,true);
 """)
 
 

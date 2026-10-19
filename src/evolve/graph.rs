@@ -259,39 +259,39 @@ impl GraphBuilder {
             }
 
             // Body identifiers per symbol, from the parent file's content.
-            let files_defining = |name: &str| -> usize {
-                by_name.get(name).map_or(0, |indices| {
+            let unambiguous_names: HashSet<&str> = by_name
+                .iter()
+                .filter_map(|(&name, indices)| {
+                    let first_parent = indices.first().map(|&i| parent_of[i])?;
                     indices
                         .iter()
-                        .map(|&i| parent_of[i])
-                        .collect::<HashSet<_>>()
-                        .len()
+                        .all(|&i| parent_of[i] == first_parent)
+                        .then_some(name)
                 })
-            };
-            let mut content_cache: HashMap<&str, String> = HashMap::new();
+                .collect();
+            let mut lines_cache: HashMap<&str, Vec<String>> = HashMap::new();
             for (index, node) in symbol_nodes.iter().enumerate() {
                 let Some(rel) = node.path.as_deref() else {
                     continue;
                 };
-                let content = content_cache
-                    .entry(rel)
-                    .or_insert_with(|| {
-                        read_broad_discovery_utf8(&project_root.join(rel)).unwrap_or_default()
-                    })
-                    .clone();
                 let Some((start, end)) = node.line_range else {
                     continue;
                 };
-                let body: String = content
-                    .lines()
-                    .skip(start.saturating_sub(1))
-                    .take(end.saturating_sub(start) + 1)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let lines = lines_cache.entry(rel).or_insert_with(|| {
+                    read_broad_discovery_utf8(&project_root.join(rel))
+                        .unwrap_or_default()
+                        .lines()
+                        .map(str::to_string)
+                        .collect()
+                });
+                let first_idx = start.saturating_sub(1).min(lines.len());
+                let last_idx = end.min(lines.len()).max(first_idx);
+                let body = lines[first_idx..last_idx].join("\n");
                 for ident in super::symbols::identifiers(&body) {
                     let Some(candidates) = by_name.get(ident.as_str()) else {
                         continue;
                     };
+                    let is_unambiguous = unambiguous_names.contains(ident.as_str());
                     for &target_index in candidates {
                         if target_index == index {
                             continue;
@@ -299,7 +299,7 @@ impl GraphBuilder {
                         let target_parent = parent_of[target_index];
                         let source_parent = parent_of[index];
                         let linked = target_parent == source_parent
-                            || files_defining(ident.as_str()) == 1
+                            || is_unambiguous
                             || import_symbols.get(source_parent).is_some_and(|imports| {
                                 imports.iter().any(|(file_id, name)| {
                                     file_id == target_parent && name == &ident

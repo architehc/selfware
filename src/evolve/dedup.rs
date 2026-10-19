@@ -120,6 +120,11 @@ impl DeduplicationAnalyzer {
 
             let lines = normalized_lines(&content);
             for (existing_id, existing_lines) in &line_sets {
+                let min_len = existing_lines.len().min(lines.len());
+                let max_len = existing_lines.len().max(lines.len());
+                if max_len > 0 && (min_len as f64) < (max_len as f64) * SIMILARITY_THRESHOLD {
+                    continue;
+                }
                 if jaccard(existing_lines, &lines) >= SIMILARITY_THRESHOLD {
                     duplicates.push(DuplicatePair {
                         first: existing_id.clone(),
@@ -197,9 +202,16 @@ pub fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if a.is_empty() && b.is_empty() {
         return 0.0;
     }
-    let intersection = a.intersection(b).count() as f64;
-    let union = a.union(b).count() as f64;
-    intersection / union
+    let intersection = if a.len() <= b.len() {
+        a.intersection(b).count()
+    } else {
+        b.intersection(a).count()
+    };
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        return 0.0;
+    }
+    (intersection as f64) / (union as f64)
 }
 
 #[cfg(test)]
@@ -239,6 +251,44 @@ mod tests {
                 first: "normal".to_string(),
                 second: "twin".to_string(),
                 kind: DuplicateKind::Exact,
+            }]
+        );
+    }
+
+    #[test]
+    fn near_duplicates_detected_and_disparate_sizes_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_lines: String = (0..10).map(|i| format!("let v_{i} = {i};\n")).collect();
+        let near_lines: String = (0..9)
+            .map(|i| format!("let v_{i} = {i};\n"))
+            .chain(std::iter::once("let extra = 99;\n".to_string()))
+            .collect();
+        let tiny_lines = "let v_0 = 0;\n";
+
+        let base_path = dir.path().join("base.rs");
+        let near_path = dir.path().join("near.rs");
+        let tiny_path = dir.path().join("tiny.rs");
+        std::fs::write(&base_path, &base_lines).unwrap();
+        std::fs::write(&near_path, &near_lines).unwrap();
+        std::fs::write(&tiny_path, tiny_lines).unwrap();
+
+        let graph = Graph {
+            nodes: vec![
+                Node::code("base", base_path.to_str().unwrap()),
+                Node::code("near", near_path.to_str().unwrap()),
+                Node::code("tiny", tiny_path.to_str().unwrap()),
+            ],
+            edges: vec![],
+        };
+        let dupes = DeduplicationAnalyzer::new()
+            .find_duplicates_in(&graph, dir.path())
+            .unwrap();
+        assert_eq!(
+            dupes,
+            vec![DuplicatePair {
+                first: "base".to_string(),
+                second: "near".to_string(),
+                kind: DuplicateKind::Near,
             }]
         );
     }

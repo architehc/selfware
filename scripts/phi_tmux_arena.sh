@@ -141,8 +141,13 @@ EOF
 fi
 
 if ! command -v tmux >/dev/null 2>&1; then
-    echo "Error: tmux is not installed or not in PATH." >&2
-    exit 1
+    echo "Note: tmux not found in PATH — launching interactive Phi Fox Cockpit HUD directly in this terminal." >&2
+    if [[ "${ATTACH}" -eq 1 ]]; then
+        exec python3 "${GAME_SCRIPT}" --workspace "${WORKSPACE_ROOT}" ${SERVER_URL:+--server "${SERVER_URL}"} ${SESSION_TOKEN:+--session-token "${SESSION_TOKEN}"}
+    else
+        python3 "${GAME_SCRIPT}" --workspace "${WORKSPACE_ROOT}" --once ${SERVER_URL:+--server "${SERVER_URL}"} ${SESSION_TOKEN:+--session-token "${SESSION_TOKEN}"}
+        exit 0
+    fi
 fi
 
 if ! tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then

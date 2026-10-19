@@ -87,6 +87,8 @@ pub(super) fn routes() -> Router<Arc<EvolveServer>> {
         .route("/api/phi/activity", get(activity))
         .route("/api/phi/policy", get(policy))
         .route("/api/phi/chat", post(chat))
+        .route("/api/phi/arena", get(arena_status))
+        .route("/api/phi/arena/drill", post(arena_drill))
 }
 
 async fn policy(
@@ -623,12 +625,154 @@ fn extract_notable_declarations(
     out
 }
 
+fn resolve_graph_mention(
+    graph: &crate::evolve::Graph,
+    message: &str,
+) -> Option<(String, Option<PhiLineSelection>, Option<String>)> {
+    let raw_tokens: Vec<&str> = message
+        .split_whitespace()
+        .map(|t| {
+            t.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '`' | '\''
+                        | '"'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | ','
+                        | ';'
+                        | ':'
+                        | '?'
+                        | '!'
+                )
+            })
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let ident_tokens: Vec<&str> = message
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| t.len() >= 4)
+        .collect();
+
+    let mut matched_file: Option<String> = None;
+    for tok in &raw_tokens {
+        let clean = tok.split(':').next().unwrap_or(tok);
+        if !clean.contains('.') && !clean.contains('/') {
+            continue;
+        }
+        for node in &graph.nodes {
+            if matches!(
+                node.layer,
+                crate::evolve::NodeLayer::Symbol
+                    | crate::evolve::NodeLayer::Concept
+                    | crate::evolve::NodeLayer::Preset
+            ) {
+                continue;
+            }
+            let Some(ref np) = node.path else {
+                continue;
+            };
+            let basename = Path::new(np)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if np == clean
+                || (clean.contains('.') && basename.eq_ignore_ascii_case(clean))
+                || (clean.contains('/') && np.ends_with(clean))
+            {
+                matched_file = Some(np.clone());
+                break;
+            }
+        }
+        if matched_file.is_some() {
+            break;
+        }
+    }
+
+    // Check for public symbol mentions in graph.nodes (preferring exact-case match,
+    // and scoped to `matched_file` when a file was also named).
+    for exact_case in [true, false] {
+        for ident in &ident_tokens {
+            if !exact_case
+                && matches!(
+                    ident.to_ascii_lowercase().as_str(),
+                    "what"
+                        | "where"
+                        | "when"
+                        | "which"
+                        | "this"
+                        | "that"
+                        | "with"
+                        | "from"
+                        | "into"
+                        | "tell"
+                        | "about"
+                        | "explain"
+                        | "show"
+                        | "file"
+                        | "code"
+                        | "line"
+                        | "lines"
+                        | "function"
+                        | "struct"
+                        | "enum"
+                        | "trait"
+                        | "next"
+                        | "quest"
+                        | "status"
+                        | "report"
+                        | "give"
+                )
+            {
+                continue;
+            }
+            for node in &graph.nodes {
+                if !matches!(node.layer, crate::evolve::NodeLayer::Symbol) {
+                    continue;
+                }
+                let Some(ref sym_path) = node.path else {
+                    continue;
+                };
+                if let Some(ref mf) = matched_file {
+                    if sym_path != mf {
+                        continue;
+                    }
+                }
+                let sym_name = node.id.rsplit("::").next().unwrap_or(&node.id);
+                let is_match = if exact_case {
+                    sym_name == *ident
+                } else {
+                    sym_name.len() >= 5 && sym_name.eq_ignore_ascii_case(ident)
+                };
+                if is_match {
+                    let sel = node
+                        .line_range
+                        .map(|(start_line, end_line)| PhiLineSelection {
+                            start_line: start_line.max(1),
+                            end_line: end_line.max(start_line.max(1)),
+                        });
+                    return Some((sym_path.clone(), sel, Some(sym_name.to_string())));
+                }
+            }
+        }
+    }
+
+    matched_file.map(|f| (f, None, None))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn synthesize_local_bot_turn(
     intent: &str,
     message: &str,
     signals: &ObservedSignalSummary,
     doc_path: Option<&str>,
     selection: Option<PhiLineSelection>,
+    resolved_symbol: Option<&str>,
     doc_evidence: &[GroundingEvidence],
     evidence_complete: bool,
 ) -> (
@@ -756,7 +900,19 @@ fn synthesize_local_bot_turn(
         _ => {
             let mut parts = Vec::new();
             if let Some(path) = doc_path {
-                if let Some(sel) = selection {
+                if let (Some(sym), Some(sel)) = (resolved_symbol, selection) {
+                    let first_sig = citations
+                        .first()
+                        .and_then(|c| c.excerpt.lines().next())
+                        .and_then(|l| l.split_once(" | ").map(|(_, code)| code.trim()))
+                        .unwrap_or(sym);
+                    parts.push(format!(
+                        "Resolved symbol `{sym}` in `{path}:{}-{}` (`{}`).",
+                        sel.start_line,
+                        sel.end_line,
+                        first_sig.chars().take(80).collect::<String>()
+                    ));
+                } else if let Some(sel) = selection {
                     parts.push(format!(
                         "Anchored to `{path}:{}-{}` for your question (\"{}\").",
                         sel.start_line,
@@ -839,7 +995,12 @@ fn synthesize_local_bot_turn(
     }
 
     let emotion = derive_signal_emotion(signals, !citations.is_empty());
-    let trust_state = if !citations.is_empty() && evidence_complete {
+    let trust_state = if intent != "whats_red"
+        && intent != "audit_unreviewed"
+        && intent != "check_debt"
+        && !citations.is_empty()
+        && (evidence_complete || !declarations.is_empty())
+    {
         "structural"
     } else {
         "observed_signals"
@@ -926,6 +1087,9 @@ async fn chat(
     let mut doc_snapshot = None;
     let mut doc_evidence = Vec::new();
     let mut evidence_complete = true;
+    let mut effective_selection = body.selection;
+    let mut resolved_symbol: Option<String> = None;
+
     if let Some(path) = body.path.as_deref() {
         if !path.trim().is_empty() {
             let doc = server
@@ -936,7 +1100,7 @@ async fn chat(
                 validate_expected_document_hash(expected_hash, &doc.hash)?;
             }
             let (ev, complete) =
-                build_selection_evidence(&doc.path, &doc.content, &doc.hash, body.selection);
+                build_selection_evidence(&doc.path, &doc.content, &doc.hash, effective_selection);
             let doc_gate = gate_evidence_trust(&ev).map_err(|err| unprocessable(err.body()))?;
             trust_gate.sources_scanned += doc_gate.sources_scanned;
             trust_gate.findings += doc_gate.findings;
@@ -956,6 +1120,37 @@ async fn chat(
         .unwrap_or_else(|_| empty(now, "capture_read_failed"));
 
     let graph = server.graph_snapshot().map_err(internal_error)?;
+
+    // Cross-repo natural-language file & symbol resolution when no explicit selection/hash pin
+    // locks us to a different slice, or when no path was passed.
+    if body.selection.is_none() {
+        if let Some((mentioned_path, mentioned_sel, mentioned_sym)) =
+            resolve_graph_mention(&graph, trimmed_message)
+        {
+            let can_switch_file = body.expected_hash.is_none()
+                || doc_snapshot
+                    .as_ref()
+                    .is_some_and(|d| d.path == mentioned_path);
+            if can_switch_file {
+                if let Ok(doc) = server.ide.read_document(&mentioned_path) {
+                    let (ev, complete) =
+                        build_selection_evidence(&doc.path, &doc.content, &doc.hash, mentioned_sel);
+                    if let Ok(doc_gate) = gate_evidence_trust(&ev) {
+                        trust_gate.sources_scanned += doc_gate.sources_scanned;
+                        trust_gate.findings += doc_gate.findings;
+                        trust_gate.worst_risk_score =
+                            trust_gate.worst_risk_score.max(doc_gate.worst_risk_score);
+                        doc_evidence = ev;
+                        evidence_complete = complete;
+                        doc_snapshot = Some(doc);
+                        effective_selection = mentioned_sel;
+                        resolved_symbol = mentioned_sym;
+                    }
+                }
+            }
+        }
+    }
+
     let validation = validate_graph(&graph);
     let mut gate_findings = Vec::new();
     if !validation.duplicate_ids.is_empty() {
@@ -1114,7 +1309,8 @@ async fn chat(
             trimmed_message,
             &signals,
             doc_snapshot.as_ref().map(|d| d.path.as_str()),
-            body.selection,
+            effective_selection,
+            resolved_symbol.as_deref(),
             &doc_evidence,
             evidence_complete,
         );
@@ -1149,6 +1345,455 @@ async fn chat(
         "model": null,
         "usage": null,
         "prompt_tokens_measured": prompt_tokens_measured,
+    })))
+}
+
+const MAX_ARENA_PROFILE_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebArenaProfile {
+    #[serde(default = "default_arena_schema")]
+    schema_version: u32,
+    #[serde(default)]
+    xp: u64,
+    #[serde(default = "default_arena_level")]
+    level: u32,
+    #[serde(default = "default_arena_streak")]
+    best_streak: f64,
+    #[serde(default)]
+    citations_inspected: u64,
+    #[serde(default)]
+    drills_completed: u64,
+    #[serde(default)]
+    achievements: Vec<String>,
+}
+
+fn default_arena_schema() -> u32 {
+    1
+}
+fn default_arena_level() -> u32 {
+    1
+}
+fn default_arena_streak() -> f64 {
+    1.0
+}
+
+impl Default for WebArenaProfile {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            xp: 0,
+            level: 1,
+            best_streak: 1.0,
+            citations_inspected: 0,
+            drills_completed: 0,
+            achievements: Vec::new(),
+        }
+    }
+}
+
+impl WebArenaProfile {
+    fn unlock(&mut self, id: &str) -> Option<Value> {
+        if !self.achievements.iter().any(|a| a == id) {
+            self.achievements.push(id.to_string());
+            Some(json!({
+                "id": id,
+                "title": arena_achievement_title(id),
+            }))
+        } else {
+            None
+        }
+    }
+
+    fn refresh_badges(&mut self) -> Vec<Value> {
+        self.level = 1 + (self.xp / 100) as u32;
+        let mut unlocked = Vec::new();
+        if self.citations_inspected >= 1 {
+            if let Some(b) = self.unlock("first_laser_lock") {
+                unlocked.push(b);
+            }
+        }
+        if self.xp >= 100 {
+            if let Some(b) = self.unlock("debt_slayer_i") {
+                unlocked.push(b);
+            }
+        }
+        if self.best_streak >= 1.61 {
+            if let Some(b) = self.unlock("golden_spiral") {
+                unlocked.push(b);
+            }
+        }
+        if self.drills_completed >= 3 {
+            if let Some(b) = self.unlock("drill_master") {
+                unlocked.push(b);
+            }
+        }
+        unlocked
+    }
+
+    fn to_public_json(&self) -> Value {
+        let badges: Vec<Value> = self
+            .achievements
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "title": arena_achievement_title(id),
+                })
+            })
+            .collect();
+        json!({
+            "schema_version": self.schema_version,
+            "xp": self.xp,
+            "level": self.level,
+            "best_streak": self.best_streak,
+            "citations_inspected": self.citations_inspected,
+            "drills_completed": self.drills_completed,
+            "achievements": self.achievements,
+            "achievement_badges": badges,
+        })
+    }
+}
+
+fn arena_achievement_title(id: &str) -> &'static str {
+    match id {
+        "first_laser_lock" => "🏆 Optical Lock",
+        "debt_slayer_i" => "🏆 Debt Slayer I",
+        "hydra_hunter" => "🏆 Hydra Hunter",
+        "golden_spiral" => "🏆 Golden Spiral (1.61x φ)",
+        "drill_master" => "🏆 Drill Master",
+        _ => "🏆 Grounded Sentinel",
+    }
+}
+
+#[cfg(unix)]
+fn load_web_arena_profile(root: &Path) -> WebArenaProfile {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(canon) = root.canonicalize() else {
+        return WebArenaProfile::default();
+    };
+    let Ok(root_dir) = File::open(&canon) else {
+        return WebArenaProfile::default();
+    };
+    let Ok(selfware_dir) = open_child(&root_dir, ".selfware".as_ref(), true) else {
+        return WebArenaProfile::default();
+    };
+    let Ok(phi_dir) = open_child(&selfware_dir, "phi".as_ref(), true) else {
+        return WebArenaProfile::default();
+    };
+    let Ok(file) = open_child(&phi_dir, "arena_profile.json".as_ref(), false) else {
+        return WebArenaProfile::default();
+    };
+    let Ok(meta) = file.metadata() else {
+        return WebArenaProfile::default();
+    };
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_ARENA_PROFILE_BYTES {
+        return WebArenaProfile::default();
+    }
+    let mut buf = Vec::new();
+    if file
+        .take(MAX_ARENA_PROFILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .is_err()
+        || (buf.len() as u64) > MAX_ARENA_PROFILE_BYTES
+    {
+        return WebArenaProfile::default();
+    }
+    let Ok(mut parsed) = serde_json::from_slice::<WebArenaProfile>(&buf) else {
+        return WebArenaProfile::default();
+    };
+    if parsed.schema_version != 1 {
+        return WebArenaProfile::default();
+    }
+    parsed.level = 1 + (parsed.xp / 100) as u32;
+    parsed
+}
+
+#[cfg(not(unix))]
+fn load_web_arena_profile(_root: &Path) -> WebArenaProfile {
+    WebArenaProfile::default()
+}
+
+fn save_web_arena_profile(root: &Path, profile: &WebArenaProfile) -> std::io::Result<()> {
+    use std::io::Write;
+    let canon = root.canonicalize()?;
+    let selfware_path = canon.join(".selfware");
+    let phi_path = selfware_path.join("phi");
+
+    for dir in [&selfware_path, &phi_path] {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "refusing to write arena profile through symlink or non-directory",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(dir)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let target = phi_path.join("arena_profile.json");
+    if let Ok(meta) = std::fs::symlink_metadata(&target) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to overwrite symlinked arena_profile.json",
+            ));
+        }
+    }
+
+    let tmp_path = phi_path.join(format!(
+        ".tmp-web-arena-profile-{}.json",
+        std::process::id()
+    ));
+    let payload = serde_json::to_vec_pretty(profile)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&tmp_path)?;
+        f.write_all(&payload)?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = File::create(&tmp_path)?;
+        f.write_all(&payload)?;
+        f.sync_all()?;
+    }
+
+    std::fs::rename(&tmp_path, &target)?;
+    Ok(())
+}
+
+fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value {
+    let mut landmarks: Vec<(String, String, usize, usize)> = Vec::new();
+    for node in &graph.nodes {
+        if !matches!(node.layer, crate::evolve::NodeLayer::Symbol) {
+            continue;
+        }
+        let Some(ref path) = node.path else {
+            continue;
+        };
+        let sym_name = node.id.rsplit("::").next().unwrap_or(&node.id);
+        if sym_name.len() < 4 {
+            continue;
+        }
+        let (start, end) = node.line_range.unwrap_or((1, 5));
+        landmarks.push((sym_name.to_string(), path.clone(), start, end));
+        if landmarks.len() >= 48 {
+            break;
+        }
+    }
+
+    if landmarks.is_empty() {
+        landmarks.push((
+            "PhiPolicy".to_string(),
+            "src/phi/policy.rs".to_string(),
+            1,
+            24,
+        ));
+        landmarks.push((
+            "DeduplicationAnalyzer".to_string(),
+            "src/evolve/dedup.rs".to_string(),
+            38,
+            60,
+        ));
+        landmarks.push((
+            "Viseme".to_string(),
+            "src/ui/tui/phi_arena.rs".to_string(),
+            34,
+            45,
+        ));
+    }
+
+    let target = &landmarks[seed % landmarks.len()];
+    let (sym, path, start_line, end_line) = target;
+    let citation = format!("{path}:{start_line}");
+
+    let mut distractors = Vec::new();
+    for (_, cand_path, _, _) in &landmarks {
+        if cand_path != path && !distractors.contains(cand_path) {
+            distractors.push(cand_path.clone());
+            if distractors.len() == 2 {
+                break;
+            }
+        }
+    }
+    for fallback in [
+        "src/safety/redact.rs",
+        "src/evolve/ontology.rs",
+        "src/main.rs",
+    ] {
+        if distractors.len() >= 2 {
+            break;
+        }
+        if fallback != path && !distractors.iter().any(|d| d == fallback) {
+            distractors.push(fallback.to_string());
+        }
+    }
+
+    let correct_index = seed % 3;
+    let options = match correct_index {
+        0 => vec![
+            citation.clone(),
+            distractors[0].clone(),
+            distractors[1].clone(),
+        ],
+        1 => vec![
+            distractors[0].clone(),
+            citation.clone(),
+            distractors[1].clone(),
+        ],
+        _ => vec![
+            distractors[0].clone(),
+            distractors[1].clone(),
+            citation.clone(),
+        ],
+    };
+
+    json!({
+        "seed": seed,
+        "question": format!("Which workspace file defines the public symbol `{sym}`?"),
+        "symbol_name": sym,
+        "citation": citation,
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "options": options,
+        "correct_index": correct_index,
+    })
+}
+
+async fn arena_status(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let root = server.project_root.clone();
+    let now = now_ms();
+    let (profile, activity_body) = tokio::task::spawn_blocking(move || {
+        let mut p = load_web_arena_profile(&root);
+        p.refresh_badges();
+        let act = read_activity(&root, now);
+        (p, act)
+    })
+    .await
+    .map_err(internal_error)?;
+
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let validation = validate_graph(&graph);
+    let signals = summarize_observed_signals(&activity_body, validation.valid, Vec::new());
+    let drill = generate_graph_drill(&graph, profile.drills_completed as usize);
+
+    Ok(Json(json!({
+        "profile": profile.to_public_json(),
+        "drill": drill,
+        "signals": {
+            "activity_status": signals.activity_status,
+            "agent_count": signals.agent_count,
+            "running_agents": signals.running_agents,
+            "failed_runs": signals.failed_runs,
+            "unreviewed_lines": signals.unreviewed_lines,
+            "untested_lines": signals.untested_lines,
+            "gate_passed": signals.gate_passed,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ArenaDrillRequest {
+    action: String,
+    #[serde(default)]
+    choice_index: Option<usize>,
+    #[serde(default)]
+    correct_index: Option<usize>,
+    #[serde(default)]
+    seed: Option<usize>,
+}
+
+async fn arena_drill(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<ArenaDrillRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let action = body.action.trim();
+    if !matches!(action, "answer_drill" | "laser_lock" | "next_drill") {
+        return Err(bad_request(
+            "action must be 'answer_drill', 'laser_lock', or 'next_drill'",
+        ));
+    }
+
+    let root = server.project_root.clone();
+    let mut profile = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || load_web_arena_profile(&root)
+    })
+    .await
+    .map_err(internal_error)?;
+
+    let mut correct = false;
+    let mut xp_gained = 0u64;
+    let mut unlocked = Vec::new();
+    let current_seed = body.seed.unwrap_or(profile.drills_completed as usize);
+    let mut next_seed = current_seed;
+
+    match action {
+        "laser_lock" => {
+            profile.citations_inspected = profile.citations_inspected.saturating_add(1);
+            xp_gained = 15;
+            profile.xp = profile.xp.saturating_add(xp_gained);
+            unlocked = profile.refresh_badges();
+            let _ = save_web_arena_profile(&server.project_root, &profile);
+        }
+        "answer_drill" => {
+            let choice = body
+                .choice_index
+                .ok_or_else(|| bad_request("choice_index is required for answer_drill"))?;
+            let expected = body
+                .correct_index
+                .ok_or_else(|| bad_request("correct_index is required for answer_drill"))?;
+            if choice == expected {
+                correct = true;
+                xp_gained = 35;
+                profile.drills_completed = profile.drills_completed.saturating_add(1);
+                profile.xp = profile.xp.saturating_add(xp_gained);
+                profile.best_streak =
+                    ((profile.best_streak + 0.25).min(3.0) * 100.0).round() / 100.0;
+                unlocked = profile.refresh_badges();
+                let _ = save_web_arena_profile(&server.project_root, &profile);
+                next_seed = current_seed.wrapping_add(1);
+            }
+        }
+        "next_drill" => {
+            next_seed = current_seed.wrapping_add(1);
+        }
+        _ => {}
+    }
+
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let drill = generate_graph_drill(&graph, next_seed);
+
+    Ok(Json(json!({
+        "action": action,
+        "correct": correct,
+        "xp_gained": xp_gained,
+        "unlocked": unlocked,
+        "profile": profile.to_public_json(),
+        "drill": drill,
     })))
 }
 
@@ -1603,5 +2248,150 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("1 failed command run"));
+    }
+
+    #[tokio::test]
+    async fn chat_resolves_symbol_mentions_and_arena_endpoints_persist_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let src_dir = root.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let source = "pub struct FoxSentinel {\n    pub active: bool,\n}\n\npub fn compute_golden_spiral() -> f64 {\n    1.618\n}\n";
+        std::fs::write(src_dir.join("sentinel.rs"), source).unwrap();
+
+        let graph = crate::evolve::Graph {
+            nodes: vec![
+                crate::evolve::Node::code("src/sentinel.rs", "src/sentinel.rs"),
+                crate::evolve::Node::symbol(
+                    "src/sentinel.rs::FoxSentinel",
+                    "src/sentinel.rs",
+                    "struct",
+                    "src/sentinel.rs",
+                    (1, 3),
+                    12,
+                ),
+                crate::evolve::Node::symbol(
+                    "src/sentinel.rs::compute_golden_spiral",
+                    "src/sentinel.rs",
+                    "fn",
+                    "src/sentinel.rs",
+                    (5, 7),
+                    14,
+                ),
+            ],
+            edges: vec![],
+        };
+
+        let server = EvolveServer::for_project(graph, root.path()).unwrap();
+
+        // 1. Ask about `compute_golden_spiral` WITHOUT passing `path` -> resolves symbol and line range
+        let sym_req = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/chat")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "message": "Where is compute_golden_spiral defined?"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sym_req.status(), 200);
+        let sym_bytes = to_bytes(sym_req.into_body(), 64 * 1024).await.unwrap();
+        let sym_payload: Value = serde_json::from_slice(&sym_bytes).unwrap();
+        assert_eq!(sym_payload["trust_state"], "structural");
+        assert!(sym_payload["reply"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Resolved symbol `compute_golden_spiral` in `src/sentinel.rs:5-7`"));
+        let cites = sym_payload["citations"].as_array().unwrap();
+        assert_eq!(cites.len(), 1);
+        assert_eq!(cites[0]["path"], "src/sentinel.rs");
+        assert_eq!(cites[0]["start_line"], 5);
+        assert_eq!(cites[0]["end_line"], 7);
+
+        // 2. GET /api/phi/arena requires session token and returns initial profile + drill
+        let arena_get = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/phi/arena")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(arena_get.status(), 200);
+        let arena_bytes = to_bytes(arena_get.into_body(), 64 * 1024).await.unwrap();
+        let arena_json: Value = serde_json::from_slice(&arena_bytes).unwrap();
+        assert_eq!(arena_json["profile"]["level"], 1);
+        assert_eq!(arena_json["profile"]["xp"], 0);
+        let correct_idx = arena_json["drill"]["correct_index"].as_u64().unwrap() as usize;
+
+        // 3. POST /api/phi/arena/drill with correct answer -> +35 XP & persists .selfware/phi/arena_profile.json
+        let drill_post = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/arena/drill")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "action": "answer_drill",
+                            "choice_index": correct_idx,
+                            "correct_index": correct_idx,
+                            "seed": 0
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(drill_post.status(), 200);
+        let drill_bytes = to_bytes(drill_post.into_body(), 64 * 1024).await.unwrap();
+        let drill_json: Value = serde_json::from_slice(&drill_bytes).unwrap();
+        assert_eq!(drill_json["correct"], true);
+        assert_eq!(drill_json["xp_gained"], 35);
+        assert_eq!(drill_json["profile"]["xp"], 35);
+        assert_eq!(drill_json["profile"]["drills_completed"], 1);
+
+        // 4. POST /api/phi/arena/drill with laser_lock -> +15 XP & unlocks first_laser_lock
+        let laser_post = server
+            .router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/phi/arena/drill")
+                    .header("content-type", "application/json")
+                    .header(super::super::SESSION_HEADER, server.session_token())
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "action": "laser_lock"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(laser_post.status(), 200);
+        let laser_bytes = to_bytes(laser_post.into_body(), 64 * 1024).await.unwrap();
+        let laser_json: Value = serde_json::from_slice(&laser_bytes).unwrap();
+        assert_eq!(laser_json["profile"]["xp"], 50);
+        assert_eq!(laser_json["profile"]["citations_inspected"], 1);
+        assert!(laser_json["profile"]["achievements"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("first_laser_lock")));
     }
 }
