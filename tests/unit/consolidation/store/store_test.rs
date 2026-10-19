@@ -336,3 +336,19 @@ async fn test_with_embedder_custom_provider() {
     assert!(ids.contains(&"r1"));
     assert!(ids.contains(&"r2"));
 }
+
+#[tokio::test]
+async fn test_remove_records_sanitizes_id_matching_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LongTermStore::new(dir.path().to_path_buf());
+
+    let r1 = make_record("dream:session/1");
+    let r2 = make_record("dream:session/2");
+    store.store(&[r1, r2]).await.unwrap();
+    assert_eq!(store.load_all().unwrap().len(), 2);
+
+    store.remove_records(&["dream:session/1".to_string()]);
+    let remaining = store.load_all().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, "dream:session/2");
+}

@@ -1158,6 +1158,7 @@ impl Agent {
                                     &checkpoint.files,
                                 )
                                 .await;
+                            self.cache_manager.clear_all().await;
                             let summary = super::render_restore_outcomes(
                                 &format!("Restored checkpoint {}", idx),
                                 &checkpoint.action.description(),

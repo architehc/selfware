@@ -15,3 +15,14 @@ pub mod repo_inventory;
 pub mod tech_debt;
 pub mod vector_store;
 pub mod workspace_graph;
+
+pub use analyzer::{AnalyzedError, ErrorAnalyzer, ErrorCategory, FixSuggestion, RawError};
+pub use bm25::{BM25Index, BM25Result};
+pub use code_graph::{
+    CodeGraph, EdgeType as CodeEdgeType, GraphEdge, GraphNode, GraphRenderer, NodeType,
+    OutputFormat,
+};
+pub use repo_inventory::{RepoInventory, CENTRALITY_METRIC};
+pub use tech_debt::{DebtItem, DebtSeverity, DebtTracker, DebtType};
+pub use vector_store::{SearchResult as VectorSearchResult, VectorStore};
+pub use workspace_graph::WorkspaceGraphOptions;

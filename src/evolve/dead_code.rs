@@ -133,7 +133,7 @@ impl DeadCodeAnalyzer {
                     && !entry.path_is_symlink()
                     && p.extension().is_some_and(|e| e == "rs")
                 {
-                    let Ok(text) = std::fs::read_to_string(p) else {
+                    let Ok(text) = super::graph::read_broad_discovery_utf8(p) else {
                         continue;
                     };
                     if is_src {

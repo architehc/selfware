@@ -144,7 +144,7 @@ impl ConceptIndex {
                 && !entry.path_is_symlink()
                 && p.extension().is_some_and(|e| e == "rs")
             {
-                let text = match std::fs::read_to_string(p) {
+                let text = match super::graph::read_broad_discovery_utf8(p) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };

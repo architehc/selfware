@@ -104,17 +104,7 @@ impl LongTermStore {
         let mut errors = Vec::new();
 
         for record in records {
-            let safe_id: String = record
-                .id
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
+            let safe_id = sanitize_record_id(&record.id);
             let path = self.storage_dir.join(format!("{safe_id}.json"));
 
             match serde_json::to_string_pretty(record) {
@@ -178,7 +168,12 @@ impl LongTermStore {
 
         let mut json_paths: Vec<std::path::PathBuf> = std::fs::read_dir(&self.storage_dir)?
             .filter_map(|e| e.ok().map(|entry| entry.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .filter(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some("json")
+                    && std::fs::symlink_metadata(p)
+                        .map(|m| m.is_file() && !m.file_type().is_symlink())
+                        .unwrap_or(false)
+            })
             .collect();
 
         if json_paths.len() > MAX_LOADED_FILES {
@@ -231,7 +226,8 @@ impl LongTermStore {
             }
         }
         for id in ids {
-            let path = self.storage_dir.join(format!("{id}.json"));
+            let safe_id = sanitize_record_id(id);
+            let path = self.storage_dir.join(format!("{safe_id}.json"));
             if let Err(e) = std::fs::remove_file(&path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!("Failed to remove superseded record {}: {e}", path.display());
@@ -372,6 +368,20 @@ impl LongTermStore {
         drop(rec_map);
         Ok(results)
     }
+}
+
+/// Sanitize a record ID for safe filesystem storage so `store` and `remove_records`
+/// always map to the exact same filename inside `storage_dir` without path traversal.
+pub(crate) fn sanitize_record_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Result of a store operation.

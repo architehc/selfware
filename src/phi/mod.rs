@@ -5,9 +5,11 @@
 //! should until recorded sessions have been evaluated.
 
 pub mod activity;
+pub mod arena;
 pub mod ledger;
 pub mod observer;
 pub mod policy;
+pub mod viseme;
 
 #[cfg(test)]
 #[path = "ledger_tests.rs"]

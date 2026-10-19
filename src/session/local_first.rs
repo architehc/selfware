@@ -87,11 +87,6 @@ pub struct LocalCacheEntry<T> {
     size_bytes: usize,
 }
 
-fn is_tree_scoped_key(key: &str) -> bool {
-    key.split_once(':')
-        .is_some_and(|(tool, _)| crate::session::cache::TREE_SCOPED_TOOLS.contains(&tool))
-}
-
 impl LocalCache<String> {
     /// Create a new cache with default settings
     pub fn new() -> Self {
@@ -141,7 +136,7 @@ impl LocalCache<String> {
             !key.contains(path)
                 && !key.starts_with("git_status")
                 && !key.starts_with("git_diff")
-                && !is_tree_scoped_key(key)
+                && !crate::session::cache::is_tree_scoped_key(key)
         });
     }
 

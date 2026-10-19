@@ -45,12 +45,25 @@ fn parse_tree(source: &str) -> Result<Tree, String> {
 
 /// Pre-validate Rust source before writing it or running the compiler.
 pub fn validate_rust_syntax(source: &str) -> Result<(), AstSyntaxError> {
+    let tree = parse_tree(source).ok();
+    if let Some(ref t) = tree {
+        if super::ast::AstAnalyzer::deeper_than(t.root_node(), super::ast::MAX_SYN_BODY_DEPTH * 2) {
+            return Err(AstSyntaxError {
+                line: Some(1),
+                column: Some(1),
+                message: format!(
+                    "syntax tree exceeds maximum safe nesting depth ({})",
+                    super::ast::MAX_SYN_BODY_DEPTH * 2
+                ),
+            });
+        }
+    }
     let Err(syn_err) = syn::parse_file(source) else {
         return Ok(());
     };
-    let located = parse_tree(source)
-        .ok()
-        .and_then(|tree| first_error_node(tree.root_node()).map(|n| n.start_position()));
+    let located = tree
+        .as_ref()
+        .and_then(|t| first_error_node(t.root_node()).map(|n| n.start_position()));
     Err(AstSyntaxError {
         line: located.map(|p| p.row + 1),
         column: located.map(|p| p.column + 1),
@@ -58,16 +71,25 @@ pub fn validate_rust_syntax(source: &str) -> Result<(), AstSyntaxError> {
     })
 }
 
-fn first_error_node(node: Node<'_>) -> Option<Node<'_>> {
-    if node.is_error() || node.is_missing() {
-        return Some(node);
-    }
-    if !node.has_error() {
+fn first_error_node(root: Node<'_>) -> Option<Node<'_>> {
+    if !root.has_error() {
         return None;
     }
-    let mut cursor = node.walk();
-    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
-    children.into_iter().find_map(first_error_node)
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        if node.is_error() || node.is_missing() {
+            return Some(node);
+        }
+        if node.has_error() && cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4415,12 +4415,10 @@ impl Agent {
 
         // Invalidate cache entries when a mutating tool targets a specific path
         if crate::session::cache::invalidates_cache(name) {
-            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                self.cache_manager.invalidate_path_and_git(path).await;
-                self.cache_manager.local_first.invalidate_git_and_path(path);
+            if let Some(path) = crate::session::cache::ToolCache::extract_file_arg(args) {
+                self.cache_manager.invalidate_all_for_path(path).await;
             } else {
-                self.cache_manager.tool_cache.invalidate_git().await;
-                self.cache_manager.local_first.invalidate_git();
+                self.cache_manager.invalidate_git_all().await;
             }
             // Mutations that can't be reduced to one `path` arg — shells run
             // arbitrary commands, file_multi_edit carries an `edits` array,
@@ -4445,8 +4443,7 @@ impl Agent {
                     | "cargo_fmt"
             ) || is_opaque_mutation
             {
-                self.cache_manager.tool_cache.clear().await;
-                self.cache_manager.local_first.clear();
+                self.cache_manager.clear_all().await;
             }
         }
 

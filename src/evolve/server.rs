@@ -37,9 +37,10 @@ use super::{
 use crate::config::Config;
 
 mod friction;
-mod phi_activity;
+pub(crate) mod phi_activity;
 mod speech;
 
+#[cfg_attr(not(feature = "tui"), allow(unused_imports))]
 pub(crate) use phi_activity::read_workspace_activity;
 
 /// Opt-in for UI iteration: names the `src/evolve/web` of a selfware source

@@ -314,7 +314,7 @@ impl AstAnalyzer {
     /// Whether `node`'s subtree nests more than `limit` levels below it.
     /// A cursor walk, not recursion: the tree is as deep as the source is
     /// nested.
-    fn deeper_than(node: TsNode<'_>, limit: usize) -> bool {
+    pub(crate) fn deeper_than(node: TsNode<'_>, limit: usize) -> bool {
         let mut cursor = node.walk();
         let mut depth = 0;
         loop {

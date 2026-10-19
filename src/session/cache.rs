@@ -73,7 +73,8 @@ impl ToolCache {
         format!("{tool_name}:{root}:{args_str}")
     }
 
-    fn extract_file_arg(args: &Value) -> Option<&str> {
+    /// Extract the target file path argument from tool arguments (`path`, `file_path`, `file`, `filepath`).
+    pub fn extract_file_arg(args: &Value) -> Option<&str> {
         ["path", "file_path", "file", "filepath"]
             .into_iter()
             .find_map(|key| args.get(key).and_then(|v| v.as_str()))
@@ -255,7 +256,7 @@ pub const TREE_SCOPED_TOOLS: &[&str] = &[
 ];
 
 /// Does this cache key belong to a [`TREE_SCOPED_TOOLS`] entry?
-fn is_tree_scoped_key(key: &str) -> bool {
+pub(crate) fn is_tree_scoped_key(key: &str) -> bool {
     key.split_once(':')
         .is_some_and(|(tool, _)| TREE_SCOPED_TOOLS.contains(&tool))
 }
@@ -615,6 +616,26 @@ impl CacheManager {
     pub async fn invalidate_path_and_git(&self, path: &str) {
         self.tool_cache.invalidate_git_and_path(path).await;
         self.llm_cache.invalidate_path(path).await;
+    }
+
+    /// Unified invalidation for a file path across `tool_cache`, `llm_cache`, and `local_first`
+    /// (including tree-scoped search tools and git status/diff caches).
+    pub async fn invalidate_all_for_path(&mut self, path: &str) {
+        self.invalidate_path_and_git(path).await;
+        self.local_first.invalidate_git_and_path(path);
+    }
+
+    /// Unified invalidation for git status and diff across `tool_cache` and `local_first`.
+    pub async fn invalidate_git_all(&mut self) {
+        self.tool_cache.invalidate_git().await;
+        self.local_first.invalidate_git();
+    }
+
+    /// Clear all cached entries across `tool_cache`, `llm_cache`, and `local_first`.
+    pub async fn clear_all(&mut self) {
+        self.tool_cache.clear().await;
+        self.llm_cache.clear().await;
+        self.local_first.clear();
     }
 }
 

@@ -125,6 +125,7 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
     };
 
     let mut counts = HashMap::new();
+    let mut saw_compiler_message = false;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -132,6 +133,7 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
         if msg.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
             continue;
         }
+        saw_compiler_message = true;
         let diag = &msg["message"];
         if diag.get("level").and_then(|l| l.as_str()) != Some("warning") {
             continue;
@@ -146,6 +148,9 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
                 }
             }
         }
+    }
+    if !output.status.success() && !saw_compiler_message {
+        return None;
     }
     Some(counts)
 }

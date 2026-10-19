@@ -42,11 +42,20 @@ pub mod telemetry;
 pub mod tournament;
 pub mod tree_log;
 
+pub use ast_tools::{
+    apply_strict_patch, cleanup_worktree, create_shadow_worktree,
+    create_shadow_worktree_for_parent, create_shadow_worktree_named,
+    create_shadow_worktree_named_at, get_git_head_commit, WorktreeError,
+};
+pub use daemon::evolve;
+pub use fitness::{SabConfig, SabResult};
+pub use micro_mode::{is_micro_model, MICRO_MAX_CONTEXT_CHARS, MICRO_MAX_EDITS, MICRO_MAX_FILES};
 pub use policy::{
     BreadthFirstPolicy, EarlyStopPlateauPolicy, LegalAction, ParetoAdaptivePolicy, PolicyDecision,
     PrefixObservation, PrefixView, RefineTop1Policy, SearchPolicy,
 };
 pub use replay::{ReplayError, ReplayReport, ReplaySimulator};
+pub use tournament::{Hypothesis, HypothesisResult};
 pub use tree_log::{
     ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
 };

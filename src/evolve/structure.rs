@@ -90,7 +90,7 @@ impl StructureAnalyzer {
                 && p.extension().is_some_and(|e| e == "rs")
                 && !p.to_string_lossy().ends_with("_test.rs")
             {
-                if let Ok(text) = std::fs::read_to_string(p) {
+                if let Ok(text) = super::graph::read_broad_discovery_utf8(p) {
                     let rel = p
                         .strip_prefix(&self.root)
                         .unwrap_or(p)

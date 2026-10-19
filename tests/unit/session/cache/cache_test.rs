@@ -479,3 +479,100 @@ fn package_tools_invalidate_the_cache() {
     }
     assert!(invalidates_cache("cargo_clippy"));
 }
+
+#[test]
+fn extract_file_arg_recognizes_all_supported_path_aliases() {
+    for alias in ["path", "file_path", "file", "filepath"] {
+        let args = serde_json::json!({ alias: "src/lib.rs" });
+        assert_eq!(ToolCache::extract_file_arg(&args), Some("src/lib.rs"));
+    }
+    assert_eq!(ToolCache::extract_file_arg(&serde_json::json!({})), None);
+}
+
+#[tokio::test]
+async fn cache_manager_unified_invalidation_clears_tool_llm_and_local_first() {
+    let mut manager = CacheManager::default();
+    let file_args = serde_json::json!({"file_path": "src/main.rs"});
+    let grep_args = serde_json::json!({"pattern": "fn main", "path": "."});
+    manager
+        .tool_cache
+        .set("file_read", &file_args, serde_json::json!("fn main() {}"))
+        .await;
+    manager
+        .tool_cache
+        .set(
+            "grep_search",
+            &grep_args,
+            serde_json::json!(["src/main.rs:1"]),
+        )
+        .await;
+    manager.local_first.cache_response(
+        "grep_search:\"/root\":{\"pattern\":\"fn main\"}",
+        "hit".to_string(),
+        3,
+    );
+    manager
+        .llm_cache
+        .store(LlmCacheEntry {
+            id: "entry-1".into(),
+            prompt: "explain main".into(),
+            embedding: vec![1.0, 0.0],
+            response: "main is entry".into(),
+            reasoning: None,
+            model: "qwen".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: now_secs(),
+            hit_count: 0,
+            context_hash: 1,
+            file_paths: vec!["src/main.rs".to_string()],
+        })
+        .await;
+
+    manager.invalidate_all_for_path("src/main.rs").await;
+    assert!(manager
+        .tool_cache
+        .get("grep_search", &grep_args)
+        .await
+        .is_none());
+    assert!(manager
+        .local_first
+        .get_response("grep_search:\"/root\":{\"pattern\":\"fn main\"}")
+        .is_none());
+    assert!(manager
+        .llm_cache
+        .lookup("explain main", &[1.0, 0.0], 1, "qwen")
+        .await
+        .is_none());
+
+    // Populate again and verify clear_all wipes all three layers
+    manager
+        .tool_cache
+        .set("git_log", &serde_json::json!({}), serde_json::json!(["c1"]))
+        .await;
+    manager
+        .local_first
+        .cache_response("git_log:\"/root\":{}", "c1".to_string(), 2);
+    manager
+        .llm_cache
+        .store(LlmCacheEntry {
+            id: "entry-2".into(),
+            prompt: "summarize repo".into(),
+            embedding: vec![0.0, 1.0],
+            response: "repo".into(),
+            reasoning: None,
+            model: "qwen".into(),
+            input_tokens: 8,
+            output_tokens: 4,
+            created_at: now_secs(),
+            hit_count: 0,
+            context_hash: 2,
+            file_paths: vec![],
+        })
+        .await;
+
+    manager.clear_all().await;
+    assert_eq!(manager.tool_cache.stats().await.entries, 0);
+    assert_eq!(manager.llm_cache.stats().await.entries, 0);
+    assert_eq!(manager.local_first.stats().cache_stats.entry_count, 0);
+}

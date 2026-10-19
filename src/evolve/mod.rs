@@ -52,11 +52,16 @@ pub mod summary;
 pub mod symbols;
 pub mod xray;
 
+#[cfg(feature = "self-improvement")]
+pub use crate::evolution;
 pub use actions::{Action, ActionEngine, ActionResult};
 #[cfg(feature = "self-improvement")]
 pub use apply::{ApplyRegistry, ApplyRun, ApplyStatus};
+pub use assistant::{ActionHop, GroundedClaim, GroundedRecommendation, GroundingEvidence};
 pub use ast::{AstAnalyzer, AstNode};
+pub use ast_scaffold::{validate_rust_syntax, AstSyntaxError};
 pub use clusters::{cluster_of, clustered, ClusteredGraph};
+pub use compiler_repair::{MachineApplicableFix, SkippedFix};
 pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
@@ -70,8 +75,13 @@ pub use context_trust::{
 };
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
+pub use deletion::{
+    preview_deletion, DeletionPreview, DeletionTarget, ImpactEdge, VerificationStep,
+};
+pub use diagnostics::{AnalysisKind, CompilerDiagnostic, DiagnosticSpan};
 pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
+pub use git::{BranchResult, GitEngine, GitFileState, GitStatusReport};
 pub use graph::GraphBuilder;
 pub use graph_cache::shared_graph_index;
 pub use graph_index::{GraphIndex, Metric};
@@ -85,6 +95,8 @@ pub use map::{
 pub use module_graph::{
     from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
+#[cfg(feature = "self-improvement")]
+pub use multi_arm_runner::OptimizationArm;
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
@@ -96,6 +108,8 @@ pub use readiness::{GateState, ReadinessGate, ReadinessReport};
 pub use server::EvolveServer;
 pub use skeleton::{extract_rust_skeleton, FileSkeleton, SkeletonItem};
 pub use structure::{ClassEntry, FileStructure, Method, StructureAnalyzer};
+pub use summary::{compile_structural_summary, StructuralSummary, SummaryEvidence};
+pub use symbols::{extract_pub_symbols, SymbolDecl};
 pub use xray::{ConceptIndex, ConceptRef, ConceptXray, DefinitionSite, RelatedConcept};
 
 use anyhow::Result;

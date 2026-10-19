@@ -19,639 +19,19 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-const MAX_PROFILE_BYTES: u64 = 64 * 1024;
-const MAX_SOURCE_SCAN_BYTES: u64 = 128 * 1024;
+pub use crate::phi::arena::{
+    achievement_badge_title, classify_debt_boss_archetype, collect_workspace_landmarks,
+    compute_debt_boss_state, generate_formal_drill, generate_formal_drill_json,
+    generate_graph_drill, generate_workspace_drill, load_arena_profile, save_arena_profile,
+    verify_phi_formal_invariants, BossBattleDrill, DebtBossState, LandmarkCandidate,
+    PhiArenaProfile,
+};
+pub use crate::phi::viseme::{text_to_viseme_frames, word_to_viseme, Viseme};
+
 const BRAILLE_SPARKS: [&str; 11] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈", "✦", "✧", "φ"];
-
-/// 10-viseme mouth shapes matching the Web `PhiVisemeEngine` and `scripts/phi_tmux_game.py`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Viseme {
-    Rest,
-    Mbp,
-    Etc,
-    Ai,
-    E,
-    O,
-    U,
-    Fv,
-    LTh,
-    Wq,
-}
-
-impl Viseme {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Rest => "rest",
-            Self::Mbp => "mbp",
-            Self::Etc => "etc",
-            Self::Ai => "ai",
-            Self::E => "e",
-            Self::O => "o",
-            Self::U => "u",
-            Self::Fv => "fv",
-            Self::LTh => "l_th",
-            Self::Wq => "wq",
-        }
-    }
-
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Self::Rest => "───",
-            Self::Mbp => "═══",
-            Self::Etc => "─▫─",
-            Self::Ai => "◁◯▷",
-            Self::E => "◁═▷",
-            Self::O => "(◯)",
-            Self::U => "(▫)",
-            Self::Fv => "─▿─",
-            Self::LTh => "─△─",
-            Self::Wq => "∘▫∘",
-        }
-    }
-}
-
-/// Map a single word to its primary viseme mouth shape.
-pub fn word_to_viseme(word: &str) -> Viseme {
-    let cleaned: String = word
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    if cleaned.is_empty() {
-        return Viseme::Rest;
-    }
-    if cleaned.starts_with('m') || cleaned.starts_with('b') || cleaned.starts_with('p') {
-        return Viseme::Mbp;
-    }
-    if cleaned.starts_with('f') || cleaned.starts_with('v') {
-        return Viseme::Fv;
-    }
-    if cleaned.starts_with('l') || cleaned.starts_with("th") {
-        return Viseme::LTh;
-    }
-    if cleaned.starts_with('w') || cleaned.starts_with("qu") || cleaned.starts_with('q') {
-        return Viseme::Wq;
-    }
-    for ch in cleaned.chars() {
-        match ch {
-            'a' => return Viseme::Ai,
-            'e' => return Viseme::E,
-            'o' => return Viseme::O,
-            'u' => return Viseme::U,
-            _ => {}
-        }
-    }
-    Viseme::Etc
-}
-
-/// Convert spoken text into a bounded sequence of viseme frames ending at `Viseme::Rest`.
-pub fn text_to_viseme_frames(text: &str, max_frames: usize) -> Vec<Viseme> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return vec![Viseme::Rest];
-    }
-    let cap = max_frames.max(2) - 1;
-    let mut frames: Vec<Viseme> = words.into_iter().take(cap).map(word_to_viseme).collect();
-    frames.push(Viseme::Rest);
-    frames
-}
-
-/// Persistent Grounded XP & Achievements profile stored at `.selfware/phi/arena_profile.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PhiArenaProfile {
-    pub schema_version: u32,
-    pub xp: u64,
-    pub level: u32,
-    pub best_streak: f64,
-    pub bosses_slain: u32,
-    pub drills_completed: u32,
-    pub citations_inspected: u32,
-    pub achievements: Vec<String>,
-}
-
-impl Default for PhiArenaProfile {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            xp: 0,
-            level: 1,
-            best_streak: 1.0,
-            bosses_slain: 0,
-            drills_completed: 0,
-            citations_inspected: 0,
-            achievements: Vec::new(),
-        }
-    }
-}
-
-impl PhiArenaProfile {
-    pub fn recompute_level_and_achievements(
-        &mut self,
-        current_streak: f64,
-        drained_hp: u64,
-        cleared_failing_run: bool,
-    ) {
-        if current_streak > self.best_streak {
-            self.best_streak = (current_streak * 100.0).round() / 100.0;
-        }
-        self.level = 1 + (self.xp / 100) as u32;
-
-        if self.citations_inspected >= 1 {
-            self.unlock("first_laser_lock");
-        }
-        if drained_hp >= 100 || self.xp >= 100 {
-            self.unlock("debt_slayer_i");
-        }
-        if cleared_failing_run {
-            self.unlock("hydra_hunter");
-        }
-        if self.best_streak >= 1.61 {
-            self.unlock("golden_spiral");
-        }
-        if self.drills_completed >= 3 {
-            self.unlock("drill_master");
-        }
-    }
-
-    pub fn unlock(&mut self, id: &str) -> bool {
-        if !self.achievements.iter().any(|a| a == id) {
-            self.achievements.push(id.to_string());
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// Human-readable title for each achievement ID.
-pub fn achievement_badge_title(id: &str) -> &'static str {
-    match id {
-        "first_laser_lock" => "🏆 Optical Lock",
-        "debt_slayer_i" => "🏆 Debt Slayer I",
-        "hydra_hunter" => "🏆 Hydra Hunter",
-        "golden_spiral" => "🏆 Golden Spiral (1.61x φ)",
-        "drill_master" => "🏆 Drill Master",
-        _ => "🏆 Grounded Sentinel",
-    }
-}
-
-#[cfg(unix)]
-fn open_child_nofollow(
-    parent: &File,
-    name: &std::ffi::OsStr,
-    directory: bool,
-) -> std::io::Result<File> {
-    use nix::libc;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    let c_name = std::ffi::CString::new(name.as_bytes())?;
-    let flags = libc::O_RDONLY
-        | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW
-        | libc::O_NONBLOCK
-        | if directory { libc::O_DIRECTORY } else { 0 };
-    // SAFETY: `parent` owns a live directory fd and `c_name` is NUL-terminated.
-    let fd = unsafe { libc::openat(parent.as_raw_fd(), c_name.as_ptr(), flags) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-/// Safely load `.selfware/phi/arena_profile.json` rejecting symlinks, hardlinks, and oversized files.
-pub fn load_arena_profile(workspace_root: &Path) -> PhiArenaProfile {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let Ok(canon) = workspace_root.canonicalize() else {
-            return PhiArenaProfile::default();
-        };
-        let Ok(root_dir) = File::open(&canon) else {
-            return PhiArenaProfile::default();
-        };
-        let Ok(selfware_dir) = open_child_nofollow(&root_dir, ".selfware".as_ref(), true) else {
-            return PhiArenaProfile::default();
-        };
-        let Ok(phi_dir) = open_child_nofollow(&selfware_dir, "phi".as_ref(), true) else {
-            return PhiArenaProfile::default();
-        };
-        let Ok(file) = open_child_nofollow(&phi_dir, "arena_profile.json".as_ref(), false) else {
-            return PhiArenaProfile::default();
-        };
-        let Ok(meta) = file.metadata() else {
-            return PhiArenaProfile::default();
-        };
-        if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_PROFILE_BYTES {
-            return PhiArenaProfile::default();
-        }
-        let mut buf = Vec::new();
-        if file
-            .take(MAX_PROFILE_BYTES + 1)
-            .read_to_end(&mut buf)
-            .is_err()
-            || (buf.len() as u64) > MAX_PROFILE_BYTES
-        {
-            return PhiArenaProfile::default();
-        }
-        let Ok(parsed) = serde_json::from_slice::<PhiArenaProfile>(&buf) else {
-            return PhiArenaProfile::default();
-        };
-        if parsed.schema_version != 1 {
-            return PhiArenaProfile::default();
-        }
-        parsed
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = workspace_root;
-        PhiArenaProfile::default()
-    }
-}
-
-/// Atomically persist `.selfware/phi/arena_profile.json` when `.selfware/phi` is free of symlinks.
-pub fn save_arena_profile(workspace_root: &Path, profile: &PhiArenaProfile) -> std::io::Result<()> {
-    let canon = workspace_root.canonicalize()?;
-    let selfware_path = canon.join(".selfware");
-    let phi_path = selfware_path.join("phi");
-
-    for dir in [&selfware_path, &phi_path] {
-        match std::fs::symlink_metadata(dir) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "refusing to write arena profile through symlink or non-directory",
-                    ));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(dir)?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    let target = phi_path.join("arena_profile.json");
-    if let Ok(meta) = std::fs::symlink_metadata(&target) {
-        if meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "refusing to overwrite symlinked arena_profile.json",
-            ));
-        }
-    }
-
-    let tmp_path = phi_path.join(format!(".tmp-arena-profile-{}.json", std::process::id()));
-    let payload = serde_json::to_vec_pretty(profile)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&tmp_path)?;
-        f.write_all(&payload)?;
-        f.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        let mut f = File::create(&tmp_path)?;
-        f.write_all(&payload)?;
-        f.sync_all()?;
-    }
-
-    std::fs::rename(&tmp_path, &target)?;
-    Ok(())
-}
-
-/// Gamified Debt Boss state derived from `.selfware/phi/activity`.
-#[derive(Debug, Clone)]
-pub struct DebtBossState {
-    pub boss_name: String,
-    pub current_hp: u64,
-    pub max_hp: u64,
-    pub debt_ratio: f64,
-    pub status_label: String,
-    pub trust_state: &'static str,
-    pub quests: Vec<String>,
-    pub emotion: String,
-    pub failed_runs: u64,
-}
-
-/// Compute Debt Boss state from the activity JSON returned by `read_workspace_activity`.
-pub fn compute_debt_boss_state(activity: &Value, peak_hp: u64, drill_damage: u64) -> DebtBossState {
-    let status = activity["status"].as_str().unwrap_or("unavailable");
-    let agents: Vec<&Value> = activity["agents"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|a| a["status"].as_str() != Some("stale"))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if status == "unavailable" || agents.is_empty() {
-        let reason = activity["reason"].as_str().unwrap_or("no_capture");
-        return DebtBossState {
-            boss_name: "Dormant Fog (No Live Agent Captures)".to_string(),
-            current_hp: 0,
-            max_hp: peak_hp.max(100),
-            debt_ratio: 0.0,
-            status_label: format!("OBSERVATION ABSENT ({reason}) — NOT VERIFIED"),
-            trust_state: "observed_signals",
-            quests: vec![
-                "Press [r] to probe workspace gates & status".to_string(),
-                "Press [b] to launch a grounded Boss Battle code drill".to_string(),
-                "Press [h] to lock Phi's optical laser onto a workspace symbol".to_string(),
-            ],
-            emotion: "curious".to_string(),
-            failed_runs: 0,
-        };
-    }
-
-    let mut unreviewed = 0u64;
-    let mut untested = 0u64;
-    let mut outstanding = 0u64;
-    let mut failed_runs = 0u64;
-    let mut unknown_runs = 0u64;
-    let mut unknown_obl = 0u64;
-    let mut running = 0u64;
-
-    for agent in &agents {
-        if agent["phase"].as_str() == Some("running") {
-            running += 1;
-        }
-        if let Some(ev) = agent["evidence"].as_object() {
-            unreviewed += ev
-                .get("unreviewed_lines")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            untested += ev
-                .get("untested_lines")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            outstanding += ev.get("outstanding").and_then(Value::as_u64).unwrap_or(0);
-            failed_runs += ev.get("failed_runs").and_then(Value::as_u64).unwrap_or(0);
-            unknown_runs += ev.get("unknown_runs").and_then(Value::as_u64).unwrap_or(0);
-            unknown_obl += ev
-                .get("unknown_size_obligations")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                + ev.get("unattributed_mutations")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-        } else {
-            unknown_obl += 1;
-        }
-    }
-
-    let raw_hp = unreviewed
-        + untested * 2
-        + outstanding * 25
-        + failed_runs * 50
-        + unknown_runs * 20
-        + unknown_obl * 40;
-    let effective_hp = raw_hp.saturating_sub(drill_damage);
-    let max_hp = peak_hp.max(raw_hp).max(100);
-
-    let mut quests = Vec::new();
-    let boss_name = if failed_runs > 0 {
-        quests.push(format!(
-            "Slay {failed_runs} failing command run(s) (+{} XP)",
-            failed_runs * 50
-        ));
-        "Regression Hydra (Failing Command Runs)"
-    } else if unknown_obl > 0 || unknown_runs > 0 {
-        quests.push(format!(
-            "Audit {} uncertain mutation(s) (+40 XP)",
-            unknown_obl + unknown_runs
-        ));
-        "Phantom Specter (Unbounded / Uncertain Mutations)"
-    } else if unreviewed > 0 || untested > 0 {
-        if unreviewed > 0 {
-            quests.push(format!(
-                "Review {unreviewed} unreviewed line(s) (+{unreviewed} XP)"
-            ));
-        }
-        if untested > 0 {
-            quests.push(format!(
-                "Cover {untested} untested line(s) (+{} XP)",
-                untested * 2
-            ));
-        }
-        "Boilerplate Golem (Unreviewed & Untested Diff)"
-    } else if outstanding > 0 {
-        quests.push(format!(
-            "Resolve {outstanding} verification obligation(s) (+{} XP)",
-            outstanding * 25
-        ));
-        "Sentinel Ward (Outstanding Obligations)"
-    } else {
-        quests.push(
-            "All observed agent obligations cleared — press [b] for a code drill".to_string(),
-        );
-        "Arena Clear (0 Observed Debt Obligations)"
-    };
-
-    let emotion = agents
-        .first()
-        .and_then(|a| a["fox_posture"]["emotion"].as_str())
-        .unwrap_or(if failed_runs > 0 {
-            "error"
-        } else if effective_hp > 0 {
-            "skeptical"
-        } else {
-            "curious"
-        })
-        .to_string();
-
-    let status_label = format!(
-        "{} agent(s) observed ({running} running) · failed={failed_runs} · unreviewed={unreviewed} · untested={untested}",
-        agents.len()
-    );
-
-    DebtBossState {
-        boss_name: boss_name.to_string(),
-        current_hp: effective_hp,
-        max_hp,
-        debt_ratio: (effective_hp as f64 / (max_hp.max(1) as f64)).clamp(0.0, 1.0),
-        status_label,
-        trust_state: "observed_signals",
-        quests,
-        emotion,
-        failed_runs,
-    }
-}
-
-/// A grounded multiple-choice codebase verification drill built from real workspace source files.
-#[derive(Debug, Clone)]
-pub struct BossBattleDrill {
-    pub question: String,
-    pub symbol_name: String,
-    pub citation: String,
-    pub code_snippet: String,
-    pub options: [String; 3],
-    pub correct_index: usize,
-}
-
-#[derive(Debug, Clone)]
-struct LandmarkCandidate {
-    rel_path: String,
-    line_no: usize,
-    symbol: String,
-    line_text: String,
-}
-
-/// Scan `src/` for concrete Rust landmarks to power optical laser locks and Boss Battle drills.
-fn collect_workspace_landmarks(workspace_root: &Path, limit: usize) -> Vec<LandmarkCandidate> {
-    let mut out = Vec::new();
-    let src_dir = workspace_root.join("src");
-    let mut stack = vec![src_dir];
-
-    while let Some(dir) = stack.pop() {
-        if out.len() >= limit {
-            break;
-        }
-        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        paths.sort();
-
-        for path in paths {
-            if out.len() >= limit {
-                break;
-            }
-            let Ok(m) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if m.file_type().is_symlink() {
-                continue;
-            }
-            if m.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !m.is_file() || m.len() > MAX_SOURCE_SCAN_BYTES {
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(rel) = path.strip_prefix(workspace_root) else {
-                continue;
-            };
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for (idx, line) in content.lines().enumerate() {
-                let trimmed = line.trim();
-                for prefix in ["pub fn ", "pub async fn ", "pub struct ", "pub enum "] {
-                    if let Some(rest) = trimmed.strip_prefix(prefix) {
-                        let sym: String = rest
-                            .chars()
-                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                            .collect();
-                        if sym.len() >= 4 {
-                            out.push(LandmarkCandidate {
-                                rel_path: rel_str.clone(),
-                                line_no: idx + 1,
-                                symbol: sym,
-                                line_text: trimmed.chars().take(72).collect(),
-                            });
-                            break;
-                        }
-                    }
-                }
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Generate a grounded 3-option Boss Battle drill from real symbols in `workspace_root/src`.
-pub fn generate_workspace_drill(workspace_root: &Path, seed: usize) -> BossBattleDrill {
-    let landmarks = collect_workspace_landmarks(workspace_root, 24);
-    if landmarks.len() >= 3 {
-        let target_idx = seed % landmarks.len();
-        let target = &landmarks[target_idx];
-        let mut distractor_paths = Vec::new();
-        for cand in &landmarks {
-            if cand.rel_path != target.rel_path && !distractor_paths.contains(&cand.rel_path) {
-                distractor_paths.push(cand.rel_path.clone());
-                if distractor_paths.len() == 2 {
-                    break;
-                }
-            }
-        }
-        while distractor_paths.len() < 2 {
-            let fallback = if distractor_paths.is_empty() {
-                "src/safety/redact.rs".to_string()
-            } else {
-                "src/evolve/ontology.rs".to_string()
-            };
-            if fallback != target.rel_path && !distractor_paths.contains(&fallback) {
-                distractor_paths.push(fallback);
-            } else {
-                distractor_paths.push("src/main.rs".to_string());
-            }
-        }
-
-        let correct_slot = seed % 3;
-        let mut options = [String::new(), String::new(), String::new()];
-        options[correct_slot] = format!("{}:{}", target.rel_path, target.line_no);
-        options[(correct_slot + 1) % 3] = format!("{}:1", distractor_paths[0]);
-        options[(correct_slot + 2) % 3] = format!("{}:1", distractor_paths[1]);
-
-        return BossBattleDrill {
-            question: format!(
-                "BOSS DRILL: Which workspace file & line defines `{}`?",
-                target.symbol
-            ),
-            symbol_name: target.symbol.clone(),
-            citation: format!("{}:{}", target.rel_path, target.line_no),
-            code_snippet: target.line_text.clone(),
-            options,
-            correct_index: correct_slot,
-        };
-    }
-
-    BossBattleDrill {
-        question: "BOSS DRILL: What does `trust_state: \"observed_signals\"` guarantee?"
-            .to_string(),
-        symbol_name: "observed_signals".to_string(),
-        citation: "src/evolve/server/phi_activity.rs:1".to_string(),
-        code_snippet: "Honest status over optimistic success (AGENTS.md Rule 3)".to_string(),
-        options: [
-            "Observed telemetry only — never fabricates green for unrun checks".to_string(),
-            "All unit and integration tests were executed and passed".to_string(),
-            "Static types were skipped to save tokens".to_string(),
-        ],
-        correct_index: 0,
-    }
-}
 
 /// Interactive state for the Phi Fox Arena & Debt Slayer TUI pane.
 pub struct PhiArenaPane {
@@ -685,7 +65,7 @@ impl PhiArenaPane {
         let activity = crate::evolve::server::read_workspace_activity(&workspace_root);
         let boss = compute_debt_boss_state(&activity, 100, 0);
         let emotion = boss.emotion.clone();
-        let mut pane = Self {
+        Self {
             workspace_root,
             frame_tick: 0,
             god_mode: false,
@@ -701,13 +81,11 @@ impl PhiArenaPane {
             active_drill: None,
             bot_log: vec![(
                 "Phi".to_string(),
-                "Ready on perch. Press [r] Red?, [d] Debt, [h] Hunt, [b] Boss Drill, or [g] GodMode."
+                "Ready on perch. Press [r] Red?, [d] Debt, [h] Hunt, [b] Boss Drill, [v] Proof Drill, or [g] GodMode."
                     .to_string(),
             )],
             drill_seed: 0,
-        };
-        pane.refresh();
-        pane
+        }
     }
 
     pub fn refresh(&mut self) {
@@ -838,20 +216,39 @@ impl PhiArenaPane {
                     "Phi Arena: started Boss Battle drill".to_string(),
                 ))
             }
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                let drill = generate_formal_drill(self.drill_seed);
+                self.drill_seed = self.drill_seed.wrapping_add(1);
+                let msg = format!(
+                    "{} Press [1], [2], or [3] to verify the Lean 4 invariant!",
+                    drill.question
+                );
+                self.active_drill = Some(drill);
+                self.speak(&msg, "analytical", None);
+                Some(PhiArenaAction::Log(
+                    "Phi Arena: started Lean 4 Formal Proof drill".to_string(),
+                ))
+            }
             KeyCode::Char(c @ ('1' | '2' | '3')) => {
                 let drill = self.active_drill.take()?;
                 let choice = (c as usize) - ('1' as usize);
+                let is_formal =
+                    drill.symbol_name.starts_with("PA") || drill.symbol_name.starts_with("PT");
                 if choice == drill.correct_index {
+                    let xp_bonus = if is_formal { 50 } else { 35 };
                     self.drill_damage += 50;
-                    self.profile.xp += 35;
+                    self.profile.xp += xp_bonus;
                     self.profile.drills_completed += 1;
                     self.streak = ((self.streak + 0.25).min(3.0) * 100.0).round() / 100.0;
                     self.profile
                         .recompute_level_and_achievements(self.streak, 50, false);
+                    if is_formal {
+                        self.profile.unlock("formal_sentinel");
+                    }
                     let _ = save_arena_profile(&self.workspace_root, &self.profile);
                     self.refresh();
                     let msg = format!(
-                        "CRITICAL HIT! `{}` verified at `{}` (+35 XP, -50 Boss HP, {:.2}x φ streak)!",
+                        "CRITICAL HIT! `{}` verified at `{}` (+{xp_bonus} XP, -50 Boss HP, {:.2}x φ streak)!",
                         drill.symbol_name, drill.citation, self.streak
                     );
                     self.speak(&msg, "analytical", Some(drill.citation));
@@ -1104,6 +501,16 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
             ),
             Span::styled(badges, Style::default().fg(Color::Rgb(250, 204, 21))),
         ]),
+        Line::from(vec![
+            Span::styled(
+                " 📐 FORMAL: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "PA1–PA8 · PT1–PT5 [TABLE_CONFORMANCE]",
+                Style::default().fg(Color::Rgb(56, 189, 248)),
+            ),
+        ]),
     ];
     frame.render_widget(Paragraph::new(boss_lines), chunks[1]);
 
@@ -1155,6 +562,8 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
         Span::raw(" Hunt  "),
         Span::styled("[b]", Style::default().fg(Color::Rgb(245, 158, 11))),
         Span::raw(" Boss Drill  "),
+        Span::styled("[v]", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::raw(" Proof Drill  "),
         Span::styled("[1-3]", Style::default().fg(Color::Rgb(56, 189, 248))),
         Span::raw(" Strike  "),
         Span::styled("[g]", Style::default().fg(Color::Rgb(245, 158, 11))),
@@ -1299,6 +708,22 @@ mod tests {
         assert_eq!(pane.profile.drills_completed, 1);
         assert!(pane.profile.xp >= 35);
 
+        // Press [v] for Lean 4 Formal Proof Drill -> answer correctly -> unlocks formal_sentinel
+        pane.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let formal_drill = pane.active_drill.clone().expect("formal drill spawned");
+        assert!(formal_drill.question.contains("PROOF DRILL"));
+        let formal_char = char::from_digit((formal_drill.correct_index + 1) as u32, 10).unwrap();
+        pane.on_key(KeyEvent::new(
+            KeyCode::Char(formal_char),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(pane.profile.drills_completed, 2);
+        assert!(pane
+            .profile
+            .achievements
+            .iter()
+            .any(|a| a == "formal_sentinel"));
+
         // Normal terminal render
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1309,6 +734,7 @@ mod tests {
         let rendered: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(rendered.contains("PHI FOX ARENA"));
         assert!(rendered.contains("OBSERVED_SIGNALS"));
+        assert!(rendered.contains("TABLE_CONFORMANCE"));
 
         // Tiny terminal survival (10x4)
         let tiny_backend = TestBackend::new(10, 4);

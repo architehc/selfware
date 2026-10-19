@@ -3955,6 +3955,7 @@ To call a tool, use this EXACT XML structure:
         };
         let outcomes =
             crate::session::edit_history::restore_checkpoint_guarded(&checkpoint.files).await;
+        self.cache_manager.clear_all().await;
         render_restore_outcomes("Undone", &checkpoint.action.description(), &outcomes)
     }
 
@@ -3968,6 +3969,7 @@ To call a tool, use this EXACT XML structure:
         };
         let _ = self.edit_history.redo();
         let outcomes = crate::session::edit_history::restore_checkpoint_guarded(&snapshots).await;
+        self.cache_manager.clear_all().await;
         render_restore_outcomes("Reapplied", &description, &outcomes)
     }
 

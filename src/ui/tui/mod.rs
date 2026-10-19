@@ -588,8 +588,9 @@ pub fn run_tui_dashboard_with_events(
     let mut tasks_inputs = tasks_view::TasksInputs::default();
     let mut tasks_refreshed = Instant::now();
     let (reap_tx, reap_rx) = std::sync::mpsc::channel::<String>();
-    // The Phi Fox Arena & Debt Slayer pane (Ctrl+F or /phi).
+    // The Phi Fox Arena & Debt Slayer pane (Ctrl+F or /phi, plus inline pane).
     let mut phi_arena_pane: Option<phi_arena::PhiArenaPane> = None;
+    let mut inline_arena_pane: Option<phi_arena::PhiArenaPane> = None;
     let mut phi_arena_refreshed = Instant::now();
 
     // Discover user skills
@@ -675,12 +676,17 @@ pub fn run_tui_dashboard_with_events(
             tasks_refreshed = Instant::now();
             needs_redraw = true;
         }
-        if let Some(pane) = phi_arena_pane.as_mut() {
-            if phi_arena_refreshed.elapsed() >= Duration::from_millis(250) {
+        if (phi_arena_pane.is_some() || inline_arena_pane.is_some())
+            && phi_arena_refreshed.elapsed() >= Duration::from_millis(250)
+        {
+            if let Some(pane) = phi_arena_pane.as_mut() {
                 pane.refresh();
-                phi_arena_refreshed = Instant::now();
-                needs_redraw = true;
             }
+            if let Some(pane) = inline_arena_pane.as_mut() {
+                pane.refresh();
+            }
+            phi_arena_refreshed = Instant::now();
+            needs_redraw = true;
         }
 
         // Process any pending events from the agent (non-blocking)
@@ -748,11 +754,13 @@ pub fn run_tui_dashboard_with_events(
                                 );
                             }
                             PaneType::PhiArena => {
-                                let mut inline_arena = phi_arena::PhiArenaPane::new(cwd.clone());
+                                let inline_arena = inline_arena_pane.get_or_insert_with(|| {
+                                    phi_arena::PhiArenaPane::new(cwd.clone())
+                                });
                                 phi_arena::render_phi_arena(
                                     frame,
                                     *pane_area,
-                                    &mut inline_arena,
+                                    inline_arena,
                                     pane.focused,
                                 );
                             }

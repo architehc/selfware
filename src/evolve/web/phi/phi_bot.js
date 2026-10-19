@@ -7,7 +7,7 @@ const VALID_EMOTIONS = new Set([
 ]);
 
 const VALID_TRUST_STATES = new Set([
-  'structural', 'observed_signals', 'degraded', 'unverified_model', 'example_preview'
+  'structural', 'observed_signals', 'table_conformance_verified', 'degraded', 'unverified_model', 'example_preview'
 ]);
 
 export const QUICK_CHIPS = Object.freeze([
@@ -30,6 +30,11 @@ export const QUICK_CHIPS = Object.freeze([
     id: 'check_debt',
     label: 'Check agent debt',
     prompt: 'Summarize current verification debt, untested lines, and next steps.'
+  },
+  {
+    id: 'check_formal',
+    label: '📐 Lean Proofs',
+    prompt: 'Show live Lean 4 formal verification status and PA1–PA8 / PT1–PT5 invariants.'
   }
 ]);
 
@@ -178,9 +183,11 @@ export function parseArenaPayload(raw) {
   const drill = raw.drill && typeof raw.drill === 'object' && Array.isArray(raw.drill.options)
     ? {
         seed: Number.isInteger(raw.drill.seed) ? raw.drill.seed : 0,
+        kind: typeof raw.drill.kind === 'string' ? raw.drill.kind : 'graph_symbol',
         question: String(raw.drill.question || 'Which workspace file defines this symbol?'),
         symbol_name: String(raw.drill.symbol_name || 'PhiPolicy'),
         citation: String(raw.drill.citation || 'src/phi/policy.rs:1'),
+        code_snippet: typeof raw.drill.code_snippet === 'string' ? raw.drill.code_snippet : '',
         path: String(raw.drill.path || 'src/phi/policy.rs'),
         start_line: Number.isInteger(raw.drill.start_line) ? raw.drill.start_line : 1,
         end_line: Number.isInteger(raw.drill.end_line) ? raw.drill.end_line : 10,
@@ -198,6 +205,7 @@ export function parseArenaPayload(raw) {
       achievement_badges: badges
     },
     drill,
+    formal: raw.formal && typeof raw.formal === 'object' ? raw.formal : null,
     correct: Boolean(raw.correct),
     xp_gained: Number.isFinite(raw.xp_gained) ? raw.xp_gained : 0,
     unlocked: Array.isArray(raw.unlocked) ? raw.unlocked : []
@@ -274,6 +282,11 @@ export class PhiBotUI {
     this.drillBtn.type = 'button';
     this.drillBtn.addEventListener('click', () => void this.launchBossDrill());
 
+    this.formalDrillBtn = el('button', '📐 Proof Drill', 'btn-cyber phi-bot-drill-btn');
+    this.formalDrillBtn.id = 'btn-phi-bot-formal-drill';
+    this.formalDrillBtn.type = 'button';
+    this.formalDrillBtn.addEventListener('click', () => void this.launchFormalDrill());
+
     this.voiceBtn = el('button', '🔊 Formant Voice', 'btn-cyber phi-bot-voice-btn');
     this.voiceBtn.id = 'btn-phi-bot-voice';
     this.voiceBtn.type = 'button';
@@ -284,7 +297,7 @@ export class PhiBotUI {
       this.voiceBtn.textContent = this.formantActive ? '🔊 Formant On' : '🔊 Formant Voice';
       this.onToggleFormantVoice?.(this.formantActive);
     });
-    arenaRow.append(this.arenaBadge, this.drillBtn, this.voiceBtn);
+    arenaRow.append(this.arenaBadge, this.drillBtn, this.formalDrillBtn, this.voiceBtn);
 
     this.badgesRow = el('div', null, 'phi-bot-badges');
     this.badgesRow.id = 'phi-bot-badges';
@@ -556,26 +569,34 @@ export class PhiBotUI {
     };
   }
 
-  async launchBossDrill() {
-    if (this.destroyed || !this.log) return null;
-    const synced = await this.refreshArena();
-    const drill = synced?.drill || this.currentDrill || this.fallbackDrill(this.arenaProfile.drills_completed || 0);
+  renderDrillCard(drill) {
+    if (this.destroyed || !this.log || !drill) return null;
     this.currentDrill = drill;
+    const isFormal = drill.kind === 'formal_proof';
+    const xpLabel = isFormal ? '+50 XP' : '+35 XP';
+    const roleLabel = isFormal ? 'Phi · Lean 4 Proof Drill' : 'Phi · Boss Battle Drill';
 
     const card = el('article', null, 'phi-bot-turn phi-bot-turn-assistant phi-bot-drill-card');
     card.dataset.role = 'assistant';
     card.dataset.drillSeed = String(drill.seed);
+    card.dataset.drillKind = drill.kind || 'graph_symbol';
 
     const meta = el('div', null, 'phi-bot-turn-meta');
     meta.append(
-      el('span', 'Phi · Boss Battle Drill', 'phi-bot-role'),
-      el('span', '+35 XP', 'phi-bot-trust-pill')
+      el('span', roleLabel, 'phi-bot-role'),
+      el('span', xpLabel, 'phi-bot-trust-pill')
     );
     card.append(meta);
-    card.append(el('p', `⚔ ${drill.question}`, 'phi-bot-msg-text'));
+    card.append(el('p', `${isFormal ? '📐' : '⚔'} ${drill.question}`, 'phi-bot-msg-text'));
 
     const optionsWrap = el('div', null, 'phi-bot-drill-options');
-    const feedback = el('p', 'Select the grounded source file to drain Boss HP and earn +35 XP.', 'deck-hint phi-bot-drill-feedback');
+    const feedback = el(
+      'p',
+      isFormal
+        ? 'Select the theorem-backed invariant to unlock Formal Sentinel and earn +50 XP.'
+        : 'Select the grounded source file to drain Boss HP and earn +35 XP.',
+      'deck-hint phi-bot-drill-feedback'
+    );
 
     drill.options.forEach((optText, idx) => {
       const btn = el('button', `[${idx + 1}] ${optText}`, 'btn-cyber phi-bot-drill-option');
@@ -607,13 +628,64 @@ export class PhiBotUI {
     return drill;
   }
 
+  async launchBossDrill() {
+    if (this.destroyed || !this.log) return null;
+    const synced = await this.refreshArena();
+    const drill = synced?.drill || this.currentDrill || this.fallbackDrill(this.arenaProfile.drills_completed || 0);
+    return this.renderDrillCard(drill);
+  }
+
+  async launchFormalDrill() {
+    if (this.destroyed || !this.log) return null;
+    const workspace = this.getWorkspace?.();
+    if (!this.isExampleMode?.() && workspace?.token) {
+      try {
+        const res = await this.fetch('/api/phi/arena/drill', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-selfware-session': workspace.token
+          },
+          body: JSON.stringify({
+            action: 'formal_drill',
+            seed: this.currentDrill?.seed ?? (this.arenaProfile.drills_completed || 0)
+          })
+        });
+        if (res.ok) {
+          const parsed = parseArenaPayload(await res.json());
+          this.renderArenaProfile(parsed.profile);
+          if (parsed.drill) return this.renderDrillCard(parsed.drill);
+        }
+      } catch (_) {
+        // Fallback below
+      }
+    }
+    return this.renderDrillCard({
+      seed: 0,
+      kind: 'formal_proof',
+      question: 'PROOF DRILL [PA1]: When `failure=false` and `debt=true`, which emotion does `classify_signal_emotion` guarantee?',
+      symbol_name: 'PA1:skeptical_dominates_non_error',
+      citation: 'src/evolve/server/phi_activity.rs:563',
+      path: 'src/evolve/server/phi_activity.rs',
+      start_line: 563,
+      end_line: 575,
+      options: [
+        'skeptical — debt overrides running/citations until reviewed',
+        'working — active agents override unverified debt',
+        'analytical — citations clear debt automatically'
+      ],
+      correct_index: 0
+    });
+  }
+
   async submitDrillChoice(drill, choiceIdx, optionsWrap, feedbackEl) {
     if (this.destroyed) return;
     const buttons = optionsWrap.querySelectorAll('button');
     buttons.forEach(b => { b.disabled = true; });
 
+    const isFormal = drill.kind === 'formal_proof';
     let correct = choiceIdx === drill.correct_index;
-    let xpGained = correct ? 35 : 0;
+    let xpGained = correct ? (isFormal ? 50 : 35) : 0;
     let unlocked = [];
 
     const workspace = this.getWorkspace?.();
@@ -627,6 +699,7 @@ export class PhiBotUI {
           },
           body: JSON.stringify({
             action: 'answer_drill',
+            kind: drill.kind || 'graph_symbol',
             choice_index: choiceIdx,
             correct_index: drill.correct_index,
             seed: drill.seed
@@ -644,7 +717,7 @@ export class PhiBotUI {
         // Offline fallback updates local counter only
       }
     } else if (correct) {
-      const nextXp = (this.arenaProfile.xp || 0) + 35;
+      const nextXp = (this.arenaProfile.xp || 0) + xpGained;
       this.renderArenaProfile({
         ...this.arenaProfile,
         xp: nextXp,
@@ -660,7 +733,7 @@ export class PhiBotUI {
 
     if (correct) {
       const badgeNote = unlocked.length > 0
-        ? ` Unlocked: ${unlocked.map(u => u.title).join(', ')}!`
+        ? ` Unlocked: ${unlocked.map(u => typeof u === 'string' ? u : u.title).join(', ')}!`
         : '';
       const msg = `CRITICAL HIT! \`${drill.symbol_name}\` verified at \`${drill.citation}\` (+${xpGained} XP).${badgeNote}`;
       feedbackEl.textContent = msg;

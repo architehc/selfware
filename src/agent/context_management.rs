@@ -1051,7 +1051,7 @@ impl Agent {
     /// assistant `tool_calls` message and its `role=tool` results (it waits
     /// until the results are through), and it folds into an adjacent
     /// text-only user message instead of creating consecutive user turns.
-    pub(super) fn demote_mid_conversation_system_messages(messages: Vec<Message>) -> Vec<Message> {
+    pub(crate) fn demote_mid_conversation_system_messages(messages: Vec<Message>) -> Vec<Message> {
         let Some(first_system) = messages.iter().position(|m| m.role == "system") else {
             return messages;
         };
