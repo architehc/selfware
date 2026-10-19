@@ -2034,14 +2034,7 @@ impl Agent {
                             ) {
                                 return None;
                             }
-                            let mut file =
-                                crate::safety::source_context::open_broad_discovery_regular(
-                                    &read_path,
-                                )
-                                .ok()?;
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
-                            Some(buf)
+                            crate::evolve::graph::read_broad_discovery_utf8(&read_path).ok()
                         })
                         .await
                         .ok()

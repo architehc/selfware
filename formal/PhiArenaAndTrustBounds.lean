@@ -1438,6 +1438,338 @@ theorem guardrail_blocked_increments_iff_should_block
       s.blocked + (if outcomeShouldBlock res act then 1 else 0) := by
   cases res <;> cases act <;> rfl
 
+/-! ## Part XXI — PA21: Safety Confirm-View Risk Classification Lattice (`src/safety/confirm_view.rs`) -/
+
+inductive RiskTagModel where
+  | reads
+  | runsCommand
+  | writesWorkspace
+  | network
+  | installsPackages
+  | gitHistory
+  | deletesFiles
+  | unclassified
+  deriving DecidableEq, Repr
+
+def RiskTagModel.label : RiskTagModel → String
+  | .reads => "[reads]"
+  | .runsCommand => "[runs command]"
+  | .writesWorkspace => "[writes workspace]"
+  | .network => "[network]"
+  | .installsPackages => "[installs packages]"
+  | .gitHistory => "[git history]"
+  | .deletesFiles => "[deletes files]"
+  | .unclassified => "[unclassified tool]"
+
+def RiskTagModel.severity : RiskTagModel → Nat
+  | .reads => 0
+  | .runsCommand => 1
+  | .writesWorkspace => 2
+  | .network => 3
+  | .installsPackages => 4
+  | .gitHistory => 5
+  | .deletesFiles => 6
+  | .unclassified => 7
+
+def RiskTagModel.isReadOnly (t : RiskTagModel) : Bool :=
+  t == .reads
+
+def joinRiskTag (a b : RiskTagModel) : RiskTagModel :=
+  if b.severity > a.severity then b else a
+
+def finalizeShellExecRisk
+    (segWorst : RiskTagModel)
+    (isObservational isShellRead envSafe noCustomShell : Bool) : RiskTagModel :=
+  let cmdTag :=
+    if segWorst == .reads && !(isObservational && isShellRead) then
+      .runsCommand
+    else
+      segWorst
+  if cmdTag == .reads && (!envSafe || !noCustomShell) then
+    .runsCommand
+  else
+    cmdTag
+
+def classifyToolMetadataFallback
+    (isContextTool : Bool)
+    (metaSpec : Option (Bool × Bool × Bool × Bool)) : RiskTagModel :=
+  if isContextTool then
+    .reads
+  else
+    match metaSpec with
+    | none => .unclassified
+    | some (destructive, shellExec, netAccess, readOnly) =>
+        if destructive && !shellExec then .deletesFiles
+        else if netAccess then .network
+        else if shellExec then .runsCommand
+        else if readOnly then .reads
+        else .writesWorkspace
+
+theorem risk_tag_join_severity_eq_max (a b : RiskTagModel) :
+    (joinRiskTag a b).severity = max a.severity b.severity := by
+  cases a <;> cases b <;> decide
+
+theorem risk_tag_join_comm (a b : RiskTagModel) :
+    joinRiskTag a b = joinRiskTag b a := by
+  cases a <;> cases b <;> decide
+
+theorem shell_exec_reads_iff_all_guards_hold
+    (seg : RiskTagModel) (obs rd env sh : Bool) :
+    finalizeShellExecRisk seg obs rd env sh = .reads ↔
+      (seg = .reads ∧ obs = true ∧ rd = true ∧ env = true ∧ sh = true) := by
+  cases seg <;> cases obs <;> cases rd <;> cases env <;> cases sh <;> decide
+
+theorem shell_exec_unsafe_env_or_custom_shell_never_reads
+    (seg : RiskTagModel) (obs rd env sh : Bool)
+    (h : env = false ∨ sh = false) :
+    finalizeShellExecRisk seg obs rd env sh ≠ .reads := by
+  cases seg <;> cases obs <;> cases rd <;> cases env <;> cases sh <;> simp_all [finalizeShellExecRisk]
+
+theorem unknown_non_context_tool_is_unclassified :
+    classifyToolMetadataFallback false none = .unclassified := rfl
+
+theorem unclassified_dominates_all_risk_tags (t : RiskTagModel) :
+    joinRiskTag t .unclassified = .unclassified := by
+  cases t <;> decide
+
+/-! ## Part XXII — PA22: Resource Pressure & Adaptive Quotas Governor Lattice (`src/resources/hardware.rs`, `src/resources/quotas.rs`) -/
+
+inductive ResourcePressureModel where
+  | none
+  | low
+  | medium
+  | high
+  | critical
+  deriving DecidableEq, Repr
+
+def ResourcePressureModel.name : ResourcePressureModel → String
+  | .none => "none"
+  | .low => "low"
+  | .medium => "medium"
+  | .high => "high"
+  | .critical => "critical"
+
+def ResourcePressureModel.requiresAction : ResourcePressureModel → Bool
+  | .medium | .high | .critical => true
+  | .none | .low => false
+
+def ResourcePressureModel.isCritical : ResourcePressureModel → Bool
+  | .critical => true
+  | _ => false
+
+def classifyResourcePressure
+    (memPct gpuMemPct warnPct critPct emergPct : Nat)
+    (gpuOverheating diskExceeded : Bool) : ResourcePressureModel :=
+  let maxPct := max memPct gpuMemPct
+  if maxPct > emergPct then
+    .critical
+  else if decide (maxPct > critPct) || gpuOverheating || diskExceeded then
+    .high
+  else if maxPct > warnPct then
+    .medium
+  else if maxPct > 50 then
+    .low
+  else
+    .none
+
+structure QuotasModel where
+  maxGpuMemoryPerModel : Nat
+  maxConcurrentRequests : Nat
+  maxContextTokens : Nat
+  maxQueuedTasks : Nat
+  deriving DecidableEq, Repr
+
+def defaultBaseQuotas : QuotasModel :=
+  { maxGpuMemoryPerModel := 20000000000
+    maxConcurrentRequests := 4
+    maxContextTokens := 1000000
+    maxQueuedTasks := 1000 }
+
+def adjustQuotasForPressure (base : QuotasModel) (p : ResourcePressureModel) : QuotasModel :=
+  match p with
+  | .none => base
+  | .low =>
+      { base with maxConcurrentRequests := base.maxConcurrentRequests - 1 }
+  | .medium =>
+      { base with
+        maxConcurrentRequests := base.maxConcurrentRequests / 2
+        maxContextTokens := base.maxContextTokens / 2 }
+  | .high =>
+      { base with
+        maxConcurrentRequests := 1
+        maxContextTokens := base.maxContextTokens / 4
+        maxQueuedTasks := base.maxQueuedTasks / 2 }
+  | .critical =>
+      { maxGpuMemoryPerModel := base.maxGpuMemoryPerModel / 2
+        maxConcurrentRequests := 1
+        maxContextTokens := 8192
+        maxQueuedTasks := 10 }
+
+def checkQuotaRequest (q : QuotasModel) (reqGpuBytes reqSysBytes : Nat) : Bool :=
+  decide (reqGpuBytes ≤ q.maxGpuMemoryPerModel) &&
+  decide (reqSysBytes ≤ q.maxContextTokens * 100)
+
+theorem emergency_ratio_forces_critical
+    (mem gpu warn crit emerg : Nat) (hot disk : Bool)
+    (h : max mem gpu > emerg) :
+    classifyResourcePressure mem gpu warn crit emerg hot disk = .critical := by
+  simp [classifyResourcePressure, h]
+
+theorem overheating_or_disk_requires_action
+    (mem gpu warn crit emerg : Nat) (hot disk : Bool)
+    (h : hot = true ∨ disk = true) :
+    (classifyResourcePressure mem gpu warn crit emerg hot disk).requiresAction = true := by
+  unfold classifyResourcePressure
+  by_cases hEm : max mem gpu > emerg
+  · simp [hEm, ResourcePressureModel.requiresAction]
+  · rcases h with rfl | rfl <;> simp [hEm, ResourcePressureModel.requiresAction]
+
+theorem pressure_none_restores_base_quotas (base : QuotasModel) :
+    adjustQuotasForPressure base .none = base := rfl
+
+theorem high_and_critical_clamp_concurrent_requests_to_one
+    (base : QuotasModel) (p : ResourcePressureModel)
+    (h : p = .high ∨ p = .critical) :
+    (adjustQuotasForPressure base p).maxConcurrentRequests = 1 := by
+  rcases h with rfl | rfl <;> rfl
+
+theorem critical_clamps_context_and_queue (base : QuotasModel) :
+    (adjustQuotasForPressure base .critical).maxContextTokens = 8192 ∧
+    (adjustQuotasForPressure base .critical).maxQueuedTasks = 10 := by
+  exact ⟨rfl, rfl⟩
+
+/-! ## Part XXIII — PA23: Agent Loop Guard & Context Compaction Bounds (`src/agent/loop_control.rs`) -/
+
+def approachingLimitBand (iteration maxIterations : Nat) : Nat :=
+  if maxIterations = 0 then
+    0
+  else if (iteration * 100) / maxIterations ≥ 90 then
+    90
+  else if (iteration * 100) / maxIterations ≥ 80 then
+    80
+  else
+    0
+
+def restoreBudgetExtension (originalMax persistedCap grants : Nat) : Nat × Nat :=
+  (max originalMax persistedCap, min grants 4)
+
+def productivePairStreak
+    (t1Success t2Success : Bool)
+    (sig1 sig2 : Nat)
+    (interveningOtherMutation : Bool) : Bool :=
+  t1Success && t2Success && (decide (sig1 ≠ sig2) || interveningOtherMutation)
+
+theorem approaching_limit_zero_max_is_zero (iter : Nat) :
+    approachingLimitBand iter 0 = 0 := rfl
+
+theorem approaching_limit_band_values (iter maxIter : Nat) :
+    approachingLimitBand iter maxIter = 0 ∨
+    approachingLimitBand iter maxIter = 80 ∨
+    approachingLimitBand iter maxIter = 90 := by
+  unfold approachingLimitBand
+  split
+  · left; rfl
+  · split
+    · right; right; rfl
+    · split
+      · right; left; rfl
+      · left; rfl
+
+theorem restore_budget_never_shrinks_cap_and_clamps_grants
+    (orig persisted grants : Nat) :
+    (restoreBudgetExtension orig persisted grants).1 ≥ orig ∧
+    (restoreBudgetExtension orig persisted grants).2 ≤ 4 := by
+  simp only [restoreBudgetExtension]
+  omega
+
+theorem unexcused_duplicate_breaks_productive_streak
+    (s1 s2 : Bool) (sig : Nat) :
+    productivePairStreak s1 s2 sig sig false = false := by
+  cases s1 <;> cases s2 <;> simp [productivePairStreak]
+
+theorem intervening_mutation_excuses_duplicate (sig : Nat) :
+    productivePairStreak true true sig sig true = true := by
+  simp [productivePairStreak]
+
+/-! ## Part XXIV — PA24: Memory Budget Eviction & Temporal Decay Lattice (`src/memory/mod.rs`, `src/consolidation/temporal.rs`) -/
+
+def deriveMaxMemoryTokens (contextLength quotaMaxTokens : Nat) : Nat :=
+  (min contextLength quotaMaxTokens * 95) / 100
+
+def isNearMemoryLimit (totalTokens maxMemoryTokens : Nat) : Bool :=
+  decide (totalTokens * 100 > maxMemoryTokens * 85)
+
+def sumEntryTokens : List Nat → Nat
+  | [] => 0
+  | x :: xs => x + sumEntryTokens xs
+
+def evictOldestUntilFits : List Nat → Nat → Nat → List Nat
+  | [], _, _ => []
+  | x :: xs, maxMem, newTok =>
+      if (x + sumEntryTokens xs) + newTok > maxMem then
+        evictOldestUntilFits xs maxMem newTok
+      else
+        x :: xs
+
+def addEntryWithEviction (entries : List Nat) (maxMemoryTokens newTokens : Nat) : List Nat :=
+  evictOldestUntilFits entries maxMemoryTokens newTokens ++ [newTokens]
+
+inductive RecordImportanceModel where
+  | low
+  | normal
+  | high
+  | critical
+  deriving DecidableEq, Repr
+
+def RecordImportanceModel.name : RecordImportanceModel → String
+  | .low => "low"
+  | .normal => "normal"
+  | .high => "high"
+  | .critical => "critical"
+
+def halfLifeDecayPct : RecordImportanceModel → Nat
+  | .low => 25
+  | .normal => 50
+  | .high => 75
+  | .critical => 100
+
+theorem derived_memory_cap_le_both_bounds (ctx quota : Nat) :
+    deriveMaxMemoryTokens ctx quota ≤ ctx ∧ deriveMaxMemoryTokens ctx quota ≤ quota := by
+  simp only [deriveMaxMemoryTokens]
+  omega
+
+theorem sum_entry_tokens_append_singleton (xs : List Nat) (y : Nat) :
+    sumEntryTokens (xs ++ [y]) = sumEntryTokens xs + y := by
+  induction xs with
+  | nil => simp [sumEntryTokens]
+  | cons x xs ih =>
+      simp [sumEntryTokens, ih]
+      omega
+
+theorem evict_oldest_fits_when_new_entry_within_cap
+    (entries : List Nat) (maxMem newTok : Nat)
+    (hFit : newTok ≤ maxMem) :
+    sumEntryTokens (addEntryWithEviction entries maxMem newTok) ≤ maxMem := by
+  unfold addEntryWithEviction
+  rw [sum_entry_tokens_append_singleton]
+  induction entries with
+  | nil =>
+      simp [evictOldestUntilFits, sumEntryTokens]
+      omega
+  | cons x xs ih =>
+      unfold evictOldestUntilFits
+      split
+      · exact ih
+      · rename_i hNotGt
+        simp [sumEntryTokens]
+        omega
+
+theorem importance_decay_strictly_monotone :
+    halfLifeDecayPct .low < halfLifeDecayPct .normal ∧
+    halfLifeDecayPct .normal < halfLifeDecayPct .high ∧
+    halfLifeDecayPct .high < halfLifeDecayPct .critical := by
+  decide
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -1685,7 +2017,58 @@ def exportTable : String :=
       s!"[\"swl_guardrail:fail_log_action\",\"res=fail,act=log\",\"total={g5.total}:pass={g5.passed}:fail={g5.failed}:err={g5.errors}:blk={g5.blocked}:warn={g5.warnings}:block={outcomeShouldBlock .fail .log}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows) ++ "]"
+  -- 21–24. PA21–PA24 rows
+  let wave5Rows : List String :=
+    [ let r1 := finalizeShellExecRisk .reads true true true true
+      s!"[\"confirm_risk:shell_git_status_reads\",\"shell_exec:git status\",\"{r1.label}:ro={r1.isReadOnly}\"]"
+    , let r2 := finalizeShellExecRisk .reads true true false true
+      s!"[\"confirm_risk:shell_git_diff_unsafe_env_runs_command\",\"shell_exec:git diff+unsafe_env\",\"{r2.label}:ro={r2.isReadOnly}\"]"
+    , let r3 := finalizeShellExecRisk .runsCommand true false true true
+      s!"[\"confirm_risk:shell_cargo_check_runs_command\",\"shell_exec:cargo check\",\"{r3.label}:ro={r3.isReadOnly}\"]"
+    , let r4 := finalizeShellExecRisk (joinRiskTag .reads .deletesFiles) false false true true
+      s!"[\"confirm_risk:shell_compound_reads_and_rm_deletes\",\"shell_exec:git status && rm -rf /tmp/x\",\"{r4.label}:ro={r4.isReadOnly}\"]"
+    , s!"[\"confirm_risk:clippy_fix_vs_nofix\",\"cargo_clippy:fix=false_vs_true\",\"{RiskTagModel.runsCommand.label}->{RiskTagModel.writesWorkspace.label}\"]"
+    , let r6 := classifyToolMetadataFallback false none
+      s!"[\"confirm_risk:unknown_mcp_tool_unclassified\",\"mcp_custom_probe\",\"{r6.label}:ro={r6.isReadOnly}\"]"
+    , let p1 := classifyResourcePressure 40 30 70 85 95 false false
+      let q1 := adjustQuotasForPressure defaultBaseQuotas p1
+      s!"[\"resource_pressure:none_baseline\",\"mem=40,gpu=30,hot=false,disk=false\",\"{p1.name}:act={p1.requiresAction}:crit={p1.isCritical}:conc={q1.maxConcurrentRequests}:ctx={q1.maxContextTokens}:q={q1.maxQueuedTasks}\"]"
+    , let p2 := classifyResourcePressure 60 20 70 85 95 false false
+      let q2 := adjustQuotasForPressure defaultBaseQuotas p2
+      s!"[\"resource_pressure:low_slight_throttle\",\"mem=60,gpu=20,hot=false,disk=false\",\"{p2.name}:act={p2.requiresAction}:crit={p2.isCritical}:conc={q2.maxConcurrentRequests}:ctx={q2.maxContextTokens}:q={q2.maxQueuedTasks}\"]"
+    , let p3 := classifyResourcePressure 75 40 70 85 95 false false
+      let q3 := adjustQuotasForPressure defaultBaseQuotas p3
+      s!"[\"resource_pressure:medium_halves_concurrency_and_context\",\"mem=75,gpu=40,hot=false,disk=false\",\"{p3.name}:act={p3.requiresAction}:crit={p3.isCritical}:conc={q3.maxConcurrentRequests}:ctx={q3.maxContextTokens}:q={q3.maxQueuedTasks}\"]"
+    , let p4 := classifyResourcePressure 40 30 70 85 95 false true
+      let q4 := adjustQuotasForPressure defaultBaseQuotas p4
+      s!"[\"resource_pressure:high_on_disk_exceeded\",\"mem=40,gpu=30,hot=false,disk=true\",\"{p4.name}:act={p4.requiresAction}:crit={p4.isCritical}:conc={q4.maxConcurrentRequests}:ctx={q4.maxContextTokens}:q={q4.maxQueuedTasks}\"]"
+    , let p5 := classifyResourcePressure 96 50 70 85 95 true true
+      let q5 := adjustQuotasForPressure defaultBaseQuotas p5
+      s!"[\"resource_pressure:critical_emergency_clamp\",\"mem=96,gpu=50,hot=true,disk=true\",\"{p5.name}:act={p5.requiresAction}:crit={p5.isCritical}:conc={q5.maxConcurrentRequests}:ctx={q5.maxContextTokens}:q={q5.maxQueuedTasks}\"]"
+    , let b1 := approachingLimitBand 7 10
+      s!"[\"loop_guard:band_below_80_pct\",\"iter=7,max=10\",\"band={b1}:warn={decide (b1 > 0)}\"]"
+    , let b2 := approachingLimitBand 8 10
+      s!"[\"loop_guard:band_at_80_pct\",\"iter=8,max=10\",\"band={b2}:warn={decide (b2 > 0)}\"]"
+    , let b3 := approachingLimitBand 9 10
+      s!"[\"loop_guard:band_at_90_pct\",\"iter=9,max=10\",\"band={b3}:warn={decide (b3 > 0)}\"]"
+    , let sDup := productivePairStreak true true 1 1 false
+      let sExc := productivePairStreak true true 1 1 true
+      s!"[\"loop_guard:streak_duplicate_probe_vs_excused_by_edit\",\"window=2\",\"dup_read={sDup}:edit_then_read={sExc}\"]"
+    , let (cap, gr) := restoreBudgetExtension 20 30 9
+      s!"[\"loop_guard:restore_budget_extension_clamp\",\"orig=20,persisted=30,grants=9\",\"cap={cap}:grants={gr}:ceiling={decide (gr ≥ 4)}\"]"
+    , let mCap1 := deriveMaxMemoryTokens 1000 2000
+      s!"[\"memory_retention:derive_cap_and_near_limit\",\"ctx=1000,quota=2000,used=807_vs_808\",\"max={mCap1}:at807={isNearMemoryLimit 807 mCap1}:at808={isNearMemoryLimit 808 mCap1}\"]"
+    , let mCap2 := deriveMaxMemoryTokens 4000 1000
+      s!"[\"memory_retention:quota_bounds_context_length\",\"ctx=4000,quota=1000,used=808\",\"max={mCap2}:near={isNearMemoryLimit 808 mCap2}\"]"
+    , let mCap3 := deriveMaxMemoryTokens 1000 1000
+      let e1 := addEntryWithEviction [] mCap3 400
+      let e2 := addEntryWithEviction e1 mCap3 400
+      let e3 := addEntryWithEviction e2 mCap3 300
+      s!"[\"memory_retention:fifo_token_budget_eviction\",\"ctx=1000,quota=1000,entries=400+400+300\",\"len={e3.length}:tokens={sumEntryTokens e3}\"]"
+    , s!"[\"memory_retention:temporal_half_life_importance_ladder\",\"half_life_1x\",\"low={halfLifeDecayPct .low}:normal={halfLifeDecayPct .normal}:high={halfLifeDecayPct .high}:critical={halfLifeDecayPct .critical}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

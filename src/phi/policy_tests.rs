@@ -1267,6 +1267,254 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
                 "Lean PA20 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if domain.starts_with("confirm_risk:") {
+            use crate::safety::confirm_view::classify_risk;
+            use serde_json::json;
+            let actual = match spec.as_str() {
+                "shell_exec:git status" => {
+                    let tag = classify_risk("shell_exec", &json!({ "command": "git status" }));
+                    format!("{}:ro={}", tag.label(), tag.is_read_only())
+                }
+                "shell_exec:git diff+unsafe_env" => {
+                    let tag = classify_risk(
+                        "shell_exec",
+                        &json!({
+                            "command": "git diff",
+                            "env": { "GIT_EXTERNAL_DIFF": "./x" }
+                        }),
+                    );
+                    format!("{}:ro={}", tag.label(), tag.is_read_only())
+                }
+                "shell_exec:cargo check" => {
+                    let tag = classify_risk("shell_exec", &json!({ "command": "cargo check" }));
+                    format!("{}:ro={}", tag.label(), tag.is_read_only())
+                }
+                "shell_exec:git status && rm -rf /tmp/x" => {
+                    let tag = classify_risk(
+                        "shell_exec",
+                        &json!({ "command": "git status && rm -rf /tmp/x" }),
+                    );
+                    format!("{}:ro={}", tag.label(), tag.is_read_only())
+                }
+                "cargo_clippy:fix=false_vs_true" => {
+                    let no_fix = classify_risk("cargo_clippy", &json!({ "fix": false }));
+                    let with_fix = classify_risk("cargo_clippy", &json!({ "fix": true }));
+                    format!("{}->{}", no_fix.label(), with_fix.label())
+                }
+                "mcp_custom_probe" => {
+                    let tag = classify_risk("mcp_custom_probe", &json!({}));
+                    format!("{}:ro={}", tag.label(), tag.is_read_only())
+                }
+                other => panic!("unknown confirm_risk spec: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA21 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain.starts_with("resource_pressure:") {
+            use crate::config::{MemoryConfig, ResourceQuotas};
+            use crate::resources::{AdaptiveQuotas, ResourcePressure};
+            let kv = parse_kv(spec);
+            let mem_pct = kv["mem"].parse::<f32>().unwrap() / 100.0;
+            let gpu_pct = kv["gpu"].parse::<f32>().unwrap() / 100.0;
+            let gpu_overheating: bool = kv["hot"].parse().unwrap();
+            let disk_exceeded: bool = kv["disk"].parse().unwrap();
+            let mem_cfg = MemoryConfig::default();
+            let max_ratio = mem_pct.max(gpu_pct);
+            let pressure = if max_ratio > mem_cfg.emergency_threshold {
+                ResourcePressure::Critical
+            } else if max_ratio > mem_cfg.critical_threshold || gpu_overheating || disk_exceeded {
+                ResourcePressure::High
+            } else if max_ratio > mem_cfg.warning_threshold {
+                ResourcePressure::Medium
+            } else if max_ratio > 0.5 {
+                ResourcePressure::Low
+            } else {
+                ResourcePressure::None
+            };
+            let pressure_name = match pressure {
+                ResourcePressure::None => "none",
+                ResourcePressure::Low => "low",
+                ResourcePressure::Medium => "medium",
+                ResourcePressure::High => "high",
+                ResourcePressure::Critical => "critical",
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let adjusted = rt.block_on(async {
+                let quotas = AdaptiveQuotas::new(ResourceQuotas::default());
+                quotas.adjust_for_pressure(pressure).await;
+                quotas.current().await
+            });
+            let actual = format!(
+                "{}:act={}:crit={}:conc={}:ctx={}:q={}",
+                pressure_name,
+                pressure.requires_action(),
+                pressure.is_critical(),
+                adjusted.max_concurrent_requests,
+                adjusted.max_context_tokens,
+                adjusted.max_queued_tasks
+            );
+            assert_eq!(
+                &actual, expected,
+                "Lean PA22 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(guard_op) = domain.strip_prefix("loop_guard:") {
+            use crate::agent::loop_control::{productive_streak, AgentLoop, TurnProgress};
+            use std::collections::VecDeque;
+            let actual = match guard_op {
+                "band_below_80_pct" | "band_at_80_pct" | "band_at_90_pct" => {
+                    let kv = parse_kv(spec);
+                    let iter: usize = kv["iter"].parse().unwrap();
+                    let max: usize = kv["max"].parse().unwrap();
+                    let mut lp = AgentLoop::new(max);
+                    lp.restore_progress(0, iter);
+                    let band = lp.approaching_limit_band();
+                    let warn = lp.approaching_limit_warning().is_some();
+                    format!("band={band}:warn={warn}")
+                }
+                "streak_duplicate_probe_vs_excused_by_edit" => {
+                    let dup_turns = VecDeque::from(vec![
+                        TurnProgress {
+                            had_success: true,
+                            signatures: vec![("cargo_test".into(), 1)],
+                        },
+                        TurnProgress {
+                            had_success: true,
+                            signatures: vec![("cargo_test".into(), 1)],
+                        },
+                    ]);
+                    let excused_turns = VecDeque::from(vec![
+                        TurnProgress {
+                            had_success: true,
+                            signatures: vec![("cargo_test".into(), 1)],
+                        },
+                        TurnProgress {
+                            had_success: true,
+                            signatures: vec![("file_edit".into(), 2), ("cargo_test".into(), 1)],
+                        },
+                    ]);
+                    format!(
+                        "dup_read={}:edit_then_read={}",
+                        productive_streak(&dup_turns, 2),
+                        productive_streak(&excused_turns, 2)
+                    )
+                }
+                "restore_budget_extension_clamp" => {
+                    let kv = parse_kv(spec);
+                    let orig: usize = kv["orig"].parse().unwrap();
+                    let persisted: usize = kv["persisted"].parse().unwrap();
+                    let grants: usize = kv["grants"].parse().unwrap();
+                    let mut lp = AgentLoop::new(orig);
+                    lp.restore_budget_extension(persisted, grants);
+                    format!(
+                        "cap={}:grants={}:ceiling={}",
+                        lp.max_iterations(),
+                        lp.extensions_granted(),
+                        lp.extension_ceiling_reached()
+                    )
+                }
+                other => panic!("unknown loop_guard op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA23 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(mem_op) = domain.strip_prefix("memory_retention:") {
+            use crate::config::Config;
+            use crate::consolidation::{CompactedContent, RecordImportance, TemporalRecord};
+            use crate::memory::AgentMemory;
+            use chrono::{Duration as ChronoDuration, Utc};
+            use std::collections::HashMap;
+            let actual = match mem_op {
+                "derive_cap_and_near_limit" => {
+                    let mut cfg = Config {
+                        context_length: 1000,
+                        ..Default::default()
+                    };
+                    cfg.resources.quotas.max_context_tokens = 2000;
+                    let mut mem = AgentMemory::new(&cfg).unwrap();
+                    let max = mem.max_memory_tokens();
+                    mem.set_total_tokens(807);
+                    let at807 = mem.is_near_limit();
+                    mem.set_total_tokens(808);
+                    let at808 = mem.is_near_limit();
+                    format!("max={max}:at807={at807}:at808={at808}")
+                }
+                "quota_bounds_context_length" => {
+                    let mut cfg = Config {
+                        context_length: 4000,
+                        ..Default::default()
+                    };
+                    cfg.resources.quotas.max_context_tokens = 1000;
+                    let mut mem = AgentMemory::new(&cfg).unwrap();
+                    let max = mem.max_memory_tokens();
+                    mem.set_total_tokens(808);
+                    format!("max={max}:near={}", mem.is_near_limit())
+                }
+                "fifo_token_budget_eviction" => {
+                    let mut cfg = Config {
+                        context_length: 1000,
+                        ..Default::default()
+                    };
+                    cfg.resources.quotas.max_context_tokens = 1000;
+                    let mut mem = AgentMemory::new(&cfg).unwrap();
+                    mem.add_raw_entry("t1".into(), "user".into(), "a".into(), 400);
+                    mem.add_raw_entry("t2".into(), "user".into(), "b".into(), 400);
+                    mem.add_raw_entry("t3".into(), "user".into(), "c".into(), 300);
+                    format!("len={}:tokens={}", mem.len(), mem.total_tokens())
+                }
+                "temporal_half_life_importance_ladder" => {
+                    let now = Utc::now();
+                    let created = now - ChronoDuration::hours(24);
+                    let score_pct = |importance: RecordImportance| -> u64 {
+                        let rec = TemporalRecord {
+                            id: "r1".into(),
+                            created_at: created,
+                            source_timestamps: vec![created],
+                            sequence_order: 1,
+                            causal_parents: vec![],
+                            causal_children: vec![],
+                            decay_score: 1.0,
+                            access_count: 0,
+                            last_accessed: created,
+                            content: CompactedContent {
+                                summary: "s".into(),
+                                key_facts: vec![],
+                                entities: vec![],
+                                actions: vec![],
+                                outcomes: vec![],
+                                insights: vec![],
+                            },
+                            multimodal_refs: vec![],
+                            source_ids: vec![],
+                            tags: vec![],
+                            importance,
+                            session_id: None,
+                            metadata: HashMap::new(),
+                        };
+                        (rec.decay_score_at(now, 24.0) * 100.0).round() as u64
+                    };
+                    format!(
+                        "low={}:normal={}:high={}:critical={}",
+                        score_pct(RecordImportance::Low),
+                        score_pct(RecordImportance::Normal),
+                        score_pct(RecordImportance::High),
+                        score_pct(RecordImportance::Critical),
+                    )
+                }
+                other => panic!("unknown memory_retention op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA24 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -1276,5 +1524,5 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 107, "all 107 PA1–PA20 rows must be checked");
+    assert_eq!(checked, 127, "all 127 PA1–PA24 rows must be checked");
 }

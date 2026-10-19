@@ -34,7 +34,7 @@ export const QUICK_CHIPS = Object.freeze([
   {
     id: 'check_formal',
     label: '📐 Lean Proofs',
-    prompt: 'Show live Lean 4 formal verification status and PA1–PA20 / PT1–PT5 invariants.'
+    prompt: 'Show live Lean 4 formal verification status and PA1–PA24 / PT1–PT5 invariants.'
   }
 ]);
 

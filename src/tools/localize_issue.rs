@@ -330,13 +330,15 @@ fn best_function_in_file(content: &str, query_terms: &[String]) -> String {
     });
     static CLASS_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?m)^\s*(?:pub\s+)?class\s+(\w+)").unwrap());
+    static ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap());
 
     let mut best = ("", 0usize);
     for cap in FN_RE.captures_iter(content) {
         let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let name_lower = name.to_lowercase();
         let score = query_terms
             .iter()
-            .filter(|t| name.to_lowercase().contains(*t))
+            .filter(|t| name_lower.contains(*t))
             .count();
         if score > best.1 {
             best = (name, score);
@@ -344,9 +346,10 @@ fn best_function_in_file(content: &str, query_terms: &[String]) -> String {
     }
     for cap in DEF_RE.captures_iter(content) {
         let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let name_lower = name.to_lowercase();
         let score = query_terms
             .iter()
-            .filter(|t| name.to_lowercase().contains(*t))
+            .filter(|t| name_lower.contains(*t))
             .count();
         if score > best.1 {
             best = (name, score);
@@ -354,9 +357,10 @@ fn best_function_in_file(content: &str, query_terms: &[String]) -> String {
     }
     for cap in CLASS_RE.captures_iter(content) {
         let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let name_lower = name.to_lowercase();
         let score = query_terms
             .iter()
-            .filter(|t| name.to_lowercase().contains(*t))
+            .filter(|t| name_lower.contains(*t))
             .count();
         if score > best.1 {
             best = (name, score);
@@ -365,12 +369,12 @@ fn best_function_in_file(content: &str, query_terms: &[String]) -> String {
 
     if best.0.is_empty() {
         // Fallback: look for any camelCase / snake_case identifier that overlaps.
-        let id_re = Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap();
-        for m in id_re.find_iter(content) {
+        for m in ID_RE.find_iter(content) {
             let name = m.as_str();
+            let name_lower = name.to_lowercase();
             let score = query_terms
                 .iter()
-                .filter(|t| name.to_lowercase().contains(*t))
+                .filter(|t| name_lower.contains(*t))
                 .count();
             if score > best.1 {
                 best = (name, score);

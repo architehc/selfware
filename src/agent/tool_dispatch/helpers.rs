@@ -411,19 +411,18 @@ where
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
     let mut required = std::collections::BTreeSet::new();
+    let mut cache = CACHE.lock();
 
     for tool_name in tool_names {
-        let escaped = regex::escape(tool_name);
-        let patterns = [
-            format!(
-                r"(?i)\b(?:use|call|invoke|run)\s+(?:the\s+)?`?{}`?(?:\s+tool)?\b",
-                escaped
-            ),
-            format!(r"(?i)\busing\s+`?{}`?(?:\s+tool)?\b", escaped),
-        ];
-
-        let mut cache = CACHE.lock();
         let regexes = cache.entry(tool_name.to_string()).or_insert_with(|| {
+            let escaped = regex::escape(tool_name);
+            let patterns = [
+                format!(
+                    r"(?i)\b(?:use|call|invoke|run)\s+(?:the\s+)?`?{}`?(?:\s+tool)?\b",
+                    escaped
+                ),
+                format!(r"(?i)\busing\s+`?{}`?(?:\s+tool)?\b", escaped),
+            ];
             patterns
                 .iter()
                 .filter_map(|pattern| regex::Regex::new(pattern).ok())
@@ -434,6 +433,7 @@ where
             required.insert(tool_name.to_string());
         }
     }
+    drop(cache);
 
     let disallowed = extract_explicit_disallowed_tools(task_context);
     required.retain(|tool_name| !disallowed.contains(tool_name));

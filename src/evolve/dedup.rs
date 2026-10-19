@@ -79,7 +79,7 @@ impl DeduplicationAnalyzer {
         for node in &graph.nodes {
             if matches!(
                 node.layer,
-                NodeLayer::Symbol | NodeLayer::Concept | NodeLayer::Preset
+                NodeLayer::Structure | NodeLayer::Symbol | NodeLayer::Concept | NodeLayer::Preset
             ) {
                 continue;
             }

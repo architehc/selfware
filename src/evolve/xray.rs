@@ -36,7 +36,7 @@ fn impl_re() -> &'static Regex {
 
 fn ident_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"[A-Z][A-Za-z0-9_]*").expect("valid ident regex"))
+    RE.get_or_init(|| Regex::new(r"\b[A-Z][A-Za-z0-9_]*\b").expect("valid ident regex"))
 }
 
 /// One place a concept is declared.
@@ -79,10 +79,8 @@ pub struct ConceptXray {
 
 struct FileEntry {
     module: String,
-    /// Distinct capitalized identifiers present in the file (for co-occurrence).
-    idents: HashSet<String>,
-    /// Full text, kept for exact mention counting.
-    text: String,
+    /// Distinct capitalized identifiers present in the file mapped to their word-bounded mention count.
+    ident_counts: HashMap<String, usize>,
 }
 
 /// A prebuilt index over the source tree; answers concept x-ray queries.
@@ -165,14 +163,13 @@ impl ConceptIndex {
                         impls.push((tr, c[2].to_string()));
                     }
                 }
-                let idents: HashSet<String> = ident_re()
-                    .find_iter(&text)
-                    .map(|m| m.as_str().to_string())
-                    .collect();
+                let mut ident_counts: HashMap<String, usize> = HashMap::new();
+                for m in ident_re().find_iter(&text) {
+                    *ident_counts.entry(m.as_str().to_string()).or_default() += 1;
+                }
                 files.push(FileEntry {
                     module,
-                    idents,
-                    text,
+                    ident_counts,
                 });
             }
         }
@@ -194,7 +191,7 @@ impl ConceptIndex {
     pub fn hubs(&self, limit: usize) -> Vec<RelatedConcept> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for f in &self.files {
-            for c in &f.idents {
+            for c in f.ident_counts.keys() {
                 if self.concept_names.contains(c) {
                     *counts.entry(c.as_str()).or_default() += 1;
                 }
@@ -224,22 +221,20 @@ impl ConceptIndex {
     /// Produce the x-ray for `concept`, or `None` if it is not a defined type.
     pub fn xray(&self, concept: &str) -> Option<ConceptXray> {
         let definitions = self.defs.get(concept)?.clone();
-        let word = Regex::new(&format!(r"\b{}\b", regex::escape(concept))).ok()?;
 
         let mut refs: BTreeMap<String, usize> = BTreeMap::new();
         let mut total = 0usize;
         let mut cooccur: HashMap<&str, usize> = HashMap::new();
         for f in &self.files {
-            if !f.idents.contains(concept) {
+            let Some(&n) = f.ident_counts.get(concept) else {
                 continue;
-            }
-            let n = word.find_iter(&f.text).count();
+            };
             if n == 0 {
                 continue;
             }
             *refs.entry(f.module.clone()).or_default() += n;
             total += n;
-            for c in &f.idents {
+            for c in f.ident_counts.keys() {
                 if c != concept && self.concept_names.contains(c) {
                     *cooccur.entry(c.as_str()).or_default() += 1;
                 }

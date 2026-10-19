@@ -779,7 +779,7 @@ pub fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value 
     })
 }
 
-/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA20 and PT1–PT5.
+/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA24 and PT1–PT5.
 ///
 /// Honest status (`AGENTS.md` Rule 3): `trust_state` is `"table_conformance_verified"` because
 /// Lean 4 kernel elaboration runs in `scripts/check_formal.sh` while the live binary verifies
@@ -927,6 +927,30 @@ pub fn verify_phi_formal_invariants() -> Value {
                 "title": "SWL Guardrail Enforcer Honest Accounting & Fail-Closed Block",
                 "theorems": ["guardrail_eval_error_with_block_blocks", "guardrail_step_conserves_total", "guardrail_blocked_increments_iff_should_block"],
                 "rust_citation": "src/swl/guardrails/types.rs:371",
+            },
+            {
+                "id": "PA21",
+                "title": "Safety Confirm-View 8-Tier RiskTag Lattice & Shell Fail-Closed Guard",
+                "theorems": ["risk_tag_join_severity_eq_max", "shell_exec_reads_iff_all_guards_hold", "unclassified_dominates_all_risk_tags"],
+                "rust_citation": "src/safety/confirm_view.rs:642",
+            },
+            {
+                "id": "PA22",
+                "title": "Resource Pressure & Adaptive Quotas Governor Lattice",
+                "theorems": ["emergency_ratio_forces_critical", "overheating_or_disk_requires_action", "critical_clamps_context_and_queue"],
+                "rust_citation": "src/resources/hardware.rs:189",
+            },
+            {
+                "id": "PA23",
+                "title": "Agent Loop Guard, Productive Streak & Budget Extension Bounds",
+                "theorems": ["approaching_limit_band_values", "restore_budget_never_shrinks_cap_and_clamps_grants", "intervening_mutation_excuses_duplicate"],
+                "rust_citation": "src/agent/loop_control.rs:340",
+            },
+            {
+                "id": "PA24",
+                "title": "Memory Budget FIFO Eviction & Temporal Decay Monotonicity",
+                "theorems": ["derived_memory_cap_le_both_bounds", "evict_oldest_fits_when_new_entry_within_cap", "importance_decay_strictly_monotone"],
+                "rust_citation": "src/memory/mod.rs:82",
             },
             {
                 "id": "PT1-PT5",
@@ -1111,6 +1135,42 @@ pub fn generate_formal_drill(seed: usize) -> BossBattleDrill {
             correct: "true — Block guardrails fail closed on evaluation errors and conserve total = passed + failed + errors",
             wrong_a: "false — only EvaluationResult::Fail triggers ViolationAction::Block",
             wrong_b: "Omits evaluation errors from total_checked",
+        },
+        ProofQuestion {
+            id: "PA21:shell_exec_unsafe_env_or_custom_shell_never_reads",
+            question: "PROOF DRILL [PA21]: Under `shell_exec_unsafe_env_or_custom_shell_never_reads`, how does `classify_risk` tag `git diff` when `env` sets `GIT_EXTERNAL_DIFF`?",
+            citation: "src/safety/confirm_view.rs:705",
+            snippet: "theorem shell_exec_unsafe_env_or_custom_shell_never_reads : finalizeShellExecRisk seg obs rd env sh ≠ .reads",
+            correct: "RiskTag::RunsCommand — unsafe env vars or custom shells upgrade observational reads so confirmation is required",
+            wrong_a: "RiskTag::Reads because `git diff` is an observational subcommand",
+            wrong_b: "RiskTag::DeletesFiles",
+        },
+        ProofQuestion {
+            id: "PA22:critical_clamps_context_and_queue",
+            question: "PROOF DRILL [PA22]: Under `critical_clamps_context_and_queue`, how does `AdaptiveQuotas::adjust_for_pressure` clamp quotas at `ResourcePressure::Critical`?",
+            citation: "src/resources/quotas.rs:45",
+            snippet: "theorem critical_clamps_context_and_queue : maxContextTokens = 8192 ∧ maxQueuedTasks = 10",
+            correct: "Clamps max_concurrent_requests=1, max_context_tokens=8192, max_queued_tasks=10, and halves GPU memory quota",
+            wrong_a: "Leaves context tokens unchanged and only logs a warning",
+            wrong_b: "Halves max_concurrent_requests to 2",
+        },
+        ProofQuestion {
+            id: "PA23:intervening_mutation_excuses_duplicate",
+            question: "PROOF DRILL [PA23]: Under `intervening_mutation_excuses_duplicate`, when does `productive_streak` allow two turns to run the same `cargo_test` command?",
+            citation: "src/agent/loop_control.rs:365",
+            snippet: "theorem intervening_mutation_excuses_duplicate : productivePairStreak true true sig sig true = true",
+            correct: "When an intervening mutating tool call (e.g. `file_edit`) occurred between the two test runs",
+            wrong_a: "Whenever both `cargo_test` calls succeeded",
+            wrong_b: "Never — any duplicate tool signature breaks a productive streak",
+        },
+        ProofQuestion {
+            id: "PA24:evict_oldest_fits_when_new_entry_within_cap",
+            question: "PROOF DRILL [PA24]: Under `evict_oldest_fits_when_new_entry_within_cap`, how does `AgentMemory::add_raw_entry` enforce `max_memory_tokens`?",
+            citation: "src/memory/mod.rs:195",
+            snippet: "theorem evict_oldest_fits_when_new_entry_within_cap : sumEntryTokens (addEntryWithEviction entries maxMem newTok) ≤ maxMem",
+            correct: "Evicts oldest entries FIFO until `total_tokens + new_tokens <= max_memory_tokens` before appending",
+            wrong_a: "Rejects the new entry when memory is full",
+            wrong_b: "Clears all memory entries whenever `is_near_limit()` is true",
         },
         ProofQuestion {
             id: "PT1:tests_never_discharge_review",

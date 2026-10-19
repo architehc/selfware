@@ -2026,10 +2026,7 @@ async fn read_discovered_context_file(path: &std::path::Path) -> Option<String> 
         if crate::safety::source_context::path_contains_private_discovery_state(&path) {
             return None;
         }
-        let mut file = crate::safety::source_context::open_broad_discovery_regular(&path).ok()?;
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
-        Some(buf)
+        crate::evolve::graph::read_broad_discovery_utf8(&path).ok()
     })
     .await
     .ok()

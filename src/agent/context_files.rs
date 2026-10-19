@@ -146,10 +146,7 @@ async fn read_walked_context_file(path: &std::path::Path) -> Option<String> {
         if crate::safety::source_context::path_contains_private_discovery_state(&path) {
             return None;
         }
-        let mut file = crate::safety::source_context::open_broad_discovery_regular(&path).ok()?;
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut file, &mut buf).ok()?;
-        Some(buf)
+        crate::evolve::graph::read_broad_discovery_utf8(&path).ok()
     })
     .await
     .ok()
@@ -282,6 +279,8 @@ impl Agent {
         let workspace = ContextWorkspace::capture();
         let mut refreshed = 0;
         let mut refreshed_paths = Vec::new();
+        let budget = self.max_context_tokens;
+        let mut current = crate::token_count::estimate_messages_tokens(&self.messages);
         for path_str in &stale_in_context {
             let tracked_path = std::path::Path::new(path_str);
             let path = workspace.anchor(tracked_path);
@@ -301,8 +300,6 @@ impl Agent {
                         &[tracked_path, &path],
                     );
                     if !existing_indices.is_empty() {
-                        let budget = self.max_context_tokens;
-                        let current = crate::token_count::estimate_messages_tokens(&self.messages);
                         let old = messages_at_indices_tokens(&self.messages, &existing_indices);
                         let replacement = crate::token_count::estimate_messages_tokens(
                             std::slice::from_ref(&new_message),
@@ -317,6 +314,7 @@ impl Agent {
                             );
                             continue;
                         }
+                        current = projected;
                         replace_context_file_messages(
                             &mut self.messages,
                             &existing_indices,
@@ -330,6 +328,7 @@ impl Agent {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.remove_resolved_context_file(path_str, &path);
+                    current = crate::token_count::estimate_messages_tokens(&self.messages);
                 }
                 Err(error) => {
                     warn!(path = %path.display(), %error, "Could not refresh context file")
@@ -503,6 +502,7 @@ impl Agent {
         let workspace = ContextWorkspace::capture();
         let mut loaded = 0;
         let budget = self.max_context_tokens;
+        let mut current = crate::token_count::estimate_messages_tokens(&self.messages);
         let mut refreshed_paths = Vec::new();
         for path_str in &files {
             let tracked_path = std::path::Path::new(path_str);
@@ -523,7 +523,6 @@ impl Agent {
                         &self.messages,
                         &[tracked_path, &path],
                     );
-                    let current = crate::token_count::estimate_messages_tokens(&self.messages);
                     let old_tokens = messages_at_indices_tokens(&self.messages, &existing_indices);
                     let projected = current
                         .saturating_sub(old_tokens)
@@ -537,6 +536,7 @@ impl Agent {
                         );
                         continue;
                     }
+                    current = projected;
                     replace_context_file_messages(
                         &mut self.messages,
                         &existing_indices,
@@ -553,6 +553,7 @@ impl Agent {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.remove_resolved_context_file(path_str, &path);
+                    current = crate::token_count::estimate_messages_tokens(&self.messages);
                 }
                 Err(error) => {
                     warn!(path = %path.display(), %error, "Could not reload context file")

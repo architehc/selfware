@@ -22,25 +22,48 @@ const FIM_INSTRUCTION_MAX_LEN: usize = 500;
 /// 2. Strips common prompt-injection patterns (e.g. "ignore previous instructions").
 /// 3. Truncates to [`FIM_INSTRUCTION_MAX_LEN`] characters.
 fn sanitize_fim_instruction(raw: &str) -> String {
-    // ── Step 1: Remove FIM / special model tokens ──────────────────
-    let fim_tokens: &[&str] = &[
-        "<|fim_prefix|>",
-        "<|fim_suffix|>",
-        "<|fim_middle|>",
-        "<|endoftext|>",
-        "<|file_separator|>",
-        "<|im_start|>",
-        "<|im_end|>",
-        "<|pad|>",
-    ];
+    use std::sync::LazyLock;
 
+    static FIM_TOKEN_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        [
+            "<|fim_prefix|>",
+            "<|fim_suffix|>",
+            "<|fim_middle|>",
+            "<|endoftext|>",
+            "<|file_separator|>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|pad|>",
+        ]
+        .iter()
+        .filter_map(|token| Regex::new(&format!("(?i){}", regex::escape(token))).ok())
+        .collect()
+    });
+
+    static INJECTION_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        [
+            r"(?i)ignore\s+(all\s+)?previous",
+            r"(?i)disregard\s+(all\s+)?(previous\s+)?instructions?",
+            r"(?i)forget\s+(all\s+)?(previous\s+)?instructions?",
+            r"(?i)override\s+(all\s+)?(previous\s+)?instructions?",
+            r"(?i)system\s*:",
+            r"(?i)user\s*:",
+            r"(?i)assistant\s*:",
+            r"(?i)new\s+instructions?\s*:",
+        ]
+        .iter()
+        .filter_map(|pat| Regex::new(pat).ok())
+        .collect()
+    });
+
+    static WS_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\s{2,}").expect("valid whitespace regex"));
+
+    // ── Step 1: Remove FIM / special model tokens ──────────────────
     let mut sanitized = raw.to_string();
-    for token in fim_tokens {
+    for re in FIM_TOKEN_RES.iter() {
         // Case-insensitive replacement so e.g. "<|FIM_PREFIX|>" is also caught.
-        let pattern = regex::escape(token);
-        if let Ok(re) = Regex::new(&format!("(?i){}", pattern)) {
-            sanitized = re.replace_all(&sanitized, "").to_string();
-        }
+        sanitized = re.replace_all(&sanitized, "").to_string();
     }
     // Any other special-token opener (`<｜…｜>`, `<think>`, `</s>`,
     // `<start_of_turn>`, unicode-pipe lookalikes): drop the opener so no
@@ -48,27 +71,12 @@ fn sanitize_fim_instruction(raw: &str) -> String {
     sanitized = crate::agent::result_envelope::strip_special_token_openers(&sanitized);
 
     // ── Step 2: Remove common injection patterns ───────────────────
-    let injection_patterns: &[&str] = &[
-        r"(?i)ignore\s+(all\s+)?previous",
-        r"(?i)disregard\s+(all\s+)?(previous\s+)?instructions?",
-        r"(?i)forget\s+(all\s+)?(previous\s+)?instructions?",
-        r"(?i)override\s+(all\s+)?(previous\s+)?instructions?",
-        r"(?i)system\s*:",
-        r"(?i)user\s*:",
-        r"(?i)assistant\s*:",
-        r"(?i)new\s+instructions?\s*:",
-    ];
-
-    for pat in injection_patterns {
-        if let Ok(re) = Regex::new(pat) {
-            sanitized = re.replace_all(&sanitized, "").to_string();
-        }
+    for re in INJECTION_RES.iter() {
+        sanitized = re.replace_all(&sanitized, "").to_string();
     }
 
     // Collapse any resulting runs of whitespace.
-    if let Ok(re) = Regex::new(r"\s{2,}") {
-        sanitized = re.replace_all(&sanitized, " ").to_string();
-    }
+    sanitized = WS_RE.replace_all(&sanitized, " ").to_string();
     let sanitized = sanitized.trim().to_string();
 
     // ── Step 3: Truncate to max length ─────────────────────────────

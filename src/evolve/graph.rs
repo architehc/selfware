@@ -80,7 +80,19 @@ impl GraphBuilder {
         let chunk_size = inventory.len().div_ceil(worker_count).max(1);
         let test_files = &test_partition.files;
 
-        type ScannedFileEntry = (Node, Option<(String, String)>);
+        let mut symbols_by_rel: HashMap<String, Vec<super::symbols::SymbolDecl>> =
+            HashMap::with_capacity(if self.symbols { inventory.len() } else { 0 });
+        let mut imports_by_rel: HashMap<String, Vec<Vec<String>>> =
+            HashMap::with_capacity(inventory.len());
+        let extract_symbols = self.symbols;
+
+        type ScannedRustEntry = (
+            String,
+            String,
+            Vec<super::symbols::SymbolDecl>,
+            Vec<Vec<String>>,
+        );
+        type ScannedFileEntry = (Node, Option<ScannedRustEntry>);
         let chunk_results: Vec<Result<Vec<ScannedFileEntry>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = inventory
                 .chunks(chunk_size)
@@ -131,7 +143,15 @@ impl GraphBuilder {
                             populate_metrics_with_content(&mut node, path, &content, partitioner)?;
                             let rust_entry = if is_rust_source(path) {
                                 analyzer.analyze_node_with_content(&mut node, &content);
-                                Some((rel_str, content))
+                                let decls =
+                                    if extract_symbols && node.layer == super::NodeLayer::Code {
+                                        super::symbols::extract_pub_symbols(&content)
+                                    } else {
+                                        Vec::new()
+                                    };
+                                let imported =
+                                    imported_modules_from_content(&content, &node.id, partitioner);
+                                Some((rel_str, content, decls, imported))
                             } else {
                                 None
                             };
@@ -153,7 +173,11 @@ impl GraphBuilder {
 
         for chunk_res in chunk_results {
             for (node, rust_entry) in chunk_res? {
-                if let Some((rel_str, content)) = rust_entry {
+                if let Some((rel_str, content, decls, imported)) = rust_entry {
+                    if !decls.is_empty() {
+                        symbols_by_rel.insert(rel_str.clone(), decls);
+                    }
+                    imports_by_rel.insert(rel_str.clone(), imported);
                     content_by_rel.insert(rel_str, content);
                 }
                 nodes.push(node);
@@ -180,11 +204,7 @@ impl GraphBuilder {
                 let Some(rel) = node.path.as_deref() else {
                     continue;
                 };
-                let Some(content) = content_by_rel.get(rel) else {
-                    continue;
-                };
-                let decls = super::symbols::extract_pub_symbols(content);
-                if !decls.is_empty() {
+                if let Some(decls) = symbols_by_rel.remove(rel) {
                     file_symbols.push((node.id.clone(), rel.to_string(), decls));
                 }
             }
@@ -222,10 +242,10 @@ impl GraphBuilder {
             let Some(path) = node.path.as_deref() else {
                 continue;
             };
-            let Some(content) = content_by_rel.get(path) else {
+            let Some(imported_list) = imports_by_rel.remove(path) else {
                 continue;
             };
-            for imported in imported_modules_from_content(content, &node.id, &partitioner) {
+            for imported in imported_list {
                 if let Some(target) = resolve_import(&imported, &node_ids, longest_id) {
                     if target != node.id {
                         edges.push(Edge {

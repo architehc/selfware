@@ -449,14 +449,9 @@ fn with_temp_cwd<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let _guard = crate::test_support::CwdGuard::hold();
-    let original = std::env::current_dir().expect("failed to get cwd");
     let tmp = tempfile::tempdir().expect("failed to create temp dir");
-    std::env::set_current_dir(&tmp).expect("failed to change to temp dir");
-    let result = f();
-    // Always restore, even if f() panicked
-    std::env::set_current_dir(&original).expect("failed to restore cwd");
-    result
+    let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+    f()
 }
 
 #[test]
