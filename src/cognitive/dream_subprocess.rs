@@ -292,7 +292,7 @@ pub async fn run_dream_consolidation(
     // failure instead of the old "success with a discarded LLM response".
     // With nothing to consolidate, the housekeeping phases alone suffice.
     let consolidate_failed = !memories.is_empty() && consolidation.is_none();
-    let success = !consolidate_failed && (errors.is_empty() || phases_completed.len() >= 3);
+    let success = !consolidate_failed && errors.is_empty();
 
     // Update persisted state and release the consolidation lock file
     let state_dir = dream_config.state_path();
@@ -350,7 +350,7 @@ async fn orient_phase(project_path: &Path) -> Result<Vec<PathBuf>> {
             }
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == "json" || ext == "jsonl" {
+                if ext == "json" || ext == "jsonl" || ext == "md" {
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if name.contains("session") || name.contains("memory") {
                         session_files.push(path);
@@ -399,9 +399,32 @@ async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<
             }
         };
 
-        // Try to parse as session log and extract memories
-        // For now, we treat each line as a potential memory
         for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                if let Ok(serde_json::Value::Object(obj)) =
+                    serde_json::from_str::<serde_json::Value>(trimmed)
+                {
+                    let text = ["memory", "fact", "summary", "content"]
+                        .iter()
+                        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    if let Some(text) = text {
+                        let date = ["date", "timestamp"]
+                            .iter()
+                            .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+                            .map(|s| s.to_string());
+                        all_memories.push(MemoryEntry {
+                            date,
+                            content: text.to_string(),
+                            section: MemorySection::Facts,
+                            raw_line: line.to_string(),
+                        });
+                    }
+                    continue;
+                }
+            }
             if let Some(entry) = MemoryEntry::parse(line, &MemorySection::Facts) {
                 all_memories.push(entry);
             }

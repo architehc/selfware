@@ -67,6 +67,22 @@ impl QualityAnalyzer {
         Ok(())
     }
 
+    /// Analyze a single-file Rust node using its already-loaded source content
+    /// so `GraphBuilder::scan_src` does not re-open and re-read the file twice.
+    pub fn analyze_node_with_content(&self, node: &mut Node, content: &str) {
+        let Some(ref path) = node.path.clone() else {
+            return;
+        };
+
+        node.warning_count = self
+            .collect_compiler_warnings
+            .then(|| self.warnings_for(path))
+            .flatten();
+        node.complexity = Some(cyclomatic_complexity_str(content));
+        node.dead_code_ratio = Some(dead_code_ratio_str(content));
+        node.coverage = None;
+    }
+
     /// Number of compiler warnings in files under `path` (e.g. "src/agent").
     /// Returns `None` if `cargo check` is unavailable or failed.
     fn warnings_for(&self, path: &str) -> Option<usize> {
@@ -145,7 +161,7 @@ fn read_rs_files(path: &Path) -> Result<Vec<String>> {
     };
     if metadata.is_file() {
         if path.extension().is_some_and(|e| e == "rs") {
-            contents.push(std::fs::read_to_string(path)?);
+            contents.push(super::graph::read_broad_discovery_utf8(path)?);
         }
     } else if metadata.is_dir() {
         for entry in walkdir::WalkDir::new(path)
@@ -158,24 +174,40 @@ fn read_rs_files(path: &Path) -> Result<Vec<String>> {
                 && !entry.path_is_symlink()
                 && entry.path().extension().is_some_and(|e| e == "rs")
             {
-                contents.push(std::fs::read_to_string(entry.path())?);
+                if let Ok(content) = super::graph::read_broad_discovery_utf8(entry.path()) {
+                    contents.push(content);
+                }
             }
         }
     }
     Ok(contents)
 }
 
+fn cyclomatic_complexity_str(content: &str) -> f64 {
+    let mut score = 1.0;
+    // Note: `" if "` already matches `" else if "`, so `" else if "` is not
+    // listed separately to avoid double-counting.
+    for token in [" if ", " match ", " for ", " while ", " loop ", "&&", "||"] {
+        score += content.matches(token).count() as f64;
+    }
+    score
+}
+
+fn dead_code_ratio_str(content: &str) -> f64 {
+    let allows = content.matches("#[allow(dead_code)]").count();
+    let fns = content.matches("fn ").count();
+    if fns == 0 {
+        0.0
+    } else {
+        (allows as f64 / fns as f64).min(1.0)
+    }
+}
+
 /// Estimated cyclomatic complexity: 1 + decision points, summed over all files.
 pub fn cyclomatic_complexity(path: &Path) -> Result<f64> {
     let mut total = 0.0;
     for content in read_rs_files(path)? {
-        let mut score = 1.0;
-        // Note: `" if "` already matches `" else if "`, so `" else if "` is not
-        // listed separately to avoid double-counting.
-        for token in [" if ", " match ", " for ", " while ", " loop ", "&&", "||"] {
-            score += content.matches(token).count() as f64;
-        }
-        total += score;
+        total += cyclomatic_complexity_str(&content);
     }
     Ok(total)
 }

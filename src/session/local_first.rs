@@ -39,6 +39,21 @@ impl LocalFirstCoordinator {
         self.response_cache.record_miss();
     }
 
+    /// Invalidate cached git status and diff responses
+    pub fn invalidate_git(&mut self) {
+        self.response_cache.invalidate_git();
+    }
+
+    /// Invalidate cached responses for a file path, tree-scoped tools, and git status/diff
+    pub fn invalidate_git_and_path(&mut self, path: &str) {
+        self.response_cache.invalidate_git_and_path(path);
+    }
+
+    /// Clear all cached responses
+    pub fn clear(&mut self) {
+        self.response_cache.clear();
+    }
+
     /// Get statistics
     pub fn stats(&self) -> LocalFirstStats {
         let cache_stats = self.response_cache.stats();
@@ -72,6 +87,11 @@ pub struct LocalCacheEntry<T> {
     size_bytes: usize,
 }
 
+fn is_tree_scoped_key(key: &str) -> bool {
+    key.split_once(':')
+        .is_some_and(|(tool, _)| crate::session::cache::TREE_SCOPED_TOOLS.contains(&tool))
+}
+
 impl LocalCache<String> {
     /// Create a new cache with default settings
     pub fn new() -> Self {
@@ -85,7 +105,7 @@ impl LocalCache<String> {
 
     /// Insert an entry
     pub fn put(&mut self, entry: LocalCacheEntry<String>) {
-        if self.entries.len() >= self.max_entries {
+        if self.entries.len() >= self.max_entries && !self.entries.contains_key(&entry.key) {
             // Simple eviction: remove first entry
             if let Some(first_key) = self.entries.keys().next().cloned() {
                 self.entries.remove(&first_key);
@@ -107,6 +127,27 @@ impl LocalCache<String> {
 
     pub fn record_miss(&mut self) {
         self.misses += 1;
+    }
+
+    /// Invalidate git status and git diff entries
+    pub fn invalidate_git(&mut self) {
+        self.entries
+            .retain(|key, _| !key.starts_with("git_status") && !key.starts_with("git_diff"));
+    }
+
+    /// Invalidate entries related to a file path, tree-scoped tools, and git status/diff
+    pub fn invalidate_git_and_path(&mut self, path: &str) {
+        self.entries.retain(|key, _| {
+            !key.contains(path)
+                && !key.starts_with("git_status")
+                && !key.starts_with("git_diff")
+                && !is_tree_scoped_key(key)
+        });
+    }
+
+    /// Clear all cached entries
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 
     /// Get cache statistics

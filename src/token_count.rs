@@ -17,7 +17,9 @@ use tokenizers::Tokenizer;
 use tracing::{debug, warn};
 
 /// Maximum number of cached token counts before the cache is cleared.
-const MAX_CACHE_ENTRIES: usize = 1_000;
+/// Sized to hold a full repository graph scan (files + inline test spans +
+/// symbol spans + Compact/Lite tier projections) without mid-scan eviction.
+const MAX_CACHE_ENTRIES: usize = 16_384;
 
 /// Measured multiplier applied to tokenizer counts on CODE-SHAPED content.
 ///

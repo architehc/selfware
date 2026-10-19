@@ -256,4 +256,45 @@ async fn test_orient_and_prune_reject_symlinks() {
         err.to_string().contains("dream memory file"),
         "expected symlink rejection for dream memory file, got: {err}"
     );
+
+    // 4. Full dream run with failing prune phase must report success == false (Rule 3)
+    let (project, _memory_dir, auto_config, _fixture_dream_config, _server) =
+        dream_fixture("## Facts (consolidated)\n- Project uses Rust\n").await;
+    let res = run_dream_consolidation(project.path(), "test_project", &auto_config, &dream_config)
+        .await
+        .unwrap();
+    assert!(
+        !res.success,
+        "dream must not report success when Prune & Index fails: {:?}",
+        res.errors
+    );
+}
+
+#[tokio::test]
+async fn test_gather_phase_parses_jsonl_and_md_and_skips_empty_json() {
+    let dir = tempdir().unwrap();
+    let sw_dir = dir.path().join(".selfware");
+    tokio::fs::create_dir(&sw_dir).await.unwrap();
+    tokio::fs::write(
+        sw_dir.join("session_log.jsonl"),
+        "{}\n{\"date\":\"2026-07-01\",\"memory\":\"JSONL memory entry\"}\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        sw_dir.join("memory_notes.md"),
+        "- [2026-07-02] Markdown memory entry\n",
+    )
+    .await
+    .unwrap();
+
+    let files = orient_phase(dir.path()).await.unwrap();
+    assert_eq!(files.len(), 2);
+
+    let memories = gather_phase(&files, 10).await.unwrap();
+    assert_eq!(memories.len(), 2);
+    assert!(memories.iter().any(|m| m.content == "JSONL memory entry"));
+    assert!(memories
+        .iter()
+        .any(|m| m.content == "Markdown memory entry"));
 }

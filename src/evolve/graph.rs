@@ -71,9 +71,11 @@ impl GraphBuilder {
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
         let test_partition = discover_test_sources(project_root, &source_files)?;
+        let mut content_by_rel: HashMap<String, String> = HashMap::with_capacity(inventory.len());
         for entry in inventory {
             let path = entry.path;
             let relative = path.strip_prefix(project_root).unwrap_or(&path);
+            let rel_str = path_string(relative);
             let classification = if test_partition.files.contains(&path) {
                 RepositoryFileClass::Test
             } else {
@@ -105,25 +107,25 @@ impl GraphBuilder {
                 && !is_tooling_module;
             let mut node = match source_set {
                 SourceSet::Test | SourceSet::Example => {
-                    let mut n = Node::test(&id, &path_string(relative));
+                    let mut n = Node::test(&id, &rel_str);
                     n.classification = file_class.to_string();
                     n
                 }
                 SourceSet::Code if is_code => {
-                    let mut n = Node::code(&id, &path_string(relative));
+                    let mut n = Node::code(&id, &rel_str);
                     n.classification = file_class.to_string();
                     n
                 }
                 // Non-source files under src (web assets, markup, shell
                 // scripts) and everything outside src (data, scripts, config,
                 // vendored) stay out of the code tiers.
-                SourceSet::Code | SourceSet::Tooling => {
-                    Node::auxiliary(&id, &path_string(relative), file_class)
-                }
+                SourceSet::Code | SourceSet::Tooling => Node::auxiliary(&id, &rel_str, file_class),
             };
-            populate_metrics(&mut node, &path, &partitioner)?;
+            let content = read_broad_discovery_utf8(&path)?;
+            populate_metrics_with_content(&mut node, &path, &content, &partitioner)?;
             if is_rust_source(&path) {
-                analyze_quality(&analyzer, &mut node, &id);
+                analyzer.analyze_node_with_content(&mut node, &content);
+                content_by_rel.insert(rel_str, content);
             }
             nodes.push(node);
         }
@@ -148,14 +150,10 @@ impl GraphBuilder {
                 let Some(rel) = node.path.as_deref() else {
                     continue;
                 };
-                let full_path = project_root.join(rel);
-                if !is_rust_source(&full_path) {
-                    continue;
-                }
-                let Ok(content) = read_broad_discovery_utf8(&full_path) else {
+                let Some(content) = content_by_rel.get(rel) else {
                     continue;
                 };
-                let decls = super::symbols::extract_pub_symbols(&content);
+                let decls = super::symbols::extract_pub_symbols(content);
                 if !decls.is_empty() {
                     file_symbols.push((node.id.clone(), rel.to_string(), decls));
                 }
@@ -194,8 +192,10 @@ impl GraphBuilder {
             let Some(path) = node.path.as_deref() else {
                 continue;
             };
-            let full_path = project_root.join(path);
-            for imported in imported_modules(&full_path, &node.id) {
+            let Some(content) = content_by_rel.get(path) else {
+                continue;
+            };
+            for imported in imported_modules_from_content(content, &node.id, &partitioner) {
                 if let Some(target) = resolve_import(&imported, &node_ids, longest_id) {
                     if target != node.id {
                         edges.push(Edge {
@@ -269,7 +269,7 @@ impl GraphBuilder {
                         .then_some(name)
                 })
                 .collect();
-            let mut lines_cache: HashMap<&str, Vec<String>> = HashMap::new();
+            let mut lines_cache: HashMap<&str, Vec<&str>> = HashMap::new();
             for (index, node) in symbol_nodes.iter().enumerate() {
                 let Some(rel) = node.path.as_deref() else {
                     continue;
@@ -278,11 +278,10 @@ impl GraphBuilder {
                     continue;
                 };
                 let lines = lines_cache.entry(rel).or_insert_with(|| {
-                    read_broad_discovery_utf8(&project_root.join(rel))
+                    content_by_rel
+                        .get(rel)
+                        .map(|c| c.lines().collect())
                         .unwrap_or_default()
-                        .lines()
-                        .map(str::to_string)
-                        .collect()
                 });
                 let first_idx = start.saturating_sub(1).min(lines.len());
                 let last_idx = end.min(lines.len()).max(first_idx);
@@ -488,6 +487,10 @@ fn repository_file_walk_impl(
 /// extraction as the graph's `DependsOn` edges.
 pub(crate) fn rust_use_paths(content: &str) -> Vec<Vec<String>> {
     let parser = AstAnalyzer::new();
+    rust_use_paths_with_parser(content, &parser)
+}
+
+fn rust_use_paths_with_parser(content: &str, parser: &AstAnalyzer) -> Vec<Vec<String>> {
     let Ok(uses) = parser.top_level_items::<syn::ItemUse>(content, "use_declaration") else {
         return fallback_imports(content);
     };
@@ -1104,14 +1107,12 @@ fn parent_node_id(id: &str, node_ids: &HashSet<String>) -> Option<String> {
         .then(|| "crate".to_string())
 }
 
-fn imported_modules(path: &Path, current_id: &str) -> Vec<Vec<String>> {
-    if !is_rust_source(path) {
-        return Vec::new();
-    }
-    let Ok(content) = read_broad_discovery_utf8(path) else {
-        return Vec::new();
-    };
-    rust_use_paths(&content)
+fn imported_modules_from_content(
+    content: &str,
+    current_id: &str,
+    parser: &AstAnalyzer,
+) -> Vec<Vec<String>> {
+    rust_use_paths_with_parser(content, parser)
         .into_iter()
         .filter_map(|parts| normalize_import(parts, current_id))
         .collect()
@@ -1217,21 +1218,19 @@ fn resolve_import(
     longest_match
 }
 
-fn analyze_quality(analyzer: &QualityAnalyzer, node: &mut Node, label: &str) {
-    if let Err(error) = analyzer.analyze_node(node) {
-        eprintln!("quality analysis skipped for {label}: {error}");
-    }
-}
-
-fn populate_metrics(node: &mut Node, path: &Path, partitioner: &AstAnalyzer) -> Result<()> {
-    let content = read_broad_discovery_utf8(path)?;
+fn populate_metrics_with_content(
+    node: &mut Node,
+    path: &Path,
+    content: &str,
+    partitioner: &AstAnalyzer,
+) -> Result<()> {
     node.lines = content.lines().count();
     // Real tokenizer (HF model-matched → tiktoken cl100k_base), cached per
     // content hash, instead of the bytes/4 heuristic — precise context sizes.
-    node.tokens = crate::token_count::estimate_content_tokens(&content);
+    node.tokens = crate::token_count::estimate_content_tokens(content);
     node.files = 1;
     let ranges = if is_rust_source(path) {
-        partitioner.cfg_test_body_ranges(&content)?
+        partitioner.cfg_test_body_ranges(content)?
     } else {
         Vec::new()
     };
