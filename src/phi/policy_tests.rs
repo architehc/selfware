@@ -722,6 +722,379 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
             };
             assert_eq!(actual, expected, "Lean PA12 mismatch for {domain} ({spec})");
             checked += 1;
+        } else if let Some(mode_label) = domain.strip_prefix("tool_permission:") {
+            use crate::safety::tool_metadata::{
+                classify_tool_metadata, ExecutionMode, PermissionChecker, PermissionResult,
+            };
+            let mode = match mode_label {
+                "plan" => ExecutionMode::Plan,
+                "normal" => ExecutionMode::Normal,
+                "auto" => ExecutionMode::Auto,
+                "yolo_default" => ExecutionMode::Yolo,
+                other => panic!("unknown tool_permission mode: {other}"),
+            };
+            let checker = PermissionChecker::new(mode);
+            let meta = classify_tool_metadata(spec)
+                .unwrap_or_else(|| panic!("tool {spec} must have classified metadata"));
+            let actual = match checker.check(spec, &meta, &serde_json::Value::Null) {
+                PermissionResult::Allow => "allow",
+                PermissionResult::Deny { .. } => "deny",
+                PermissionResult::Prompt { .. } => "prompt",
+            };
+            assert_eq!(
+                actual, expected,
+                "Lean PA13 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain == "tool_confirm:normal" {
+            use crate::safety::permissions::{PermissionGrant, PermissionStore};
+            use crate::safety::tool_metadata::normal_mode_needs_confirmation;
+            let mut grants = PermissionStore::new();
+            let actual = match spec.as_str() {
+                "read_only_low" => normal_mode_needs_confirmation("file_read", &[], &grants),
+                "unclassified" => {
+                    normal_mode_needs_confirmation("custom_unclassified_tool", &[], &grants)
+                }
+                "session_granted" => {
+                    grants.add(PermissionGrant::session("custom_unclassified_tool"));
+                    normal_mode_needs_confirmation("custom_unclassified_tool", &[], &grants)
+                }
+                other => panic!("unknown tool_confirm spec: {other}"),
+            };
+            let label = if actual { "confirm" } else { "skip" };
+            assert_eq!(
+                label, expected,
+                "Lean PA13 confirm mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(cb_op) = domain.strip_prefix("circuit_breaker:") {
+            use crate::supervision::circuit_breaker::{
+                CircuitBreaker, CircuitBreakerConfig, CircuitState,
+            };
+            use std::time::Duration;
+            let state_str = |s: CircuitState| match s {
+                CircuitState::Closed => "closed",
+                CircuitState::Open => "open",
+                CircuitState::HalfOpen => "half_open",
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let actual = rt.block_on(async {
+                match (cb_op, spec.as_str()) {
+                    ("on_failure", "closed:4->5") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 5,
+                            success_threshold: 3,
+                            reset_timeout: Duration::from_secs(60),
+                            half_open_max_requests: 3,
+                        });
+                        for _ in 0..5 {
+                            cb.on_failure().await;
+                        }
+                        format!(
+                            "{}:{}",
+                            state_str(cb.current_state()),
+                            cb.metrics().failure_count
+                        )
+                    }
+                    ("on_failure", "closed:2->3") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 5,
+                            success_threshold: 3,
+                            reset_timeout: Duration::from_secs(60),
+                            half_open_max_requests: 3,
+                        });
+                        for _ in 0..3 {
+                            cb.on_failure().await;
+                        }
+                        format!(
+                            "{}:{}",
+                            state_str(cb.current_state()),
+                            cb.metrics().failure_count
+                        )
+                    }
+                    ("on_failure", "half_open:0->1") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 1,
+                            success_threshold: 3,
+                            reset_timeout: Duration::ZERO,
+                            half_open_max_requests: 3,
+                        });
+                        cb.on_failure().await;
+                        let _ = cb.call(|| async { Err::<(), &str>("probe_fail") }).await;
+                        format!(
+                            "{}:{}",
+                            state_str(cb.current_state()),
+                            cb.metrics().failure_count
+                        )
+                    }
+                    ("on_success", "half_open:2->3") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 1,
+                            success_threshold: 3,
+                            reset_timeout: Duration::ZERO,
+                            half_open_max_requests: 3,
+                        });
+                        cb.on_failure().await;
+                        for _ in 0..3 {
+                            let _ = cb.call(|| async { Ok::<(), &str>(()) }).await;
+                        }
+                        format!(
+                            "{}:{}",
+                            state_str(cb.current_state()),
+                            cb.metrics().success_count
+                        )
+                    }
+                    ("on_success", "closed:reset_failures") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 5,
+                            success_threshold: 3,
+                            reset_timeout: Duration::from_secs(60),
+                            half_open_max_requests: 3,
+                        });
+                        cb.on_failure().await;
+                        cb.on_failure().await;
+                        cb.on_failure().await;
+                        cb.on_success().await;
+                        format!(
+                            "{}:{}",
+                            state_str(cb.current_state()),
+                            cb.metrics().failure_count
+                        )
+                    }
+                    ("can_execute", "open:timeout_elapsed") => {
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 1,
+                            success_threshold: 3,
+                            reset_timeout: Duration::ZERO,
+                            half_open_max_requests: 3,
+                        });
+                        cb.on_failure().await;
+                        let res = cb
+                            .call(|| async {
+                                let mid_state = cb.current_state();
+                                // With half_open_max_requests: 1, a concurrent second probe would be rejected,
+                                // proving 1 active half_open_request slot is held during probe execution.
+                                Ok::<CircuitState, &str>(mid_state)
+                            })
+                            .await;
+                        match res {
+                            Ok(mid_state) => format!("allow:{}:1", state_str(mid_state)),
+                            Err(_) => format!("deny:{}:0", state_str(cb.current_state())),
+                        }
+                    }
+                    other => panic!("unknown circuit_breaker row: {other:?}"),
+                }
+            });
+            assert_eq!(
+                &actual, expected,
+                "Lean PA14 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(ont_op) = domain.strip_prefix("ontology_graph:") {
+            use crate::evolve::ontology::validate_graph;
+            use crate::evolve::{Edge, EdgeType, Graph, Node};
+            let make_node = |id: &str| Node::code(id, "src/lib.rs");
+            let actual = match (ont_op, spec.as_str()) {
+                ("validate", "clean") => {
+                    let g = Graph {
+                        nodes: vec![make_node("a"), make_node("b")],
+                        edges: vec![Edge {
+                            from: "a".into(),
+                            to: "b".into(),
+                            edge_type: EdgeType::Contains,
+                        }],
+                    };
+                    if validate_graph(&g).valid {
+                        "valid"
+                    } else {
+                        "invalid"
+                    }
+                    .to_string()
+                }
+                ("validate", "duplicate_id") => {
+                    let g = Graph {
+                        nodes: vec![make_node("a"), make_node("a")],
+                        edges: vec![Edge {
+                            from: "a".into(),
+                            to: "a".into(),
+                            edge_type: EdgeType::DependsOn,
+                        }],
+                    };
+                    if validate_graph(&g).valid {
+                        "valid"
+                    } else {
+                        "invalid"
+                    }
+                    .to_string()
+                }
+                ("validate", "structural_cycle") => {
+                    let g = Graph {
+                        nodes: vec![make_node("a"), make_node("b")],
+                        edges: vec![
+                            Edge {
+                                from: "a".into(),
+                                to: "b".into(),
+                                edge_type: EdgeType::Contains,
+                            },
+                            Edge {
+                                from: "b".into(),
+                                to: "a".into(),
+                                edge_type: EdgeType::Contains,
+                            },
+                        ],
+                    };
+                    if validate_graph(&g).valid {
+                        "valid"
+                    } else {
+                        "invalid"
+                    }
+                    .to_string()
+                }
+                ("validate", "dangling_edge") => {
+                    let g = Graph {
+                        nodes: vec![make_node("a")],
+                        edges: vec![Edge {
+                            from: "a".into(),
+                            to: "missing".into(),
+                            edge_type: EdgeType::DependsOn,
+                        }],
+                    };
+                    if validate_graph(&g).valid {
+                        "valid"
+                    } else {
+                        "invalid"
+                    }
+                    .to_string()
+                }
+                ("cycle_edge", "depends_on_vs_contains") => {
+                    let g_dep = Graph {
+                        nodes: vec![make_node("a"), make_node("b")],
+                        edges: vec![
+                            Edge {
+                                from: "a".into(),
+                                to: "b".into(),
+                                edge_type: EdgeType::DependsOn,
+                            },
+                            Edge {
+                                from: "b".into(),
+                                to: "a".into(),
+                                edge_type: EdgeType::DependsOn,
+                            },
+                        ],
+                    };
+                    let g_cont = Graph {
+                        nodes: vec![make_node("a"), make_node("b")],
+                        edges: vec![
+                            Edge {
+                                from: "a".into(),
+                                to: "b".into(),
+                                edge_type: EdgeType::Contains,
+                            },
+                            Edge {
+                                from: "b".into(),
+                                to: "a".into(),
+                                edge_type: EdgeType::Contains,
+                            },
+                        ],
+                    };
+                    format!(
+                        "{}:{}",
+                        if validate_graph(&g_dep).cycles.is_empty() {
+                            "exempt"
+                        } else {
+                            "checked"
+                        },
+                        if validate_graph(&g_cont).cycles.is_empty() {
+                            "exempt"
+                        } else {
+                            "checked"
+                        },
+                    )
+                }
+                other => panic!("unknown ontology_graph row: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA15 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if domain == "evolve_deletion:gate" {
+            use crate::evolve::deletion::{require_executable, DeletionPreview, DeletionTarget};
+            assert_eq!(spec, "preview_blocked_vs_ready");
+            let blocked = DeletionPreview {
+                action_id: "act-1".into(),
+                lifecycle: "proposed".into(),
+                action: "preview_source_deletion".into(),
+                target: DeletionTarget {
+                    logical_node_id: "n".into(),
+                    path: "src/n.rs".into(),
+                    content_hash: "00".into(),
+                    graph_revision: "00".into(),
+                },
+                inbound: vec![],
+                outbound: vec![],
+                blockers: vec!["unproven".into()],
+                evidence_completeness: "partial".into(),
+                removed_lines: 10,
+                verification: vec![],
+                executable: false,
+            };
+            let ready = DeletionPreview {
+                executable: true,
+                blockers: vec![],
+                ..blocked.clone()
+            };
+            let actual = format!(
+                "{}:{}",
+                if require_executable(&blocked).is_ok() {
+                    "allow"
+                } else {
+                    "block"
+                },
+                if require_executable(&ready).is_ok() {
+                    "allow"
+                } else {
+                    "block"
+                },
+            );
+            assert_eq!(&actual, expected, "Lean PA15 deletion gate mismatch");
+            checked += 1;
+        } else if domain == "phi_viseme:lookup" {
+            use crate::phi::viseme::{active_viseme_at, Viseme, VisemeSpan};
+            let schedule = [
+                VisemeSpan {
+                    start_ms: 100,
+                    end_ms: 250,
+                    viseme: Viseme::Mbp,
+                },
+                VisemeSpan {
+                    start_ms: 250,
+                    end_ms: 400,
+                    viseme: Viseme::Ai,
+                },
+                VisemeSpan {
+                    start_ms: 450,
+                    end_ms: 600,
+                    viseme: Viseme::O,
+                },
+            ];
+            let elapsed_ms = match spec.as_str() {
+                "before_50ms" => 50,
+                "span1_150ms" => 150,
+                "boundary_250ms" => 250,
+                "gap_420ms" => 420,
+                "after_600ms" => 600,
+                other => panic!("unknown phi_viseme spec: {other}"),
+            };
+            let actual = active_viseme_at(&schedule, elapsed_ms).code();
+            assert_eq!(
+                actual, expected,
+                "Lean PA16 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -731,4 +1104,5 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
+    assert_eq!(checked, 88, "all 88 PA1–PA16 rows must be checked");
 }

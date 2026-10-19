@@ -572,8 +572,16 @@ struct DirPattern {
 /// `repo`, or nothing when `.gitignore`, `.ignore`, or `.rgignore`
 /// re-includes anything (`!`) or `.gitignore` is missing.
 fn gitignored_dirs(repo: &Path) -> Vec<DirPattern> {
+    const MAX_IGNORE_FILE_BYTES: u64 = 64 * 1024;
     for extra in [".ignore", ".rgignore"] {
-        match std::fs::read_to_string(repo.join(extra)) {
+        let extra_path = repo.join(extra);
+        match std::fs::symlink_metadata(&extra_path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Vec::new(),
+            Ok(meta) if !meta.file_type().is_file() => return Vec::new(),
+            Ok(_) => {}
+        }
+        match crate::tools::file::read_to_string_capped(&extra_path, MAX_IGNORE_FILE_BYTES) {
             Ok(extra_text) => {
                 if extra_text
                     .lines()
@@ -582,11 +590,12 @@ fn gitignored_dirs(repo: &Path) -> Vec<DirPattern> {
                     return Vec::new();
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Vec::new(),
         }
     }
-    let Ok(text) = std::fs::read_to_string(repo.join(".gitignore")) else {
+    let Ok(text) =
+        crate::tools::file::read_to_string_capped(&repo.join(".gitignore"), MAX_IGNORE_FILE_BYTES)
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();

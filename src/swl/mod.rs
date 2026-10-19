@@ -30,14 +30,18 @@ pub mod state;
 pub mod types;
 
 pub use codegen::generate_rust_stub;
+pub use guardrails::{
+    Condition, EvaluationResult, GuardrailDef, GuardrailEnforcer, GuardrailEngine, GuardrailStats,
+    GuardrailSummary, ViolationAction,
+};
 pub use lowering::{lower_document, LoweredSwl};
 pub use parser::{
     parse_document, validate_document, CodeBlock, CodeLanguage, ParseError, SwlDocument,
     ValidationIssue, WorkflowType,
 };
 pub use runtime::{
-    AgentTelemetry, ExecutionContext, ExecutionEvent, ExecutionResult, ExecutionStatus, SwlRuntime,
-    WorkflowTelemetry,
+    AgentTelemetry, ExecutionContext, ExecutionEvent, ExecutionResult, ExecutionStatus,
+    GuardedSwlRuntime, SwlRuntime, WorkflowTelemetry,
 };
 pub use state::{
     backend::{StateBackend, StateBackendType},

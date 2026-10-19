@@ -1848,7 +1848,17 @@ fn try_parse_plain_function_calls(
             // Direct JSON
             match serde_json::from_str::<serde_json::Value>(args_raw) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    results.push((
+                        Err(anyhow::anyhow!(
+                            "Invalid JSON arguments in plain function call '{}': {}",
+                            name,
+                            e
+                        )),
+                        span,
+                    ));
+                    continue;
+                }
             }
         } else {
             // Try to map positional args to known parameter names

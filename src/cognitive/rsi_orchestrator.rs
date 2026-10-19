@@ -991,8 +991,16 @@ fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[
         return true;
     }
     edited_files.iter().all(|rel| {
-        let old = std::fs::read_to_string(project_root.join(rel)).unwrap_or_default();
-        let new = std::fs::read_to_string(sandbox_dir.join(rel)).unwrap_or_default();
+        let old = crate::tools::file::read_to_string_capped(
+            &project_root.join(rel),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .unwrap_or_default();
+        let new = crate::tools::file::read_to_string_capped(
+            &sandbox_dir.join(rel),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .unwrap_or_default();
         let ext = Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())

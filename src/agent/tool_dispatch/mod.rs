@@ -5395,11 +5395,11 @@ const CONFIRM_DIFF_MAX_EXISTING_BYTES: u64 = 512 * 1024;
 /// prompt then shows the new-file view.
 fn existing_file_for_prompt(path: &str) -> Option<String> {
     let resolved = crate::tools::workspace_root::anchor(path);
-    let meta = std::fs::symlink_metadata(&resolved).ok()?;
-    if !meta.is_file() || meta.len() > CONFIRM_DIFF_MAX_EXISTING_BYTES {
-        return None;
-    }
-    std::fs::read_to_string(&resolved).ok()
+    crate::tools::file::read_to_string_capped(
+        std::path::Path::new(&resolved),
+        CONFIRM_DIFF_MAX_EXISTING_BYTES,
+    )
+    .ok()
 }
 
 /// Colour a risk tag for the CLI prompt: reads green, local effects yellow,
@@ -5424,6 +5424,10 @@ fn run_pager(argv: &[String], text: &str) -> std::io::Result<()> {
         .split_first()
         .ok_or_else(|| std::io::Error::other("empty pager command"))?;
     let mut cmd = std::process::Command::new(program);
+    crate::safety::process_env::sanitize_std_command_env_preserve(
+        &mut cmd,
+        &["LESS", "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE"],
+    );
     cmd.args(args).stdin(std::process::Stdio::piped());
     if std::env::var_os("LESS").is_none() {
         cmd.env("LESS", "FRX");

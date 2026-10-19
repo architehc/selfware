@@ -727,7 +727,10 @@ pub struct FileEntry {
 impl FileEntry {
     /// Create from path
     pub fn from_path(path: PathBuf) -> Result<Self> {
-        let metadata = std::fs::metadata(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() {
+            anyhow::bail!("Refusing non-regular file: {}", path.display());
+        }
         let modified = metadata.modified()?.into();
         let extension = path.extension().map(|e| e.to_string_lossy().to_string());
         let language = extension.as_ref().and_then(|e| detect_language(e));
@@ -744,7 +747,10 @@ impl FileEntry {
 
     /// Count lines in file
     pub fn count_lines(&mut self) -> Result<usize> {
-        let content = std::fs::read_to_string(&self.path)?;
+        let content = crate::tools::file::read_to_string_capped(
+            &self.path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let count = content.lines().count();
         self.lines = Some(count);
         Ok(count)

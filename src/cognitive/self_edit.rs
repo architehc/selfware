@@ -468,7 +468,10 @@ impl SelfEditOrchestrator {
             return Err(anyhow!("Target file '{}' escapes sandbox directory", file));
         }
 
-        let original = std::fs::read_to_string(&canonical_path)?;
+        let original = crate::tools::file::read_to_string_capped(
+            &canonical_path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
 
         let (updated, summary) = match target.category {
             ImprovementCategory::CodeQuality => {
@@ -659,7 +662,10 @@ impl SelfEditOrchestrator {
         // Scan for TODO/FIXME comments as improvement targets
         if let Ok(entries) = glob_rs_files(&src_dir) {
             for path in entries {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = crate::tools::file::read_to_string_capped(
+                    &path,
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                ) {
                     let rel_path = path
                         .strip_prefix(&self.project_root)
                         .unwrap_or(&path)
@@ -735,7 +741,10 @@ impl SelfEditOrchestrator {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let history: Vec<ImprovementRecord> = serde_json::from_str(&content)?;
         Ok(history)
     }

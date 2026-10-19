@@ -9,6 +9,9 @@
 pub mod builtin;
 pub mod shell_handler;
 
+pub use builtin::*;
+pub use shell_handler::*;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

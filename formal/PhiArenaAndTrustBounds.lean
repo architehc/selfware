@@ -841,6 +841,396 @@ theorem terminal_apply_states_absorbing
     stepApplyStatus st ev = st := by
   rcases h with rfl | rfl | rfl <;> cases ev <;> rfl
 
+/-! ## Part XIII — PA13: Safety Tool Metadata & Confirmation Gate (`src/safety/tool_metadata.rs`) -/
+
+inductive ToolRiskLevel where
+  | low
+  | medium
+  | high
+  deriving DecidableEq, Repr
+
+inductive SafetyExecMode where
+  | normal
+  | plan
+  | auto
+  | yolo
+  deriving DecidableEq, Repr
+
+inductive PermissionOutcome where
+  | allow
+  | deny
+  | prompt
+  deriving DecidableEq, Repr
+
+def PermissionOutcome.asString : PermissionOutcome → String
+  | .allow => "allow"
+  | .deny => "deny"
+  | .prompt => "prompt"
+
+structure ToolSafetySpec where
+  riskLevel : ToolRiskLevel
+  readOnly : Bool
+  destructive : Bool
+  networkAccess : Bool
+  isProtected : Bool
+  isHotReload : Bool
+  deriving DecidableEq, Repr
+
+structure PermissionConfig where
+  mode : SafetyExecMode
+  allowDestructiveInYolo : Bool := false
+  allowNetwork : Bool := true
+  explicitlyAllowed : Bool := false
+  explicitlyDenied : Bool := false
+  deriving DecidableEq, Repr
+
+/-- Permission decision mirroring `PermissionChecker::check` (`src/safety/tool_metadata.rs`). -/
+def checkToolPermission (cfg : PermissionConfig) (spec : ToolSafetySpec) : PermissionOutcome :=
+  if cfg.explicitlyDenied then
+    .deny
+  else if cfg.explicitlyAllowed then
+    .allow
+  else
+    match cfg.mode with
+    | .plan =>
+        if spec.readOnly then .allow else .deny
+    | .normal =>
+        match spec.riskLevel with
+        | .low => .allow
+        | .medium | .high => .prompt
+    | .auto =>
+        match spec.riskLevel with
+        | .low | .medium => .allow
+        | .high =>
+            if spec.destructive && spec.isProtected then .prompt else .allow
+    | .yolo =>
+        if spec.isHotReload then
+          .prompt
+        else if spec.networkAccess && !cfg.allowNetwork then
+          .prompt
+        else if spec.destructive && !cfg.allowDestructiveInYolo then
+          .prompt
+        else
+          .allow
+
+/-- Normal-mode confirmation predicate mirroring `normal_mode_needs_confirmation` (`src/safety/tool_metadata.rs`). -/
+def normalModeNeedsConfirmation
+    (isGranted : Bool)
+    (inRequireConfirmationList : Bool)
+    (classified : Option (Bool × ToolRiskLevel)) : Bool :=
+  if isGranted then
+    false
+  else if inRequireConfirmationList then
+    true
+  else
+    match classified with
+    | some (readOnly, risk) => !(readOnly && decide (risk = .low))
+    | none => true
+
+theorem plan_mode_denies_mutating_tools
+    (spec : ToolSafetySpec)
+    (hMut : spec.readOnly = false) :
+    checkToolPermission { mode := .plan } spec = .deny := by
+  simp [checkToolPermission, hMut]
+
+theorem plan_mode_allows_readonly_tools
+    (spec : ToolSafetySpec)
+    (hRo : spec.readOnly = true) :
+    checkToolPermission { mode := .plan } spec = .allow := by
+  simp [checkToolPermission, hRo]
+
+theorem normal_mode_prompts_medium_and_high
+    (spec : ToolSafetySpec)
+    (hRisk : spec.riskLevel = .medium ∨ spec.riskLevel = .high) :
+    checkToolPermission { mode := .normal } spec = .prompt := by
+  rcases hRisk with h | h <;> simp [checkToolPermission, h]
+
+theorem auto_mode_prompts_destructive_protected_high_risk
+    (spec : ToolSafetySpec)
+    (hHigh : spec.riskLevel = .high)
+    (hDest : spec.destructive = true)
+    (hProt : spec.isProtected = true) :
+    checkToolPermission { mode := .auto } spec = .prompt := by
+  simp [checkToolPermission, hHigh, hDest, hProt]
+
+theorem default_yolo_prompts_destructive_and_hot_reload
+    (spec : ToolSafetySpec)
+    (hGuard : spec.isHotReload = true ∨ spec.destructive = true) :
+    checkToolPermission { mode := .yolo } spec = .prompt := by
+  rcases hGuard with hHot | hDest
+  · simp [checkToolPermission, hHot]
+  · cases hHot : spec.isHotReload <;> simp [checkToolPermission, hHot, hDest]
+
+theorem unclassified_tool_requires_confirmation
+    (inReqList : Bool) :
+    normalModeNeedsConfirmation false inReqList none = true := by
+  cases inReqList <;> rfl
+
+theorem normal_confirmation_skipped_iff_readonly_low
+    (ro : Bool) (risk : ToolRiskLevel) :
+    normalModeNeedsConfirmation false false (some (ro, risk)) = false ↔
+      (ro = true ∧ risk = .low) := by
+  cases ro <;> cases risk <;> decide
+
+/-! ## Part XIV — PA14: Supervision Circuit Breaker Threshold & Probe Recovery (`src/supervision/circuit_breaker.rs`) -/
+
+inductive CBState where
+  | closed
+  | openState
+  | halfOpen
+  deriving DecidableEq, Repr
+
+def CBState.asString : CBState → String
+  | .closed => "closed"
+  | .openState => "open"
+  | .halfOpen => "half_open"
+
+structure CBConfig where
+  failureThreshold : Nat
+  successThreshold : Nat
+  halfOpenMaxRequests : Nat
+  deriving DecidableEq, Repr
+
+structure CBSnapshot where
+  state : CBState
+  failureCount : Nat
+  successCount : Nat
+  halfOpenRequests : Nat
+  deriving DecidableEq, Repr
+
+def cbTransitionTo (target : CBState) : CBSnapshot :=
+  { state := target, failureCount := 0, successCount := 0, halfOpenRequests := 0 }
+
+def cbCanExecute (cfg : CBConfig) (s : CBSnapshot) (timeoutElapsed : Bool) : Bool × CBSnapshot :=
+  match s.state with
+  | .closed => (true, s)
+  | .openState =>
+      if timeoutElapsed then
+        let next := cbTransitionTo .halfOpen
+        if next.halfOpenRequests < cfg.halfOpenMaxRequests then
+          (true, { next with halfOpenRequests := next.halfOpenRequests + 1 })
+        else
+          (false, next)
+      else
+        (false, s)
+  | .halfOpen =>
+      if s.halfOpenRequests < cfg.halfOpenMaxRequests then
+        (true, { s with halfOpenRequests := s.halfOpenRequests + 1 })
+      else
+        (false, s)
+
+def cbOnFailure (cfg : CBConfig) (s : CBSnapshot) : CBSnapshot :=
+  let fc := s.failureCount + 1
+  match s.state with
+  | .halfOpen => cbTransitionTo .openState
+  | _ =>
+      if fc ≥ cfg.failureThreshold then
+        cbTransitionTo .openState
+      else
+        { s with failureCount := fc }
+
+def cbOnSuccess (cfg : CBConfig) (s : CBSnapshot) : CBSnapshot :=
+  match s.state with
+  | .halfOpen =>
+      let sc := s.successCount + 1
+      if sc ≥ cfg.successThreshold then
+        cbTransitionTo .closed
+      else
+        { s with successCount := sc, halfOpenRequests := s.halfOpenRequests - 1 }
+  | .closed =>
+      { s with successCount := s.successCount + 1, failureCount := 0 }
+  | .openState =>
+      s
+
+theorem cb_closed_trips_at_failure_threshold
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hClosed : s.state = .closed)
+    (hThresh : s.failureCount + 1 ≥ cfg.failureThreshold) :
+    cbOnFailure cfg s = cbTransitionTo .openState := by
+  simp [cbOnFailure, hClosed, hThresh]
+
+theorem cb_half_open_single_failure_reopens
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hHalf : s.state = .halfOpen) :
+    cbOnFailure cfg s = cbTransitionTo .openState := by
+  simp [cbOnFailure, hHalf]
+
+theorem cb_half_open_closes_at_success_threshold
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hHalf : s.state = .halfOpen)
+    (hThresh : s.successCount + 1 ≥ cfg.successThreshold) :
+    cbOnSuccess cfg s = cbTransitionTo .closed := by
+  simp [cbOnSuccess, hHalf, hThresh]
+
+theorem cb_closed_success_resets_failure_count
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hClosed : s.state = .closed) :
+    (cbOnSuccess cfg s).failureCount = 0 ∧ (cbOnSuccess cfg s).state = .closed := by
+  simp [cbOnSuccess, hClosed]
+
+theorem cb_open_ignores_late_success
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hOpen : s.state = .openState) :
+    cbOnSuccess cfg s = s := by
+  simp [cbOnSuccess, hOpen]
+
+theorem cb_half_open_rejects_at_probe_cap
+    (cfg : CBConfig) (s : CBSnapshot)
+    (hHalf : s.state = .halfOpen)
+    (hCap : s.halfOpenRequests ≥ cfg.halfOpenMaxRequests) :
+    (cbCanExecute cfg s false).1 = false := by
+  have hNotLt : ¬ (s.halfOpenRequests < cfg.halfOpenMaxRequests) := by omega
+  simp [cbCanExecute, hHalf, hNotLt]
+
+/-! ## Part XV — PA15: Evolve Ontology Graph Validation & Deletion Execution Gate (`src/evolve/ontology.rs`, `src/evolve/deletion.rs`) -/
+
+inductive OntologyEdgeKind where
+  | contains
+  | dependsOn
+  | implements
+  | tests
+  | documents
+  | evolvedFrom
+  | influences
+  deriving DecidableEq, Repr
+
+def participatesInCycleCheck (kind : OntologyEdgeKind) : Bool :=
+  kind != .dependsOn
+
+structure OntologyValidationCounts where
+  duplicateIds : Nat
+  cycles : Nat
+  danglingEdges : Nat
+  isolatedNodes : Nat
+  deriving DecidableEq, Repr
+
+def validateGraphReportValid (c : OntologyValidationCounts) : Bool :=
+  decide (c.duplicateIds = 0) &&
+  decide (c.cycles = 0) &&
+  decide (c.danglingEdges = 0) &&
+  decide (c.isolatedNodes = 0)
+
+def validateConnectedGraphValid (duplicateIds cycles danglingEdges : Nat) : Bool :=
+  validateGraphReportValid {
+    duplicateIds := duplicateIds
+    cycles := cycles
+    danglingEdges := danglingEdges
+    isolatedNodes := 0
+  }
+
+def deletionRequireExecutable (executable : Bool) (blockerCount : Nat) : Bool :=
+  executable && decide (blockerCount = 0)
+
+theorem validate_graph_valid_iff_all_empty (c : OntologyValidationCounts) :
+    validateGraphReportValid c = true ↔
+      (c.duplicateIds = 0 ∧ c.cycles = 0 ∧ c.danglingEdges = 0 ∧ c.isolatedNodes = 0) := by
+  simp [validateGraphReportValid, and_assoc]
+
+theorem validate_connected_graph_valid_iff_three_empty (dup cyc dang : Nat) :
+    validateConnectedGraphValid dup cyc dang = true ↔
+      (dup = 0 ∧ cyc = 0 ∧ dang = 0) := by
+  simp [validateConnectedGraphValid, validateGraphReportValid, and_assoc]
+
+theorem depends_on_excluded_from_cycle_check (k : OntologyEdgeKind) :
+    participatesInCycleCheck k = false ↔ k = .dependsOn := by
+  cases k <;> decide
+
+theorem deletion_executable_iff_flag_and_zero_blockers (exec : Bool) (blockers : Nat) :
+    deletionRequireExecutable exec blockers = true ↔ (exec = true ∧ blockers = 0) := by
+  cases exec <;> simp [deletionRequireExecutable]
+
+/-! ## Part XVI — PA16: Phi Viseme Time-Window Lookup & Rest Fallback (`src/phi/viseme.rs`) -/
+
+inductive PhiViseme where
+  | rest
+  | mbp
+  | etc
+  | ai
+  | e
+  | o
+  | u
+  | fv
+  | lth
+  | wq
+  deriving DecidableEq, Repr
+
+def PhiViseme.asCode : PhiViseme → String
+  | .rest => "rest"
+  | .mbp => "mbp"
+  | .etc => "etc"
+  | .ai => "ai"
+  | .e => "e"
+  | .o => "o"
+  | .u => "u"
+  | .fv => "fv"
+  | .lth => "l_th"
+  | .wq => "wq"
+
+structure VisemeSpan where
+  startMs : Nat
+  endMs : Nat
+  viseme : PhiViseme
+  deriving DecidableEq, Repr
+
+def spanContains (span : VisemeSpan) (elapsedMs : Nat) : Bool :=
+  decide (span.startMs ≤ elapsedMs) && decide (elapsedMs < span.endMs)
+
+def activeVisemeAt (schedule : List VisemeSpan) (elapsedMs : Nat) : PhiViseme :=
+  match schedule with
+  | [] => .rest
+  | span :: tail =>
+      if spanContains span elapsedMs then
+        span.viseme
+      else
+        activeVisemeAt tail elapsedMs
+
+theorem active_viseme_empty_is_rest (t : Nat) :
+    activeVisemeAt [] t = .rest := rfl
+
+theorem active_viseme_inside_single_span
+    (span : VisemeSpan) (t : Nat)
+    (hStart : span.startMs ≤ t)
+    (hEnd : t < span.endMs) :
+    activeVisemeAt [span] t = span.viseme := by
+  simp [activeVisemeAt, spanContains, hStart, hEnd]
+
+theorem active_viseme_outside_single_span_is_rest
+    (span : VisemeSpan) (t : Nat)
+    (hOut : t < span.startMs ∨ span.endMs ≤ t) :
+    activeVisemeAt [span] t = .rest := by
+  rcases hOut with hBefore | hAfter
+  · have hNotStart : ¬ (span.startMs ≤ t) := by omega
+    simp [activeVisemeAt, spanContains, hNotStart]
+  · have hNotEnd : ¬ (t < span.endMs) := by omega
+    simp [activeVisemeAt, spanContains, hNotEnd]
+
+theorem active_viseme_degenerate_span_is_rest
+    (span : VisemeSpan) (t : Nat)
+    (hDeg : span.endMs ≤ span.startMs) :
+    activeVisemeAt [span] t = .rest := by
+  by_cases hStart : span.startMs ≤ t
+  · have hNotEnd : ¬ (t < span.endMs) := by omega
+    simp [activeVisemeAt, spanContains, hStart, hNotEnd]
+  · simp [activeVisemeAt, spanContains, hStart]
+
+def fileReadSpec : ToolSafetySpec :=
+  { riskLevel := .low, readOnly := true, destructive := false, networkAccess := false, isProtected := false, isHotReload := false }
+def fileEditSpec : ToolSafetySpec :=
+  { riskLevel := .medium, readOnly := false, destructive := false, networkAccess := false, isProtected := false, isHotReload := false }
+def gitPushSpec : ToolSafetySpec :=
+  { riskLevel := .high, readOnly := false, destructive := false, networkAccess := true, isProtected := false, isHotReload := false }
+def fileDeleteSpec : ToolSafetySpec :=
+  { riskLevel := .high, readOnly := false, destructive := true, networkAccess := false, isProtected := true, isHotReload := false }
+
+def defaultCBConfig : CBConfig :=
+  { failureThreshold := 5, successThreshold := 3, halfOpenMaxRequests := 3 }
+
+def sampleVisemeSchedule : List VisemeSpan :=
+  [ { startMs := 100, endMs := 250, viseme := .mbp }
+  , { startMs := 250, endMs := 400, viseme := .ai }
+  , { startMs := 450, endMs := 600, viseme := .o }
+  ]
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -1001,8 +1391,55 @@ def exportTable : String :=
     let spec := s!"state={st.name},event={ev.name}"
     s!"[\"apply_lifecycle:{label}\",\"{spec}\",\"{next.name}\"]" :: acc) []
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows) ++ "]"
+  -- 13–16. PA13–PA16 rows
+  let wave3Rows : List String :=
+    [ s!"[\"tool_permission:plan\",\"file_read\",\"{(checkToolPermission { mode := .plan } fileReadSpec).asString}\"]"
+    , s!"[\"tool_permission:plan\",\"file_edit\",\"{(checkToolPermission { mode := .plan } fileEditSpec).asString}\"]"
+    , s!"[\"tool_permission:normal\",\"file_read\",\"{(checkToolPermission { mode := .normal } fileReadSpec).asString}\"]"
+    , s!"[\"tool_permission:normal\",\"file_edit\",\"{(checkToolPermission { mode := .normal } fileEditSpec).asString}\"]"
+    , s!"[\"tool_permission:auto\",\"git_push\",\"{(checkToolPermission { mode := .auto } gitPushSpec).asString}\"]"
+    , s!"[\"tool_permission:auto\",\"file_delete\",\"{(checkToolPermission { mode := .auto } fileDeleteSpec).asString}\"]"
+    , s!"[\"tool_permission:yolo_default\",\"file_delete\",\"{(checkToolPermission { mode := .yolo } fileDeleteSpec).asString}\"]"
+    , s!"[\"tool_confirm:normal\",\"read_only_low\",\"{if normalModeNeedsConfirmation false false (some (true, .low)) then "confirm" else "skip"}\"]"
+    , s!"[\"tool_confirm:normal\",\"unclassified\",\"{if normalModeNeedsConfirmation false false none then "confirm" else "skip"}\"]"
+    , s!"[\"tool_confirm:normal\",\"session_granted\",\"{if normalModeNeedsConfirmation true false none then "confirm" else "skip"}\"]"
+    , let s := cbOnFailure defaultCBConfig { state := .closed, failureCount := 4, successCount := 0, halfOpenRequests := 0 }
+      s!"[\"circuit_breaker:on_failure\",\"closed:4->5\",\"{s.state.asString}:{s.failureCount}\"]"
+    , let s := cbOnFailure defaultCBConfig { state := .closed, failureCount := 2, successCount := 0, halfOpenRequests := 0 }
+      s!"[\"circuit_breaker:on_failure\",\"closed:2->3\",\"{s.state.asString}:{s.failureCount}\"]"
+    , let s := cbOnFailure defaultCBConfig { state := .halfOpen, failureCount := 0, successCount := 2, halfOpenRequests := 1 }
+      s!"[\"circuit_breaker:on_failure\",\"half_open:0->1\",\"{s.state.asString}:{s.failureCount}\"]"
+    , let s := cbOnSuccess defaultCBConfig { state := .halfOpen, failureCount := 0, successCount := 2, halfOpenRequests := 1 }
+      s!"[\"circuit_breaker:on_success\",\"half_open:2->3\",\"{s.state.asString}:{s.successCount}\"]"
+    , let s := cbOnSuccess defaultCBConfig { state := .closed, failureCount := 3, successCount := 1, halfOpenRequests := 0 }
+      s!"[\"circuit_breaker:on_success\",\"closed:reset_failures\",\"{s.state.asString}:{s.failureCount}\"]"
+    , let (ok, s) := cbCanExecute defaultCBConfig { state := .openState, failureCount := 0, successCount := 0, halfOpenRequests := 0 } true
+      let okStr := if ok then "allow" else "deny"
+      s!"[\"circuit_breaker:can_execute\",\"open:timeout_elapsed\",\"{okStr}:{s.state.asString}:{s.halfOpenRequests}\"]"
+    , let vClean := if validateGraphReportValid { duplicateIds := 0, cycles := 0, danglingEdges := 0, isolatedNodes := 0 } then "valid" else "invalid"
+      s!"[\"ontology_graph:validate\",\"clean\",\"{vClean}\"]"
+    , let vDup := if validateGraphReportValid { duplicateIds := 1, cycles := 0, danglingEdges := 0, isolatedNodes := 0 } then "valid" else "invalid"
+      s!"[\"ontology_graph:validate\",\"duplicate_id\",\"{vDup}\"]"
+    , let vCyc := if validateGraphReportValid { duplicateIds := 0, cycles := 1, danglingEdges := 0, isolatedNodes := 0 } then "valid" else "invalid"
+      s!"[\"ontology_graph:validate\",\"structural_cycle\",\"{vCyc}\"]"
+    , let vDang := if validateGraphReportValid { duplicateIds := 0, cycles := 0, danglingEdges := 1, isolatedNodes := 0 } then "valid" else "invalid"
+      s!"[\"ontology_graph:validate\",\"dangling_edge\",\"{vDang}\"]"
+    , let cDep := if participatesInCycleCheck .dependsOn then "checked" else "exempt"
+      let cCont := if participatesInCycleCheck .contains then "checked" else "exempt"
+      s!"[\"ontology_graph:cycle_edge\",\"depends_on_vs_contains\",\"{cDep}:{cCont}\"]"
+    , let dBlock := if deletionRequireExecutable false 1 then "allow" else "block"
+      let dReady := if deletionRequireExecutable true 0 then "allow" else "block"
+      s!"[\"evolve_deletion:gate\",\"preview_blocked_vs_ready\",\"{dBlock}:{dReady}\"]"
+    , s!"[\"phi_viseme:lookup\",\"before_50ms\",\"{(activeVisemeAt sampleVisemeSchedule 50).asCode}\"]"
+    , s!"[\"phi_viseme:lookup\",\"span1_150ms\",\"{(activeVisemeAt sampleVisemeSchedule 150).asCode}\"]"
+    , s!"[\"phi_viseme:lookup\",\"boundary_250ms\",\"{(activeVisemeAt sampleVisemeSchedule 250).asCode}\"]"
+    , s!"[\"phi_viseme:lookup\",\"gap_420ms\",\"{(activeVisemeAt sampleVisemeSchedule 420).asCode}\"]"
+    , s!"[\"phi_viseme:lookup\",\"after_600ms\",\"{(activeVisemeAt sampleVisemeSchedule 600).asCode}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 
 #eval PhiArenaAndTrustBounds.exportTable
+

@@ -404,12 +404,27 @@ impl ContextMap {
             }
         }
 
-        // Estimate from file size.
+        // Measure from disk when the file exists (`AGENTS.md` Rule 4), falling
+        // back to byte-size heuristic only when the path is not readable on disk.
         let full_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.project_root.join(path)
         };
+
+        if matches!(level, ContextMode::Map) {
+            return 10; // single line entry
+        }
+
+        if let Ok(content) =
+            crate::tools::file::read_to_string_capped_async(&full_path, 4 * 1024 * 1024).await
+        {
+            return match level {
+                ContextMode::Map => 10,
+                ContextMode::Lite => extract_rust_skeleton(path, &content).token_count.max(1),
+                _ => estimate_content_tokens(&content).max(1),
+            };
+        }
 
         let file_size = tokio::fs::metadata(&full_path)
             .await
@@ -896,7 +911,12 @@ impl ContextMap {
     /// These are tracked as virtual files at L3 with the given content.
     pub fn add_external_context(&mut self, key: &str, content: String, source: &str) {
         let virtual_path = PathBuf::from(format!("<external>/{}", key));
-        let token_cost = estimate_content_tokens(&content);
+        let framed = format!(
+            "// Source: {}\n{}",
+            crate::safety::source_context::quote_untrusted_label(source),
+            content
+        );
+        let token_cost = estimate_content_tokens(&framed);
 
         // Auto-compress if needed.
         if self.remaining() < token_cost {
@@ -924,11 +944,7 @@ impl ContextMap {
         entry.level = ContextMode::Full;
         entry.current_tokens = token_cost;
         entry.costs.l3 = token_cost;
-        entry.full_content = Some(format!(
-            "// Source: {}\n{}",
-            crate::safety::source_context::quote_untrusted_label(source),
-            content
-        ));
+        entry.full_content = Some(framed);
         entry.last_accessed = Instant::now();
         self.total_tokens += token_cost;
 

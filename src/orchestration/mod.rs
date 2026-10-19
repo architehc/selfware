@@ -15,3 +15,17 @@ pub mod multiagent;
 pub(crate) mod primitives;
 pub mod swarm;
 pub mod workflows;
+
+pub use multiagent::{
+    print_agent_summary, run_multiagent_task, AgentInstance, AgentResult, MultiAgentChat,
+    MultiAgentConfig, MultiAgentEvent, MultiAgentFailurePolicy, MultiChatView, ViewTab,
+    MAX_CONCURRENT_AGENTS,
+};
+pub use swarm::{
+    create_dev_swarm, Agent as SwarmAgent, AgentRole, ConflictStrategy, Decision, DecisionStatus,
+    MemoryAccess, MemoryAction, MemoryEntry, SharedMemory, Swarm, SwarmStats, SwarmTask, Vote,
+};
+pub use workflows::{
+    new_run_id, step_fingerprint, validate_run_id, CheckpointStore, WorkflowCheckpoint,
+    WorkflowRun, WorkflowStatus, CHECKPOINT_FORMAT_VERSION,
+};

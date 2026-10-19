@@ -4,12 +4,21 @@
 //! doing and report it. Nothing here influences agent behaviour, and nothing
 //! should until recorded sessions have been evaluated.
 
+#![allow(unused_imports)]
+
 pub mod activity;
 pub mod arena;
 pub mod ledger;
 pub mod observer;
 pub mod policy;
 pub mod viseme;
+
+pub use activity::*;
+pub use arena::*;
+pub use ledger::*;
+pub use observer::*;
+pub use policy::*;
+pub use viseme::*;
 
 #[cfg(test)]
 #[path = "ledger_tests.rs"]

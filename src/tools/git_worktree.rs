@@ -143,11 +143,21 @@ async fn record_created_worktree(repo_dir: &Path, path: &Path) {
     let line = format!("{}\n", path.to_string_lossy());
     let appended = async {
         use tokio::io::AsyncWriteExt;
-        let mut f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&ledger)
-            .await?;
+        if let Ok(meta) = tokio::fs::symlink_metadata(&ledger).await {
+            if !meta.file_type().is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "refusing to append to symlinked or non-regular worktree ledger",
+                ));
+            }
+        }
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut f = opts.open(&ledger).await?;
         f.write_all(line.as_bytes()).await
     }
     .await;
@@ -199,13 +209,15 @@ pub async fn prune_stale_selfware_worktrees(repo_dir: &Path) -> Result<PruneOutc
     }
     let entries = parse_worktree_list(&String::from_utf8_lossy(&out.stdout));
     let ledger: Vec<PathBuf> = match git_common_dir(repo_dir).await {
-        Ok(common) => tokio::fs::read_to_string(common.join(CREATED_LEDGER))
-            .await
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(PathBuf::from)
-            .collect(),
+        Ok(common) => {
+            crate::tools::file::read_to_string_capped_async(&common.join(CREATED_LEDGER), 64 * 1024)
+                .await
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(PathBuf::from)
+                .collect()
+        }
         Err(_) => Vec::new(),
     };
     let mut ours = Vec::new();

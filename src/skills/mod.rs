@@ -189,14 +189,30 @@ impl AdmissionLedger {
                     ));
                 }
                 use std::io::Read;
-                let file = std::fs::File::open(&ledger_path).map_err(|e| {
+                #[cfg(unix)]
+                let file = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(&ledger_path)
+                };
+                #[cfg(not(unix))]
+                let file = std::fs::File::open(&ledger_path);
+                let file = file.map_err(|e| {
                     format!(
                         "Failed to open admission ledger {}: {e}",
                         ledger_path.display()
                     )
                 })?;
+                if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
+                    return Err(format!(
+                        "Admission ledger is not a regular file: {}",
+                        ledger_path.display()
+                    ));
+                }
                 let mut content = String::new();
-                file.take(1_048_576)
+                file.take(1_048_576 + 1)
                     .read_to_string(&mut content)
                     .map_err(|e| {
                         format!(
@@ -204,6 +220,12 @@ impl AdmissionLedger {
                             ledger_path.display()
                         )
                     })?;
+                if content.len() > 1_048_576 {
+                    return Err(format!(
+                        "Admission ledger {} exceeds maximum size (1 MiB)",
+                        ledger_path.display()
+                    ));
+                }
                 serde_json::from_str(&content).map_err(|e| {
                     format!(
                         "Admission ledger {} is corrupt (invalid JSON): {e} — failing closed to prevent tamper bypass",
@@ -370,11 +392,33 @@ impl Skill {
             ));
         }
         use std::io::Read;
-        let file = std::fs::File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::File::open(path);
+        let file = file.map_err(|e| format!("Failed to open file: {e}"))?;
+        if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
+            return Err(format!(
+                "Skill file must be a regular file: {}",
+                path.display()
+            ));
+        }
         let mut source = String::new();
-        file.take(1_048_576)
+        file.take(1_048_576 + 1)
             .read_to_string(&mut source)
             .map_err(|e| format!("Failed to read file: {e}"))?;
+        if source.len() > 1_048_576 {
+            return Err(format!(
+                "Skill file {} exceeds maximum size (1 MiB)",
+                path.display()
+            ));
+        }
         let mut skill = Self::from_markdown(&source)?;
         skill.source = Some(path.to_path_buf());
         Ok(skill)
@@ -1001,7 +1045,8 @@ impl SkillRegistry {
                 ));
             }
             Some(
-                std::fs::read(&target_file)
+                crate::tools::file::read_to_string_capped(&target_file, 1_048_576)
+                    .map(|s| s.into_bytes())
                     .map_err(|e| format!("Failed to backup existing skill file: {e}"))?,
             )
         } else {

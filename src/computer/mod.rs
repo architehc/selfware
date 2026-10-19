@@ -9,16 +9,18 @@
 //! - First use per session requires explicit confirmation
 //! - All actions are logged to the audit trail
 
+#![allow(unused_imports)]
+
 pub mod keyboard;
 pub mod mouse;
 pub mod screen;
 pub mod window;
 pub(crate) mod xdotool;
 
-pub use keyboard::KeyboardController;
-pub use mouse::MouseController;
-pub use screen::ScreenCapture;
-pub use window::WindowManager;
+pub use keyboard::*;
+pub use mouse::*;
+pub use screen::*;
+pub use window::*;
 
 /// Display-session variables that computer-control child processes
 /// (xdotool, wmctrl, xprop, osascript, …) legitimately need to reach the

@@ -109,12 +109,14 @@ mod auto_commit_quoting_regression_tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
 
+        use crate::safety::process_env::SanitizedEnvExt;
         for args in [
             &["init", "-q"][..],
             &["config", "user.email", "test@example.com"][..],
             &["config", "user.name", "Test User"][..],
         ] {
             let status = std::process::Command::new("git")
+                .sanitized_env()
                 .args(args)
                 .current_dir(&repo)
                 .status()
@@ -144,6 +146,7 @@ mod auto_commit_quoting_regression_tests {
         );
 
         let log_out = std::process::Command::new("git")
+            .sanitized_env()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(&repo)
             .output()

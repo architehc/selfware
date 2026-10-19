@@ -779,7 +779,7 @@ pub fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value 
     })
 }
 
-/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA8 and PT1–PT5.
+/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA16 and PT1–PT5.
 ///
 /// Honest status (`AGENTS.md` Rule 3): `trust_state` is `"table_conformance_verified"` because
 /// Lean 4 kernel elaboration runs in `scripts/check_formal.sh` while the live binary verifies
@@ -879,6 +879,30 @@ pub fn verify_phi_formal_invariants() -> Value {
                 "title": "ApplyStatus Shadow Worktree & Compile-Gate Lifecycle",
                 "theorems": ["staged_from_running_iff_verified_and_compiled", "compile_failed_rejects_run", "terminal_apply_states_absorbing"],
                 "rust_citation": "src/evolve/apply.rs:69",
+            },
+            {
+                "id": "PA13",
+                "title": "Safety Tool Metadata & Confirmation Gate",
+                "theorems": ["plan_mode_denies_mutating_tools", "auto_mode_prompts_destructive_protected_high_risk", "unclassified_tool_requires_confirmation"],
+                "rust_citation": "src/safety/tool_metadata.rs:234",
+            },
+            {
+                "id": "PA14",
+                "title": "Supervision Circuit Breaker Threshold & Probe Recovery",
+                "theorems": ["cb_closed_trips_at_failure_threshold", "cb_half_open_single_failure_reopens", "cb_open_ignores_late_success"],
+                "rust_citation": "src/supervision/circuit_breaker.rs:169",
+            },
+            {
+                "id": "PA15",
+                "title": "Evolve Ontology Graph Validation & Deletion Execution Gate",
+                "theorems": ["validate_graph_valid_iff_all_empty", "depends_on_excluded_from_cycle_check", "deletion_executable_iff_flag_and_zero_blockers"],
+                "rust_citation": "src/evolve/ontology.rs:89",
+            },
+            {
+                "id": "PA16",
+                "title": "Phi Viseme Time-Window Lookup & Rest Fallback",
+                "theorems": ["active_viseme_inside_single_span", "active_viseme_outside_single_span_is_rest", "active_viseme_degenerate_span_is_rest"],
+                "rust_citation": "src/phi/viseme.rs:86",
             },
             {
                 "id": "PT1-PT5",
@@ -991,6 +1015,42 @@ pub fn generate_formal_drill(seed: usize) -> BossBattleDrill {
             correct: "Only when both shadow diff verification and `cargo check` succeed",
             wrong_a: "As soon as the agent subprocess exits 0",
             wrong_b: "Whenever a non-empty diff exists in the shadow worktree",
+        },
+        ProofQuestion {
+            id: "PA13:auto_mode_prompts_destructive_protected_high_risk",
+            question: "PROOF DRILL [PA13]: Under `auto_mode_prompts_destructive_protected_high_risk`, how does `PermissionChecker::check` treat `file_delete` in Auto mode?",
+            citation: "src/safety/tool_metadata.rs:234",
+            snippet: "theorem auto_mode_prompts_destructive_protected_high_risk : checkToolPermission { mode := .auto } spec = .prompt",
+            correct: "Prompts for confirmation — destructive protected High-risk tools are never auto-approved in Auto mode",
+            wrong_a: "Auto-approves all High-risk tools without prompting",
+            wrong_b: "Denies the tool call outright like Plan mode",
+        },
+        ProofQuestion {
+            id: "PA14:cb_half_open_single_failure_reopens",
+            question: "PROOF DRILL [PA14]: Under `cb_half_open_single_failure_reopens`, what happens when a single probe fails in `CircuitState::HalfOpen`?",
+            citation: "src/supervision/circuit_breaker.rs:265",
+            snippet: "theorem cb_half_open_single_failure_reopens (hHalf : s.state = .halfOpen) : cbOnFailure cfg s = cbTransitionTo .openState",
+            correct: "Immediately re-opens the circuit and resets counters regardless of failureThreshold",
+            wrong_a: "Waits until failureThreshold failures accumulate in HalfOpen",
+            wrong_b: "Transitions to Closed if successCount > 0",
+        },
+        ProofQuestion {
+            id: "PA15:depends_on_excluded_from_cycle_check",
+            question: "PROOF DRILL [PA15]: Under `depends_on_excluded_from_cycle_check`, which `EdgeType` is exempt from structural cycle detection in `validate_graph`?",
+            citation: "src/evolve/ontology.rs:149",
+            snippet: "theorem depends_on_excluded_from_cycle_check (k : OntologyEdgeKind) : participatesInCycleCheck k = false ↔ k = .dependsOn",
+            correct: "EdgeType::DependsOn — only containment/implementation/lineage edges are checked for structural cycles",
+            wrong_a: "EdgeType::Contains",
+            wrong_b: "All edges are checked equally",
+        },
+        ProofQuestion {
+            id: "PA16:active_viseme_outside_single_span_is_rest",
+            question: "PROOF DRILL [PA16]: Under `active_viseme_outside_single_span_is_rest`, what does `active_viseme_at` return at `t = end_ms` of a `[start_ms, end_ms)` span?",
+            citation: "src/phi/viseme.rs:94",
+            snippet: "theorem active_viseme_outside_single_span_is_rest (hOut : t < span.startMs ∨ span.endMs ≤ t) : activeVisemeAt [span] t = .rest",
+            correct: "Viseme::Rest — spans are half-open `[start_ms, end_ms)` so `t == end_ms` falls back to Rest (or the next span)",
+            wrong_a: "Retains the previous span's Viseme indefinitely",
+            wrong_b: "Always returns Viseme::Etc on boundary timestamps",
         },
         ProofQuestion {
             id: "PT1:tests_never_discharge_review",

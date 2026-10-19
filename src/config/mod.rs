@@ -53,7 +53,9 @@ pub use provenance::{
 };
 pub use resources::*;
 pub use safety::*;
+pub use trust::{is_config_trusted, trusted_repos_file};
 pub use types::*;
+pub use unpack::{scan_local_endpoints, DiscoveredEndpoint};
 pub use validation::{
     check_sglang_backend, clear_sglang_capability_cache, get_sglang_capability,
     is_known_non_sglang_endpoint, is_sglang_backend, is_sglang_server_info_body,

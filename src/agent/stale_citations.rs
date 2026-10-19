@@ -64,11 +64,8 @@ impl StaleCitationWatch {
         if !self.versions.contains_key(&canonical) && self.versions.len() >= MAX_TRACKED_FILES {
             return;
         }
-        match std::fs::metadata(&canonical) {
-            Ok(m) if m.is_file() && m.len() <= MAX_SNAPSHOT_BYTES => {}
-            _ => return,
-        }
-        let Ok(text) = std::fs::read_to_string(&canonical) else {
+        let Ok(text) = crate::tools::file::read_to_string_capped(&canonical, MAX_SNAPSHOT_BYTES)
+        else {
             return;
         };
         let lines: Vec<String> = text.lines().map(str::to_string).collect();

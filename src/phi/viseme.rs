@@ -4,7 +4,7 @@
 //! Policy Twin (`src/evolve/web/phi/phi_rig.js`), and `scripts/phi_tmux_game.py`.
 
 /// 10-viseme mouth shapes matching the Web `PhiVisemeEngine` and `scripts/phi_tmux_game.py`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Viseme {
     Rest,
     Mbp,
@@ -82,6 +82,33 @@ pub fn word_to_viseme(word: &str) -> Viseme {
         }
     }
     Viseme::Etc
+}
+
+/// Half-open time window `[start_ms, end_ms)` paired with a mouth [`Viseme`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VisemeSpan {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub viseme: Viseme,
+}
+
+impl VisemeSpan {
+    /// Returns `true` iff `elapsed_ms` lies in the half-open interval `[start_ms, end_ms)`.
+    #[inline]
+    pub const fn contains(&self, elapsed_ms: u64) -> bool {
+        self.start_ms <= elapsed_ms && elapsed_ms < self.end_ms
+    }
+}
+
+/// Look up the active [`Viseme`] at `elapsed_ms` across a timed schedule,
+/// falling back to [`Viseme::Rest`] whenever `elapsed_ms` is outside all `[start_ms, end_ms)` spans.
+pub fn active_viseme_at(schedule: &[VisemeSpan], elapsed_ms: u64) -> Viseme {
+    for span in schedule {
+        if span.contains(elapsed_ms) {
+            return span.viseme;
+        }
+    }
+    Viseme::Rest
 }
 
 /// Convert spoken text into a bounded sequence of viseme frames ending at `Viseme::Rest`.

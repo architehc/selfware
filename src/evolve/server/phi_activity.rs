@@ -934,7 +934,7 @@ fn synthesize_local_bot_turn(
                 });
             }
             format!(
-                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA8 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), and PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`)."
+                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA16 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13 Safety permission & confirmation gate (`src/safety/tool_metadata.rs:234`), PA14 CircuitBreaker recovery (`src/supervision/circuit_breaker.rs:169`), PA15 Ontology graph & deletion gate (`src/evolve/ontology.rs:89`), and PA16 Viseme time-window lookup (`src/phi/viseme.rs:86`)."
             )
         }
         "explain_selection" => {
@@ -978,6 +978,14 @@ fn synthesize_local_bot_turn(
                 "pa6",
                 "pa7",
                 "pa8",
+                "pa9",
+                "pa10",
+                "pa11",
+                "pa12",
+                "pa13",
+                "pa14",
+                "pa15",
+                "pa16",
                 "pt1",
                 "pt2",
                 "pt3",
@@ -994,7 +1002,7 @@ fn synthesize_local_bot_turn(
                 let formal = crate::phi::arena::verify_phi_formal_invariants();
                 let total_rows = formal["total_rows"].as_u64().unwrap_or(0);
                 parts.push(format!(
-                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA8, PT1–PT5)."
+                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA16, PT1–PT5)."
                 ));
             }
             if let Some(path) = doc_path {

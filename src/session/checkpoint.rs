@@ -434,16 +434,33 @@ impl WorkspaceFingerprint {
                 } else {
                     root.join(path)
                 };
-                let digest = match fs::File::open(&path) {
-                    Ok(mut file) => {
-                        let mut hasher = Sha256::new();
-                        match std::io::copy(&mut file, &mut hasher) {
-                            Ok(_) => hex::encode(hasher.finalize()),
-                            Err(_) => Self::UNREADABLE.to_string(),
+                let digest = match fs::symlink_metadata(&path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::ABSENT.to_string(),
+                    Ok(meta) if meta.is_file() => {
+                        #[cfg(unix)]
+                        let open_res = {
+                            use std::os::unix::fs::OpenOptionsExt;
+                            fs::OpenOptions::new()
+                                .read(true)
+                                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                                .open(&path)
+                        };
+                        #[cfg(not(unix))]
+                        let open_res = fs::File::open(&path);
+                        match open_res {
+                            Ok(mut file)
+                                if file.metadata().map(|m| m.is_file()).unwrap_or(false) =>
+                            {
+                                let mut hasher = Sha256::new();
+                                match std::io::copy(&mut file, &mut hasher) {
+                                    Ok(_) => hex::encode(hasher.finalize()),
+                                    Err(_) => Self::UNREADABLE.to_string(),
+                                }
+                            }
+                            _ => Self::UNREADABLE.to_string(),
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::ABSENT.to_string(),
-                    Err(_) => Self::UNREADABLE.to_string(),
+                    _ => Self::UNREADABLE.to_string(),
                 };
                 (recorded.clone(), digest)
             })

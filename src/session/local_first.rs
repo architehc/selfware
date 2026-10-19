@@ -59,7 +59,9 @@ impl LocalFirstCoordinator {
         let cache_stats = self.response_cache.stats();
         LocalFirstStats {
             offline_status: OfflineStatus::Online,
-            bandwidth_saved_bytes: cache_stats.total_size_bytes,
+            bandwidth_saved_bytes: cache_stats
+                .total_size_bytes
+                .max(self.response_cache.bytes_saved()),
             cache_stats,
         }
     }
@@ -78,6 +80,7 @@ pub struct LocalCache<T> {
     max_entries: usize,
     hits: usize,
     misses: usize,
+    bytes_saved: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +98,13 @@ impl LocalCache<String> {
             max_entries: 1000,
             hits: 0,
             misses: 0,
+            bytes_saved: 0,
         }
+    }
+
+    /// Cumulative bytes saved across all cache hits.
+    pub fn bytes_saved(&self) -> usize {
+        self.bytes_saved
     }
 
     /// Insert an entry
@@ -113,6 +122,7 @@ impl LocalCache<String> {
     pub fn get(&mut self, key: &str) -> Option<&str> {
         if let Some(entry) = self.entries.get(key) {
             self.hits += 1;
+            self.bytes_saved = self.bytes_saved.saturating_add(entry.size_bytes);
             Some(entry.value.as_str())
         } else {
             self.misses += 1;

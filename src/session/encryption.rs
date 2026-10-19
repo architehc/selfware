@@ -36,18 +36,34 @@ fn salt_file_path() -> PathBuf {
 fn load_or_create_salt() -> Result<Vec<u8>> {
     let path = salt_file_path();
 
-    if let Ok(meta) = std::fs::symlink_metadata(&path) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "Refusing to use symlinked encryption salt file: {}",
-                path.display()
-            );
-        }
-        if meta.is_file() {
-            let data = std::fs::read(&path).context("Failed to read encryption salt file")?;
-            if data.len() == SALT_LEN {
-                return Ok(data);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to use symlinked encryption salt file: {}",
+                    path.display()
+                );
             }
+            if !meta.is_file() {
+                anyhow::bail!(
+                    "Refusing to use non-regular encryption salt path: {}",
+                    path.display()
+                );
+            }
+            let data = std::fs::read(&path).context("Failed to read encryption salt file")?;
+            if data.len() != SALT_LEN {
+                anyhow::bail!(
+                    "Corrupt encryption salt file {} (expected {} bytes, found {}); refusing to overwrite",
+                    path.display(),
+                    SALT_LEN,
+                    data.len()
+                );
+            }
+            return Ok(data);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).context("Failed to inspect encryption salt file");
         }
     }
 

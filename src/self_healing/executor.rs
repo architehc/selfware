@@ -120,8 +120,12 @@ impl RecoveryExecutor {
         self.stats.executions.fetch_add(1, Ordering::Relaxed);
 
         let mut actions_executed = Vec::new();
-        let mut success = true;
-        let mut error = None;
+        let mut success = !strategy.actions.is_empty();
+        let mut error = if strategy.actions.is_empty() {
+            Some("Recovery strategy contains no actions".to_string())
+        } else {
+            None
+        };
 
         let max_actions = self.config.max_healing_attempts.max(1) as usize;
 

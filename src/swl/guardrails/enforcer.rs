@@ -128,7 +128,14 @@ impl GuardrailEnforcer {
                         _ => {}
                     }
                 }
-                EvaluationResult::Error { .. } => summary.errors += 1,
+                EvaluationResult::Error { .. } => {
+                    summary.errors += 1;
+                    match outcome.action {
+                        ViolationAction::Block => summary.blocked += 1,
+                        ViolationAction::Warn => summary.warnings += 1,
+                        _ => {}
+                    }
+                }
             }
 
             summary.outcomes.push(outcome);

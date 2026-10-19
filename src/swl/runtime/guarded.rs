@@ -240,21 +240,48 @@ impl GuardedSwlRuntime {
     async fn execute_sequential(
         &self,
         doc: &SwlDocument,
-        _workflow: &WorkflowDefinition,
-        workflow_name: &str,
+        workflow: &WorkflowDefinition,
+        _workflow_name: &str,
     ) -> crate::errors::Result<ExecutionResult> {
         debug!("Executing sequential workflow with guardrails");
         let workflow_start = std::time::Instant::now();
 
         let mut outputs = HashMap::new();
 
-        for (agent_name, agent) in &doc.agents {
+        let declared: Vec<(String, AgentDefinition)> = if workflow.steps.is_empty() {
+            doc.agents
+                .iter()
+                .map(|(name, agent)| (name.clone(), agent.clone()))
+                .collect()
+        } else {
+            let mut resolved = Vec::with_capacity(workflow.steps.len());
+            for (idx, step) in workflow.steps.iter().enumerate() {
+                let name = step.agent.as_ref().or(step.delegate.as_ref());
+                let Some(name) = name else {
+                    return Err(SelfwareError::Internal(format!(
+                        "workflow step {idx} declares neither `agent` nor `delegate` — unsupported step form"
+                    )));
+                };
+                let Some(agent) = doc.agents.get(name) else {
+                    return Err(SelfwareError::Internal(format!(
+                        "workflow step {idx} references unknown agent '{name}'"
+                    )));
+                };
+                resolved.push((name.clone(), agent.clone()));
+            }
+            resolved
+        };
+
+        for (agent_name, agent) in &declared {
             // Agent execution with guardrails is handled inside
             // execute_agent_with_guardrails (pre/post agent checks).
             let output = self
                 .execute_agent_with_guardrails(agent_name, agent)
                 .await?;
-            outputs.insert(agent_name.clone(), output);
+            outputs.insert(agent_name.clone(), output.clone());
+
+            let mut ctx = self.base.context.lock().await;
+            ctx.set(agent_name.clone(), output);
         }
 
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
@@ -340,7 +367,7 @@ impl GuardedSwlRuntime {
         let workflow_start = std::time::Instant::now();
 
         // Map phase: execute in parallel
-        let map_result = self.execute_parallel(doc, workflow, workflow_name).await?;
+        let mut map_result = self.execute_parallel(doc, workflow, workflow_name).await?;
 
         // Reduce phase: honor the reduce stage declared on the workflow.
         // ReduceStage::Aggregate names the reducer agent explicitly;
@@ -349,16 +376,21 @@ impl GuardedSwlRuntime {
         // always reduced with the last agent in the document.
         if let Some(reduce_agent_name) = select_reduce_agent(workflow, doc) {
             if let Some(agent) = doc.agents.get(&reduce_agent_name) {
-                let _reduce_output = self
+                let reduce_output = self
                     .execute_agent_with_guardrails(&reduce_agent_name, agent)
                     .await?;
+                map_result
+                    .outputs
+                    .insert(reduce_agent_name.clone(), reduce_output.clone());
+                let mut ctx = self.base.context.lock().await;
+                ctx.set(reduce_agent_name, reduce_output);
             }
         }
 
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
 
         Ok(ExecutionResult {
-            status: ExecutionStatus::Completed,
+            status: map_result.status,
             outputs: map_result.outputs,
             duration_ms,
         })

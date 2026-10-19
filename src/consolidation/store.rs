@@ -247,7 +247,7 @@ impl LongTermStore {
         let records = self.load_all()?;
         let start = records.len().saturating_sub(MAX_INDEXED_RECORDS);
         let slice = &records[start..];
-        let count = slice.len();
+        let mut indexed = 0usize;
 
         for record in slice {
             let text = record_text(record);
@@ -258,6 +258,7 @@ impl LongTermStore {
 
                     let mut rec_map = self.records.write().unwrap_or_else(|e| e.into_inner());
                     rec_map.insert(record.id.clone(), record.clone());
+                    indexed += 1;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to embed {}: {e}", record.id);
@@ -265,8 +266,8 @@ impl LongTermStore {
             }
         }
 
-        info!("Indexed {} existing records for retrieval", count);
-        Ok(count)
+        info!("Indexed {} existing records for retrieval", indexed);
+        Ok(indexed)
     }
 
     /// Hybrid retrieval: semantic vector search + causal-graph expansion.

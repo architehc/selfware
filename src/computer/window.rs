@@ -338,6 +338,14 @@ impl WindowManager {
         {
             self.focus_window_macos(id).await?;
         }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            anyhow::bail!(
+                "window focus_window({:?}) is not supported on this platform",
+                id
+            );
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Ok(())
     }
 
@@ -353,6 +361,7 @@ impl WindowManager {
         #[cfg(target_os = "linux")]
         {
             self.resize_window_linux(id, width, height).await?;
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {
@@ -363,9 +372,14 @@ impl WindowManager {
                 height
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            Ok(())
+            anyhow::bail!(
+                "window resize_window({:?}, {}x{}) is not supported on this platform",
+                id,
+                width,
+                height
+            );
         }
     }
 
@@ -381,6 +395,7 @@ impl WindowManager {
         #[cfg(target_os = "linux")]
         {
             self.move_window_linux(id, x, y).await?;
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {
@@ -391,9 +406,14 @@ impl WindowManager {
                 y
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            Ok(())
+            anyhow::bail!(
+                "window move_window({:?}, {}, {}) is not supported on this platform",
+                id,
+                x,
+                y
+            );
         }
     }
 
@@ -408,6 +428,7 @@ impl WindowManager {
         #[cfg(target_os = "linux")]
         {
             self.minimize_window_linux(id).await?;
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {
@@ -416,9 +437,12 @@ impl WindowManager {
                 id
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            Ok(())
+            anyhow::bail!(
+                "window minimize_window({:?}) is not supported on this platform",
+                id
+            );
         }
     }
 
@@ -433,6 +457,7 @@ impl WindowManager {
         #[cfg(target_os = "linux")]
         {
             self.close_window_linux(id).await?;
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {
@@ -441,9 +466,12 @@ impl WindowManager {
                 id
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            Ok(())
+            anyhow::bail!(
+                "window close_window({:?}) is not supported on this platform",
+                id
+            );
         }
     }
 
@@ -485,6 +513,7 @@ impl WindowManager {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("Failed to launch '{}': {}", app_name, stderr.trim());
             }
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
@@ -515,9 +544,16 @@ impl WindowManager {
             sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
             cmd.spawn()
                 .map_err(|e| anyhow::anyhow!("Failed to launch '{}': {}", app_name, e))?;
+            Ok(())
         }
 
-        Ok(())
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            anyhow::bail!(
+                "launch_app('{}') is not supported on this platform",
+                app_name
+            );
+        }
     }
 
     // ==================== Linux Implementations ====================
