@@ -45,19 +45,27 @@ pub mod tree_log;
 pub use ast_tools::{
     apply_strict_patch, cleanup_worktree, create_shadow_worktree,
     create_shadow_worktree_for_parent, create_shadow_worktree_named,
-    create_shadow_worktree_named_at, get_git_head_commit, WorktreeError,
+    create_shadow_worktree_named_at, get_git_head_commit, resolve_parent_base_commit,
+    restore_worktree_parent_state, WorktreeError,
 };
-pub use daemon::evolve;
+pub use daemon::{apply_edits, evolve};
 pub use fitness::{SabConfig, SabResult};
-pub use micro_mode::{is_micro_model, MICRO_MAX_CONTEXT_CHARS, MICRO_MAX_EDITS, MICRO_MAX_FILES};
+pub use investigate::{
+    investigate_attempt, simulate_10000_reviewer_governance, Degree5Safety, GovernanceDecision,
+};
+pub use micro_mode::{
+    build_micro_system_prompt, is_micro_model, validate_micro_hypothesis, MICRO_MAX_CONTEXT_CHARS,
+    MICRO_MAX_EDITS, MICRO_MAX_FILES,
+};
 pub use policy::{
     BreadthFirstPolicy, EarlyStopPlateauPolicy, LegalAction, ParetoAdaptivePolicy, PolicyDecision,
     PrefixObservation, PrefixView, RefineTop1Policy, SearchPolicy,
 };
 pub use replay::{ReplayError, ReplayReport, ReplaySimulator};
+pub use telemetry::{AllocationHotspot, TelemetrySnapshot};
 pub use tournament::{Hypothesis, HypothesisResult};
 pub use tree_log::{
-    ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
+    compute_sha256, ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
 };
 
 use serde::{Deserialize, Serialize};

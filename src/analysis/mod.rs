@@ -24,5 +24,9 @@ pub use code_graph::{
 };
 pub use repo_inventory::{RepoInventory, CENTRALITY_METRIC};
 pub use tech_debt::{DebtItem, DebtSeverity, DebtTracker, DebtType};
-pub use vector_store::{SearchResult as VectorSearchResult, VectorStore};
+pub use vector_store::{
+    BoundedVectorStore, ChunkMetadata, ChunkType, CodeChunk, CodeChunker, EmbeddingProvider,
+    IndexHealth, SearchResult as VectorSearchResult, TfIdfEmbeddingProvider, VectorCollection,
+    VectorIndex, VectorStore, VectorStoreStats,
+};
 pub use workspace_graph::WorkspaceGraphOptions;

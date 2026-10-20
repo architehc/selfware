@@ -128,6 +128,12 @@ pub use devops::process_manager;
 pub use testing::verification;
 pub use testing::visual_verification;
 
+// Canonical root-level umbrella re-exports for core entrypoints
+pub use agent::Agent;
+pub use config::Config;
+pub use errors::{AgentError, SelfwareError};
+pub use token_count::estimate_content_tokens;
+
 // ============================================================================
 // New feature modules
 pub mod evolve;

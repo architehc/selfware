@@ -21,10 +21,12 @@ pub fn current_timestamp_secs() -> u64 {
 /// directories as needed.
 pub fn save_json_pretty<T: Serialize + ?Sized>(value: &T, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     let json = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, json)?;
+    crate::session::checkpoint::write_bytes_atomically(path, json.as_bytes(), 0o644)?;
     Ok(())
 }
 

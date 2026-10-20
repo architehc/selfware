@@ -977,7 +977,10 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
         return fallback(Some("Active policy file does not exist".to_string()));
     }
 
-    let Ok(content) = std::fs::read_to_string(active_policy_path) else {
+    let Ok(content) = crate::tools::file::read_to_string_capped(
+        active_policy_path,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    ) else {
         return fallback(Some("Failed to read active policy file".to_string()));
     };
 
@@ -4891,7 +4894,10 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
             ));
             return false;
         };
-        let content = match std::fs::read_to_string(&path) {
+        let content = match crate::tools::file::read_to_string_capped(
+            &path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             Ok(c) => c,
             Err(_) => return false,
         };
@@ -4936,7 +4942,9 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
             return false;
         }
 
-        if std::fs::write(&path, &modified).is_err() {
+        if crate::session::checkpoint::write_bytes_atomically(&path, modified.as_bytes(), 0o644)
+            .is_err()
+        {
             return false;
         }
     }

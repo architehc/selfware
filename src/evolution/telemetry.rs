@@ -465,7 +465,8 @@ fn try_parse_dhat_output(
 
     for path in &candidates {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(content) = crate::tools::file::read_to_string_capped(path, 128 * 1024 * 1024)
+            {
                 if let Some(hotspots) = parse_dhat_json(&content) {
                     return Ok(Some(hotspots));
                 }

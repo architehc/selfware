@@ -76,7 +76,11 @@ pub fn resolve_parent_base_commit(attempts_file: &Path, parent_id: Option<&str>)
         return None;
     }
 
-    let content = std::fs::read_to_string(attempts_file).ok()?;
+    let content = crate::tools::file::read_to_string_capped(
+        attempts_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .ok()?;
     let mut nodes_by_id = std::collections::HashMap::new();
     for line in content.lines() {
         if let Ok(node) = serde_json::from_str::<crate::evolution::tree_log::AttemptNode>(line) {
@@ -294,7 +298,11 @@ pub fn restore_worktree_parent_state(
         }
     }
 
-    let content = std::fs::read_to_string(attempts_file).map_err(WorktreeError::IoError)?;
+    let content = crate::tools::file::read_to_string_capped(
+        attempts_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .map_err(|e| WorktreeError::IoError(std::io::Error::other(e)))?;
     let mut nodes_by_id = std::collections::HashMap::new();
     for line in content.lines() {
         if let Ok(node) = serde_json::from_str::<crate::evolution::tree_log::AttemptNode>(line) {
@@ -397,15 +405,19 @@ pub fn restore_worktree_parent_state(
             .current_dir(worktree)
             .output()
             .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
-        if diff_out.status.success() {
-            let actual_diff = String::from_utf8_lossy(&diff_out.stdout);
-            let actual_sha = crate::evolution::tree_log::compute_sha256(actual_diff.as_bytes());
-            if actual_sha != parent_node.diff_sha256 {
-                return Err(WorktreeError::PatchApplicationFailed(format!(
-                    "Restored worktree diff sha256 ({actual_sha}) does not match parent expected diff sha256 ({})",
-                    parent_node.diff_sha256
-                )));
-            }
+        if !diff_out.status.success() {
+            return Err(WorktreeError::GitFailed(format!(
+                "Failed to compute staged diff for fidelity check: {}",
+                String::from_utf8_lossy(&diff_out.stderr).trim()
+            )));
+        }
+        let actual_diff = String::from_utf8_lossy(&diff_out.stdout);
+        let actual_sha = crate::evolution::tree_log::compute_sha256(actual_diff.as_bytes());
+        if actual_sha != parent_node.diff_sha256 {
+            return Err(WorktreeError::PatchApplicationFailed(format!(
+                "Restored worktree diff sha256 ({actual_sha}) does not match parent expected diff sha256 ({})",
+                parent_node.diff_sha256
+            )));
         }
     }
 
@@ -433,7 +445,10 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
                 let Some(replace) = edit["replace"].as_str() else {
                     return false;
                 };
-                let Ok(content) = std::fs::read_to_string(&target) else {
+                let Ok(content) = crate::tools::file::read_to_string_capped(
+                    &target,
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                ) else {
                     return false;
                 };
                 if !content.contains(replace) || content.contains(search) {

@@ -58,15 +58,15 @@ fn cached_or_load<'a>(
     slot: &'a mut Option<CachedIndex>,
     path: &Path,
 ) -> Result<&'a Arc<GraphIndex>> {
-    let metadata = std::fs::metadata(path).map_err(|_| {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
         anyhow!(
             "no evolve graph at {}; run `selfware self-evolve` to build one",
             path.display()
         )
     })?;
-    // `metadata` follows symlinks: a checkout can commit the graph path as a
-    // symlink to a device such as `/dev/zero`, on which `fs::read` never
-    // reaches EOF. Refuse anything but a bounded regular file up front.
+    // `symlink_metadata` inspects the link itself: a checkout can commit the
+    // graph path as a symlink to a device or regular file, which we refuse up
+    // front so only a bounded regular file is ever read.
     if !metadata.file_type().is_file() {
         anyhow::bail!(
             "evolve graph at {} is not a regular file; run `selfware self-evolve` to rebuild it",

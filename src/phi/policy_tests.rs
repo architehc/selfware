@@ -3718,6 +3718,855 @@ steps:
                 "Lean PA36 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(label) = domain.strip_prefix("verification_attribution:") {
+            use crate::agent::preexisting_failure::{
+                attribute, normalized_counts, Attribution, BaselineRun, RerunSpec,
+            };
+            use crate::agent::verification_scope::{
+                check_id_for, VerificationRecord, VerificationScope,
+            };
+            use std::path::Path;
+
+            let attribution_tag = |a: &Attribution| -> &'static str {
+                match a {
+                    Attribution::PreExisting { .. } => "PreExisting",
+                    Attribution::New { .. } => "New",
+                    Attribution::Different { .. } => "Different",
+                    Attribution::Unknown { .. } => "Unknown",
+                }
+            };
+
+            let actual = match (label, spec.as_str()) {
+                ("scope_relevance_lattice", "no_runner_in_scope_parent_sibling_noncargo") => {
+                    let task_root = Path::new("/workspace/repo/subcrate");
+                    let s_no_runner = VerificationScope {
+                        working_dir: task_root.to_path_buf(),
+                        project_root: Some(task_root.to_path_buf()),
+                        runner_exists: Some(false),
+                    };
+                    let s_in_scope = VerificationScope {
+                        working_dir: task_root.to_path_buf(),
+                        project_root: Some(task_root.join("nested")),
+                        runner_exists: Some(true),
+                    };
+                    let s_parent = VerificationScope {
+                        working_dir: task_root.to_path_buf(),
+                        project_root: Some(PathBuf::from("/workspace/repo")),
+                        runner_exists: Some(true),
+                    };
+                    let s_sibling_unknown = VerificationScope {
+                        working_dir: PathBuf::from("/workspace/other"),
+                        project_root: Some(PathBuf::from("/workspace/other")),
+                        runner_exists: None,
+                    };
+                    let non_cargo_dir = tempfile::tempdir().unwrap();
+                    let s_non_cargo = VerificationScope {
+                        working_dir: PathBuf::from("/workspace/other"),
+                        project_root: Some(PathBuf::from("/workspace/other")),
+                        runner_exists: Some(true),
+                    };
+                    format!(
+                        "no_runner={:?}:same_or_child={:?}:parent={:?}:sibling_unknown={:?}:non_cargo_task={:?}",
+                        s_no_runner.relevance_to(task_root),
+                        s_in_scope.relevance_to(task_root),
+                        s_parent.relevance_to(task_root),
+                        s_sibling_unknown.relevance_to(task_root),
+                        s_non_cargo.relevance_to(non_cargo_dir.path()),
+                    )
+                }
+                (
+                    "blocks_completion_and_awaits_rerun_gates",
+                    "fresh_fail_vs_stale_rerun_vs_preexisting_vs_out_of_scope",
+                ) => {
+                    let task_root = Path::new("/workspace/repo");
+                    let in_scope = VerificationScope {
+                        working_dir: task_root.to_path_buf(),
+                        project_root: Some(task_root.to_path_buf()),
+                        runner_exists: Some(true),
+                    };
+                    let oos_scope = VerificationScope {
+                        working_dir: PathBuf::from("/workspace"),
+                        project_root: Some(PathBuf::from("/workspace")),
+                        runner_exists: Some(true),
+                    };
+                    let base_rec = VerificationRecord {
+                        check_id: "cargo test".to_string(),
+                        command: "cargo test".to_string(),
+                        scope: in_scope,
+                        passed: false,
+                        mutation_sequence: 2,
+                        summary: "test failed".to_string(),
+                        diagnostics: vec!["error[E0425]: x".to_string()],
+                        rerun: Some(RerunSpec::Tool {
+                            name: "cargo_test".to_string(),
+                            args: "{}".to_string(),
+                        }),
+                        attribution: None,
+                    };
+                    let fresh_blk = base_rec.blocks_completion(task_root, 2);
+                    let fresh_rerun = base_rec.awaits_rerun(task_root, 2);
+                    let stale_blk = base_rec.blocks_completion(task_root, 3);
+                    let stale_rerun = base_rec.awaits_rerun(task_root, 3);
+
+                    let mut pre_rec = base_rec.clone();
+                    pre_rec.attribution = Some(Attribution::PreExisting {
+                        sample: vec!["error[E0425]: x".to_string()],
+                    });
+                    let pre_blk = pre_rec.blocks_completion(task_root, 2);
+                    let pre_rerun = pre_rec.awaits_rerun(task_root, 3);
+
+                    let mut oos_rec = base_rec;
+                    oos_rec.scope = oos_scope;
+                    let oos_blk = oos_rec.blocks_completion(task_root, 2);
+
+                    format!(
+                        "fresh_blk={fresh_blk}:fresh_rerun={fresh_rerun}:stale_blk={stale_blk}:stale_rerun={stale_rerun}:pre_blk={pre_blk}:pre_rerun={pre_rerun}:oos_blk={oos_blk}"
+                    )
+                }
+                (
+                    "cargo_check_id_and_asymmetric_clearing",
+                    "lib_pass_vs_full_fail_and_full_pass_vs_lib_fail",
+                ) => {
+                    let id_lib = check_id_for("shell_exec", "cargo test --lib 2>&1");
+                    let id_pkg = check_id_for("shell_exec", "cargo test -p core");
+                    let id_full = check_id_for("shell_exec", "cargo test -- --nocapture");
+
+                    let scope = VerificationScope {
+                        working_dir: PathBuf::from("/workspace/repo"),
+                        project_root: Some(PathBuf::from("/workspace/repo")),
+                        runner_exists: Some(true),
+                    };
+                    let make = |check_id: &str, passed: bool| VerificationRecord {
+                        check_id: check_id.to_string(),
+                        command: check_id.to_string(),
+                        scope: scope.clone(),
+                        passed,
+                        mutation_sequence: 1,
+                        summary: String::new(),
+                        diagnostics: vec![],
+                        rerun: None,
+                        attribution: None,
+                    };
+                    let lib_pass = make(&id_lib, true);
+                    let full_fail = make(&id_full, false);
+                    let full_pass = make(&id_full, true);
+                    let lib_fail = make(&id_lib, false);
+
+                    let lib_clears_full = lib_pass.clears(&full_fail);
+                    let full_clears_lib = full_pass.clears(&lib_fail);
+                    format!(
+                        "id_lib={id_lib}:id_pkg={id_pkg}:id_full={id_full}:lib_clears_full={lib_clears_full}:full_clears_lib={full_clears_lib}"
+                    )
+                }
+                (
+                    "baseline_attribution_preexisting_vs_multiplicity_new",
+                    "same_or_fewer_errors_vs_count_increase_vs_passed_baseline",
+                ) => {
+                    let roots = vec!["/repo".to_string()];
+                    let base_two = BaselineRun::Ran {
+                        passed: false,
+                        diagnostics: normalized_counts(
+                            &[
+                                "error[E0308]: /repo/src/a.rs:10:5: mismatched types".to_string(),
+                                "error[E0425]: /repo/src/b.rs:20:1: cannot find value".to_string(),
+                            ],
+                            &roots,
+                        ),
+                    };
+                    let curr_same = normalized_counts(
+                        &[
+                            "error[E0308]: /repo/src/a.rs:99:1: mismatched types".to_string(),
+                            "error[E0425]: /repo/src/b.rs:42:3: cannot find value".to_string(),
+                        ],
+                        &roots,
+                    );
+                    let curr_fewer = normalized_counts(
+                        &["error[E0308]: /repo/src/a.rs:10:5: mismatched types".to_string()],
+                        &roots,
+                    );
+                    let curr_more = normalized_counts(
+                        &[
+                            "error[E0308]: /repo/src/a.rs:10:5: mismatched types".to_string(),
+                            "error[E0308]: /repo/src/a.rs:50:5: mismatched types".to_string(),
+                        ],
+                        &roots,
+                    );
+                    let base_passed = BaselineRun::Ran {
+                        passed: true,
+                        diagnostics: Default::default(),
+                    };
+
+                    let a_same = attribute(&curr_same, &base_two);
+                    let a_fewer = attribute(&curr_fewer, &base_two);
+                    let a_more = attribute(&curr_more, &base_two);
+                    let a_base_pass = attribute(&curr_fewer, &base_passed);
+                    format!(
+                        "same={}:fewer={}:more_count={}:base_passed={}",
+                        attribution_tag(&a_same),
+                        attribution_tag(&a_fewer),
+                        attribution_tag(&a_more),
+                        attribution_tag(&a_base_pass),
+                    )
+                }
+                (
+                    "baseline_attribution_different_and_unknown_cap",
+                    "disjoint_errors_and_unavailable_baseline_block_cap",
+                ) => {
+                    let roots = vec!["/repo".to_string()];
+                    let base = BaselineRun::Ran {
+                        passed: false,
+                        diagnostics: normalized_counts(
+                            &["error[E0308]: /repo/src/a.rs:10:5: mismatched types".to_string()],
+                            &roots,
+                        ),
+                    };
+                    let curr_disjoint = normalized_counts(
+                        &["error[E0599]: /repo/src/c.rs:12:1: no method named foo".to_string()],
+                        &roots,
+                    );
+                    let a_diff = attribute(&curr_disjoint, &base);
+                    let a_unavail = attribute(
+                        &curr_disjoint,
+                        &BaselineRun::Unavailable("no git tree".to_string()),
+                    );
+                    format!(
+                        "different={}:diff_pre={}:diff_cap={}:unavail={}:unavail_pre={}:unavail_cap={}",
+                        attribution_tag(&a_diff),
+                        a_diff.is_preexisting(),
+                        a_diff.block_is_capped(),
+                        attribution_tag(&a_unavail),
+                        a_unavail.is_preexisting(),
+                        a_unavail.block_is_capped(),
+                    )
+                }
+                other => panic!("unexpected verification_attribution case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA37 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(label) = domain.strip_prefix("protocol_process_guard:") {
+            use crate::lsp::client::{query_settling_indexing, Language};
+            use crate::safety::process_env::sanitized_env_from;
+            use crate::skills::{compute_metadata_hash, validate_skill_name, Skill, SkillRegistry};
+
+            let badge_tag = |badge: &str| -> &'static str {
+                if badge.contains("CANDIDATE") {
+                    "CANDIDATE"
+                } else if badge.contains("UNVERIFIED") {
+                    "UNVERIFIED"
+                } else {
+                    "CLEAN"
+                }
+            };
+
+            let actual = match (label, spec.as_str()) {
+                (
+                    "skill_name_validation_and_traversal_rejection",
+                    "valid_vs_empty_dot_traversal_slash",
+                ) => {
+                    let valid = validate_skill_name("rust-test_01").is_ok();
+                    let empty = validate_skill_name("").is_ok();
+                    let dot = validate_skill_name(".hidden").is_ok();
+                    let traversal = validate_skill_name("../escape").is_ok();
+                    let slash = validate_skill_name("bad/slash").is_ok();
+                    format!(
+                        "valid={valid}:empty={empty}:dot={dot}:traversal={traversal}:slash={slash}"
+                    )
+                }
+                (
+                    "skill_trust_badge_and_argument_rendering",
+                    "candidate_admitted_verified_badges_and_arg_substitution",
+                ) => {
+                    let s_unadm = Skill {
+                        name: "s".to_string(),
+                        candidate: true,
+                        admitted: false,
+                        verified: false,
+                        content: "Run $ARGUMENTS now".to_string(),
+                        ..Default::default()
+                    };
+                    let s_adm_unv = Skill {
+                        name: "s".to_string(),
+                        candidate: true,
+                        admitted: true,
+                        verified: false,
+                        content: "Static body".to_string(),
+                        ..Default::default()
+                    };
+                    let s_ver = Skill {
+                        name: "s".to_string(),
+                        candidate: true,
+                        admitted: true,
+                        verified: true,
+                        ..Default::default()
+                    };
+                    let s_man = Skill {
+                        name: "s".to_string(),
+                        candidate: false,
+                        admitted: false,
+                        verified: false,
+                        ..Default::default()
+                    };
+                    let sub = s_unadm.render_content(" --release ");
+                    let append = s_adm_unv.render_content("--check").replace("\n\n", "|");
+                    format!(
+                        "unadmitted={}:admitted_unverified={}:verified={}:manual={}:sub={sub}:append={append}",
+                        badge_tag(&s_unadm.trust_badge()),
+                        badge_tag(&s_adm_unv.trust_badge()),
+                        badge_tag(&s_ver.trust_badge()),
+                        badge_tag(&s_man.trust_badge()),
+                    )
+                }
+                (
+                    "skill_admission_ledger_and_hash_tamper_gate",
+                    "unadmitted_refused_admitted_loaded_tampered_refused_and_sorted_tools",
+                ) => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let cand_dir = dir.path().join("candidates");
+                    let skills_dir = dir.path().join("skills");
+                    std::fs::create_dir_all(&cand_dir).unwrap();
+                    std::fs::create_dir_all(&skills_dir).unwrap();
+
+                    let unadm_file = skills_dir.join("unadmitted.md");
+                    std::fs::write(
+                        &unadm_file,
+                        "---\nname: unadmitted\ndescription: d\n---\nbody\n",
+                    )
+                    .unwrap();
+                    let mut reg1 = SkillRegistry::new();
+                    reg1.discover_dir(&skills_dir);
+                    let unadm_loaded = reg1.len();
+                    let unadm_refused = reg1.refused().len();
+                    std::fs::remove_file(&unadm_file).unwrap();
+
+                    let cand_file = cand_dir.join("cand.md");
+                    std::fs::write(
+                        &cand_file,
+                        "---\nname: cand\ndescription: d\ncandidate: true\n---\noriginal body\n",
+                    )
+                    .unwrap();
+                    SkillRegistry::admit_candidate(&cand_file, &skills_dir).unwrap();
+                    let mut reg2 = SkillRegistry::new();
+                    reg2.discover_dir(&skills_dir);
+                    let adm_loaded = reg2.len();
+                    let adm_refused = reg2.refused().len();
+
+                    let admitted_file = skills_dir.join("cand.md");
+                    let tampered = std::fs::read_to_string(&admitted_file)
+                        .unwrap()
+                        .replace("original body", "tampered body");
+                    std::fs::write(&admitted_file, tampered).unwrap();
+                    let mut reg3 = SkillRegistry::new();
+                    reg3.discover_dir(&skills_dir);
+                    let tamp_loaded = reg3.len();
+                    let tamp_refused = reg3.refused().len();
+
+                    let h1 = compute_metadata_hash(
+                        "desc",
+                        &["shell_exec".to_string(), "file_read".to_string()],
+                        Some("src"),
+                        Some("distilled"),
+                    );
+                    let h2 = compute_metadata_hash(
+                        "desc",
+                        &["file_read".to_string(), "shell_exec".to_string()],
+                        Some("src"),
+                        Some("distilled"),
+                    );
+                    let tool_order_invariant = h1 == h2;
+                    format!(
+                        "unadmitted={unadm_loaded}/{unadm_refused}:admitted={adm_loaded}/{adm_refused}:tampered={tamp_loaded}/{tamp_refused}:tool_order_invariant={tool_order_invariant}"
+                    )
+                }
+                (
+                    "process_env_allowlist_and_proxy_credential_scrub",
+                    "secrets_dropped_and_http_proxy_userinfo_redacted_vs_opt_in",
+                ) => {
+                    let parent = vec![
+                        ("PATH", "/usr/bin"),
+                        ("CUSTOM_KEEP", "1"),
+                        ("SELFWARE_API_KEY", "sk-secret"),
+                        ("GITHUB_TOKEN", "ghp-secret"),
+                        ("HTTP_PROXY", "http://alice:hunter2@proxy.internal:8080"),
+                    ];
+                    let scrubbed: std::collections::HashMap<String, String> =
+                        sanitized_env_from(&["CUSTOM_KEEP"], parent.clone())
+                            .into_iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.to_string_lossy().into_owned(),
+                                    v.to_string_lossy().into_owned(),
+                                )
+                            })
+                            .collect();
+                    let mut parent_opt_in = parent;
+                    parent_opt_in.push(("SELFWARE_FORWARD_PROXY_CREDENTIALS", "1"));
+                    let opt_in: std::collections::HashMap<String, String> =
+                        sanitized_env_from(&["CUSTOM_KEEP"], parent_opt_in)
+                            .into_iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.to_string_lossy().into_owned(),
+                                    v.to_string_lossy().into_owned(),
+                                )
+                            })
+                            .collect();
+                    format!(
+                        "path={}:custom={}:api_key={}:gh_token={}:proxy_scrub={}:proxy_opt_in={}",
+                        scrubbed.contains_key("PATH"),
+                        scrubbed.contains_key("CUSTOM_KEEP"),
+                        scrubbed.contains_key("SELFWARE_API_KEY"),
+                        scrubbed.contains_key("GITHUB_TOKEN"),
+                        scrubbed.get("HTTP_PROXY").unwrap(),
+                        opt_in.get("HTTP_PROXY").unwrap(),
+                    )
+                }
+                (
+                    "lsp_language_detection_and_settling_query_retry",
+                    "rs_pyi_tsx_md_and_indexing_retry_gate",
+                ) => {
+                    let rs = Language::from_path("src/lib.rs")
+                        .map(|l| l.id())
+                        .unwrap_or("none");
+                    let pyi = Language::from_path("pkg/stub.pyi")
+                        .map(|l| l.id())
+                        .unwrap_or("none");
+                    let tsx = Language::from_path("ui/app.tsx")
+                        .map(|l| l.id())
+                        .unwrap_or("none");
+                    let md = Language::from_path("README.md")
+                        .map(|l| l.id())
+                        .unwrap_or("none");
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let c1 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let c1_ref = c1.clone();
+                    let out1 = rt
+                        .block_on(query_settling_indexing(
+                            || true,
+                            Vec::<u8>::is_empty,
+                            std::time::Duration::from_millis(1),
+                            move || {
+                                let c = c1_ref.clone();
+                                async move {
+                                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    Ok(vec![1u8])
+                                }
+                            },
+                        ))
+                        .unwrap();
+
+                    let c2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let c2_ref = c2.clone();
+                    let out2 = rt
+                        .block_on(query_settling_indexing(
+                            || false,
+                            Vec::<u8>::is_empty,
+                            std::time::Duration::from_millis(1),
+                            move || {
+                                let c = c2_ref.clone();
+                                async move {
+                                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    Ok(Vec::<u8>::new())
+                                }
+                            },
+                        ))
+                        .unwrap();
+
+                    let c3 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let c3_ref = c3.clone();
+                    let out3 = rt
+                        .block_on(query_settling_indexing(
+                            || true,
+                            Vec::<u8>::is_empty,
+                            std::time::Duration::from_millis(1),
+                            move || {
+                                let c = c3_ref.clone();
+                                async move {
+                                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    Ok(Vec::<u8>::new())
+                                }
+                            },
+                        ))
+                        .unwrap();
+                    assert!(out1.still_indexing && !out2.still_indexing);
+
+                    format!(
+                        "rs={rs}:pyi={pyi}:tsx={tsx}:md={md}:nonempty_calls={}:idle_empty_calls={}:indexing_empty_calls={}:still_indexing={}",
+                        c1.load(std::sync::atomic::Ordering::SeqCst),
+                        c2.load(std::sync::atomic::Ordering::SeqCst),
+                        c3.load(std::sync::atomic::Ordering::SeqCst),
+                        out3.still_indexing,
+                    )
+                }
+                other => panic!("unexpected protocol_process_guard case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA38 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(label) = domain.strip_prefix("retrieval_ranking:") {
+            use crate::analysis::bm25::BM25Index;
+            use crate::analysis::code_graph::{
+                CodeGraph, EdgeType as CgEdgeType, GraphEdge, GraphNode, NodeType,
+            };
+            use crate::analysis::vector_store::VectorIndex;
+
+            let actual = match (label, spec.as_str()) {
+                (
+                    "bm25_upsert_camelcase_and_query_limit",
+                    "upsert_doc1_camelcase_split_empty_query_and_limit_1",
+                ) => {
+                    let mut idx = BM25Index::new();
+                    idx.add("doc1", "old text");
+                    idx.add("doc1", "alpha token alpha token");
+                    idx.add("doc2", "getUserName alpha token");
+
+                    let docs = idx.len();
+                    let camel = idx.search("user", 5);
+                    let camel_hit = camel.first().map(|r| r.id.as_str()).unwrap_or("none");
+                    let empty_q = idx.search("", 5).len();
+                    let lim1 = idx.search("alpha", 1);
+                    let lim1_len = lim1.len();
+                    let top = lim1.first().map(|r| r.id.as_str()).unwrap_or("none");
+                    format!(
+                        "docs={docs}:camel_hit={camel_hit}:empty_q={empty_q}:limit1_len={lim1_len}:top={top}"
+                    )
+                }
+                (
+                    "vector_cosine_similarity_and_zero_guard",
+                    "identical_orthogonal_zero_and_scaled_vectors",
+                ) => {
+                    let same = (VectorIndex::cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) * 100.0)
+                        .round() as i64;
+                    let ortho = (VectorIndex::cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]) * 100.0)
+                        .round() as i64;
+                    let zero = (VectorIndex::cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]) * 100.0)
+                        .round() as i64;
+                    let scaled = (VectorIndex::cosine_similarity(&[3.0, 4.0], &[6.0, 8.0]) * 100.0)
+                        .round() as i64;
+                    format!("same={same}:ortho={ortho}:zero={zero}:scaled={scaled}")
+                }
+                (
+                    "vector_soft_delete_and_30pct_autocompact",
+                    "ten_chunks_remove_3_soft_then_4th_compacts",
+                ) => {
+                    let mut v = VectorIndex::new(2);
+                    for i in 0..10 {
+                        v.add(format!("c{i}"), vec![1.0, 0.0]).unwrap();
+                    }
+                    v.remove("c0");
+                    v.remove("c1");
+                    v.remove("c2");
+                    let after3_active = v.len();
+                    let after3_slots = v.total_slots();
+
+                    v.remove("c3");
+                    let after4_active = v.len();
+                    let after4_slots = v.total_slots();
+                    format!(
+                        "after3_active={after3_active}:after3_slots={after3_slots}:after4_active={after4_active}:after4_slots={after4_slots}"
+                    )
+                }
+                ("vector_index_health_lattice", "clean_vs_duplicate_id_vs_nan_or_dim_mismatch") => {
+                    let mut v_clean = VectorIndex::new(2);
+                    v_clean.add("c1".to_string(), vec![1.0, 0.0]).unwrap();
+                    let clean = format!("{:?}", v_clean.check_health());
+
+                    let mut v_dup = VectorIndex::new(2);
+                    v_dup.add("dup".to_string(), vec![1.0, 0.0]).unwrap();
+                    v_dup.add("dup".to_string(), vec![0.0, 1.0]).unwrap();
+                    let dup_id = format!("{:?}", v_dup.check_health());
+
+                    let mut v_nan = VectorIndex::new(2);
+                    v_nan.add("nan".to_string(), vec![f32::NAN, 1.0]).unwrap();
+                    let nan = format!("{:?}", v_nan.check_health());
+
+                    let mut v_dim = VectorIndex::new(2);
+                    v_dim.add("ok".to_string(), vec![1.0, 0.0]).unwrap();
+                    v_dim.set_dimension(3);
+                    let dim_mismatch = format!("{:?}", v_dim.check_health());
+
+                    format!("clean={clean}:dup_id={dup_id}:nan={nan}:dim_mismatch={dim_mismatch}")
+                }
+                (
+                    "code_graph_bfs_shortest_path_and_cycles",
+                    "reflexive_direct_vs_two_hop_unreachable_and_cycle",
+                ) => {
+                    let mut g = CodeGraph::new("test");
+                    for id in ["n1", "n2", "n3", "iso"] {
+                        let mut node = GraphNode::new(id, NodeType::Function)
+                            .in_file("src/lib.rs")
+                            .at_line(1);
+                        node.id = id.to_string();
+                        g.add_node(node);
+                    }
+                    for (from, to) in [("n1", "n2"), ("n2", "n3"), ("n1", "n3"), ("n3", "n1")] {
+                        g.add_edge(GraphEdge::new(from, to, CgEdgeType::Calls));
+                    }
+                    let self_len = g.find_path("n1", "n1").unwrap().len();
+                    let shortest_len = g.find_path("n1", "n3").unwrap().len();
+                    let unreachable = match g.find_path("n1", "iso") {
+                        Some(p) => p.len().to_string(),
+                        None => "none".to_string(),
+                    };
+                    let has_cycle = !g.find_cycles().is_empty();
+                    format!(
+                        "self_len={self_len}:shortest_len={shortest_len}:unreachable={unreachable}:has_cycle={has_cycle}"
+                    )
+                }
+                other => panic!("unexpected retrieval_ranking case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA39 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(label) = domain.strip_prefix("evolve_quality_lattice:") {
+            use crate::evolve::context_reduce::dedup_context;
+            use crate::evolve::dead_code::DeadCodeAnalyzer;
+            use crate::evolve::dedup::{jaccard, DeduplicationAnalyzer};
+            use crate::evolve::git::GitEngine;
+            use crate::evolve::quality::QualityAnalyzer;
+            use crate::evolve::readiness::GateState;
+            use crate::evolve::{Graph, Node};
+            use std::collections::HashSet;
+
+            let actual = match (label, spec.as_str()) {
+                (
+                    "readiness_gate_three_state_aggregation",
+                    "all_pass_vs_clean_eval_incomplete_vs_dirty_blocked",
+                ) => {
+                    let aggregate = |states: &[GateState]| -> (&'static str, bool) {
+                        let ready = states.iter().all(|s| *s == GateState::Pass);
+                        let status = if ready {
+                            "ready"
+                        } else if states.contains(&GateState::Fail) {
+                            "blocked"
+                        } else {
+                            "incomplete"
+                        };
+                        (status, ready)
+                    };
+                    let (all_pass_st, all_pass_r) =
+                        aggregate(&[GateState::Pass, GateState::Pass, GateState::Pass]);
+
+                    let dir = tempfile::tempdir().unwrap();
+                    let src = dir.path().join("src");
+                    std::fs::create_dir_all(&src).unwrap();
+                    std::fs::write(
+                        src.join("lib.rs"),
+                        "pub fn ok() -> usize { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert_eq!(super::ok(), 1); }\n}\n",
+                    )
+                    .unwrap();
+                    use crate::safety::git_exec::{GitScope, SanitizedGitExt};
+                    let run_git = |args: &[&str]| {
+                        assert!(std::process::Command::new("git")
+                            .sanitized_git(dir.path(), GitScope::Internal)
+                            .args(args)
+                            .status()
+                            .unwrap()
+                            .success());
+                    };
+                    run_git(&["init", "-q"]);
+                    run_git(&["config", "user.email", "test@example.com"]);
+                    run_git(&["config", "user.name", "Test"]);
+                    run_git(&["add", "."]);
+                    run_git(&["commit", "-q", "-m", "init"]);
+
+                    let git_clean = GitEngine::new(dir.path()).status().unwrap();
+                    let clean_git_gate = if git_clean.dirty {
+                        GateState::Fail
+                    } else {
+                        GateState::Pass
+                    };
+                    let (clean_st, clean_r) = aggregate(&[
+                        GateState::Pass,
+                        GateState::Pass,
+                        clean_git_gate,
+                        GateState::Unknown,
+                    ]);
+
+                    std::fs::write(src.join("dirty.rs"), "pub fn dirty() {}\n").unwrap();
+                    let git_dirty = GitEngine::new(dir.path()).status().unwrap();
+                    let dirty_git_gate = if git_dirty.dirty {
+                        GateState::Fail
+                    } else {
+                        GateState::Pass
+                    };
+                    let (dirty_st, dirty_r) = aggregate(&[
+                        GateState::Pass,
+                        GateState::Pass,
+                        dirty_git_gate,
+                        GateState::Unknown,
+                    ]);
+
+                    format!(
+                        "all_pass={all_pass_st}/{all_pass_r}:clean_eval={clean_st}/{clean_r}:dirty_eval={dirty_st}/{dirty_r}"
+                    )
+                }
+                (
+                    "quality_cyclomatic_and_dead_code_ratio_clamp",
+                    "branch_free_vs_4_branches_and_dead_ratio_0_25_100",
+                ) => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let f_base = dir.path().join("base.rs");
+                    let f_branches = dir.path().join("branches.rs");
+                    let f_zero_fn = dir.path().join("zero_fn.rs");
+                    let f_clamped = dir.path().join("clamped.rs");
+
+                    std::fs::write(&f_base, "pub fn a() -> i32 { 1 }\n").unwrap();
+                    std::fs::write(
+                        &f_branches,
+                        "#[allow(dead_code)]\nfn f1(x: bool, y: bool) {\n    if x && y || !x {\n        match x { true => {} false => {} }\n    }\n}\nfn f2() {}\nfn f3() {}\nfn f4() {}\n",
+                    )
+                    .unwrap();
+                    std::fs::write(&f_zero_fn, "pub const K: usize = 1;\n").unwrap();
+                    std::fs::write(
+                        &f_clamped,
+                        "#[allow(dead_code)]\n#[allow(dead_code)]\n#[allow(dead_code)]\nfn g1() {}\nfn g2() {}\n",
+                    )
+                    .unwrap();
+
+                    let mut nodes = vec![
+                        Node::code("base", f_base.to_str().unwrap()),
+                        Node::code("branches", f_branches.to_str().unwrap()),
+                        Node::code("zero_fn", f_zero_fn.to_str().unwrap()),
+                        Node::code("clamped", f_clamped.to_str().unwrap()),
+                    ];
+                    let qa = QualityAnalyzer::static_only();
+                    for node in &mut nodes {
+                        qa.analyze_node(node).unwrap();
+                    }
+
+                    let cc_base = (nodes[0].complexity.unwrap() * 10.0).round() as i64;
+                    let cc_4 = (nodes[1].complexity.unwrap() * 10.0).round() as i64;
+                    let dc_zero_fn = (nodes[2].dead_code_ratio.unwrap() * 100.0).round() as i64;
+                    let dc_1_of_4 = (nodes[1].dead_code_ratio.unwrap() * 100.0).round() as i64;
+                    let dc_clamped = (nodes[3].dead_code_ratio.unwrap() * 100.0).round() as i64;
+
+                    format!(
+                        "cc_base={cc_base}:cc_4={cc_4}:dc_zero_fn={dc_zero_fn}:dc_1_of_4={dc_1_of_4}:dc_clamped={dc_clamped}"
+                    )
+                }
+                ("dedup_jaccard_and_near_threshold", "empty_identical_3of5_and_4of5_threshold") => {
+                    let set = |items: &[&str]| -> HashSet<String> {
+                        items.iter().map(|s| (*s).to_string()).collect()
+                    };
+                    let empty = (jaccard(&set(&[]), &set(&[])) * 100.0).round() as i64;
+                    let same =
+                        (jaccard(&set(&["a", "b"]), &set(&["a", "b"])) * 100.0).round() as i64;
+                    let three_fifths =
+                        (jaccard(&set(&["a", "b", "c", "d"]), &set(&["a", "b", "c", "e"])) * 100.0)
+                            .round() as i64;
+                    let j45 = jaccard(
+                        &set(&["a", "b", "c", "d", "e"]),
+                        &set(&["a", "b", "c", "d"]),
+                    );
+                    let four_fifths = (j45 * 100.0).round() as i64;
+                    let near_80 = j45 >= 0.8;
+                    format!(
+                        "empty={empty}:same={same}:three_fifths={three_fifths}:four_fifths={four_fifths}:near_80={near_80}"
+                    )
+                }
+                (
+                    "dedup_exact_near_and_structure_node_skip",
+                    "exact_pair_near_pair_and_structure_exempt",
+                ) => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let exact_body = "fn exact_fn() -> usize {\n    let step_one_accumulator = 100;\n    let step_two_accumulator = 200;\n    let step_three_accumulator = step_one_accumulator + step_two_accumulator;\n    let step_four_accumulator = step_three_accumulator * 10;\n    step_four_accumulator + 42\n}\n";
+                    let e1 = dir.path().join("e1.rs");
+                    let e2 = dir.path().join("e2.rs");
+                    std::fs::write(&e1, exact_body).unwrap();
+                    std::fs::write(&e2, exact_body).unwrap();
+
+                    let base_lines: String =
+                        (0..10).map(|i| format!("let v_{i} = {i};\n")).collect();
+                    let near_lines: String = (0..9)
+                        .map(|i| format!("let v_{i} = {i};\n"))
+                        .chain(std::iter::once("let extra = 99;\n".to_string()))
+                        .collect();
+                    let n1 = dir.path().join("n1.rs");
+                    let n2 = dir.path().join("n2.rs");
+                    std::fs::write(&n1, &base_lines).unwrap();
+                    std::fs::write(&n2, &near_lines).unwrap();
+
+                    let analyzer = DeduplicationAnalyzer::new();
+                    let g_exact = Graph {
+                        nodes: vec![
+                            Node::code("e1", e1.to_str().unwrap()),
+                            Node::code("e2", e2.to_str().unwrap()),
+                        ],
+                        edges: vec![],
+                    };
+                    let exact_dupes = analyzer.find_duplicates_in(&g_exact, dir.path()).unwrap();
+
+                    let g_near = Graph {
+                        nodes: vec![
+                            Node::code("n1", n1.to_str().unwrap()),
+                            Node::code("n2", n2.to_str().unwrap()),
+                        ],
+                        edges: vec![],
+                    };
+                    let near_dupes = analyzer.find_duplicates_in(&g_near, dir.path()).unwrap();
+
+                    let g_struct = Graph {
+                        nodes: vec![Node::structure("s1"), Node::structure("s2")],
+                        edges: vec![],
+                    };
+                    let struct_dupes = analyzer.find_duplicates_in(&g_struct, dir.path()).unwrap();
+
+                    let (_, elided) = dedup_context(&[
+                        ("e1.rs".to_string(), exact_body.to_string()),
+                        ("e2.rs".to_string(), exact_body.to_string()),
+                    ]);
+                    let saving_pos = elided > 0;
+
+                    format!(
+                        "exact_kind={:?}:near_kind={:?}:structure_pairs={}:saving_pos={saving_pos}",
+                        exact_dupes[0].kind,
+                        near_dupes[0].kind,
+                        struct_dupes.len(),
+                    )
+                }
+                (
+                    "dead_code_dispatched_test_exemption_and_cfg_sort",
+                    "new_and_test_exempt_plain_before_cfg_gated",
+                ) => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let src = dir.path().join("src");
+                    std::fs::create_dir_all(&src).unwrap();
+                    std::fs::write(
+                        src.join("lib.rs"),
+                        "#[cfg(feature = \"extra\")]\nfn unused_gated() {}\nfn unused_plain() {}\nfn new() {}\n#[test]\nfn test_helper() {}\n",
+                    )
+                    .unwrap();
+                    let dead = DeadCodeAnalyzer::new(dir.path()).find().unwrap();
+                    let has_new = dead.iter().any(|d| d.name == "new");
+                    let has_test = dead.iter().any(|d| d.name == "test_helper");
+                    let plain_dead = dead.iter().any(|d| d.name == "unused_plain");
+                    let gated_dead = dead.iter().any(|d| d.name == "unused_gated");
+                    let plain_before_gated =
+                        dead.len() == 2 && !dead[0].cfg_gated && dead[1].cfg_gated;
+                    format!(
+                        "dead_count={}:first={}/{}:second={}/{}:has_new={has_new}:has_test={has_test}:plain_dead={plain_dead}:gated_dead={gated_dead}:plain_before_gated={plain_before_gated}",
+                        dead.len(),
+                        dead[0].name,
+                        dead[0].cfg_gated,
+                        dead[1].name,
+                        dead[1].cfg_gated,
+                    )
+                }
+                other => panic!("unexpected evolve_quality_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA40 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -3727,7 +4576,7 @@ steps:
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 187, "all 187 PA1–PA36 rows must be checked");
+    assert_eq!(checked, 207, "all 207 PA1–PA40 rows must be checked");
 }
 
 #[test]
@@ -4255,4 +5104,168 @@ fn pa36_plan_mode_and_workflow_lattice_invariants() {
         message: "b".to_string(),
     };
     assert_ne!(step_fingerprint(&step_a), step_fingerprint(&step_b));
+}
+
+#[test]
+fn pa37_verification_scope_and_preexisting_attribution_invariants() {
+    use crate::agent::preexisting_failure::{
+        attribute, normalized_counts, Attribution, BaselineRun, RerunSpec,
+    };
+    use crate::agent::verification_scope::{
+        VerificationLedger, VerificationRecord, VerificationScope,
+    };
+    use std::path::Path;
+
+    let task_root = Path::new("/workspace/repo");
+    let no_runner_rec = VerificationRecord {
+        check_id: "cargo check".to_string(),
+        command: "cargo check".to_string(),
+        scope: VerificationScope {
+            working_dir: task_root.to_path_buf(),
+            project_root: Some(task_root.to_path_buf()),
+            runner_exists: Some(false),
+        },
+        passed: false,
+        mutation_sequence: 1,
+        summary: "cargo not found".to_string(),
+        diagnostics: vec![],
+        rerun: Some(RerunSpec::Tool {
+            name: "cargo_check".to_string(),
+            args: "{}".to_string(),
+        }),
+        attribution: None,
+    };
+    assert!(!no_runner_rec.blocks_completion(task_root, 1));
+    assert!(!no_runner_rec.awaits_rerun(task_root, 2));
+
+    let mut ledger = VerificationLedger::default();
+    ledger.record(no_runner_rec);
+    assert!(ledger.is_empty());
+
+    let roots = vec!["/repo".to_string()];
+    let diag = normalized_counts(
+        &["error[E0308]: /repo/src/lib.rs:10:5: mismatched types".to_string()],
+        &roots,
+    );
+    let pre = attribute(
+        &diag,
+        &BaselineRun::Ran {
+            passed: false,
+            diagnostics: diag.clone(),
+        },
+    );
+    assert!(pre.is_preexisting());
+    assert!(!pre.block_is_capped());
+    let unk = attribute(&diag, &BaselineRun::Unavailable("no git".to_string()));
+    assert!(!unk.is_preexisting());
+    assert!(unk.block_is_capped());
+}
+
+#[test]
+fn pa38_protocol_skill_admission_and_process_env_invariants() {
+    use crate::safety::process_env::sanitized_env_from;
+    use crate::skills::{validate_skill_name, Skill};
+
+    assert!(validate_skill_name("valid_skill-1").is_ok());
+    assert!(validate_skill_name("../escape").is_err());
+    assert!(validate_skill_name(".hidden").is_err());
+
+    let candidate = Skill {
+        name: "cand".to_string(),
+        candidate: true,
+        admitted: false,
+        verified: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        candidate.trust_badge(),
+        "[Skill: cand (CANDIDATE - Unadmitted)]"
+    );
+
+    let env: std::collections::HashMap<String, String> = sanitized_env_from(
+        &[],
+        vec![
+            ("HTTPS_PROXY", "https://user:secret@proxy.example.com:8443"),
+            ("AWS_SECRET_ACCESS_KEY", "top-secret"),
+        ],
+    )
+    .into_iter()
+    .map(|(k, v)| {
+        (
+            k.to_string_lossy().into_owned(),
+            v.to_string_lossy().into_owned(),
+        )
+    })
+    .collect();
+    assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"));
+    assert_eq!(
+        env.get("HTTPS_PROXY").map(String::as_str),
+        Some("https://proxy.example.com:8443")
+    );
+}
+
+#[test]
+fn pa39_retrieval_bm25_vector_autocompact_and_health_invariants() {
+    use crate::analysis::bm25::BM25Index;
+    use crate::analysis::vector_store::{IndexHealth, VectorIndex};
+
+    let mut bm25 = BM25Index::new();
+    assert!(bm25.search("anything", 5).is_empty());
+    bm25.add("d1", "parseHttpHeader");
+    assert!(bm25.search("", 5).is_empty());
+    assert_eq!(bm25.search("http", 5).len(), 1);
+
+    assert_eq!(
+        VectorIndex::cosine_similarity(&[0.0, 0.0], &[1.0, 2.0]),
+        0.0
+    );
+
+    let mut idx = VectorIndex::new(2);
+    for i in 0..10 {
+        idx.add(format!("c{i}"), vec![1.0, 0.0]).unwrap();
+    }
+    assert_eq!(idx.check_health(), IndexHealth::Healthy);
+    for i in 0..3 {
+        idx.remove(&format!("c{i}"));
+    }
+    assert_eq!(idx.total_slots(), 10);
+    idx.remove("c3");
+    assert_eq!(idx.total_slots(), 6);
+}
+
+#[test]
+fn pa40_evolve_readiness_quality_dedup_and_dead_code_invariants() {
+    use crate::evolve::dead_code::DeadCodeAnalyzer;
+    use crate::evolve::dedup::{jaccard, DeduplicationAnalyzer};
+    use crate::evolve::{Graph, Node};
+    use std::collections::HashSet;
+
+    let empty: HashSet<String> = HashSet::new();
+    assert_eq!(jaccard(&empty, &empty), 0.0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let f = src.join("lib.rs");
+    std::fs::write(
+        &f,
+        "fn __internal_gen() {}\nfn main() {}\nfn unused_fn() {}\n",
+    )
+    .unwrap();
+
+    let sym_graph = Graph {
+        nodes: vec![
+            Node::symbol("s1", "lib", "fn", f.to_str().unwrap(), (1, 1), 10),
+            Node::symbol("s2", "lib", "fn", f.to_str().unwrap(), (1, 1), 10),
+        ],
+        edges: vec![],
+    };
+    assert!(DeduplicationAnalyzer::new()
+        .find_duplicates_in(&sym_graph, dir.path())
+        .unwrap()
+        .is_empty());
+
+    let dead = DeadCodeAnalyzer::new(dir.path()).find().unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].name, "unused_fn");
 }

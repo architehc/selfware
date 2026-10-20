@@ -850,6 +850,16 @@ impl VectorIndex {
         self.dimension
     }
 
+    /// Total allocated slots (including soft-deleted entries prior to compaction).
+    pub fn total_slots(&self) -> usize {
+        self.embeddings.len()
+    }
+
+    /// Update the expected embedding dimension (used by integrity checks and tests).
+    pub fn set_dimension(&mut self, dimension: usize) {
+        self.dimension = dimension;
+    }
+
     /// Add an embedding to the index.
     ///
     /// The embedding is L2-normalized at insert time so that the HNSW

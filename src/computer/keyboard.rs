@@ -524,15 +524,10 @@ impl KeyboardController {
                     run_xdotool(&args).await?;
                 }
                 Some(KeyboardBackend::WindowsWsl) => {
-                    // SendKeys does not support hold-down semantics; log a warning
-                    // and send a single key press as best-effort.
-                    warn!(
-                        "key_down('{}') via WSL PowerShell has no hold semantics; \
-                         sending a single key press instead",
+                    bail!(
+                        "keyboard key_down('{}') is not supported on WSL: PowerShell SendKeys has no key-hold semantics",
                         key
                     );
-                    let sendkeys = map_key_to_sendkeys(key);
-                    run_powershell_sendkeys(&sendkeys).await?;
                 }
             }
         }
@@ -571,9 +566,8 @@ impl KeyboardController {
                     run_xdotool(&args).await?;
                 }
                 Some(KeyboardBackend::WindowsWsl) => {
-                    // SendKeys does not support key-up; this is a no-op on WSL.
-                    warn!(
-                        "key_up('{}') via WSL PowerShell is a no-op (SendKeys has no hold semantics)",
+                    bail!(
+                        "keyboard key_up('{}') is not supported on WSL: PowerShell SendKeys has no key-hold semantics",
                         key
                     );
                 }

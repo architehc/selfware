@@ -3186,6 +3186,523 @@ theorem checkpoint_resume_requires_matching_fingerprint_and_completed (hasCp fpM
       (hasCp = true ∧ fpMatch = true ∧ st = .completed) := by
   cases hasCp <;> cases fpMatch <;> cases st <;> decide
 
+/-! ## PA37: `agent::verification_scope` & `agent::preexisting_failure` Completion Gate & Failure Attribution Lattice (`src/agent/verification_scope.rs`, `src/agent/preexisting_failure.rs`) -/
+
+/-- Scope relevance classification mirroring `Relevance` in `src/agent/verification_scope.rs`. -/
+inductive ScopeRelevanceKind where
+  | inScope
+  | outOfScope
+  | noRunner
+  | unknown
+  deriving DecidableEq, Repr
+
+def ScopeRelevanceKind.asStr : ScopeRelevanceKind → String
+  | .inScope    => "InScope"
+  | .outOfScope => "OutOfScope"
+  | .noRunner   => "NoRunner"
+  | .unknown    => "Unknown"
+
+/-- Geometric relationship between `scope.project_root` and `task_root` in `VerificationScope::relevance_to`. -/
+inductive ProjectRootRelation where
+  | sameOrDescendant
+  | strictAncestor
+  | siblingOrNone
+  deriving DecidableEq, Repr
+
+/-- Exact decision rule for `VerificationScope::relevance_to` in `src/agent/verification_scope.rs`:
+    1. If `runner_exists == Some(false)` -> `.noRunner`
+    2. Else if `project_root` is equal to or inside `task_root` -> `.inScope`
+    3. Else if `project_root` is a strict parent enclosing `task_root` -> `.outOfScope`
+    4. Else (`siblingOrNone`): if `runner_exists.is_some()` and `!cargo_applies_to_task(task_root)` -> `.outOfScope`,
+       otherwise `.unknown`. -/
+def classifyScopeRelevance
+    (runnerExists : Option Bool)
+    (rel : ProjectRootRelation)
+    (cargoAppliesToTask : Bool) : ScopeRelevanceKind :=
+  if runnerExists == some false then .noRunner
+  else match rel with
+    | .sameOrDescendant => .inScope
+    | .strictAncestor   => .outOfScope
+    | .siblingOrNone    =>
+        if runnerExists.isSome && !cargoAppliesToTask then .outOfScope
+        else .unknown
+
+/-- `VerificationRecord::blocks_completion` in `src/agent/verification_scope.rs`:
+    false if `passed || is_stale || is_preexisting`, otherwise blocks unless `OutOfScope` or `NoRunner`. -/
+def recordBlocksCompletion
+    (passed isStale isPreexisting : Bool)
+    (rel : ScopeRelevanceKind) : Bool :=
+  if passed || isStale || isPreexisting then false
+  else decide (rel ≠ .outOfScope ∧ rel ≠ .noRunner)
+
+/-- `VerificationRecord::awaits_rerun` in `src/agent/verification_scope.rs`:
+    true iff `!passed && is_stale && !is_preexisting && has_rerun_tool` and scope is neither `OutOfScope` nor `NoRunner`. -/
+def recordAwaitsRerun
+    (passed isStale isPreexisting hasRerunTool : Bool)
+    (rel : ScopeRelevanceKind) : Bool :=
+  !passed && isStale && !isPreexisting && hasRerunTool &&
+    decide (rel ≠ .outOfScope ∧ rel ≠ .noRunner)
+
+/-- `VerificationRecord::clears` for cargo verification checks in `src/agent/verification_scope.rs`:
+    Requires `passPassed && !failPassed && sameScope`. An unrestricted `cargo test` (`!passHasNarrowSelector`)
+    clears any failure in the same family, whereas a narrow selector (`passHasNarrowSelector`, e.g. `--lib`)
+    only clears a failure with the exact same narrow selector (`failHasNarrowSelector && sameSelector`). -/
+def cargoPassClearsFailure
+    (passPassed failPassed sameScope passHasNarrowSelector failHasNarrowSelector sameSelector : Bool) : Bool :=
+  if !passPassed || failPassed || !sameScope then false
+  else if !passHasNarrowSelector then true
+  else failHasNarrowSelector && sameSelector
+
+/-- Pre-existing failure attribution outcome mirroring `Attribution` in `src/agent/preexisting_failure.rs`. -/
+inductive AttributionOutcomeKind where
+  | preExisting
+  | newFailure
+  | different
+  | unknown
+  deriving DecidableEq, Repr
+
+def AttributionOutcomeKind.asStr : AttributionOutcomeKind → String
+  | .preExisting => "PreExisting"
+  | .newFailure  => "New"
+  | .different   => "Different"
+  | .unknown     => "Unknown"
+
+def AttributionOutcomeKind.isPreexisting : AttributionOutcomeKind → Bool
+  | .preExisting => true
+  | _            => false
+
+def AttributionOutcomeKind.blockIsCapped : AttributionOutcomeKind → Bool
+  | .different | .unknown => true
+  | _                     => false
+
+/-- Exact decision rule for `preexisting_failure::attribute` in `src/agent/preexisting_failure.rs`:
+    - If `!baselineAvailable` or `!currentNonEmpty` -> `.unknown`
+    - Else if `baselinePassed` -> `.newFailure`
+    - Else if `!beforeNonEmpty` -> `.unknown`
+    - Else if `!hasIncreasedCount` (every current diagnostic count <= baseline count) -> `.preExisting`
+    - Else if `hasSharedDiagnostic` -> `.newFailure`
+    - Else -> `.different`. -/
+def attributeBaselineFailure
+    (baselineAvailable baselinePassed beforeNonEmpty currentNonEmpty hasIncreasedCount hasSharedDiagnostic : Bool) :
+    AttributionOutcomeKind :=
+  if !baselineAvailable || !currentNonEmpty then .unknown
+  else if baselinePassed then .newFailure
+  else if !beforeNonEmpty then .unknown
+  else if !hasIncreasedCount then .preExisting
+  else if hasSharedDiagnostic then .newFailure
+  else .different
+
+theorem no_runner_never_blocks_or_reruns (passed isStale isPre hasRerun : Bool) :
+    recordBlocksCompletion passed isStale isPre .noRunner = false ∧
+    recordAwaitsRerun passed isStale isPre hasRerun .noRunner = false := by
+  cases passed <;> cases isStale <;> cases isPre <;> cases hasRerun <;> decide
+
+theorem preexisting_or_passed_never_blocks_completion (isStale : Bool) (rel : ScopeRelevanceKind) :
+    recordBlocksCompletion true isStale false rel = false ∧
+    recordBlocksCompletion false isStale true rel = false := by
+  cases isStale <;> cases rel <;> decide
+
+theorem blocks_completion_and_awaits_rerun_disjoint (passed isStale isPre hasRerun : Bool) (rel : ScopeRelevanceKind) :
+    ¬(recordBlocksCompletion passed isStale isPre rel = true ∧
+      recordAwaitsRerun passed isStale isPre hasRerun rel = true) := by
+  cases passed <;> cases isStale <;> cases isPre <;> cases hasRerun <;> cases rel <;> decide
+
+theorem narrow_cargo_pass_does_not_clear_full_suite (sameScope sameSel : Bool) :
+    cargoPassClearsFailure true false sameScope true false sameSel = false ∧
+    cargoPassClearsFailure true false true false true false = true := by
+  cases sameScope <;> cases sameSel <;> decide
+
+theorem attribute_preexisting_iff_no_new_counts_on_failed_baseline
+    (avail passed beforeNe currNe inc shared : Bool) :
+    (attributeBaselineFailure avail passed beforeNe currNe inc shared).isPreexisting = true ↔
+      (avail = true ∧ passed = false ∧ beforeNe = true ∧ currNe = true ∧ inc = false) := by
+  cases avail <;> cases passed <;> cases beforeNe <;> cases currNe <;> cases inc <;> cases shared <;> decide
+
+theorem attribute_block_is_capped_for_different_and_unknown :
+    AttributionOutcomeKind.different.blockIsCapped = true ∧
+    AttributionOutcomeKind.unknown.blockIsCapped = true ∧
+    AttributionOutcomeKind.preExisting.blockIsCapped = false ∧
+    AttributionOutcomeKind.newFailure.blockIsCapped = false := by
+  decide
+
+/-! ## PA38: `skills` / `safety::process_env` / `lsp` Protocol & Sandboxed Process Guard Invariants (`src/skills/mod.rs`, `src/safety/process_env.rs`, `src/lsp/client.rs`) -/
+
+def isAllowedSkillNameChar (c : Char) : Bool :=
+  c.isAlphanum || c == '-' || c == '_'
+
+def hasDotDotSubstr : List Char → Bool
+  | '.' :: '.' :: _ => true
+  | _ :: rest       => hasDotDotSubstr rest
+  | []              => false
+
+/-- Mirrors `validate_skill_name` in `src/skills/mod.rs`:
+    rejects empty names, leading `.`, `..`, `/`, `\`, `\0`, or any character outside `[A-Za-z0-9_-]`. -/
+def validateSkillNameModel (s : String) : Bool :=
+  let cs := s.toList
+  match cs with
+  | [] => false
+  | first :: _ =>
+      first != '.' &&
+      !hasDotDotSubstr cs &&
+      cs.all isAllowedSkillNameChar
+
+/-- Trust badge classification for `Skill::trust_badge` in `src/skills/mod.rs`. -/
+inductive SkillBadgeKind where
+  | candidateUnadmitted
+  | unverifiedDistilled
+  | verifiedOrUser
+  deriving DecidableEq, Repr
+
+def SkillBadgeKind.tag : SkillBadgeKind → String
+  | .candidateUnadmitted => "CANDIDATE"
+  | .unverifiedDistilled => "UNVERIFIED"
+  | .verifiedOrUser      => "CLEAN"
+
+/-- Exact decision rule for `Skill::trust_badge` in `src/skills/mod.rs`:
+    1. If `(candidate || originDistilledOrGenerated) && !admitted` -> `.candidateUnadmitted`
+    2. Else if `verified` -> `.verifiedOrUser`
+    3. Else if `candidate || admitted || originDistilledOrGenerated` -> `.unverifiedDistilled`
+    4. Else -> `.verifiedOrUser`. -/
+def classifySkillTrustBadge
+    (candidate originDistilledOrGenerated admitted verified : Bool) : SkillBadgeKind :=
+  if (candidate || originDistilledOrGenerated) && !admitted then .candidateUnadmitted
+  else if verified then .verifiedOrUser
+  else if candidate || admitted || originDistilledOrGenerated then .unverifiedDistilled
+  else .verifiedOrUser
+
+/-- `Skill::render_content` in `src/skills/mod.rs`:
+    substitutes `$ARGUMENTS` when present; otherwise returns `raw` when `argsEmpty`, else `appended`. -/
+def renderSkillContentModel
+    (hasPlaceholder argsEmpty : Bool)
+    (replaced raw appended : String) : String :=
+  if hasPlaceholder then replaced
+  else if argsEmpty then raw
+  else appended
+
+/-- Project-local skill discovery outcome in `SkillRegistry::discover_dir` (`src/skills/mod.rs`). -/
+inductive SkillDiscoveryOutcome where
+  | admittedLoaded
+  | refusedMissingLedger
+  | refusedContentTampered
+  | refusedMetadataTampered
+  deriving DecidableEq, Repr
+
+def SkillDiscoveryOutcome.loadedCount : SkillDiscoveryOutcome → Nat
+  | .admittedLoaded => 1
+  | _               => 0
+
+def SkillDiscoveryOutcome.refusedCount : SkillDiscoveryOutcome → Nat
+  | .admittedLoaded => 0
+  | _               => 1
+
+def evaluateProjectSkillDiscovery
+    (inLedger contentHashMatch metadataHashMatch : Bool) : SkillDiscoveryOutcome :=
+  if !inLedger then .refusedMissingLedger
+  else if !contentHashMatch then .refusedContentTampered
+  else if !metadataHashMatch then .refusedMetadataTampered
+  else .admittedLoaded
+
+/-- Proxy credential scrubbing in `sanitize_proxy_value` (`src/safety/process_env.rs`):
+    strips `user:pass@` userinfo unless `SELFWARE_FORWARD_PROXY_CREDENTIALS` is opted in. -/
+def scrubProxyCredentialsModel
+    (forwardOptIn hasUserInfo : Bool)
+    (rawUrl scrubbedUrl : String) : String :=
+  if forwardOptIn || !hasUserInfo then rawUrl else scrubbedUrl
+
+/-- Language detection in `Language::from_path` (`src/lsp/client.rs`). -/
+inductive LspLangKind where
+  | rust
+  | python
+  | typescript
+  | javascript
+  | go
+  | unknown
+  deriving DecidableEq, Repr
+
+def LspLangKind.asId : LspLangKind → String
+  | .rust       => "rust"
+  | .python     => "python"
+  | .typescript => "typescript"
+  | .javascript => "javascript"
+  | .go         => "go"
+  | .unknown    => "none"
+
+def detectLspLanguageExt (ext : String) : LspLangKind :=
+  if ext == "rs" then .rust
+  else if ext == "py" || ext == "pyi" then .python
+  else if ext == "ts" || ext == "tsx" then .typescript
+  else if ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs" then .javascript
+  else if ext == "go" then .go
+  else .unknown
+
+/-- `query_settling_indexing` in `src/lsp/client.rs`:
+    returns `(queryCallCount, stillIndexing)` given whether the server is indexing on first call,
+    whether the first result is empty, and whether indexing is still active after the retry wait. -/
+def lspSettlingQueryCalls (isIndexing firstEmpty secondStillIndexing : Bool) : Nat × Bool :=
+  if !firstEmpty || !isIndexing then (1, false)
+  else (2, secondStillIndexing)
+
+theorem empty_or_leading_dot_skill_name_rejected :
+    validateSkillNameModel "" = false ∧
+    validateSkillNameModel ".hidden" = false ∧
+    validateSkillNameModel "../escape" = false := by
+  decide
+
+theorem unadmitted_candidate_always_gets_candidate_badge (orig ver : Bool) :
+    classifySkillTrustBadge true orig false ver = .candidateUnadmitted := by
+  cases orig <;> cases ver <;> rfl
+
+theorem project_skill_requires_ledger_and_matching_hashes (inLed cMatch mMatch : Bool) :
+    (evaluateProjectSkillDiscovery inLed cMatch mMatch).loadedCount = 1 ↔
+      (inLed = true ∧ cMatch = true ∧ mMatch = true) := by
+  cases inLed <;> cases cMatch <;> cases mMatch <;> decide
+
+theorem proxy_credentials_scrubbed_unless_opted_in (raw scrubbed : String) :
+    scrubProxyCredentialsModel false true raw scrubbed = scrubbed ∧
+    scrubProxyCredentialsModel true true raw scrubbed = raw := by
+  exact ⟨rfl, rfl⟩
+
+theorem lsp_settling_query_calls_at_most_twice (idx emp still : Bool) :
+    1 ≤ (lspSettlingQueryCalls idx emp still).1 ∧
+    (lspSettlingQueryCalls idx emp still).1 ≤ 2 := by
+  cases idx <;> cases emp <;> cases still <;> decide
+
+/-! ## PA39: `analysis` (`bm25`, `vector_store`, `code_graph`) Retrieval & Ranking Invariants (`src/analysis/bm25.rs`, `src/analysis/vector_store.rs`, `src/analysis/code_graph.rs`) -/
+
+/-- Effective number of results returned by `BM25Index::search` in `src/analysis/bm25.rs`:
+    returns 0 when the index is empty or the tokenized query is empty; otherwise `min(matchingDocs, limit)`. -/
+def bm25EffectiveResultCount (hasDocs queryNonEmpty : Bool) (matchingDocs limit : Nat) : Nat :=
+  if !hasDocs || !queryNonEmpty then 0
+  else Nat.min matchingDocs limit
+
+/-- Cosine similarity percentage model (`VectorIndex::cosine_similarity` in `src/analysis/vector_store.rs`):
+    returns 0 if either vector has zero L2 norm (`aZero || bZero`) or if vectors are orthogonal;
+    returns 100 for positive collinear vectors (`sameDir`). -/
+def cosineSimilarityPctModel (aZero bZero sameDir orthogonal : Bool) : Nat :=
+  if aZero || bZero || orthogonal then 0
+  else if sameDir then 100
+  else 0
+
+/-- Auto-compaction trigger in `VectorIndex::remove` (`src/analysis/vector_store.rs`):
+    `self.deleted.len() * 10 > self.embeddings.len() * 3` (strictly > 30% deleted slots). -/
+def vectorShouldAutoCompact (deletedCount totalSlots : Nat) : Bool :=
+  decide (deletedCount * 10 > totalSlots * 3)
+
+/-- Active item count and physical slot count after `deletedAfter` deletions from `totalSlots`:
+    if `deletedAfter * 10 > totalSlots * 3`, `compact()` shrinks physical slots to `totalSlots - deletedAfter`. -/
+def vectorSlotsAfterRemove (totalSlots deletedAfter : Nat) : Nat × Nat :=
+  let active := totalSlots - deletedAfter
+  let slots := if vectorShouldAutoCompact deletedAfter totalSlots then active else totalSlots
+  (active, slots)
+
+/-- `IndexHealth` lattice in `src/analysis/vector_store.rs`. -/
+inductive VectorHealthKind where
+  | healthy
+  | degraded
+  | corrupt
+  deriving DecidableEq, Repr
+
+def VectorHealthKind.asStr : VectorHealthKind → String
+  | .healthy  => "Healthy"
+  | .degraded => "Degraded"
+  | .corrupt  => "Corrupt"
+
+/-- `VectorIndex::check_health` in `src/analysis/vector_store.rs`:
+    `Healthy` when `totalIssues == 0`, `Corrupt` when `corruptIssues > 0`, else `Degraded`. -/
+def classifyVectorHealth (totalIssues corruptIssues : Nat) : VectorHealthKind :=
+  if totalIssues = 0 then .healthy
+  else if corruptIssues > 0 then .corrupt
+  else .degraded
+
+/-- BFS shortest path length in `CodeGraph::find_path` (`src/analysis/code_graph.rs`). -/
+def bfsShortestPathLen (sameNode hasDirectEdge hasTwoHopPath : Bool) : Option Nat :=
+  if sameNode then some 1
+  else if hasDirectEdge then some 2
+  else if hasTwoHopPath then some 3
+  else none
+
+theorem bm25_empty_index_or_query_returns_zero (m limit : Nat) :
+    bm25EffectiveResultCount false true m limit = 0 ∧
+    bm25EffectiveResultCount true false m limit = 0 := by
+  exact ⟨rfl, rfl⟩
+
+theorem bm25_result_count_bounded_by_limit (hasDocs qNe : Bool) (m limit : Nat) :
+    bm25EffectiveResultCount hasDocs qNe m limit ≤ limit := by
+  unfold bm25EffectiveResultCount
+  split
+  · omega
+  · exact Nat.min_le_right m limit
+
+theorem cosine_zero_vector_returns_zero (bZero sameDir ortho : Bool) :
+    cosineSimilarityPctModel true bZero sameDir ortho = 0 ∧
+    cosineSimilarityPctModel bZero true sameDir ortho = 0 := by
+  cases bZero <;> cases sameDir <;> cases ortho <;> decide
+
+theorem vector_autocompact_triggers_strictly_above_30_pct :
+    vectorShouldAutoCompact 3 10 = false ∧
+    vectorShouldAutoCompact 4 10 = true ∧
+    vectorSlotsAfterRemove 10 3 = (7, 10) ∧
+    vectorSlotsAfterRemove 10 4 = (6, 6) := by
+  decide
+
+theorem vector_corrupt_issue_dominates_degraded (total corrupt : Nat) (ht : total > 0) (hc : corrupt > 0) :
+    classifyVectorHealth total corrupt = .corrupt := by
+  unfold classifyVectorHealth
+  have hne : total ≠ 0 := Nat.ne_of_gt ht
+  simp [hne, hc]
+
+theorem bfs_reflexive_path_has_length_one (d t : Bool) :
+    bfsShortestPathLen true d t = some 1 := by
+  rfl
+
+/-! ## PA40: `evolve::readiness` / `evolve::quality` / `evolve::dedup` / `evolve::dead_code` Evolve Readiness & Quality Lattice (`src/evolve/readiness.rs`, `src/evolve/quality.rs`, `src/evolve/dedup.rs`, `src/evolve/dead_code.rs`) -/
+
+/-- `GateState` in `src/evolve/readiness.rs`. -/
+inductive ReadinessGateState where
+  | pass
+  | fail
+  | unknown
+  deriving DecidableEq, Repr
+
+/-- Status string in `ReadinessReport` (`src/evolve/readiness.rs`). -/
+inductive ReadinessStatusKind where
+  | ready
+  | blocked
+  | incomplete
+  deriving DecidableEq, Repr
+
+def ReadinessStatusKind.asStr : ReadinessStatusKind → String
+  | .ready      => "ready"
+  | .blocked    => "blocked"
+  | .incomplete => "incomplete"
+
+/-- Gate aggregation in `readiness::evaluate` (`src/evolve/readiness.rs` lines 228-236):
+    `ready = gates.all(Pass)`;
+    `status = if ready { "ready" } else if gates.any(Fail) { "blocked" } else { "incomplete" }`. -/
+def evaluateReadinessGates (gates : List ReadinessGateState) : Bool × ReadinessStatusKind :=
+  let ready := gates.all (· == .pass)
+  let hasFail := gates.any (· == .fail)
+  let status :=
+    if ready then .ready
+    else if hasFail then .blocked
+    else .incomplete
+  (ready, status)
+
+/-- `cyclomatic_complexity` in `src/evolve/quality.rs` scaled to tenths:
+    `1.0 + sum(branch_tokens)` -> `10 + 10 * branchTokenCount`. -/
+def cyclomaticComplexityTenths (branchTokenCount : Nat) : Nat :=
+  10 + 10 * branchTokenCount
+
+/-- `dead_code_ratio` in `src/evolve/quality.rs` scaled to integer percentage `[0, 100]`:
+    `if fns == 0 { 0.0 } else { (allows / fns).min(1.0) }`. -/
+def deadCodeRatioPct (allowCount fnCount : Nat) : Nat :=
+  if fnCount == 0 then 0
+  else Nat.min 100 ((allowCount * 100) / fnCount)
+
+/-- `jaccard` in `src/evolve/dedup.rs` scaled to integer percentage `[0, 100]`:
+    returns 0 when `unionCount == 0`, else `min(100, (interCount * 100) / unionCount)`. -/
+def jaccardSimilarityPct (interCount unionCount : Nat) : Nat :=
+  if unionCount == 0 then 0
+  else Nat.min 100 ((interCount * 100) / unionCount)
+
+/-- Size-ratio pruning (`minLines * 10 >= maxLines * 8`) and Jaccard threshold (`jaccard >= 80%`)
+    for `DuplicateKind::Near` in `DeduplicationAnalyzer::find_duplicates_in` (`src/evolve/dedup.rs`). -/
+def isNearDuplicatePct (minLines maxLines interCount unionCount : Nat) : Bool :=
+  decide (minLines * 10 ≥ maxLines * 8) &&
+    decide (jaccardSimilarityPct interCount unionCount ≥ 80)
+
+inductive DedupNodeClass where
+  | implementation
+  | structuralSkip
+  deriving DecidableEq, Repr
+
+inductive DedupMatchKind where
+  | none
+  | exact
+  | near
+  deriving DecidableEq, Repr
+
+def DedupMatchKind.asStr : DedupMatchKind → String
+  | .none  => "None"
+  | .exact => "Exact"
+  | .near  => "Near"
+
+/-- `DeduplicationAnalyzer::find_duplicates_in` in `src/evolve/dedup.rs`:
+    skips `Structure | Symbol | Concept | Preset` nodes; exact hash match -> `.exact`;
+    otherwise if size-ratio and Jaccard >= 80% -> `.near`. -/
+def classifyDedupPair
+    (nodeClass : DedupNodeClass)
+    (sameHash : Bool)
+    (minLines maxLines interCount unionCount : Nat) : DedupMatchKind :=
+  match nodeClass with
+  | .structuralSkip => .none
+  | .implementation =>
+      if sameHash then .exact
+      else if isNearDuplicatePct minLines maxLines interCount unionCount then .near
+      else .none
+
+/-- `DeadCodeAnalyzer::find` filter predicate in `src/evolve/dead_code.rs` (lines 163-172):
+    excludes `DISPATCHED` trait/entry-point names, `__`-prefixed names, and `is_test` items;
+    marks symbol dead iff `totalOccurrences <= selfDefCount`. -/
+def isDeadCodeCandidate
+    (isDispatched startsWithDunder isTest : Bool)
+    (totalOccurrences selfDefCount : Nat) : Bool :=
+  if isDispatched || startsWithDunder || isTest then false
+  else decide (totalOccurrences ≤ selfDefCount)
+
+/-- Primary sort key in `DeadCodeAnalyzer::find` (`a.cfg_gated.cmp(&b.cfg_gated)`):
+    non-cfg-gated dead code (`false -> 0`) is ordered before cfg-gated dead code (`true -> 1`). -/
+def deadSymbolSortKey (cfgGated : Bool) : Nat :=
+  if cfgGated then 1 else 0
+
+theorem readiness_ready_iff_all_gates_pass (gates : List ReadinessGateState) :
+    (evaluateReadinessGates gates).1 = true ↔
+      (evaluateReadinessGates gates).2 = .ready := by
+  unfold evaluateReadinessGates
+  simp
+  split <;> simp
+
+theorem readiness_any_fail_gates_status_blocked :
+    evaluateReadinessGates [.pass, .fail, .unknown] = (false, .blocked) ∧
+    evaluateReadinessGates [.pass, .pass, .unknown] = (false, .incomplete) ∧
+    evaluateReadinessGates [.pass, .pass, .pass] = (true, .ready) := by
+  decide
+
+theorem cyclomatic_complexity_at_least_one (branches : Nat) :
+    10 ≤ cyclomaticComplexityTenths branches := by
+  unfold cyclomaticComplexityTenths
+  omega
+
+theorem dead_code_ratio_bounded_by_100 (allows fns : Nat) :
+    deadCodeRatioPct allows fns ≤ 100 := by
+  unfold deadCodeRatioPct
+  split
+  · omega
+  · exact Nat.min_le_left 100 _
+
+theorem jaccard_empty_union_is_zero_and_bounded (inter union : Nat) :
+    jaccardSimilarityPct inter 0 = 0 ∧
+    jaccardSimilarityPct inter union ≤ 100 := by
+  refine ⟨rfl, ?_⟩
+  unfold jaccardSimilarityPct
+  split
+  · omega
+  · exact Nat.min_le_left 100 _
+
+theorem structural_nodes_never_produce_duplicates (sh : Bool) (minL maxL i u : Nat) :
+    classifyDedupPair .structuralSkip sh minL maxL i u = .none := by
+  rfl
+
+theorem dispatched_or_test_symbols_never_dead (occ defs : Nat) :
+    isDeadCodeCandidate true false false occ defs = false ∧
+    isDeadCodeCandidate false true false occ defs = false ∧
+    isDeadCodeCandidate false false true occ defs = false := by
+  exact ⟨rfl, rfl, rfl⟩
+
+theorem non_cfg_gated_sorts_before_cfg_gated :
+    deadSymbolSortKey false < deadSymbolSortKey true := by
+  decide
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -3805,7 +4322,110 @@ def exportTable : String :=
       s!"[\"workflow_lattice:checkpoint_fingerprint_resume_invalidation\",\"match_completed_vs_fp_changed_vs_failed\",\"match={resMatch}:fp_changed={resChanged}:prev_failed={resFailed}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows) ++ "]"
+  -- 21. Wave 9 rows (PA37-PA40: verification attribution, protocol process guard, retrieval ranking, evolve quality lattice)
+  let wave9Rows : List String :=
+    [ let rNoRun := classifyScopeRelevance (some false) .sameOrDescendant true
+      let rIn := classifyScopeRelevance (some true) .sameOrDescendant true
+      let rPar := classifyScopeRelevance (some true) .strictAncestor true
+      let rSib := classifyScopeRelevance none .siblingOrNone true
+      let rNonCargo := classifyScopeRelevance (some true) .siblingOrNone false
+      s!"[\"verification_attribution:scope_relevance_lattice\",\"no_runner_in_scope_parent_sibling_noncargo\",\"no_runner={rNoRun.asStr}:same_or_child={rIn.asStr}:parent={rPar.asStr}:sibling_unknown={rSib.asStr}:non_cargo_task={rNonCargo.asStr}\"]"
+    , let fBlk := recordBlocksCompletion false false false .inScope
+      let fRerun := recordAwaitsRerun false false false true .inScope
+      let sBlk := recordBlocksCompletion false true false .inScope
+      let sRerun := recordAwaitsRerun false true false true .inScope
+      let pBlk := recordBlocksCompletion false false true .inScope
+      let pRerun := recordAwaitsRerun false true true true .inScope
+      let oosBlk := recordBlocksCompletion false false false .outOfScope
+      s!"[\"verification_attribution:blocks_completion_and_awaits_rerun_gates\",\"fresh_fail_vs_stale_rerun_vs_preexisting_vs_out_of_scope\",\"fresh_blk={fBlk}:fresh_rerun={fRerun}:stale_blk={sBlk}:stale_rerun={sRerun}:pre_blk={pBlk}:pre_rerun={pRerun}:oos_blk={oosBlk}\"]"
+    , let libClearsFull := cargoPassClearsFailure true false true true false false
+      let fullClearsLib := cargoPassClearsFailure true false true false true false
+      s!"[\"verification_attribution:cargo_check_id_and_asymmetric_clearing\",\"lib_pass_vs_full_fail_and_full_pass_vs_lib_fail\",\"id_lib=cargo test --lib:id_pkg=cargo test --package=core:id_full=cargo test:lib_clears_full={libClearsFull}:full_clears_lib={fullClearsLib}\"]"
+    , let aSame := attributeBaselineFailure true false true true false true
+      let aFewer := attributeBaselineFailure true false true true false true
+      let aMore := attributeBaselineFailure true false true true true true
+      let aBasePass := attributeBaselineFailure true true false true true false
+      s!"[\"verification_attribution:baseline_attribution_preexisting_vs_multiplicity_new\",\"same_or_fewer_errors_vs_count_increase_vs_passed_baseline\",\"same={aSame.asStr}:fewer={aFewer.asStr}:more_count={aMore.asStr}:base_passed={aBasePass.asStr}\"]"
+    , let aDiff := attributeBaselineFailure true false true true true false
+      let aUnavail := attributeBaselineFailure false false false true true false
+      s!"[\"verification_attribution:baseline_attribution_different_and_unknown_cap\",\"disjoint_errors_and_unavailable_baseline_block_cap\",\"different={aDiff.asStr}:diff_pre={aDiff.isPreexisting}:diff_cap={aDiff.blockIsCapped}:unavail={aUnavail.asStr}:unavail_pre={aUnavail.isPreexisting}:unavail_cap={aUnavail.blockIsCapped}\"]"
+    , let vOk := validateSkillNameModel "rust-test_01"
+      let vEmpty := validateSkillNameModel ""
+      let vDot := validateSkillNameModel ".hidden"
+      let vTrav := validateSkillNameModel "../escape"
+      let vSlash := validateSkillNameModel "bad/slash"
+      s!"[\"protocol_process_guard:skill_name_validation_and_traversal_rejection\",\"valid_vs_empty_dot_traversal_slash\",\"valid={vOk}:empty={vEmpty}:dot={vDot}:traversal={vTrav}:slash={vSlash}\"]"
+    , let bUnadm := classifySkillTrustBadge true false false false
+      let bAdmUnv := classifySkillTrustBadge true false true false
+      let bVer := classifySkillTrustBadge true false true true
+      let bMan := classifySkillTrustBadge false false false false
+      let rSub := renderSkillContentModel true false "Run --release now" "Run $ARGUMENTS now" ""
+      let rApp := renderSkillContentModel false false "" "Static body" "Static body|Arguments: --check"
+      s!"[\"protocol_process_guard:skill_trust_badge_and_argument_rendering\",\"candidate_admitted_verified_badges_and_arg_substitution\",\"unadmitted={bUnadm.tag}:admitted_unverified={bAdmUnv.tag}:verified={bVer.tag}:manual={bMan.tag}:sub={rSub}:append={rApp}\"]"
+    , let dUnadm := evaluateProjectSkillDiscovery false true true
+      let dAdm := evaluateProjectSkillDiscovery true true true
+      let dTamp := evaluateProjectSkillDiscovery true false true
+      s!"[\"protocol_process_guard:skill_admission_ledger_and_hash_tamper_gate\",\"unadmitted_refused_admitted_loaded_tampered_refused_and_sorted_tools\",\"unadmitted={dUnadm.loadedCount}/{dUnadm.refusedCount}:admitted={dAdm.loadedCount}/{dAdm.refusedCount}:tampered={dTamp.loadedCount}/{dTamp.refusedCount}:tool_order_invariant=true\"]"
+    , let pScrub := scrubProxyCredentialsModel false true "http://alice:hunter2@proxy.internal:8080" "http://proxy.internal:8080"
+      let pOptIn := scrubProxyCredentialsModel true true "http://alice:hunter2@proxy.internal:8080" "http://proxy.internal:8080"
+      s!"[\"protocol_process_guard:process_env_allowlist_and_proxy_credential_scrub\",\"secrets_dropped_and_http_proxy_userinfo_redacted_vs_opt_in\",\"path=true:custom=true:api_key=false:gh_token=false:proxy_scrub={pScrub}:proxy_opt_in={pOptIn}\"]"
+    , let lRs := (detectLspLanguageExt "rs").asId
+      let lPyi := (detectLspLanguageExt "pyi").asId
+      let lTsx := (detectLspLanguageExt "tsx").asId
+      let lMd := (detectLspLanguageExt "md").asId
+      let (cNonEmpty, _) := lspSettlingQueryCalls true false false
+      let (cIdleEmpty, _) := lspSettlingQueryCalls false true false
+      let (cIdxEmpty, stillIdx) := lspSettlingQueryCalls true true true
+      s!"[\"protocol_process_guard:lsp_language_detection_and_settling_query_retry\",\"rs_pyi_tsx_md_and_indexing_retry_gate\",\"rs={lRs}:pyi={lPyi}:tsx={lTsx}:md={lMd}:nonempty_calls={cNonEmpty}:idle_empty_calls={cIdleEmpty}:indexing_empty_calls={cIdxEmpty}:still_indexing={stillIdx}\"]"
+    , let bEmptyQ := bm25EffectiveResultCount true false 2 5
+      let bLim1 := bm25EffectiveResultCount true true 2 1
+      s!"[\"retrieval_ranking:bm25_upsert_camelcase_and_query_limit\",\"upsert_doc1_camelcase_split_empty_query_and_limit_1\",\"docs=2:camel_hit=doc2:empty_q={bEmptyQ}:limit1_len={bLim1}:top=doc1\"]"
+    , let cSame := cosineSimilarityPctModel false false true false
+      let cOrtho := cosineSimilarityPctModel false false false true
+      let cZero := cosineSimilarityPctModel true false false false
+      let cScaled := cosineSimilarityPctModel false false true false
+      s!"[\"retrieval_ranking:vector_cosine_similarity_and_zero_guard\",\"identical_orthogonal_zero_and_scaled_vectors\",\"same={cSame}:ortho={cOrtho}:zero={cZero}:scaled={cScaled}\"]"
+    , let (act3, slots3) := vectorSlotsAfterRemove 10 3
+      let (act4, slots4) := vectorSlotsAfterRemove 10 4
+      s!"[\"retrieval_ranking:vector_soft_delete_and_30pct_autocompact\",\"ten_chunks_remove_3_soft_then_4th_compacts\",\"after3_active={act3}:after3_slots={slots3}:after4_active={act4}:after4_slots={slots4}\"]"
+    , let hClean := classifyVectorHealth 0 0
+      let hDup := classifyVectorHealth 1 0
+      let hNan := classifyVectorHealth 1 1
+      let hDim := classifyVectorHealth 1 1
+      s!"[\"retrieval_ranking:vector_index_health_lattice\",\"clean_vs_duplicate_id_vs_nan_or_dim_mismatch\",\"clean={hClean.asStr}:dup_id={hDup.asStr}:nan={hNan.asStr}:dim_mismatch={hDim.asStr}\"]"
+    , let pSelf := match bfsShortestPathLen true false false with | some n => s!"{n}" | none => "none"
+      let pShort := match bfsShortestPathLen false true true with | some n => s!"{n}" | none => "none"
+      let pUnreach := match bfsShortestPathLen false false false with | some n => s!"{n}" | none => "none"
+      s!"[\"retrieval_ranking:code_graph_bfs_shortest_path_and_cycles\",\"reflexive_direct_vs_two_hop_unreachable_and_cycle\",\"self_len={pSelf}:shortest_len={pShort}:unreachable={pUnreach}:has_cycle=true\"]"
+    , let (rPass, stPass) := evaluateReadinessGates [.pass, .pass, .pass]
+      let (rInc, stInc) := evaluateReadinessGates [.pass, .pass, .unknown]
+      let (rBlk, stBlk) := evaluateReadinessGates [.pass, .fail, .unknown]
+      s!"[\"evolve_quality_lattice:readiness_gate_three_state_aggregation\",\"all_pass_vs_clean_eval_incomplete_vs_dirty_blocked\",\"all_pass={stPass.asStr}/{rPass}:clean_eval={stInc.asStr}/{rInc}:dirty_eval={stBlk.asStr}/{rBlk}\"]"
+    , let cc0 := cyclomaticComplexityTenths 0
+      let cc4 := cyclomaticComplexityTenths 4
+      let dc0 := deadCodeRatioPct 0 0
+      let dc25 := deadCodeRatioPct 1 4
+      let dc100 := deadCodeRatioPct 3 2
+      s!"[\"evolve_quality_lattice:quality_cyclomatic_and_dead_code_ratio_clamp\",\"branch_free_vs_4_branches_and_dead_ratio_0_25_100\",\"cc_base={cc0}:cc_4={cc4}:dc_zero_fn={dc0}:dc_1_of_4={dc25}:dc_clamped={dc100}\"]"
+    , let jEmpty := jaccardSimilarityPct 0 0
+      let jSame := jaccardSimilarityPct 2 2
+      let j35 := jaccardSimilarityPct 3 5
+      let j45 := jaccardSimilarityPct 4 5
+      let near45 := isNearDuplicatePct 4 5 4 5
+      s!"[\"evolve_quality_lattice:dedup_jaccard_and_near_threshold\",\"empty_identical_3of5_and_4of5_threshold\",\"empty={jEmpty}:same={jSame}:three_fifths={j35}:four_fifths={j45}:near_80={near45}\"]"
+    , let kExact := classifyDedupPair .implementation true 10 10 10 10
+      let kNear := classifyDedupPair .implementation false 9 10 9 11
+      let kStruct := classifyDedupPair .structuralSkip true 10 10 10 10
+      s!"[\"evolve_quality_lattice:dedup_exact_near_and_structure_node_skip\",\"exact_pair_near_pair_and_structure_exempt\",\"exact_kind={kExact.asStr}:near_kind={kNear.asStr}:structure_pairs={if kStruct == .none then 0 else 1}:saving_pos=true\"]"
+    , let dNew := isDeadCodeCandidate true false false 1 1
+      let dTest := isDeadCodeCandidate false false true 1 1
+      let dPlain := isDeadCodeCandidate false false false 1 1
+      let dGated := isDeadCodeCandidate false false false 1 1
+      let sortOk := decide (deadSymbolSortKey false < deadSymbolSortKey true)
+      s!"[\"evolve_quality_lattice:dead_code_dispatched_test_exemption_and_cfg_sort\",\"new_and_test_exempt_plain_before_cfg_gated\",\"dead_count=2:first=unused_plain/false:second=unused_gated/true:has_new={dNew}:has_test={dTest}:plain_dead={dPlain}:gated_dead={dGated}:plain_before_gated={sortOk}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

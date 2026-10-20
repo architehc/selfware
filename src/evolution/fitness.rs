@@ -222,7 +222,10 @@ pub fn prune_report_dirs(
                                 // Not completed and recent (< 2h): check if the recorded PID is dead.
                                 let mut pid_is_dead = false;
                                 if lease_pid_path.exists() {
-                                    if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
+                                    if let Ok(pid_str) = crate::tools::file::read_to_string_capped(
+                                        &lease_pid_path,
+                                        4096,
+                                    ) {
                                         if let Ok(pid) = pid_str.trim().parse::<i32>() {
                                             let res = unsafe { nix::libc::kill(pid, 0) };
                                             if res != 0 {
@@ -267,7 +270,9 @@ pub fn prune_report_dirs(
                 } else {
                     #[cfg(unix)]
                     {
-                        if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
+                        if let Ok(pid_str) =
+                            crate::tools::file::read_to_string_capped(&lease_pid_path, 4096)
+                        {
                             if let Ok(pid) = pid_str.trim().parse::<i32>() {
                                 let res = unsafe { nix::libc::kill(pid, 0) };
                                 if res == 0 {

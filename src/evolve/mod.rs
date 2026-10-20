@@ -74,7 +74,7 @@ pub use context_trust::{
     TrustReport,
 };
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
-pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
+pub use dedup::{jaccard, DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use deletion::{
     preview_deletion, DeletionPreview, DeletionTarget, ImpactEdge, VerificationStep,
 };
@@ -96,15 +96,18 @@ pub use module_graph::{
     from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
 #[cfg(feature = "self-improvement")]
-pub use multi_arm_runner::OptimizationArm;
+pub use multi_arm_runner::{MultiArmConfig, MultiArmReport, OptimizationArm};
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
 };
 pub use persona::ComponentPersona;
 pub use presets::{preset, presets, render_prompt as render_preset_prompt, Preset};
-pub use quality::QualityAnalyzer;
-pub use readiness::{GateState, ReadinessGate, ReadinessReport};
+pub use quality::{cyclomatic_complexity, dead_code_ratio, QualityAnalyzer};
+pub use readiness::{
+    DeterministicRecommendation, GateEvidence, GateState, ReadinessEngine, ReadinessGate,
+    ReadinessReport, RecommendationHop,
+};
 pub use server::EvolveServer;
 pub use skeleton::{extract_rust_skeleton, FileSkeleton, SkeletonItem};
 pub use structure::{ClassEntry, FileStructure, Method, StructureAnalyzer};
