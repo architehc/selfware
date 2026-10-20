@@ -8,6 +8,6 @@ pub mod run_registry;
 pub mod run_supervisor;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-pub use health::HealthStatus;
-pub use run_registry::{AbortOutcome, RunRecord, RunRegistry};
+pub use health::{HealthStatus, Severity};
+pub use run_registry::{is_terminal_status, AbortOutcome, RunRecord, RunRegistry};
 pub use run_supervisor::{RunId, RunStatus, RunSupervisor};

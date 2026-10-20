@@ -458,7 +458,8 @@ pub(crate) fn orphan_output_keys(
     instruction: &str,
     known: &[String],
 ) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(artifact) else {
+    let Ok(text) = crate::tools::file::read_to_string_capped(artifact, CENSUS_MAX_FILE_BYTES * 4)
+    else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -542,7 +543,7 @@ fn read_gate_output(path: &Path, discovered: bool) -> Option<String> {
     if meta.len() > CENSUS_MAX_FILE_BYTES * 4 {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    crate::tools::file::read_to_string_capped(path, CENSUS_MAX_FILE_BYTES * 4).ok()
 }
 
 /// Conventional output directories scanned when no git diff is available

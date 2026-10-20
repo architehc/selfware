@@ -74,47 +74,8 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
     let mut salt = vec![0u8; SALT_LEN];
     rand::rng().fill_bytes(&mut salt);
 
-    let mut tmp_suffix = [0u8; 8];
-    rand::rng().fill_bytes(&mut tmp_suffix);
-    let tmp_name = format!(
-        "encryption_salt.tmp.{}.{:016x}",
-        std::process::id(),
-        u64::from_le_bytes(tmp_suffix)
-    );
-    let tmp_path = path.with_file_name(tmp_name);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .context("Failed to create temporary encryption salt file with secure permissions")?;
-        if let Err(e) = std::io::Write::write_all(&mut file, &salt)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| std::fs::rename(&tmp_path, &path))
-        {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e).context("Failed to atomically write encryption salt");
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .context("Failed to create temporary encryption salt file")?;
-        if let Err(e) = std::io::Write::write_all(&mut file, &salt)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| std::fs::rename(&tmp_path, &path))
-        {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e).context("Failed to atomically write encryption salt file");
-        }
-    }
+    crate::session::checkpoint::write_bytes_atomically(&path, &salt, 0o600)
+        .context("Failed to atomically write encryption salt")?;
 
     Ok(salt)
 }

@@ -505,8 +505,10 @@ pub enum RestoreOutcome {
 pub(crate) async fn restore_checkpoint_guarded(
     files: &std::collections::HashMap<PathBuf, FileSnapshot>,
 ) -> Vec<(PathBuf, RestoreOutcome)> {
-    let mut outcomes = Vec::new();
-    for (path, snapshot) in files {
+    let mut sorted_files: Vec<(&PathBuf, &FileSnapshot)> = files.iter().collect();
+    sorted_files.sort_by_key(|(a, _)| *a);
+    let mut outcomes = Vec::with_capacity(sorted_files.len());
+    for (path, snapshot) in sorted_files {
         // Snapshot integrity: the recorded hash must match the snapshot's
         // own content, or the checkpoint is corrupt and must not be trusted.
         if compute_hash(&snapshot.content) != snapshot.hash {

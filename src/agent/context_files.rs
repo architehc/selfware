@@ -288,7 +288,12 @@ impl Agent {
                 warn!("Skipping unsafe context file {path_str}: {error}");
                 continue;
             }
-            match tokio::fs::read_to_string(&path).await {
+            match crate::tools::file::read_to_string_capped_async(
+                &path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .await
+            {
                 Ok(content) => {
                     let raw = format!("{}{}", context_file_header(&path), content);
                     let new_content = self.sanitize_context_data(&path, &raw);
@@ -326,7 +331,11 @@ impl Agent {
                             .push((path_str.clone(), path.to_string_lossy().into_owned()));
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound) =>
+                {
                     self.remove_resolved_context_file(path_str, &path);
                     current = crate::token_count::estimate_messages_tokens(&self.messages);
                 }
@@ -511,7 +520,12 @@ impl Agent {
                 warn!("Skipping unsafe context file {path_str}: {error}");
                 continue;
             }
-            match tokio::fs::read_to_string(&path).await {
+            match crate::tools::file::read_to_string_capped_async(
+                &path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .await
+            {
                 Ok(content) => {
                     let raw = format!("{}{}", context_file_header(&path), content);
                     let full_content = self.sanitize_context_data(&path, &raw);
@@ -551,7 +565,11 @@ impl Agent {
                     );
                     loaded += 1;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound) =>
+                {
                     self.remove_resolved_context_file(path_str, &path);
                     current = crate::token_count::estimate_messages_tokens(&self.messages);
                 }
@@ -684,7 +702,12 @@ impl Agent {
                     file_count
                 ));
             } else {
-                let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                let Ok(content) = crate::tools::file::read_to_string_capped_async(
+                    &path,
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                )
+                .await
+                else {
                     continue;
                 };
                 let raw = format!(

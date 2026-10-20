@@ -628,7 +628,9 @@ pub(crate) mod tests {
         }
         // A killed grandchild is reparented to init and reaped promptly; a
         // zombie still answers kill(0). `ps -o stat=` works on macOS and Linux.
+        use crate::safety::process_env::SanitizedEnvExt;
         let stat = std::process::Command::new("ps")
+            .sanitized_env()
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

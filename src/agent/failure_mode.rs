@@ -679,7 +679,12 @@ impl FailureMode {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let path = result_dir.join("failure_mode.json");
         tokio::fs::create_dir_all(&result_dir).await?;
-        tokio::fs::write(&path, json).await
+        tokio::task::spawn_blocking(move || {
+            crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o600)
+                .map_err(std::io::Error::other)
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Render a multi-line CLI banner suitable for the end of a non-TUI run.

@@ -159,7 +159,7 @@ fn resolve_git_dir(root: &Path) -> PathBuf {
     if dot_git.is_dir() {
         return dot_git;
     }
-    if let Ok(text) = std::fs::read_to_string(&dot_git) {
+    if let Ok(text) = crate::tools::file::read_to_string_capped(&dot_git, 65_536) {
         if let Some(rest) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")) {
             let rel = Path::new(rest.trim());
             return if rel.is_absolute() {

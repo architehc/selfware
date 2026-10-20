@@ -85,9 +85,9 @@ pub struct LocalCache<T> {
 
 #[derive(Debug, Clone)]
 pub struct LocalCacheEntry<T> {
-    key: String,
-    value: T,
-    size_bytes: usize,
+    pub key: String,
+    pub value: T,
+    pub size_bytes: usize,
 }
 
 impl LocalCache<String> {
@@ -113,8 +113,8 @@ impl LocalCache<String> {
             return;
         }
         if self.entries.len() >= self.max_entries && !self.entries.contains_key(&entry.key) {
-            // Simple eviction: remove first entry
-            if let Some(first_key) = self.entries.keys().next().cloned() {
+            // Deterministic eviction: remove lexicographically smallest key
+            if let Some(first_key) = self.entries.keys().min().cloned() {
                 self.entries.remove(&first_key);
             }
         }
@@ -171,6 +171,9 @@ impl LocalCache<String> {
             entry_count: self.entries.len(),
             total_size_bytes,
             hit_rate,
+            hits: self.hits,
+            misses: self.misses,
+            bytes_saved: self.bytes_saved,
         }
     }
 }
@@ -182,11 +185,29 @@ impl Default for LocalCache<String> {
 }
 
 /// Cache statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CacheStats {
     pub entry_count: usize,
     pub total_size_bytes: usize,
     pub hit_rate: f64,
+    pub hits: usize,
+    pub misses: usize,
+    pub bytes_saved: usize,
+}
+
+impl std::fmt::Display for CacheStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "entries={} size={}B hits={} misses={} hit_rate={:.1}% saved={}B",
+            self.entry_count,
+            self.total_size_bytes,
+            self.hits,
+            self.misses,
+            self.hit_rate * 100.0,
+            self.bytes_saved
+        )
+    }
 }
 
 /// Offline status

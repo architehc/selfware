@@ -1275,7 +1275,10 @@ impl super::Agent {
                     continue;
                 }
                 seen += 1;
-                if let Ok(text) = std::fs::read_to_string(&k) {
+                if let Ok(text) = crate::tools::file::read_to_string_capped(
+                    std::path::Path::new(&k),
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                ) {
                     ledger.line_counts.insert(k, text.lines().count());
                 }
             }

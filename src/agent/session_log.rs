@@ -160,7 +160,11 @@ impl SessionLogger {
             return Ok(Vec::new());
         }
 
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = crate::tools::file::read_to_string_capped_async(
+            path,
+            crate::tools::file::MAX_READ_SIZE,
+        )
+        .await?;
 
         let mut lines: Vec<&str> = content
             .lines()

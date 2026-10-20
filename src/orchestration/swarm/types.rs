@@ -560,10 +560,13 @@ impl SwarmTask {
     /// Agents whose recorded result reported failure, paired with their
     /// result strings (the failure evidence).
     pub fn failed_results(&self) -> Vec<(&String, &String)> {
-        self.result_success
+        let mut out: Vec<(&String, &String)> = self
+            .result_success
             .iter()
             .filter(|(_, success)| !**success)
             .filter_map(|(agent_id, _)| self.results.get(agent_id).map(|r| (agent_id, r)))
-            .collect()
+            .collect();
+        out.sort_by_key(|(a, _)| *a);
+        out
     }
 }

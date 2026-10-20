@@ -185,10 +185,14 @@ impl LongTermStore {
             .collect();
 
         if json_paths.len() > Self::MAX_LOADED_FILES {
-            json_paths.sort_by_key(|p| {
-                std::fs::metadata(p)
+            json_paths.sort_by(|a, b| {
+                let ma = std::fs::metadata(a)
                     .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let mb = std::fs::metadata(b)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                ma.cmp(&mb).then_with(|| a.cmp(b))
             });
             let drop_count = json_paths.len() - Self::MAX_LOADED_FILES;
             json_paths.drain(..drop_count);
@@ -213,8 +217,12 @@ impl LongTermStore {
             }
         }
 
-        // Sort by sequence order
-        records.sort_by_key(|r| r.sequence_order);
+        // Sort by sequence order, breaking ties deterministically by record ID
+        records.sort_by(|a, b| {
+            a.sequence_order
+                .cmp(&b.sequence_order)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         info!("Loaded {} consolidated records", records.len());
         Ok(records)

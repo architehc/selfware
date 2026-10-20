@@ -817,20 +817,29 @@ impl PlaywrightBridge {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating bridge dir {}", dir.display()))?;
         let script = dir.join("playwright-bridge.js");
-        let needs_write = match std::fs::read_to_string(&script) {
+        let needs_write = match crate::tools::file::read_to_string_capped(
+            &script,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             Ok(existing) => existing != EMBEDDED_BRIDGE_JS,
             Err(_) => true,
         };
         if needs_write {
-            std::fs::write(&script, EMBEDDED_BRIDGE_JS)
-                .with_context(|| format!("writing bridge to {}", script.display()))?;
+            crate::session::checkpoint::write_bytes_atomically(
+                &script,
+                EMBEDDED_BRIDGE_JS.as_bytes(),
+                0o600,
+            )
+            .with_context(|| format!("writing bridge to {}", script.display()))?;
         }
         // Drop a package.json so `npm install` in this dir pulls Playwright.
         let pkg = dir.join("package.json");
         if !pkg.exists() {
-            let _ = std::fs::write(
+            let pkg_json = "{\n  \"name\": \"selfware-playwright-bridge\",\n  \"private\": true,\n  \"dependencies\": { \"playwright\": \"*\" }\n}\n";
+            let _ = crate::session::checkpoint::write_bytes_atomically(
                 &pkg,
-                "{\n  \"name\": \"selfware-playwright-bridge\",\n  \"private\": true,\n  \"dependencies\": { \"playwright\": \"*\" }\n}\n",
+                pkg_json.as_bytes(),
+                0o600,
             );
         }
         Ok(script)

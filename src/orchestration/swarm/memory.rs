@@ -162,12 +162,16 @@ impl SharedMemory {
 
     /// List all keys
     pub fn keys(&self) -> Vec<&str> {
-        self.data.keys().map(|k| k.as_str()).collect()
+        let mut keys: Vec<&str> = self.data.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// Get all entries
     pub fn entries(&self) -> Vec<&MemoryEntry> {
-        self.data.values().collect()
+        let mut entries: Vec<&MemoryEntry> = self.data.values().collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        entries
     }
 
     /// Tag an entry

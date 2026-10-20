@@ -2147,7 +2147,9 @@ fn write_all_blocking(files: &[(PathBuf, String)], _config: Option<&SafetyConfig
             for (rb_path, pre_image) in pre_images.iter().take(idx) {
                 match pre_image {
                     Some(bytes) => {
-                        let _ = std::fs::write(rb_path, bytes);
+                        let _ = crate::session::checkpoint::write_bytes_atomically(
+                            rb_path, bytes, 0o600,
+                        );
                     }
                     None => {
                         let _ = std::fs::remove_file(rb_path);

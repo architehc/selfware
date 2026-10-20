@@ -267,7 +267,12 @@ async fn read_bounded_file(
     max_chars: usize,
     safety: &crate::config::SafetyConfig,
 ) -> Option<String> {
-    let content = tokio::fs::read_to_string(path).await.ok()?;
+    let content = crate::tools::file::read_to_string_capped_async(
+        path,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .await
+    .ok()?;
     bound_recovered_text(path.to_path_buf(), content, max_chars, safety)
 }
 

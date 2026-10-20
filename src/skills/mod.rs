@@ -537,7 +537,9 @@ impl SkillRegistry {
             }
         };
 
-        for entry in entries.flatten() {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
@@ -702,7 +704,9 @@ impl SkillRegistry {
             }
         };
 
-        for entry in entries.flatten() {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
@@ -862,7 +866,9 @@ impl SkillRegistry {
             Err(_) => return unadmitted,
         };
 
-        for entry in entries.flatten() {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
@@ -900,7 +906,9 @@ impl SkillRegistry {
             Ok(e) => e,
             Err(_) => return candidates,
         };
-        for entry in entries.flatten() {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
                 if let Ok(mut skill) = Skill::from_file(&path) {

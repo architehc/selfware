@@ -34,11 +34,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod executor;
 pub mod recovery_tree;
 
-pub use executor::{ExecutorSummary, RecoveryExecution, RecoveryExecutor};
+pub use executor::{ExecutorStats, ExecutorSummary, RecoveryExecution, RecoveryExecutor};
 pub use recovery_tree::{
     classify, ContextOverflowCompress, CredentialReload, FailureKind, FailureSignal,
-    LocalEndpointFallback, RecoveryContext, RecoveryDirective, RecoveryTree, Resolution,
-    ResolutionOutcome,
+    LocalEndpointFallback, RateLimitBackoff, RecoveryContext, RecoveryDirective, RecoveryTree,
+    Resolution, ResolutionOutcome,
 };
 
 // ============================================================================

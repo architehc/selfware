@@ -703,9 +703,11 @@ impl BaselineCheckout {
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         let _ = std::fs::create_dir_all(&config_dir);
-        let _ = std::fs::write(
-            config_dir.join("config.toml"),
-            format!("[build]\ntarget-dir = \"{escaped}\"\n"),
+        let config_body = format!("[build]\ntarget-dir = \"{escaped}\"\n");
+        let _ = crate::session::checkpoint::write_bytes_atomically(
+            &config_dir.join("config.toml"),
+            config_body.as_bytes(),
+            0o600,
         );
     }
 }
@@ -766,8 +768,11 @@ fn live_cargo_target(project: &Path, toplevel: &Path) -> Option<PathBuf> {
         if !d.starts_with(toplevel) {
             break;
         }
-        if std::fs::read_to_string(d.join("Cargo.toml"))
-            .is_ok_and(|m| m.lines().any(|l| l.trim() == "[workspace]"))
+        if crate::tools::file::read_to_string_capped(
+            &d.join("Cargo.toml"),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .is_ok_and(|m| m.lines().any(|l| l.trim() == "[workspace]"))
         {
             return Some(d.join("target"));
         }

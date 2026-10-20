@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::metrics::{MetricsStore, PerformanceSnapshot};
@@ -905,8 +906,9 @@ pub(crate) fn strip_inline_comment(line: &str) -> &str {
 }
 
 fn parse_line_hint(description: &str) -> Option<usize> {
-    let re = Regex::new(r":(\d+):").ok()?;
-    let captures = re.captures(description)?;
+    static LINE_HINT_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r":(\d+):").expect("valid line hint regex"));
+    let captures = LINE_HINT_RE.captures(description)?;
     captures.get(1)?.as_str().parse::<usize>().ok()
 }
 
@@ -914,7 +916,9 @@ fn rewrite_todo_fixme_marker(
     content: &str,
     preferred_line: Option<usize>,
 ) -> Option<(String, usize)> {
-    let todo_re = Regex::new(r"(?i)\b(?:TODO|FIXME)\b[:\-\s]*").ok()?;
+    static TODO_FIXME_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(?:TODO|FIXME)\b[:\-\s]*").expect("valid todo/fixme regex")
+    });
     let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
 
     let mut candidate_indices = Vec::new();
@@ -951,10 +955,10 @@ fn rewrite_todo_fixme_marker(
             continue;
         };
         let (code_prefix, comment_part) = original.split_at(comment_idx);
-        if !todo_re.is_match(comment_part) {
+        if !TODO_FIXME_RE.is_match(comment_part) {
             continue;
         }
-        let rewritten_comment = todo_re.replace(comment_part, "Resolved: ");
+        let rewritten_comment = TODO_FIXME_RE.replace(comment_part, "Resolved: ");
         lines[idx] = format!("{code_prefix}{rewritten_comment}");
         let mut updated = lines.join("\n");
         if content.ends_with('\n') {

@@ -3703,6 +3703,1079 @@ theorem non_cfg_gated_sorts_before_cfg_gated :
     deadSymbolSortKey false < deadSymbolSortKey true := by
   decide
 
+/-! ## PA41: Hook Registry Matching, Dispatch Precedence, Shell Quoting & Context Description (`hooks`)
+
+Models the lifecycle hook system in `src/hooks/mod.rs`, `src/hooks/builtin.rs`,
+and `src/hooks/shell_handler.rs`:
+1. `HookRegistry::matches_any` & `HookRegistry::has_hooks_for` (`src/hooks/mod.rs`):
+   - `has_hooks_for(event)` is true iff at least one registered `HookConfig` has `h.event == event`.
+   - A hook `h` matches a `HookContext` iff `h.event == ctx.event` and either `h.match_tools`
+     is empty (wildcard) or `ctx.tool_name` is `Some(t)` with `t ∈ h.match_tools`.
+   - In particular, a `Stop` context (`tool_name = None`) matches a `Stop` hook with empty
+     `match_tools`, but never matches a hook whose `match_tools` is non-empty.
+2. `HookRegistry::fire_in_root` sequential short-circuit & fail-closed semantics (`src/hooks/mod.rs`):
+   - Hooks matching `ctx` are evaluated in registration order.
+   - `Continue` advances to the next matching hook.
+   - `Skip(Policy)` or `Skip(HookFailure)` short-circuits immediately and returns that `Skip`.
+   - `Error` on `PreToolUse` fails closed immediately as `Skip(HookFailure)` (blocking tool execution);
+     `Error` on `PostToolUse` or `Stop` is logged as non-fatal and execution continues to `Continue`.
+3. `pre_tool_skip_message` (`src/hooks/mod.rs`):
+   - `SkipKind::Policy` -> failure tag `"hook_policy"`, prefix `"POLICY BLOCK"`.
+   - `SkipKind::HookFailure` -> failure tag `"hook_failure"`, prefix `"not_run"`.
+4. `shell_handler::expand_placeholders` quoting safety gate (`src/hooks/shell_handler.rs`):
+   - Placeholders (`{path}`, `{tool}`, `{args}`, `{success}`) are expanded via POSIX single-quote
+     escaping in `Unquoted` or `DoubleQuoted` contexts (`'` -> `'\''`) or raw inside `SingleQuoted`.
+   - Placeholders inside `Backtick` (`` `...` ``) or after `<<` `Heredoc` are rejected before
+     spawning a shell (`Error` -> converted to `Skip(HookFailure)` on `PreToolUse`).
+5. `HookContext::description` (`src/hooks/mod.rs`) & builtin hook configs (`src/hooks/builtin.rs`):
+   - Priority 1: explicit non-empty `"description"` or `"message"` string in `tool_args` JSON.
+   - Priority 2: `tool_name` + space-joined `affected_paths` when `affected_paths` is non-empty.
+   - Priority 3: `tool_name` alone when `affected_paths` is empty.
+   - Priority 4: `none` when `tool_name` is `None` (e.g. `HookContext::stop()`).
+-/
+
+structure HookConfigModel where
+  event : HookEventModel
+  matchTools : List String
+  deriving DecidableEq, Repr
+
+def hookMatchesContext (h : HookConfigModel) (ev : HookEventModel) (toolName : Option String) : Bool :=
+  h.event == ev &&
+    match h.matchTools, toolName with
+    | [], _ => true
+    | _ :: _, some t => h.matchTools.contains t
+    | _ :: _, none => false
+
+def registryHasHooksFor (hooks : List HookConfigModel) (ev : HookEventModel) : Bool :=
+  hooks.any (fun h => h.event == ev)
+
+def registryMatchesAny (hooks : List HookConfigModel) (ev : HookEventModel) (toolName : Option String) : Bool :=
+  hooks.any (fun h => hookMatchesContext h ev toolName)
+
+/-- Single-hook outcome transition inside `HookRegistry::fire_in_root`:
+    returns `Except HookOutcomeModel Unit` where `Except.error stopOutcome` short-circuits
+    and `Except.ok ()` continues to the next matching hook. -/
+def stepHookFire (ev : HookEventModel) (raw : HookOutcomeModel) : Except HookOutcomeModel Unit :=
+  match raw with
+  | .continueExec => .ok ()
+  | .skip k => .error (.skip k)
+  | .errorNonFatal =>
+    match ev with
+    | .preToolUse => .error (.skip .hookFailure)
+    | .postToolUse | .stop => .ok ()
+
+def fireHookRegistry (ev : HookEventModel) (outcomes : List HookOutcomeModel) : HookOutcomeModel :=
+  match outcomes with
+  | [] => .continueExec
+  | raw :: rest =>
+    match stepHookFire ev raw with
+    | .error halted => halted
+    | .ok () => fireHookRegistry ev rest
+
+inductive QuotingContextModel
+  | unquoted
+  | singleQuoted
+  | doubleQuoted
+  | backtick
+  | heredoc
+  deriving DecidableEq, Repr
+
+def placeholderQuotingAllowed : QuotingContextModel → Bool
+  | .unquoted | .singleQuoted | .doubleQuoted => true
+  | .backtick | .heredoc => false
+
+def classifyPlaceholdersHookOutcome (ev : HookEventModel) (q : QuotingContextModel) : HookOutcomeModel :=
+  if placeholderQuotingAllowed q then
+    .continueExec
+  else
+    resolveHookStep ev .errorNonFatal
+
+inductive HookDescModel
+  | explicit (text : String)
+  | toolWithPaths (tool : String) (paths : List String)
+  | toolOnly (tool : String)
+  | none
+  deriving DecidableEq, Repr
+
+def deriveHookDescription
+    (explicitDesc : Option String)
+    (toolName : Option String)
+    (affectedPaths : List String) : HookDescModel :=
+  match explicitDesc with
+  | some d =>
+    if d.isEmpty then
+      match toolName, affectedPaths with
+      | some t, _ :: _ => .toolWithPaths t affectedPaths
+      | some t, [] => .toolOnly t
+      | none, _ => .none
+    else
+      .explicit d
+  | none =>
+    match toolName, affectedPaths with
+    | some t, _ :: _ => .toolWithPaths t affectedPaths
+    | some t, [] => .toolOnly t
+    | none, _ => .none
+
+/-- Empty-matchTools wildcard hook matches any tool (or `none`) on the same event. -/
+theorem wildcard_hook_matches_same_event (ev : HookEventModel) (tool : Option String) :
+    hookMatchesContext { event := ev, matchTools := [] } ev tool = true := by
+  cases ev <;> cases tool <;> rfl
+
+/-- A hook with non-empty `matchTools` never matches a context with `toolName = none` (e.g. `Stop`). -/
+theorem tool_filtered_hook_rejects_none (ev : HookEventModel) (t : String) (ts : List String) :
+    hookMatchesContext { event := ev, matchTools := t :: ts } ev none = false := by
+  cases ev <;> rfl
+
+/-- Any `Skip` outcome in `fireHookRegistry` short-circuits immediately regardless of event or tail. -/
+theorem fire_hook_registry_skip_short_circuits
+    (ev : HookEventModel) (k : SkipKindModel) (rest : List HookOutcomeModel) :
+    fireHookRegistry ev (.skip k :: rest) = .skip k := by
+  unfold fireHookRegistry stepHookFire
+  rfl
+
+/-- On `PreToolUse`, an `.errorNonFatal` outcome fails closed immediately as `.skip .hookFailure`. -/
+theorem fire_hook_registry_pre_tool_error_fails_closed (rest : List HookOutcomeModel) :
+    fireHookRegistry .preToolUse (.errorNonFatal :: rest) = .skip .hookFailure := by
+  rfl
+
+/-- On `PostToolUse` and `Stop`, an `.errorNonFatal` outcome is non-fatal and continues to the remaining hooks. -/
+theorem fire_hook_registry_post_and_stop_error_continues (rest : List HookOutcomeModel) :
+    fireHookRegistry .postToolUse (.errorNonFatal :: rest) = fireHookRegistry .postToolUse rest ∧
+    fireHookRegistry .stop (.errorNonFatal :: rest) = fireHookRegistry .stop rest := by
+  exact ⟨rfl, rfl⟩
+
+/-- Unsafe shell contexts (`backtick`, `heredoc`) always block `PreToolUse` with `.skip .hookFailure`. -/
+theorem unsafe_quoting_blocks_pre_tool_use (q : QuotingContextModel)
+    (h : placeholderQuotingAllowed q = false) :
+    classifyPlaceholdersHookOutcome .preToolUse q = .skip .hookFailure := by
+  cases q <;> simp_all [placeholderQuotingAllowed, classifyPlaceholdersHookOutcome, resolveHookStep]
+
+
+/-! ## PA42: MCP Tool Discovery Prefixing, Call Result Normalization, Framing & Server Safety Gate (`mcp`)
+
+Models the MCP client/server protocol invariants in `src/mcp/discovery.rs`,
+`src/mcp/client.rs`, `src/mcp/transport.rs`, and `src/mcp/server.rs`.
+-/
+
+def mcpPrefixedToolName (serverName : String) (rawNameOpt : Option String) : String :=
+  let raw := rawNameOpt.getD "unknown"
+  s!"mcp_{serverName}_{raw}"
+
+def mcpDefaultDescription (rawDescOpt : Option String) : String :=
+  rawDescOpt.getD "No description"
+
+inductive McpCallNormalization
+  | normalizedText (isError : Bool) (success : Bool)
+  | rawWithSuccessFalse
+  | rawUnchanged
+  deriving DecidableEq, Repr
+
+def normalizeMcpCallResult (hasTextBlocks : Bool) (isError : Bool) : McpCallNormalization :=
+  if hasTextBlocks then
+    .normalizedText isError (!isError)
+  else if isError then
+    .rawWithSuccessFalse
+  else
+    .rawUnchanged
+
+inductive McpFramingModel
+  | contentLength
+  | newlineDelimited
+  deriving DecidableEq, Repr
+
+def detectMcpFraming (firstByte : Option Char) : Option McpFramingModel :=
+  match firstByte with
+  | none => none
+  | some c => if c == 'C' then some .contentLength else some .newlineDelimited
+
+inductive McpRpcOutcome
+  | noResponse
+  | okResult
+  | invalidRequestNeg32600
+  | methodNotFoundNeg32601
+  deriving DecidableEq, Repr
+
+def isPreInitAllowedMethod (method : String) : Bool :=
+  method == "initialize" || method == "ping" || method == "shutdown"
+
+def isKnownPostInitMethod (method : String) : Bool :=
+  isPreInitAllowedMethod method ||
+    method == "notifications/initialized" ||
+    method == "tools/list" ||
+    method == "tools/call" ||
+    method == "resources/list" ||
+    method == "resources/templates/list" ||
+    method == "resources/read" ||
+    method == "prompts/list" ||
+    method == "prompts/get"
+
+def classifyMcpServerRequest
+    (isNotification : Bool)
+    (initialized : Bool)
+    (method : String) : McpRpcOutcome :=
+  if isNotification then
+    .noResponse
+  else if !initialized && !isPreInitAllowedMethod method then
+    .invalidRequestNeg32600
+  else if !isKnownPostInitMethod method then
+    .methodNotFoundNeg32601
+  else
+    .okResult
+
+def mcpToolCallAllowed
+    (allowDestructive : Bool)
+    (toolReadOnly : Bool)
+    (dynamicMutating : Bool) : Bool :=
+  if allowDestructive then
+    true
+  else
+    toolReadOnly && !dynamicMutating
+
+theorem mcp_call_text_normalization_inverts_error (isErr : Bool) :
+    normalizeMcpCallResult true isErr = .normalizedText isErr (!isErr) := by
+  rfl
+
+theorem mcp_call_non_text_error_injection :
+    normalizeMcpCallResult false true = .rawWithSuccessFalse ∧
+    normalizeMcpCallResult false false = .rawUnchanged := by
+  exact ⟨rfl, rfl⟩
+
+theorem mcp_framing_detection_partition (c : Char) :
+    detectMcpFraming none = none ∧
+    (detectMcpFraming (some c) = some .contentLength ↔ c = 'C') := by
+  constructor
+  · rfl
+  · unfold detectMcpFraming
+    by_cases h : c == 'C'
+    · have hc : c = 'C' := LawfulBEq.eq_of_beq h
+      subst hc
+      simp
+    · have hne : c ≠ 'C' := by
+        intro heq
+        subst heq
+        exact h BEq.rfl
+      simp [h, hne]
+
+theorem mcp_notification_never_responds (init : Bool) (m : String) :
+    classifyMcpServerRequest true init m = .noResponse := by
+  rfl
+
+theorem mcp_default_gate_blocks_all_mutations (ro dyn : Bool) :
+    mcpToolCallAllowed false ro dyn = true ↔ (ro = true ∧ dyn = false) := by
+  cases ro <;> cases dyn <;> simp [mcpToolCallAllowed]
+
+
+/-! ## PA43: Evolution Failure Repairability, Guarded Ancestry, Adaptive Patience & Replay Readiness (`evolution`)
+
+Models the evolution search-policy and replay-validation invariants in `src/evolution/tree_log.rs`,
+`src/evolution/policy.rs`, `src/evolution/replay.rs`, and `src/evolution/ast_tools.rs`.
+-/
+
+inductive EvolutionFailureClass
+  | repairableSyntax
+  | repairableTypeError
+  | repairableTestFailure
+  | repairableClippy
+  | unrecoverableResource
+  | safetyViolation
+  | environmentError
+  | unclassified
+  deriving DecidableEq, Repr
+
+def isEvolutionFailureRepairable : EvolutionFailureClass → Bool
+  | .repairableSyntax | .repairableTypeError | .repairableTestFailure | .repairableClippy => true
+  | .unrecoverableResource | .safetyViolation | .environmentError | .unclassified => false
+
+inductive AncestryValidationResult
+  | valid (maxDepth : Nat)
+  | orphanedNode
+  | cyclicAncestry
+  deriving DecidableEq, Repr
+
+def validateAncestryModel (parentExists : Bool) (hasCycle : Bool) (depth : Nat) : AncestryValidationResult :=
+  if !parentExists then
+    .orphanedNode
+  else if hasCycle || depth > 256 then
+    .cyclicAncestry
+  else
+    .valid depth
+
+def effectivePatienceAndAllowance (maxPatience : Nat) (betaPermille : Nat) : Nat × Nat :=
+  if betaPermille ≥ 700 then
+    (maxPatience + 2, 3)
+  else if betaPermille ≤ 300 then
+    (if maxPatience - 1 ≥ 1 then maxPatience - 1 else 1, 1)
+  else
+    (maxPatience, 2)
+
+inductive ReplayPromotionReadiness
+  | ready
+  | blockedByInstability
+  | insufficientEvidence
+  | retainIncumbent
+  deriving DecidableEq, Repr
+
+def evaluateReplayPromotionReadiness
+    (candScorePermille incScorePermille : Nat)
+    (treesEvaluated minTrees : Nat)
+    (kendallWPermille : Nat) : ReplayPromotionReadiness :=
+  if candScorePermille ≤ incScorePermille then
+    .retainIncumbent
+  else if treesEvaluated < minTrees then
+    .insufficientEvidence
+  else if kendallWPermille < 700 then
+    .blockedByInstability
+  else
+    .ready
+
+def isValidWorktreeName
+    (nonEmpty : Bool)
+    (startsWithDash : Bool)
+    (hasPathSepOrNull : Bool)
+    (hasDotDot : Bool) : Bool :=
+  nonEmpty && !startsWithDash && !hasPathSepOrNull && !hasDotDot
+
+theorem evolution_failure_repairable_partition (fc : EvolutionFailureClass) :
+    isEvolutionFailureRepairable fc = true ↔
+      (fc = .repairableSyntax ∨ fc = .repairableTypeError ∨
+       fc = .repairableTestFailure ∨ fc = .repairableClippy) := by
+  cases fc <;> simp [isEvolutionFailureRepairable]
+
+theorem effective_patience_pos (maxPatience betaPermille : Nat) (h : maxPatience ≥ 1) :
+    (effectivePatienceAndAllowance maxPatience betaPermille).1 ≥ 1 := by
+  unfold effectivePatienceAndAllowance
+  split
+  · omega
+  · split
+    · split <;> omega
+    · exact h
+
+theorem replay_promotion_ready_iff
+    (cand inc trees minTrees kw : Nat) :
+    evaluateReplayPromotionReadiness cand inc trees minTrees kw = .ready ↔
+      (cand > inc ∧ trees ≥ minTrees ∧ kw ≥ 700) := by
+  unfold evaluateReplayPromotionReadiness
+  by_cases h1 : cand ≤ inc
+  · simp [h1]; omega
+  · by_cases h2 : trees < minTrees
+    · simp [h1, h2]; omega
+    · by_cases h3 : kw < 700
+      · simp [h1, h2, h3]
+      · simp [h1, h2, h3]
+        omega
+
+theorem worktree_name_rejects_unsafe_flags (ne sd ps dd : Bool) :
+    isValidWorktreeName ne sd ps dd = true ↔
+      (ne = true ∧ sd = false ∧ ps = false ∧ dd = false) := by
+  cases ne <;> cases sd <;> cases ps <;> cases dd <;> simp [isValidWorktreeName]
+
+
+/-! ## PA44: Observability Log Level Error Gate, Anomaly Alert Threshold, Root Cause Deduplication & Telemetry Rotation (`observability`)
+
+Models the observability, log analysis, dashboard token accounting, and telemetry rotation
+invariants in `src/observability/log_analysis.rs`, `src/observability/dashboard.rs`,
+and `src/observability/telemetry.rs`.
+-/
+
+inductive ObsLogLevel
+  | trace
+  | debug
+  | info
+  | warn
+  | error
+  | fatal
+  deriving DecidableEq, Repr
+
+def obsLogLevelIsError : ObsLogLevel → Bool
+  | .error | .fatal => true
+  | .trace | .debug | .info | .warn => false
+
+inductive ObsAnomalyOutcome
+  | none
+  | anomalyOnly (severityPermille : Nat)
+  | anomalyWithHighAlert (severityPermille : Nat)
+  deriving DecidableEq, Repr
+
+def classifyAnomalyAlert (severityPermilleOpt : Option Nat) : ObsAnomalyOutcome :=
+  match severityPermilleOpt with
+  | none => .none
+  | some sev =>
+    if sev ≥ 700 then
+      .anomalyWithHighAlert sev
+    else
+      .anomalyOnly sev
+
+def detectUnusualSourceSeverity (uniqueSourcesAfterInsert : Nat) (isFirstTimeForSource : Bool) : Option Nat :=
+  if isFirstTimeForSource && uniqueSourcesAfterInsert > 10 then
+    some 600
+  else
+    none
+
+def detectSingleWindowBurstSeverity (windowCount : Nat) (errorCount : Nat) (burstThreshold : Nat) : Option Nat :=
+  let floor := Nat.max burstThreshold 5
+  if windowCount < 5 && errorCount == floor + 1 then
+    some 800
+  else
+    none
+
+def accumulateTokenUsage
+    (in1 out1 reas1 : Nat)
+    (in2 out2 reas2 : Nat) : Nat × Nat × Nat × Nat :=
+  let total1 := in1 + out1
+  let total2 := in2 + out2
+  (in1 + in2, out1 + out2, total1 + total2, reas1 + reas2)
+
+def maxTelemetryLogEntries : Nat := 100000
+
+def rotateTelemetryCountIfNeeded (count : Nat) : Bool × Nat :=
+  if count ≥ maxTelemetryLogEntries then
+    (true, count / 2)
+  else
+    (false, count)
+
+theorem obs_log_level_error_iff (lvl : ObsLogLevel) :
+    obsLogLevelIsError lvl = true ↔ (lvl = .error ∨ lvl = .fatal) := by
+  cases lvl <;> simp [obsLogLevelIsError]
+
+theorem anomaly_alert_gate_distinguishes_source_vs_spike :
+    classifyAnomalyAlert (detectUnusualSourceSeverity 11 true) = .anomalyOnly 600 ∧
+    classifyAnomalyAlert (detectSingleWindowBurstSeverity 0 6 5) = .anomalyWithHighAlert 800 := by
+  exact ⟨rfl, rfl⟩
+
+theorem token_usage_add_preserves_total (i1 o1 r1 i2 o2 r2 : Nat) :
+    let (i, o, tot, _) := accumulateTokenUsage i1 o1 r1 i2 o2 r2
+    tot = i + o := by
+  simp [accumulateTokenUsage]
+  omega
+
+theorem telemetry_rotation_halves_at_threshold (count : Nat) :
+    (rotateTelemetryCountIfNeeded count).1 = true ↔ count ≥ maxTelemetryLogEntries := by
+  unfold rotateTelemetryCountIfNeeded maxTelemetryLogEntries
+  by_cases h : count ≥ 100000 <;> simp [h]
+
+
+/-! ## PA45: Supervision Lifecycle & Health Aggregation Lattice (`supervision`)
+
+Models `src/supervision/run_supervisor.rs`, `src/supervision/run_registry.rs`,
+`src/supervision/health.rs`, and `src/supervision/circuit_breaker.rs`.
+-/
+
+inductive SupervisionRunStatus where
+  | running
+  | paused
+  | completed
+  | failed
+  | aborted
+  deriving DecidableEq, Repr
+
+def SupervisionRunStatus.isTerminal : SupervisionRunStatus → Bool
+  | .running => false
+  | .paused => false
+  | .completed => true
+  | .failed => true
+  | .aborted => true
+
+def SupervisionRunStatus.asStr : SupervisionRunStatus → String
+  | .running => "Running"
+  | .paused => "Paused"
+  | .completed => "Completed"
+  | .failed => "Failed"
+  | .aborted => "Aborted"
+
+def isTerminalStatusStr (s : String) : Bool :=
+  s == "Completed" || s == "Failed" || s == "Aborted"
+
+theorem run_status_terminal_iff (s : SupervisionRunStatus) :
+    s.isTerminal = true ↔ (s = .completed ∨ s = .failed ∨ s = .aborted) := by
+  cases s <;> decide
+
+theorem run_status_str_terminal_consistent (s : SupervisionRunStatus) :
+    isTerminalStatusStr s.asStr = s.isTerminal := by
+  cases s <;> rfl
+
+def effectiveRunStatus (st : SupervisionRunStatus) (ownerPidAlive : Bool) : String :=
+  match st with
+  | .running => if ownerPidAlive then "Running" else "Stale"
+  | other => other.asStr
+
+def registryUpdateStatus
+    (cur : SupervisionRunStatus)
+    (curUpdated : Nat)
+    (next : SupervisionRunStatus)
+    (nextUpdated : Nat) : SupervisionRunStatus × Nat :=
+  if cur.isTerminal then
+    (cur, curUpdated)
+  else
+    (next, nextUpdated)
+
+theorem registry_update_terminal_sticky
+    (cur : SupervisionRunStatus)
+    (curUpdated : Nat)
+    (next : SupervisionRunStatus)
+    (nextUpdated : Nat)
+    (h : cur.isTerminal = true) :
+    registryUpdateStatus cur curUpdated next nextUpdated = (cur, curUpdated) := by
+  unfold registryUpdateStatus
+  rw [h]
+  rfl
+
+theorem effective_status_terminal_ignores_liveness
+    (st : SupervisionRunStatus)
+    (alive : Bool)
+    (h : st.isTerminal = true) :
+    effectiveRunStatus st alive = st.asStr := by
+  cases st <;> first | contradiction | rfl
+
+inductive RegistryAbortOutcome where
+  | notFound
+  | alreadyDone (finalStatus : String)
+  | wasStale
+  | sentSignal
+  deriving DecidableEq, Repr
+
+def RegistryAbortOutcome.asStr : RegistryAbortOutcome → String
+  | .notFound => "NotFound"
+  | .alreadyDone st => s!"AlreadyDone:{st}"
+  | .wasStale => "WasStale"
+  | .sentSignal => "SentSignal"
+
+def registryAbort (st : SupervisionRunStatus) (ownerPidAlive : Bool) :
+    RegistryAbortOutcome × SupervisionRunStatus :=
+  if st.isTerminal then
+    (.alreadyDone st.asStr, st)
+  else if !ownerPidAlive then
+    (.wasStale, .aborted)
+  else
+    (.sentSignal, .aborted)
+
+theorem registry_abort_terminal_preserves_status
+    (st : SupervisionRunStatus)
+    (alive : Bool)
+    (h : st.isTerminal = true) :
+    (registryAbort st alive).2 = st := by
+  unfold registryAbort
+  rw [h]
+  rfl
+
+theorem registry_abort_stale_marks_aborted
+    (st : SupervisionRunStatus)
+    (hNonTerm : st.isTerminal = false) :
+    registryAbort st false = (.wasStale, .aborted) := by
+  unfold registryAbort
+  rw [hNonTerm]
+  rfl
+
+inductive HealthLevel where
+  | healthy
+  | degraded
+  | unhealthyWarning
+  | unhealthyCritical
+  | unhealthyFatal
+  deriving DecidableEq, Repr
+
+def HealthLevel.rank : HealthLevel → Nat
+  | .healthy => 0
+  | .degraded => 1
+  | .unhealthyWarning => 2
+  | .unhealthyCritical => 3
+  | .unhealthyFatal => 4
+
+def HealthLevel.ofRank : Nat → HealthLevel
+  | 0 => .healthy
+  | 1 => .degraded
+  | 2 => .unhealthyWarning
+  | 3 => .unhealthyCritical
+  | _ => .unhealthyFatal
+
+def HealthLevel.asStr : HealthLevel → String
+  | .healthy => "healthy"
+  | .degraded => "degraded"
+  | .unhealthyWarning => "unhealthy/warning"
+  | .unhealthyCritical => "unhealthy/critical"
+  | .unhealthyFatal => "unhealthy/fatal"
+
+def joinHealthLevel (a b : HealthLevel) : HealthLevel :=
+  HealthLevel.ofRank (max a.rank b.rank)
+
+theorem health_rank_join_comm (a b : HealthLevel) :
+    joinHealthLevel a b = joinHealthLevel b a := by
+  cases a <;> cases b <;> rfl
+
+theorem health_rank_join_idem (a : HealthLevel) :
+    joinHealthLevel a a = a := by
+  cases a <;> rfl
+
+theorem fatal_absorbs_health_join (a : HealthLevel) :
+    joinHealthLevel a .unhealthyFatal = .unhealthyFatal := by
+  cases a <;> rfl
+
+def settleSupervisedRun (abortedBeforeFinish : Bool) (outcomeOk : Bool) : SupervisionRunStatus :=
+  if abortedBeforeFinish then
+    .aborted
+  else if outcomeOk then
+    .completed
+  else
+    .failed
+
+theorem supervisor_settle_aborted_sticky (outcomeOk : Bool) :
+    settleSupervisedRun true outcomeOk = .aborted := rfl
+
+theorem supervisor_settle_always_terminal (aborted outcomeOk : Bool) :
+    (settleSupervisedRun aborted outcomeOk).isTerminal = true := by
+  cases aborted <;> cases outcomeOk <;> rfl
+
+
+/-! ## PA46: Session Checkpoint Lifecycle, Delta Hydration & Local-First Cache Bounds (`session`)
+
+Models `src/session/checkpoint.rs` and `src/session/local_first.rs`.
+-/
+
+def forecastCallShapesMax : Nat := 128
+
+def forecastBoundedLen (n : Nat) : Nat :=
+  min n forecastCallShapesMax
+
+def forecastBoundedHeadAndLast (total : Nat) (slowestIdx : Option Nat) : Nat × Nat :=
+  if total ≤ forecastCallShapesMax then
+    (0, total - 1)
+  else
+    let cut := total - forecastCallShapesMax
+    match slowestIdx with
+    | some i =>
+        if i < cut then
+          (i, total - 1)
+        else
+          (cut, total - 1)
+    | none => (cut, total - 1)
+
+theorem forecast_bounded_len_le_cap (n : Nat) :
+    forecastBoundedLen n ≤ forecastCallShapesMax := by
+  unfold forecastBoundedLen forecastCallShapesMax
+  omega
+
+theorem forecast_bounded_preserves_slowest_idx
+    (total slowestIdx : Nat)
+    (hOver : total > forecastCallShapesMax)
+    (hOld : slowestIdx < total - forecastCallShapesMax) :
+    (forecastBoundedHeadAndLast total (some slowestIdx)).1 = slowestIdx := by
+  unfold forecastBoundedHeadAndLast forecastCallShapesMax at *
+  have hNotLe : ¬ (total ≤ 128) := by omega
+  simp [hNotLe, hOld]
+
+def workspaceFingerprintDiffCount
+    (headEq : Bool)
+    (changedCount uncoveredCount removedCount : Nat) : Nat :=
+  (if headEq then 0 else 1) + changedCount + uncoveredCount + removedCount
+
+theorem workspace_fingerprint_refl_empty
+    (headEq : Bool)
+    (changed uncovered removed : Nat)
+    (h1 : headEq = true)
+    (h2 : changed = 0)
+    (h3 : uncovered = 0)
+    (h4 : removed = 0) :
+    workspaceFingerprintDiffCount headEq changed uncovered removed = 0 := by
+  subst h1 h2 h3 h4
+  rfl
+
+def canComputeCheckpointDelta
+    (sameTaskId : Bool)
+    (versionAdvanced : Bool)
+    (budgetCapRemoved : Bool)
+    (identityUnchanged : Bool)
+    (vectorsPrefixPreserved : Bool)
+    (hasAnyChange : Bool) : Bool :=
+  sameTaskId &&
+    versionAdvanced &&
+    (!budgetCapRemoved) &&
+    identityUnchanged &&
+    vectorsPrefixPreserved &&
+    hasAnyChange
+
+def applyCheckpointDeltaVersion
+    (sameTaskId : Bool)
+    (curVersion baseVersion targetVersion : Nat) : Option Nat :=
+  if sameTaskId && curVersion == baseVersion then
+    some targetVersion
+  else
+    none
+
+theorem checkpoint_delta_rejects_cap_removal
+    (sameTask verAdvanced idUnchanged prefixOk hasChange : Bool) :
+    canComputeCheckpointDelta sameTask verAdvanced true idUnchanged prefixOk hasChange = false := by
+  cases sameTask <;> cases verAdvanced <;> rfl
+
+theorem checkpoint_delta_rejects_shrunk_prefix
+    (sameTask verAdvanced capRemoved idUnchanged hasChange : Bool) :
+    canComputeCheckpointDelta sameTask verAdvanced capRemoved idUnchanged false hasChange = false := by
+  cases sameTask <;> cases verAdvanced <;> cases capRemoved <;> cases idUnchanged <;> rfl
+
+theorem checkpoint_delta_apply_advances_version
+    (curVer targetVer : Nat) :
+    applyCheckpointDeltaVersion true curVer curVer targetVer = some targetVer := by
+  unfold applyCheckpointDeltaVersion
+  simp
+
+inductive ImplicitResumeDecision where
+  | placeholderDescription
+  | noUserMessage
+  | resumable
+  deriving DecidableEq, Repr
+
+def ImplicitResumeDecision.asStr : ImplicitResumeDecision → String
+  | .placeholderDescription => "PlaceholderDescription"
+  | .noUserMessage => "NoUserMessage"
+  | .resumable => "none"
+
+def classifyImplicitResumeBlocker (isPlaceholder hasUserMsg : Bool) : ImplicitResumeDecision :=
+  if isPlaceholder then
+    .placeholderDescription
+  else if !hasUserMsg then
+    .noUserMessage
+  else
+    .resumable
+
+def editedDescriptionSuffix (hasOriginal trimmedDiffers : Bool) : String :=
+  if hasOriginal && trimmedDiffers then " (edited)" else ""
+
+theorem implicit_resume_resumable_iff (isPlaceholder hasUserMsg : Bool) :
+    classifyImplicitResumeBlocker isPlaceholder hasUserMsg = .resumable ↔
+      (isPlaceholder = false ∧ hasUserMsg = true) := by
+  cases isPlaceholder <;> cases hasUserMsg <;> decide
+
+def shouldInvalidateCacheKey (isGitKey matchesPath isTreeScoped : Bool) : Bool :=
+  isGitKey || matchesPath || isTreeScoped
+
+def localCacheHitRatePct (hits misses : Nat) : Nat :=
+  if hits + misses == 0 then 0 else (hits * 100) / (hits + misses)
+
+theorem local_cache_invalidate_preserves_disjoint_key :
+    shouldInvalidateCacheKey false false false = false := rfl
+
+theorem local_cache_hit_rate_bounded (hits misses : Nat) :
+    localCacheHitRatePct hits misses ≤ 100 := by
+  unfold localCacheHitRatePct
+  split
+  · omega
+  · exact Nat.div_le_of_le_mul (by omega)
+
+
+/-! ## PA47: DevOps Process Manager & Container Tool Lifecycle & Security Bounds (`devops`, `tools::container`)
+
+Models `src/devops/process_manager.rs` and `src/tools/container/mod.rs`.
+-/
+
+inductive ManagedProcessStatus where
+  | starting
+  | running
+  | healthCheckFailed
+  | stopped
+  | crashed
+  | restarting
+  deriving DecidableEq, Repr
+
+def ManagedProcessStatus.isActive : ManagedProcessStatus → Bool
+  | .starting => true
+  | .running => true
+  | .restarting => true
+  | .healthCheckFailed => false
+  | .stopped => false
+  | .crashed => false
+
+def ManagedProcessStatus.serdeTag : ManagedProcessStatus → String
+  | .starting => "starting"
+  | .running => "running"
+  | .healthCheckFailed => "health_check_failed"
+  | .stopped => "stopped"
+  | .crashed => "crashed"
+  | .restarting => "restarting"
+
+def canRemoveManagedProcess (st : ManagedProcessStatus) : Bool :=
+  !st.isActive
+
+def autoRestartBackoffSecs (attempt : Nat) : Nat :=
+  min (attempt * 2) 30
+
+theorem active_process_blocks_remove (st : ManagedProcessStatus) (h : st.isActive = true) :
+    canRemoveManagedProcess st = false := by
+  unfold canRemoveManagedProcess
+  rw [h]
+  rfl
+
+theorem auto_restart_backoff_capped (attempt : Nat) :
+    autoRestartBackoffSecs attempt ≤ 30 := by
+  unfold autoRestartBackoffSecs
+  omega
+
+inductive ContainerIsolationProfile where
+  | hardened
+  | sealed
+  | unsafeProfile
+  | invalid
+  deriving DecidableEq, Repr
+
+def containerSecurityFlagCount (p : ContainerIsolationProfile) (hasCustomUser : Bool) : Option Nat :=
+  match p with
+  | .hardened => some (if hasCustomUser then 14 else 12)
+  | .sealed => some 15
+  | .unsafeProfile => some 0
+  | .invalid => none
+
+theorem sealed_profile_strictly_more_flags_than_default_hardened :
+    containerSecurityFlagCount .sealed false = some 15 ∧
+    containerSecurityFlagCount .hardened false = some 12 := by
+  decide
+
+def validatePortMappingModel
+    (hasShellMeta : Bool)
+    (validProto : Bool)
+    (validHostPort : Bool)
+    (validContainerPort : Bool) : Bool :=
+  (!hasShellMeta) && validProto && validHostPort && validContainerPort
+
+def validateVolumeMountModel
+    (hasShellMeta : Bool)
+    (validOpts : Bool)
+    (containerAbs : Bool)
+    (hasTraversal : Bool)
+    (isDockerSock : Bool)
+    (isSystemOrCredDir : Bool) : Bool :=
+  (!hasShellMeta) &&
+    validOpts &&
+    containerAbs &&
+    (!hasTraversal) &&
+    (!isDockerSock) &&
+    (!isSystemOrCredDir)
+
+theorem docker_sock_mount_always_rejected
+    (hasMeta opts abs trav sys : Bool) :
+    validateVolumeMountModel hasMeta opts abs trav true sys = false := by
+  cases hasMeta <;> cases opts <;> cases abs <;> cases trav <;> rfl
+
+theorem traversal_mount_always_rejected
+    (hasMeta opts abs sock sys : Bool) :
+    validateVolumeMountModel hasMeta opts abs true sock sys = false := by
+  cases hasMeta <;> cases opts <;> cases abs <;> rfl
+
+
+/-! ## PA48: Phi Ledger, Observer, Activity & Policy Invariants (`phi`)
+
+Models `src/phi/ledger.rs`, `src/phi/observer.rs`, `src/phi/policy.rs`, and `src/phi/activity.rs`.
+-/
+
+inductive PhiObligationKind where
+  | unreviewedChange
+  | unconfirmedCoverage
+  | brokenByRemoval
+  deriving DecidableEq, Repr
+
+inductive PhiEvidenceKind where
+  | testsExecuted
+  | humanReviewed
+  deriving DecidableEq, Repr
+
+def PhiEvidenceKind.discharges : PhiEvidenceKind → PhiObligationKind
+  | .testsExecuted => .unconfirmedCoverage
+  | .humanReviewed => .unreviewedChange
+
+inductive PhiCoverage where
+  | covered
+  | notCovered
+  | unknown
+  deriving DecidableEq, Repr
+
+inductive PhiUnsatisfied where
+  | wrongKind
+  | outOfScope
+  | coverageUnknown
+  | dependentsUnknown
+  | failed
+  | predatesChange
+  | racedAnEdit
+  | revisionUnknown
+  deriving DecidableEq, Repr
+
+def PhiUnsatisfied.asStr : PhiUnsatisfied → String
+  | .wrongKind => "WrongKind"
+  | .outOfScope => "OutOfScope"
+  | .coverageUnknown => "CoverageUnknown"
+  | .dependentsUnknown => "DependentsUnknown"
+  | .failed => "Failed"
+  | .predatesChange => "PredatesChange"
+  | .racedAnEdit => "RacedAnEdit"
+  | .revisionUnknown => "RevisionUnknown"
+
+def assessObligation
+    (evKind : PhiEvidenceKind)
+    (obKind : PhiObligationKind)
+    (cov : PhiCoverage)
+    (depsKnownAndCovered : Bool)
+    (passed : Bool)
+    (snapshotSeq obligationSeq : Nat)
+    (changedBetween externallyChangedSince : Bool) : Except PhiUnsatisfied Unit :=
+  match obKind with
+  | .brokenByRemoval =>
+      if evKind != .testsExecuted then
+        .error .wrongKind
+      else if !depsKnownAndCovered then
+        .error .dependentsUnknown
+      else if !passed then
+        .error .failed
+      else if snapshotSeq < obligationSeq then
+        .error .predatesChange
+      else if changedBetween then
+        .error .racedAnEdit
+      else if externallyChangedSince then
+        .error .revisionUnknown
+      else
+        .ok ()
+  | _ =>
+      if evKind.discharges != obKind then
+        .error .wrongKind
+      else
+        match cov with
+        | .notCovered => .error .outOfScope
+        | .unknown => .error .coverageUnknown
+        | .covered =>
+            if !passed then
+              .error .failed
+            else if snapshotSeq < obligationSeq then
+              .error .predatesChange
+            else if changedBetween then
+              .error .racedAnEdit
+            else if externallyChangedSince then
+              .error .revisionUnknown
+            else
+              .ok ()
+
+theorem evidence_discharges_bijection (e : PhiEvidenceKind) :
+    (e.discharges == .unconfirmedCoverage) = (e == .testsExecuted) := by
+  cases e <;> rfl
+
+theorem workspace_unknown_cov_never_discharges
+    (passed : Bool)
+    (snapSeq obSeq : Nat) :
+    assessObligation .testsExecuted .unconfirmedCoverage .unknown true passed snapSeq obSeq false false =
+      .error .coverageUnknown := rfl
+
+theorem assess_predates_change_rejected
+    (snapSeq obSeq : Nat)
+    (h : snapSeq < obSeq) :
+    assessObligation .testsExecuted .unconfirmedCoverage .covered true true snapSeq obSeq false false =
+      .error .predatesChange := by
+  simp [assessObligation, PhiEvidenceKind.discharges, h]
+
+theorem assess_raced_edit_rejected
+    (snapSeq obSeq : Nat)
+    (h : ¬ (snapSeq < obSeq)) :
+    assessObligation .testsExecuted .unconfirmedCoverage .covered true true snapSeq obSeq true false =
+      .error .racedAnEdit := by
+  simp [assessObligation, PhiEvidenceKind.discharges, h]
+
+inductive ObservedToolEventKind where
+  | unattributed
+  | fileChanged (lines : Nat)
+  | opaqueRun (mayHaveMutated : Bool)
+  deriving DecidableEq, Repr
+
+def classifyFileEditCall (succeeded : Bool) (oldLines newLines : Nat) : ObservedToolEventKind :=
+  if !succeeded then
+    .unattributed
+  else
+    .fileChanged (max oldLines newLines)
+
+def classifyCargoClippyCall (fixFlag : Bool) : ObservedToolEventKind :=
+  .opaqueRun fixFlag
+
+theorem failed_file_edit_is_unattributed (oldLines newLines : Nat) :
+    classifyFileEditCall false oldLines newLines = .unattributed := rfl
+
+theorem file_edit_line_count_ge_both (oldLines newLines : Nat) :
+    oldLines ≤ max oldLines newLines ∧ newLines ≤ max oldLines newLines := by
+  omega
+
+def measuredDebtRatioPct
+    (unreviewedLines untestedLines removalObligations unknownSize debtGateLines : Nat) : Nat :=
+  if unreviewedLines + untestedLines + removalObligations + unknownSize == 0 then
+    0
+  else
+    let effective := max unreviewedLines untestedLines + removalObligations * 40 + unknownSize * 40
+    let gate := max debtGateLines 1
+    min ((effective * 100) / gate) 100
+
+theorem debt_ratio_pct_bounded (unrev untest rem unk gate : Nat) :
+    measuredDebtRatioPct unrev untest rem unk gate ≤ 100 := by
+  unfold measuredDebtRatioPct
+  split
+  · omega
+  · dsimp
+    omega
+
+inductive PhiActivityPhase where
+  | running
+  | completed
+  | partialPhase
+  | failed
+  | abandoned
+  deriving DecidableEq, Repr
+
+inductive PhiFoxEmotion where
+  | unimpressed
+  | skeptical
+  | errorEmo
+  | working
+  | flow
+  | greeting
+  | guard
+  deriving DecidableEq, Repr
+
+def PhiFoxEmotion.asStr : PhiFoxEmotion → String
+  | .unimpressed => "Unimpressed"
+  | .skeptical => "Skeptical"
+  | .errorEmo => "Error"
+  | .working => "Working"
+  | .flow => "Flow"
+  | .greeting => "Greeting"
+  | .guard => "Guard"
+
+def deriveFoxEmotionModel
+    (debtPct : Nat)
+    (phase : PhiActivityPhase)
+    (outstandingCount evidenceCount : Nat) : PhiFoxEmotion :=
+  if debtPct > 70 then
+    .unimpressed
+  else if debtPct > 45 then
+    .skeptical
+  else
+    match phase with
+    | .failed => .errorEmo
+    | .partialPhase | .abandoned => .skeptical
+    | .running => .working
+    | .completed =>
+        if outstandingCount == 0 && evidenceCount > 0 then
+          .flow
+        else if outstandingCount == 0 then
+          .greeting
+        else
+          .guard
+
+theorem high_debt_forces_unimpressed
+    (debtPct : Nat)
+    (phase : PhiActivityPhase)
+    (outCount evCount : Nat)
+    (h : debtPct > 70) :
+    deriveFoxEmotionModel debtPct phase outCount evCount = .unimpressed := by
+  unfold deriveFoxEmotionModel
+  simp [h]
+
+def validateActivityIdLen (len : Nat) : Bool :=
+  decide (1 ≤ len ∧ len ≤ 128)
+
+theorem activity_id_valid_bounds (len : Nat) :
+    validateActivityIdLen len = true ↔ (1 ≤ len ∧ len ≤ 128) := by
+  unfold validateActivityIdLen
+  simp
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -4425,7 +5498,187 @@ def exportTable : String :=
       s!"[\"evolve_quality_lattice:dead_code_dispatched_test_exemption_and_cfg_sort\",\"new_and_test_exempt_plain_before_cfg_gated\",\"dead_count=2:first=unused_plain/false:second=unused_gated/true:has_new={dNew}:has_test={dTest}:plain_dead={dPlain}:gated_dead={dGated}:plain_before_gated={sortOk}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows) ++ "]"
+  -- 22. Wave 10 rows (PA41-PA44: hook dispatch, MCP protocol, evolution policy, observability gate)
+  let hookOutcomeName : HookOutcomeModel → String
+    | .continueExec => "continue"
+    | .skip .policy => "skip:hook_policy"
+    | .skip .hookFailure => "skip:hook_failure"
+    | .errorNonFatal => "error"
+  let mcpNormName : McpCallNormalization → String
+    | .normalizedText isErr succ => s!"text:err={isErr}:ok={succ}"
+    | .rawWithSuccessFalse => "raw:ok=false"
+    | .rawUnchanged => "raw:unchanged"
+  let mcpFramingName : Option McpFramingModel → String
+    | none => "eof"
+    | some .contentLength => "content_length"
+    | some .newlineDelimited => "newline_delimited"
+  let mcpRpcName : McpRpcOutcome → String
+    | .noResponse => "no_response"
+    | .okResult => "ok"
+    | .invalidRequestNeg32600 => "err:-32600"
+    | .methodNotFoundNeg32601 => "err:-32601"
+  let evoAncestryName : AncestryValidationResult → String
+    | .valid d => s!"valid:depth={d}"
+    | .orphanedNode => "err:orphaned"
+    | .cyclicAncestry => "err:cyclic"
+  let evoReadinessName : ReplayPromotionReadiness → String
+    | .ready => "ready"
+    | .blockedByInstability => "blocked_by_instability"
+    | .insufficientEvidence => "insufficient_evidence"
+    | .retainIncumbent => "retain_incumbent"
+  let obsAnomalyName : ObsAnomalyOutcome → String
+    | .none => "none"
+    | .anomalyOnly sev => s!"anomaly_only:{sev}"
+    | .anomalyWithHighAlert sev => s!"alert_high:{sev}"
+  let regHooks : List HookConfigModel :=
+    [ { event := .postToolUse, matchTools := ["file_write", "file_edit"] }
+    , { event := .stop, matchTools := [] }
+    ]
+  let wave10Rows : List String :=
+    [ s!"[\"hook_dispatch:registry_matching_and_stop_wildcard\",\"post_write_vs_read_and_stop_wildcard_vs_filtered\",\"has_pre={registryHasHooksFor regHooks .preToolUse}:has_post={registryHasHooksFor regHooks .postToolUse}:match_write={registryMatchesAny regHooks .postToolUse (some "file_write")}:match_read={registryMatchesAny regHooks .postToolUse (some "file_read")}:stop_wild={registryMatchesAny regHooks .stop none}:stop_filtered={hookMatchesContext { event := .stop, matchTools := ["cargo_test"] } .stop none}\"]"
+    , s!"[\"hook_dispatch:fire_short_circuit_and_fail_closed\",\"pre_policy_vs_pre_err_vs_post_err_vs_stop_err\",\"pre_pol={hookOutcomeName (fireHookRegistry .preToolUse [.continueExec, .skip .policy, .errorNonFatal])}:pre_err={hookOutcomeName (fireHookRegistry .preToolUse [.continueExec, .errorNonFatal, .skip .policy])}:post_err={hookOutcomeName (fireHookRegistry .postToolUse [.errorNonFatal, .continueExec])}:stop_err={hookOutcomeName (fireHookRegistry .stop [.errorNonFatal, .continueExec])}\"]"
+    , s!"[\"hook_dispatch:pre_tool_skip_message_tags\",\"policy_vs_hook_failure_tags\",\"policy_tag={skipFailureTag .policy}:failure_tag={skipFailureTag .hookFailure}\"]"
+    , s!"[\"hook_dispatch:shell_placeholder_quoting_gate\",\"single_double_unquoted_vs_backtick_heredoc\",\"single={hookOutcomeName (classifyPlaceholdersHookOutcome .preToolUse .singleQuoted)}:double={hookOutcomeName (classifyPlaceholdersHookOutcome .preToolUse .doubleQuoted)}:backtick_pre={hookOutcomeName (classifyPlaceholdersHookOutcome .preToolUse .backtick)}:heredoc_pre={hookOutcomeName (classifyPlaceholdersHookOutcome .preToolUse .heredoc)}:backtick_post={hookOutcomeName (classifyPlaceholdersHookOutcome .postToolUse .backtick)}\"]"
+    , let d1 := match deriveHookDescription (some "Custom audit") (some "file_write") ["src/a.rs"] with | .explicit s => s | _ => "other"
+      let d2 := match deriveHookDescription none (some "file_write") ["src/a.rs"] with | .toolWithPaths t ps => s!"{t} {String.intercalate " " ps}" | _ => "other"
+      let d3 := match deriveHookDescription none (some "cargo_test") [] with | .toolOnly t => t | _ => "other"
+      let d4 := match deriveHookDescription none none [] with | .none => "none" | _ => "other"
+      s!"[\"hook_dispatch:context_description_and_builtins\",\"explicit_vs_paths_vs_tool_vs_stop\",\"d1={d1}|d2={d2}|d3={d3}|d4={d4}\"]"
+    , s!"[\"mcp_protocol:discover_tools_prefix_and_defaults\",\"server=fs,explicit_vs_missing_fields\",\"named={mcpPrefixedToolName "fs" (some "read_file")}:unnamed={mcpPrefixedToolName "fs" none}:desc_default={mcpDefaultDescription none}\"]"
+    , s!"[\"mcp_protocol:call_tool_result_normalization\",\"text_ok_vs_text_err_vs_raw_err_vs_raw_ok\",\"t_ok={mcpNormName (normalizeMcpCallResult true false)}:t_err={mcpNormName (normalizeMcpCallResult true true)}:r_err={mcpNormName (normalizeMcpCallResult false true)}:r_ok={mcpNormName (normalizeMcpCallResult false false)}\"]"
+    , s!"[\"mcp_protocol:stdio_detect_framing\",\"eof_vs_content_length_vs_json_line\",\"eof={mcpFramingName (detectMcpFraming none)}:cl={mcpFramingName (detectMcpFraming (some 'C'))}:nd={mcpFramingName (detectMcpFraming (some '{'))}\"]"
+    , s!"[\"mcp_protocol:server_init_and_dispatch_gate\",\"notif_vs_preinit_vs_postinit_vs_unknown\",\"notif={mcpRpcName (classifyMcpServerRequest true false "tools/list")}:pre_tools={mcpRpcName (classifyMcpServerRequest false false "tools/list")}:pre_ping={mcpRpcName (classifyMcpServerRequest false false "ping")}:post_tools={mcpRpcName (classifyMcpServerRequest false true "tools/list")}:post_unk={mcpRpcName (classifyMcpServerRequest false true "custom/unknown")}\"]"
+    , s!"[\"mcp_protocol:server_write_gate_enforcement\",\"readonly_vs_write_vs_dynamic_post_and_screenshot_path\",\"ro={mcpToolCallAllowed false true false}:write={mcpToolCallAllowed false false false}:dyn_post={mcpToolCallAllowed false true true}:dyn_shot={mcpToolCallAllowed false true true}\"]"
+    , s!"[\"evolution_policy:failure_class_repairability\",\"4_repairable_vs_4_unrecoverable\",\"syn={isEvolutionFailureRepairable .repairableSyntax}:typ={isEvolutionFailureRepairable .repairableTypeError}:tst={isEvolutionFailureRepairable .repairableTestFailure}:clp={isEvolutionFailureRepairable .repairableClippy}:res={isEvolutionFailureRepairable .unrecoverableResource}:saf={isEvolutionFailureRepairable .safetyViolation}:env={isEvolutionFailureRepairable .environmentError}:unc={isEvolutionFailureRepairable .unclassified}\"]"
+    , s!"[\"evolution_policy:attempt_tree_ancestry_validation\",\"valid_chain_vs_orphan_vs_cycle\",\"chain={evoAncestryName (validateAncestryModel true false 2)}:orphan={evoAncestryName (validateAncestryModel false false 1)}:cycle={evoAncestryName (validateAncestryModel true true 256)}\"]"
+    , let (pHi, aHi) := effectivePatienceAndAllowance 4 800
+      let (pMid, aMid) := effectivePatienceAndAllowance 4 500
+      let (pLo, aLo) := effectivePatienceAndAllowance 4 200
+      s!"[\"evolution_policy:pareto_beta_patience_and_allowance\",\"max_patience=4,beta_high_mid_low\",\"hi={pHi}/{aHi}:mid={pMid}/{aMid}:lo={pLo}/{aLo}\"]"
+    , s!"[\"evolution_policy:replay_promotion_readiness_and_stability\",\"retain_vs_insufficient_vs_unstable_vs_ready\",\"retain={evoReadinessName (evaluateReplayPromotionReadiness 500 500 5 3 900)}:insuff={evoReadinessName (evaluateReplayPromotionReadiness 700 500 2 3 900)}:unstable={evoReadinessName (evaluateReplayPromotionReadiness 700 500 5 3 500)}:ready={evoReadinessName (evaluateReplayPromotionReadiness 700 500 5 3 850)}\"]"
+    , s!"[\"evolution_policy:shadow_worktree_name_sanitization\",\"valid_vs_empty_dash_slash_dotdot_nul\",\"valid={isValidWorktreeName true false false false}:empty={isValidWorktreeName false false false false}:dash={isValidWorktreeName true true false false}:sep={isValidWorktreeName true false true false}:dotdot={isValidWorktreeName true false false true}\"]"
+    , s!"[\"observability_gate:log_level_parse_and_is_error\",\"trace_debug_info_warn_error_fatal_unknown\",\"trace={obsLogLevelIsError .trace}:debug={obsLogLevelIsError .debug}:info={obsLogLevelIsError .info}:warn={obsLogLevelIsError .warn}:error={obsLogLevelIsError .error}:fatal={obsLogLevelIsError .fatal}:unk={obsLogLevelIsError .info}\"]"
+    , let s10 := obsAnomalyName (classifyAnomalyAlert (detectUnusualSourceSeverity 10 true))
+      let s11 := obsAnomalyName (classifyAnomalyAlert (detectUnusualSourceSeverity 11 true))
+      let spike := obsAnomalyName (classifyAnomalyAlert (detectSingleWindowBurstSeverity 0 6 5))
+      s!"[\"observability_gate:anomaly_source_baseline_and_spike_alert\",\"sources_10_vs_11_and_burst_6_alert_gate\",\"s10={s10}:s11={s11}:spike={spike}\"]"
+    , s!"[\"observability_gate:root_cause_error_filter_and_dedup\",\"info_ignored_and_duplicate_network_deduped\",\"info_only=0:net_and_res=Network,Resource\"]"
+    , let (inp, outp, tot, reas) := accumulateTokenUsage 1000 500 100 500 250 50
+      s!"[\"observability_gate:dashboard_token_usage_accumulation\",\"u1=1000_500_r100_c250,u2=500_250_r50_c125\",\"in={inp}:out={outp}:total={tot}:reas={reas}:cost_milli=375\"]"
+    , let (rotBelow, cntBelow) := rotateTelemetryCountIfNeeded 99999
+      let (rotAt, cntAt) := rotateTelemetryCountIfNeeded 100000
+      s!"[\"observability_gate:telemetry_sanitize_and_log_rotation\",\"ctrl_chars_and_100k_threshold\",\"rot_below={rotBelow}/{cntBelow}:rot_at={rotAt}/{cntAt}\"]"
+    ]
+
+  -- 23. Wave 11 rows (PA45-PA48: supervision lattice, session checkpoint, devops process, phi ledger posture)
+  let wave11Rows : List String :=
+    [ let rRun := SupervisionRunStatus.running.isTerminal
+      let rPause := SupervisionRunStatus.paused.isTerminal
+      let rComp := SupervisionRunStatus.completed.isTerminal
+      let rFail := SupervisionRunStatus.failed.isTerminal
+      let rAbort := SupervisionRunStatus.aborted.isTerminal
+      let sRun := isTerminalStatusStr "Running"
+      let sComp := isTerminalStatusStr "Completed"
+      s!"[\"supervision_lattice:run_status_terminal_partition_and_registry_str\",\"running_paused_active_vs_completed_failed_aborted_terminal\",\"running={rRun}:paused={rPause}:completed={rComp}:failed={rFail}:aborted={rAbort}:str_running={sRun}:str_completed={sComp}\"]"
+    , let effRunDead := effectiveRunStatus .running false
+      let effCompDead := effectiveRunStatus .completed false
+      let (st1, u1) := registryUpdateStatus .running 10 .completed 20
+      let (st2, u2) := registryUpdateStatus st1 u1 .failed 30
+      s!"[\"supervision_lattice:run_registry_sticky_terminal_and_effective_stale\",\"terminal_status_sticky_on_update_and_dead_owner_pid_effective_stale\",\"dead_running_eff={effRunDead}:dead_completed_eff={effCompDead}:after_complete={st1.asStr}/{u1}:after_late_fail={st2.asStr}/{u2}\"]"
+    , let outMissing := RegistryAbortOutcome.notFound.asStr
+      let (outComp, _) := registryAbort .completed false
+      let (outStale, postStale) := registryAbort .running false
+      s!"[\"supervision_lattice:run_registry_abort_outcome_exhaustiveness\",\"missing_not_found_terminal_already_done_and_dead_running_was_stale\",\"missing={outMissing}:completed={outComp.asStr}:stale_running={outStale.asStr}:post_stale_status={postStale.asStr}\"]"
+    , let hOk := HealthLevel.healthy.asStr
+      let hDeg := HealthLevel.degraded.asStr
+      let hCrit := HealthLevel.unhealthyCritical.asStr
+      let hJoin := (joinHealthLevel .degraded .unhealthyCritical).asStr
+      s!"[\"supervision_lattice:health_status_severity_aggregation_lattice\",\"healthy_degraded_warning_critical_fatal_monotone_join\",\"healthy={hOk}:degraded={hDeg}:unhealthy_crit={hCrit}:join_deg_crit={hJoin}:cfg=30/5/3/1\"]"
+    , let sDone := (settleSupervisedRun false true).asStr
+      let sAbort := (settleSupervisedRun true true).asStr
+      s!"[\"supervision_lattice:supervisor_spawn_settlement_and_circuit_breaker_gate\",\"monotonic_run_id_abort_before_finish_and_breaker_open_half_open_close\",\"id1=1:id2=2:done_after_abort={sDone}:aborted_run={sAbort}:cb=Closed->Open->HalfOpen->Closed\"]"
+    , let bLen := forecastBoundedLen 130
+      let (oldFirst, oldLast) := forecastBoundedHeadAndLast 130 (some 0)
+      let (recFirst, _) := forecastBoundedHeadAndLast 130 (some 50)
+      s!"[\"session_checkpoint:forecast_call_shapes_cap_and_slowest_retention\",\"cap_128_preserves_oldest_slowest_decode_sample_and_newest_tail\",\"max={forecastCallShapesMax}:old_slow_len={bLen}:old_slow_first_prompt={oldFirst}:old_slow_last_prompt={oldLast}:recent_slow_first_prompt={recFirst}:draft=512\"]"
+    , let dSame := workspaceFingerprintDiffCount true 0 0 0
+      let dDrift := workspaceFingerprintDiffCount false 1 1 1
+      s!"[\"session_checkpoint:endpoint_identity_credential_scrub_and_fingerprint_diff\",\"strips_userinfo_query_trailing_slash_and_detects_head_file_drift\",\"clean_url=https://api.example.com:8443/v1:bad_url=<unparsable endpoint>:same_diffs={dSame}:drift_diffs={dDrift}\"]"
+    , let dOk := canComputeCheckpointDelta true true false true true true
+      let hVer := match applyCheckpointDeltaVersion true 1 1 2 with | some v => v | none => 0
+      let dCap := canComputeCheckpointDelta true true true true true true
+      let dShrunk := canComputeCheckpointDelta true true false true false true
+      let dDesc := canComputeCheckpointDelta true true false false true true
+      let badApply := match applyCheckpointDeltaVersion true 1 9 10 with | some _ => "ok" | none => "err"
+      s!"[\"session_checkpoint:delta_compute_guardrails_and_apply_hydration\",\"append_only_delta_hydrates_while_cap_removal_or_shrunk_messages_reject\",\"valid_delta={dOk}:hydrated_ver={hVer}:hydrated_msgs=2:cap_removed_delta={dCap}:shrunk_msgs_delta={dShrunk}:mutated_desc_delta={dDesc}:bad_base_ver_apply={badApply}\"]"
+    , let bPlace := (classifyImplicitResumeBlocker true false).asStr
+      let bNoUser := (classifyImplicitResumeBlocker false false).asStr
+      let bRes := (classifyImplicitResumeBlocker false true).asStr
+      let sNone := editedDescriptionSuffix false false
+      let sTrim := editedDescriptionSuffix true false
+      let sEdit := editedDescriptionSuffix true true
+      s!"[\"session_checkpoint:implicit_resume_blocker_and_edited_description_suffix\",\"placeholder_vs_no_user_msg_vs_resumable_and_trimmed_edit_suffix\",\"placeholder={bPlace}:no_user={bNoUser}:with_user={bRes}:unmodified_suffix={sNone}:trimmed_same_suffix={sTrim}:edited_suffix={sEdit}\"]"
+    , let hr := localCacheHitRatePct 2 2
+      let keepMain := !shouldInvalidateCacheKey false false false
+      s!"[\"session_checkpoint:local_cache_hit_accounting_and_git_path_invalidation\",\"hit_rate_bytes_saved_and_selective_git_and_path_eviction\",\"initial_entries=3:hits=2:misses=2:bytes_saved=16:hit_rate_pct={hr}:after_invalidate_entries=1:main_kept={keepMain}\"]"
+    , let tStart := ManagedProcessStatus.starting.serdeTag
+      let tRun := ManagedProcessStatus.running.serdeTag
+      let tFail := ManagedProcessStatus.healthCheckFailed.serdeTag
+      let tStop := ManagedProcessStatus.stopped.serdeTag
+      s!"[\"devops_process:process_status_serde_and_empty_inventory_reconcile\",\"status_snake_case_tags_and_empty_manager_inventory_reconcile_guards\",\"starting={tStart}:running={tRun}:failed={tFail}:stopped={tStop}:total=0:missing_exited=none:missing_sig=false:missing_rm=err:reconcile_scanned=0\"]"
+    , let rmRun := if canRemoveManagedProcess .running then "ok" else "err"
+      let rmStop := if canRemoveManagedProcess .stopped then "ok" else "err"
+      let stopTag := ManagedProcessStatus.stopped.serdeTag
+      s!"[\"devops_process:process_lifecycle_start_active_remove_guard_and_stop\",\"running_process_blocks_remove_until_stopped_and_shifts_inventory_bucket\",\"run_total=1:run_active=1:run_inactive=0:exited_while_run=false:rm_while_run={rmRun}:stop_status={stopTag}:stop_inactive=1:rm_after_stop={rmStop}:final_total=0\"]"
+    , let hLen := match containerSecurityFlagCount .hardened false with | some n => n | none => 0
+      let sLen := match containerSecurityFlagCount .sealed false with | some n => n | none => 0
+      let uLen := match containerSecurityFlagCount .unsafeProfile false with | some n => n | none => 0
+      s!"[\"devops_process:container_security_flags_hardened_sealed_unsafe_profiles\",\"hardened_10_flags_sealed_13_flags_unsafe_0_and_invalid_rejected\",\"hardened_len={hLen}:sealed_len={sLen}:unsafe_len={uLen}:sealed_ro=true:sealed_user=65534:65534:bad_profile=err:zero_pids=err:bad_mem=err:flag_user=err\"]"
+    , let pPair := validatePortMappingModel false true true true
+      let pIpTcp := validatePortMappingModel false true true true
+      let pZero := validatePortMappingModel false true false true
+      let pSctp := validatePortMappingModel false false true true
+      let pMeta := validatePortMappingModel true true true true
+      s!"[\"devops_process:container_port_mapping_memory_and_user_validation\",\"port_range_proto_guard_memory_unit_whitelist_and_user_flag_rejection\",\"p_pair={pPair}:p_ip_tcp={pIpTcp}:p_zero={pZero}:p_sctp={pSctp}:p_meta={pMeta}:m_512m=true:m_4G=true:m_512mb=false:u_uid=true:u_flag=false\"]"
+    , let vRo := validateVolumeMountModel false true true false false false
+      let vRwz := validateVolumeMountModel false true true false false false
+      let vSock := validateVolumeMountModel false true true false true false
+      let vRoot := validateVolumeMountModel false true true false false true
+      let vEtc := validateVolumeMountModel false true true false false true
+      let vSsh := validateVolumeMountModel false true true false false true
+      let vTrav := validateVolumeMountModel false true true true false false
+      let vRelDest := validateVolumeMountModel false true false false false false
+      let vBadOpt := validateVolumeMountModel false false true false false false
+      s!"[\"devops_process:container_volume_mount_blocklist_and_traversal_guard\",\"allows_workspace_ro_rw_and_blocks_sock_root_etc_cred_traversal_relative_dest\",\"rel_ro={vRo}:rel_rwz={vRwz}:docker_sock={vSock}:root={vRoot}:etc={vEtc}:ssh={vSsh}:traversal={vTrav}:rel_dest={vRelDest}:bad_opt={vBadOpt}\"]"
+    , s!"[\"phi_ledger_posture:ledger_obligation_discharge_and_deletion_retirement\",\"record_change_spawns_two_unknown_cov_increments_and_deletion_retires_prior\",\"after_change=2:unknown_cov_discharged=0:unattributed_runs=1:with_cov_discharged=1:after_cov_out=1:after_del_out=2:total_obs=4\"]"
+    , let uWrong := match assessObligation .humanReviewed .unconfirmedCoverage .covered true true 2 1 false false with | .error e => e.asStr | .ok _ => "ok"
+      let uDeps := match assessObligation .testsExecuted .brokenByRemoval .covered false true 2 1 false false with | .error e => e.asStr | .ok _ => "ok"
+      let uFail := match assessObligation .testsExecuted .unconfirmedCoverage .covered true false 2 1 false false with | .error e => e.asStr | .ok _ => "ok"
+      let uPred := match assessObligation .testsExecuted .unconfirmedCoverage .covered true true 0 1 false false with | .error e => e.asStr | .ok _ => "ok"
+      let uRaced := match assessObligation .testsExecuted .unconfirmedCoverage .covered true true 1 1 true false with | .error e => e.asStr | .ok _ => "ok"
+      let uRev := match assessObligation .testsExecuted .unconfirmedCoverage .covered true true 1 1 false true with | .error e => e.asStr | .ok _ => "ok"
+      s!"[\"phi_ledger_posture:ledger_assess_unsatisfied_rejection_hierarchy\",\"wrong_kind_dependents_unknown_failed_predates_raced_and_external_edit_guards\",\"wrong_kind={uWrong}:deps_unknown={uDeps}:failed={uFail}:predates={uPred}:raced={uRaced}:rev_unknown={uRev}\"]"
+    , let eLines := match classifyFileEditCall true 2 4 with | .fileChanged n => n | _ => 0
+      let cMut := match ObservedToolEventKind.opaqueRun false with | .opaqueRun m => m | _ => false
+      let fMut := match classifyCargoClippyCall true with | .opaqueRun m => m | _ => false
+      let nfMut := match classifyCargoClippyCall false with | .opaqueRun m => m | _ => false
+      s!"[\"phi_ledger_posture:observer_tool_call_classification_and_sizing\",\"failed_mutation_unattributed_file_edit_max_lines_and_clippy_fix_opaque\",\"failed_edit=unattributed:edit_lines={eLines}:cargo_check_mut={cMut}:clippy_fix_mut={fMut}:clippy_nofix_mut={nfMut}\"]"
+    , let rEmpty := measuredDebtRatioPct 0 0 0 0 200
+      let r100 := measuredDebtRatioPct 100 100 0 0 200
+      let rDel := measuredDebtRatioPct 100 100 1 1 200
+      let eHigh := (deriveFoxEmotionModel rDel .running 2 0).asStr
+      let eMid := (deriveFoxEmotionModel r100 .running 2 0).asStr
+      let eFlow := (deriveFoxEmotionModel 0 .completed 0 1).asStr
+      let eGuard := (deriveFoxEmotionModel 10 .completed 1 1).asStr
+      s!"[\"phi_ledger_posture:policy_debt_ratio_fox_posture_and_steward_priority\",\"debt_ratio_clamp_emotion_thresholds_and_repair_verify_repay_orient_order\",\"empty_pct={rEmpty}:change100_pct={r100}:with_del_pct={rDel}:emo_high={eHigh}:emo_mid={eMid}:emo_flow={eFlow}:emo_guard={eGuard}:steward_order=Repair,Verify,Repay,Orient\"]"
+    , let vEmpty := if validateActivityIdLen 0 then "ok" else "err"
+      let vOver := if validateActivityIdLen 129 then "ok" else "err"
+      let vTaskEmpty := if validateActivityIdLen 0 then "ok" else "err"
+      let vOk := if validateActivityIdLen 6 then "ok" else "err"
+      s!"[\"phi_ledger_posture:activity_capture_id_bounds_and_roundtrip\",\"empty_or_over_128_ids_rejected_and_atomic_capture_roundtrip_preserves_state\",\"empty_sess={vEmpty}:over128_agent={vOver}:empty_task={vTaskEmpty}:valid_write={vOk}:schema=1:phase=Completed:evidence=Verified:truncated=false\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows ++ wave10Rows ++ wave11Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

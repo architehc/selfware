@@ -408,7 +408,7 @@ impl Tool for ContainerRun {
 
         // Settle the entry. A failed start still leaves a created container
         // behind, so the cidfile — not the exit code — decides.
-        let full_id = std::fs::read_to_string(&cid_file)
+        let full_id = crate::tools::file::read_to_string_capped(&cid_file, 65_536)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let removed_itself = auto_remove && !detach;

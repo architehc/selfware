@@ -897,8 +897,8 @@ fn copy_cargo_config(host_cargo_home: &Path, arm_cargo_home: &Path) -> Result<St
     else {
         return Ok("no operator cargo config to copy".into());
     };
-    let text =
-        std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    let text = crate::tools::file::read_to_string_capped(&src, 1024 * 1024)
+        .with_context(|| format!("reading {}", src.display()))?;
     let mut table: toml::Table = match text.parse() {
         Ok(t) => t,
         Err(_) => {
@@ -939,7 +939,11 @@ fn copy_cargo_config(host_cargo_home: &Path, arm_cargo_home: &Path) -> Result<St
         }
     }
     let rendered = toml::to_string(&table).context("re-serializing the cargo config")?;
-    std::fs::write(arm_cargo_home.join("config.toml"), rendered)?;
+    crate::session::checkpoint::write_bytes_atomically(
+        &arm_cargo_home.join("config.toml"),
+        rendered.as_bytes(),
+        0o600,
+    )?;
     Ok(if dropped.is_empty() {
         "operator config.toml copied (no credential or host-process keys found)".into()
     } else {

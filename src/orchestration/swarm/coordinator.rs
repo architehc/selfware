@@ -188,6 +188,7 @@ impl Swarm {
         }
 
         if !timed_out.is_empty() {
+            timed_out.sort();
             self.prune_resolved_decisions();
         }
         timed_out
@@ -217,20 +218,27 @@ impl Swarm {
 
     /// List agents
     pub fn list_agents(&self) -> Vec<&Agent> {
-        self.agents.values().collect()
+        let mut agents: Vec<&Agent> = self.agents.values().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        agents
     }
 
     /// List agents by role
     pub fn agents_by_role(&self, role: AgentRole) -> Vec<&Agent> {
-        self.agents.values().filter(|a| a.role == role).collect()
+        let mut agents: Vec<&Agent> = self.agents.values().filter(|a| a.role == role).collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        agents
     }
 
     /// List idle agents
     pub fn idle_agents(&self) -> Vec<&Agent> {
-        self.agents
+        let mut agents: Vec<&Agent> = self
+            .agents
             .values()
             .filter(|a| a.status == AgentStatus::Idle)
-            .collect()
+            .collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        agents
     }
 
     /// Get shared memory
@@ -305,7 +313,13 @@ impl Swarm {
 
     /// List all decisions
     pub fn list_decisions(&self) -> Vec<&Decision> {
-        self.decisions.values().collect()
+        let mut decisions: Vec<&Decision> = self.decisions.values().collect();
+        decisions.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        decisions
     }
 
     /// Get a specific decision
@@ -364,14 +378,16 @@ impl Swarm {
                     best_vote.map(|v| v.choice.clone())
                 }
                 ConflictStrategy::MajorityWins => {
-                    // Simple majority
+                    // Simple majority with deterministic lexicographical tie-break
                     let mut counts: std::collections::HashMap<&str, usize> = HashMap::new();
                     for vote in &decision.votes {
                         *counts.entry(&vote.choice).or_insert(0) += 1;
                     }
                     counts
                         .into_iter()
-                        .max_by_key(|(_, count)| *count)
+                        .max_by(|(choice_a, count_a), (choice_b, count_b)| {
+                            count_a.cmp(count_b).then_with(|| choice_b.cmp(choice_a))
+                        })
                         .map(|(choice, _)| choice.to_string())
                 }
                 ConflictStrategy::HumanIntervention => {
@@ -379,10 +395,10 @@ impl Swarm {
                     None
                 }
                 ConflictStrategy::AcceptAll => {
-                    // Return all unique choices joined
-                    let choices: std::collections::HashSet<_> =
-                        decision.votes.iter().map(|v| &v.choice).collect();
-                    Some(choices.into_iter().cloned().collect::<Vec<_>>().join(", "))
+                    // Return all unique choices joined in deterministic order
+                    let choices: std::collections::BTreeSet<_> =
+                        decision.votes.iter().map(|v| v.choice.as_str()).collect();
+                    Some(choices.into_iter().collect::<Vec<_>>().join(", "))
                 }
             }
         };
@@ -470,7 +486,7 @@ impl Swarm {
         let mut assigned = Vec::new();
 
         for role in &task.required_roles.clone() {
-            // Find best idle agent for this role
+            // Find best idle agent for this role (tie-breaking deterministically by agent id)
             let best = self
                 .agents
                 .values()
@@ -479,6 +495,7 @@ impl Swarm {
                     a.trust_score
                         .partial_cmp(&b.trust_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.id.cmp(&a.id))
                 });
 
             if let Some(agent) = best {

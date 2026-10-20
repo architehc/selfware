@@ -14,6 +14,7 @@ pub mod transport;
 
 pub use client::{McpClient, McpToolCallError};
 pub use discovery::discover_tools;
+pub use server::{run_mcp_server, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpServer};
 pub use tool_bridge::McpTool;
 pub use transport::{Framing, McpTransportError, StdioTransport, Transport};
 

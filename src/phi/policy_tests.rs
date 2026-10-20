@@ -4567,6 +4567,2060 @@ steps:
                 "Lean PA40 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(hk_op) = domain.strip_prefix("hook_dispatch:") {
+            use crate::hooks::{
+                builtin, pre_tool_skip_message, HookAction, HookConfig, HookContext, HookEvent,
+                HookRegistry, SkipKind,
+            };
+            use crate::tools::workspace_root::WorkspaceRoot;
+
+            let action_label = |a: &HookAction| -> &'static str {
+                match a {
+                    HookAction::Continue => "continue",
+                    HookAction::Skip {
+                        kind: SkipKind::Policy,
+                        ..
+                    } => "skip:hook_policy",
+                    HookAction::Skip {
+                        kind: SkipKind::HookFailure,
+                        ..
+                    } => "skip:hook_failure",
+                    HookAction::Error { .. } => "error",
+                }
+            };
+
+            let actual = match (hk_op, spec.as_str()) {
+                (
+                    "registry_matching_and_stop_wildcard",
+                    "post_write_vs_read_and_stop_wildcard_vs_filtered",
+                ) => {
+                    let reg = HookRegistry::from_config(&[
+                        HookConfig {
+                            event: HookEvent::PostToolUse,
+                            command: "true".to_string(),
+                            match_tools: vec!["file_write".to_string(), "file_edit".to_string()],
+                            timeout_secs: 5,
+                        },
+                        HookConfig {
+                            event: HookEvent::Stop,
+                            command: "true".to_string(),
+                            match_tools: vec![],
+                            timeout_secs: 5,
+                        },
+                    ]);
+                    let filtered_stop = HookRegistry::from_config(&[HookConfig {
+                        event: HookEvent::Stop,
+                        command: "true".to_string(),
+                        match_tools: vec!["cargo_test".to_string()],
+                        timeout_secs: 5,
+                    }]);
+                    let has_pre = reg.has_hooks_for(&HookEvent::PreToolUse);
+                    let has_post = reg.has_hooks_for(&HookEvent::PostToolUse);
+                    let match_write = reg.matches_any(&HookContext::post_tool(
+                        "file_write",
+                        r#"{"path":"src/a.rs"}"#,
+                        true,
+                        "ok",
+                    ));
+                    let match_read = reg.matches_any(&HookContext::post_tool(
+                        "file_read",
+                        r#"{"path":"src/a.rs"}"#,
+                        true,
+                        "ok",
+                    ));
+                    let stop_wild = reg.matches_any(&HookContext::stop());
+                    let stop_filtered = filtered_stop.matches_any(&HookContext::stop());
+                    format!(
+                        "has_pre={has_pre}:has_post={has_post}:match_write={match_write}:match_read={match_read}:stop_wild={stop_wild}:stop_filtered={stop_filtered}"
+                    )
+                }
+                (
+                    "fire_short_circuit_and_fail_closed",
+                    "pre_policy_vs_pre_err_vs_post_err_vs_stop_err",
+                ) => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let root = WorkspaceRoot::fixed(dir.path());
+                    rt.block_on(async {
+                        let reg_pre_pol = HookRegistry::from_config(&[
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "true".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "false".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "echo `{path}`".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                        ]);
+                        let pre_ctx =
+                            HookContext::pre_tool("file_write", r#"{"path":"src/a.rs"}"#);
+                        let pre_pol = action_label(&reg_pre_pol.fire_in_root(&pre_ctx, &root).await);
+
+                        let reg_pre_err = HookRegistry::from_config(&[
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "true".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "echo `{path}`".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::PreToolUse,
+                                command: "false".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                        ]);
+                        let pre_err = action_label(&reg_pre_err.fire_in_root(&pre_ctx, &root).await);
+
+                        let reg_post_err = HookRegistry::from_config(&[
+                            HookConfig {
+                                event: HookEvent::PostToolUse,
+                                command: "false".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::PostToolUse,
+                                command: "true".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                        ]);
+                        let post_ctx = HookContext::post_tool(
+                            "file_write",
+                            r#"{"path":"src/a.rs"}"#,
+                            true,
+                            "ok",
+                        );
+                        let post_err =
+                            action_label(&reg_post_err.fire_in_root(&post_ctx, &root).await);
+
+                        let reg_stop_err = HookRegistry::from_config(&[
+                            HookConfig {
+                                event: HookEvent::Stop,
+                                command: "false".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                            HookConfig {
+                                event: HookEvent::Stop,
+                                command: "true".to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            },
+                        ]);
+                        let stop_err = action_label(
+                            &reg_stop_err
+                                .fire_in_root(&HookContext::stop(), &root)
+                                .await,
+                        );
+                        format!(
+                            "pre_pol={pre_pol}:pre_err={pre_err}:post_err={post_err}:stop_err={stop_err}"
+                        )
+                    })
+                }
+                ("pre_tool_skip_message_tags", "policy_vs_hook_failure_tags") => {
+                    let (pol_msg, _pol_log, pol_tag) =
+                        pre_tool_skip_message("file_write", "blocked by policy", SkipKind::Policy);
+                    let (fail_msg, _fail_log, fail_tag) =
+                        pre_tool_skip_message("file_write", "timed out", SkipKind::HookFailure);
+                    assert!(pol_msg.starts_with("POLICY BLOCK:"));
+                    assert!(fail_msg.contains("was not run"));
+                    format!("policy_tag={pol_tag}:failure_tag={fail_tag}")
+                }
+                (
+                    "shell_placeholder_quoting_gate",
+                    "single_double_unquoted_vs_backtick_heredoc",
+                ) => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let root = WorkspaceRoot::fixed(dir.path());
+                    let pre_ctx =
+                        HookContext::pre_tool("file_write", r#"{"path":"src/o'hare.rs"}"#);
+                    let post_ctx = HookContext::post_tool(
+                        "file_write",
+                        r#"{"path":"src/o'hare.rs"}"#,
+                        true,
+                        "ok",
+                    );
+                    rt.block_on(async {
+                        let run_one = |event: HookEvent, cmd: &str, ctx: &HookContext| {
+                            let reg = HookRegistry::from_config(&[HookConfig {
+                                event,
+                                command: cmd.to_string(),
+                                match_tools: vec![],
+                                timeout_secs: 5,
+                            }]);
+                            let root = root.clone();
+                            let ctx = ctx.clone();
+                            async move { action_label(&reg.fire_in_root(&ctx, &root).await) }
+                        };
+                        let single = run_one(HookEvent::PreToolUse, "true '{path}'", &pre_ctx).await;
+                        let double =
+                            run_one(HookEvent::PreToolUse, "true \"{path}\"", &pre_ctx).await;
+                        let backtick_pre =
+                            run_one(HookEvent::PreToolUse, "echo `{path}`", &pre_ctx).await;
+                        let heredoc_pre =
+                            run_one(HookEvent::PreToolUse, "cat <<EOF\n{path}", &pre_ctx).await;
+                        let backtick_post =
+                            run_one(HookEvent::PostToolUse, "echo `{path}`", &post_ctx).await;
+                        format!(
+                            "single={single}:double={double}:backtick_pre={backtick_pre}:heredoc_pre={heredoc_pre}:backtick_post={backtick_post}"
+                        )
+                    })
+                }
+                ("context_description_and_builtins", "explicit_vs_paths_vs_tool_vs_stop") => {
+                    let fmt_hook = builtin::format_on_save_rust();
+                    let stop_hook = builtin::test_on_stop_rust();
+                    let commit_hook = builtin::auto_commit();
+                    assert_eq!(fmt_hook.event, HookEvent::PostToolUse);
+                    assert_eq!(stop_hook.event, HookEvent::Stop);
+                    assert_eq!(commit_hook.event, HookEvent::PostToolUse);
+
+                    let c1 = HookContext::pre_tool(
+                        "file_write",
+                        r#"{"path":"src/a.rs","description":"Custom audit"}"#,
+                    );
+                    let c2 = HookContext::pre_tool("file_write", r#"{"path":"src/a.rs"}"#);
+                    let c3 = HookContext::pre_tool("cargo_test", r#"{}"#);
+                    let c4 = HookContext::stop();
+                    let d1 = c1.description().unwrap_or_else(|| "none".to_string());
+                    let d2 = c2.description().unwrap_or_else(|| "none".to_string());
+                    let d3 = c3.description().unwrap_or_else(|| "none".to_string());
+                    let d4 = c4.description().unwrap_or_else(|| "none".to_string());
+                    format!("d1={d1}|d2={d2}|d3={d3}|d4={d4}")
+                }
+                other => panic!("unexpected hook_dispatch case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA41 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(mcp_op) = domain.strip_prefix("mcp_protocol:") {
+            use crate::config::SafetyConfig;
+            use crate::mcp::client::McpClient;
+            use crate::mcp::discovery::discover_tools;
+            use crate::mcp::server::{JsonRpcRequest, McpServer};
+            use crate::mcp::transport::{detect_framing, Framing, Transport};
+            use crate::tools::Tool;
+            use anyhow::Result;
+            use async_trait::async_trait;
+            use serde_json::Value;
+            use std::sync::Arc;
+            use tokio::io::BufReader;
+
+            struct CannedTransport {
+                response: Value,
+            }
+
+            #[async_trait]
+            impl Transport for CannedTransport {
+                async fn request(&self, _method: &str, _params: Option<Value>) -> Result<Value> {
+                    Ok(self.response.clone())
+                }
+                async fn notify(&self, _method: &str, _params: Option<Value>) -> Result<()> {
+                    Ok(())
+                }
+                async fn shutdown(&self) -> Result<()> {
+                    Ok(())
+                }
+            }
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let actual = rt.block_on(async {
+                match (mcp_op, spec.as_str()) {
+                    (
+                        "discover_tools_prefix_and_defaults",
+                        "server=fs,explicit_vs_missing_fields",
+                    ) => {
+                        let client = Arc::new(McpClient::new_for_test(
+                            Arc::new(CannedTransport {
+                                response: serde_json::json!({
+                                    "tools": [
+                                        {
+                                            "name": "read_file",
+                                            "description": "Read a file",
+                                            "inputSchema": {"type": "object"}
+                                        },
+                                        {
+                                            "inputSchema": {"type": "object"}
+                                        }
+                                    ]
+                                }),
+                            }),
+                            "fs",
+                        ));
+                        let tools = discover_tools(&client).await.unwrap();
+                        assert_eq!(tools.len(), 2);
+                        format!(
+                            "named={}:unnamed={}:desc_default={}",
+                            tools[0].name(),
+                            tools[1].name(),
+                            tools[1].description()
+                        )
+                    }
+                    (
+                        "call_tool_result_normalization",
+                        "text_ok_vs_text_err_vs_raw_err_vs_raw_ok",
+                    ) => {
+                        let classify_call = |payload: Value| {
+                            let client = McpClient::new_for_test(
+                                Arc::new(CannedTransport { response: payload }),
+                                "mock",
+                            );
+                            async move {
+                                let out =
+                                    client.call_tool("probe", serde_json::json!({})).await.unwrap();
+                                if out.get("content").and_then(|c| c.as_str()).is_some() {
+                                    let is_err = out
+                                        .get("isError")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let ok = out
+                                        .get("success")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    format!("text:err={is_err}:ok={ok}")
+                                } else if out.get("success").and_then(|v| v.as_bool())
+                                    == Some(false)
+                                {
+                                    "raw:ok=false".to_string()
+                                } else {
+                                    "raw:unchanged".to_string()
+                                }
+                            }
+                        };
+                        let t_ok = classify_call(serde_json::json!({
+                            "content": [{"type": "text", "text": "hello"}],
+                            "isError": false
+                        }))
+                        .await;
+                        let t_err = classify_call(serde_json::json!({
+                            "content": [{"type": "text", "text": "boom"}],
+                            "isError": true
+                        }))
+                        .await;
+                        let r_err = classify_call(serde_json::json!({
+                            "content": [{"type": "image", "data": "abc"}],
+                            "isError": true
+                        }))
+                        .await;
+                        let r_ok = classify_call(serde_json::json!({
+                            "custom": 42
+                        }))
+                        .await;
+                        format!("t_ok={t_ok}:t_err={t_err}:r_err={r_err}:r_ok={r_ok}")
+                    }
+                    ("stdio_detect_framing", "eof_vs_content_length_vs_json_line") => {
+                        let fmt_frame = |f: Option<Framing>| match f {
+                            None => "eof",
+                            Some(Framing::ContentLength) => "content_length",
+                            Some(Framing::NewlineDelimited) => "newline_delimited",
+                        };
+                        let mut r_eof = BufReader::new(&b""[..]);
+                        let mut r_cl =
+                            BufReader::new(&b"Content-Length: 2\r\n\r\n{}"[..]);
+                        let mut r_nd = BufReader::new(&b"{\"jsonrpc\":\"2.0\"}\n"[..]);
+                        let eof = fmt_frame(detect_framing(&mut r_eof).await.unwrap());
+                        let cl = fmt_frame(detect_framing(&mut r_cl).await.unwrap());
+                        let nd = fmt_frame(detect_framing(&mut r_nd).await.unwrap());
+                        format!("eof={eof}:cl={cl}:nd={nd}")
+                    }
+                    (
+                        "server_init_and_dispatch_gate",
+                        "notif_vs_preinit_vs_postinit_vs_unknown",
+                    ) => {
+                        let server =
+                            McpServer::with_explicit_safety_config(SafetyConfig::default());
+                        let classify_resp = |resp: Option<crate::mcp::server::JsonRpcResponse>| {
+                            match resp {
+                                None => "no_response".to_string(),
+                                Some(r) => match r.error {
+                                    None => "ok".to_string(),
+                                    Some(e) => format!("err:{}", e.code),
+                                },
+                            }
+                        };
+                        let notif = classify_resp(
+                            server
+                                .handle_request(&JsonRpcRequest {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: None,
+                                    method: "tools/list".to_string(),
+                                    params: None,
+                                })
+                                .await,
+                        );
+                        let pre_tools = classify_resp(
+                            server
+                                .handle_request(&JsonRpcRequest {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: Some(Value::from(1)),
+                                    method: "tools/list".to_string(),
+                                    params: None,
+                                })
+                                .await,
+                        );
+                        let pre_ping = classify_resp(
+                            server
+                                .handle_request(&JsonRpcRequest {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: Some(Value::from(2)),
+                                    method: "ping".to_string(),
+                                    params: None,
+                                })
+                                .await,
+                        );
+                        let _ = server
+                            .handle_request(&JsonRpcRequest {
+                                jsonrpc: "2.0".to_string(),
+                                id: Some(Value::from(3)),
+                                method: "initialize".to_string(),
+                                params: Some(serde_json::json!({})),
+                            })
+                            .await;
+                        let post_tools = classify_resp(
+                            server
+                                .handle_request(&JsonRpcRequest {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: Some(Value::from(4)),
+                                    method: "tools/list".to_string(),
+                                    params: None,
+                                })
+                                .await,
+                        );
+                        let post_unk = classify_resp(
+                            server
+                                .handle_request(&JsonRpcRequest {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: Some(Value::from(5)),
+                                    method: "custom/unknown".to_string(),
+                                    params: None,
+                                })
+                                .await,
+                        );
+                        format!(
+                            "notif={notif}:pre_tools={pre_tools}:pre_ping={pre_ping}:post_tools={post_tools}:post_unk={post_unk}"
+                        )
+                    }
+                    (
+                        "server_write_gate_enforcement",
+                        "readonly_vs_write_vs_dynamic_post_and_screenshot_path",
+                    ) => {
+                        let server =
+                            McpServer::with_explicit_safety_config(SafetyConfig::default());
+                        let _ = server
+                            .handle_request(&JsonRpcRequest {
+                                jsonrpc: "2.0".to_string(),
+                                id: Some(Value::from(0)),
+                                method: "initialize".to_string(),
+                                params: Some(serde_json::json!({})),
+                            })
+                            .await;
+                        let call_allowed = |name: &str, args: Value| {
+                            let server = &server;
+                            let name = name.to_string();
+                            async move {
+                                let resp = server
+                                    .handle_request(&JsonRpcRequest {
+                                        jsonrpc: "2.0".to_string(),
+                                        id: Some(Value::from(1)),
+                                        method: "tools/call".to_string(),
+                                        params: Some(serde_json::json!({
+                                            "name": name,
+                                            "arguments": args,
+                                        })),
+                                    })
+                                    .await
+                                    .unwrap();
+                                let res = resp.result.unwrap_or_default();
+                                let text = res["content"][0]["text"].as_str().unwrap_or("");
+                                !text.contains("can modify state")
+                            }
+                        };
+                        let ro = call_allowed("knowledge_stats", serde_json::json!({})).await;
+                        let write = call_allowed(
+                            "file_write",
+                            serde_json::json!({"path": "target/tmp/mcp_deny.txt", "content": "x"}),
+                        )
+                        .await;
+                        let dyn_post = call_allowed(
+                            "http_request",
+                            serde_json::json!({"url": "https://example.com", "method": "POST"}),
+                        )
+                        .await;
+                        let dyn_shot = call_allowed(
+                            "page_control",
+                            serde_json::json!({"action": "screenshot", "path": "target/tmp/shot.png", "url": "http://127.0.0.1:9/"}),
+                        )
+                        .await;
+                        format!("ro={ro}:write={write}:dyn_post={dyn_post}:dyn_shot={dyn_shot}")
+                    }
+                    other => panic!("unexpected mcp_protocol case: {other:?}"),
+                }
+            });
+            assert_eq!(
+                &actual, expected,
+                "Lean PA42 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(ep_op) = domain.strip_prefix("evolution_policy:") {
+            use crate::evolution::ast_tools::create_shadow_worktree_named_at;
+            use crate::evolution::policy::{
+                LegalAction, ParetoAdaptivePolicy, PolicyDecision, PrefixObservation, PrefixView,
+                SearchPolicy,
+            };
+            use crate::evolution::replay::{
+                PolicyValidationSummary, PromotionReadiness, RankingStability,
+                ReplayValidationOutcome,
+            };
+            use crate::evolution::tree_log::{
+                guarded_ancestry_depth, ActionType, AttemptNode, AttemptStatus, AttemptTree,
+                FailureClass, TreeLogError,
+            };
+
+            let make_node = |id: &str, parent_id: Option<&str>, gen: usize| AttemptNode {
+                id: id.to_string(),
+                parent_id: parent_id.map(|s| s.to_string()),
+                generation: gen,
+                branch_id: "b1".to_string(),
+                hypothesis_id: format!("h_{id}"),
+                description: "test".to_string(),
+                diff_sha256: "00".to_string(),
+                patch: None,
+                sab_report_path: None,
+                metrics: None,
+                composite_score: Some(0.5),
+                tokens_used: Some(100),
+                wall_time_ms: 10,
+                status: AttemptStatus::Evaluated,
+                failure_class: None,
+                failure_reason: None,
+                output_tail: None,
+                binary_sha256: None,
+                base_commit: None,
+                committed_commit: None,
+                action_type: Some(if parent_id.is_none() {
+                    ActionType::OpenRoot
+                } else {
+                    ActionType::RefineFrontier
+                }),
+                git_tree_id: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            };
+
+            let actual = match (ep_op, spec.as_str()) {
+                ("failure_class_repairability", "4_repairable_vs_4_unrecoverable") => {
+                    let syn = FailureClass::RepairableSyntax.is_repairable();
+                    let typ = FailureClass::RepairableTypeError.is_repairable();
+                    let tst = FailureClass::RepairableTestFailure.is_repairable();
+                    let clp = FailureClass::RepairableClippy.is_repairable();
+                    let res = FailureClass::UnrecoverableResource.is_repairable();
+                    let saf = FailureClass::SafetyViolation.is_repairable();
+                    let env = FailureClass::EnvironmentError.is_repairable();
+                    let unc = FailureClass::Unclassified.is_repairable();
+                    format!(
+                        "syn={syn}:typ={typ}:tst={tst}:clp={clp}:res={res}:saf={saf}:env={env}:unc={unc}"
+                    )
+                }
+                ("attempt_tree_ancestry_validation", "valid_chain_vs_orphan_vs_cycle") => {
+                    let mut valid_tree = AttemptTree::new();
+                    valid_tree.add_node(make_node("n0", None, 0)).unwrap();
+                    valid_tree.add_node(make_node("n1", Some("n0"), 1)).unwrap();
+                    valid_tree.add_node(make_node("n2", Some("n1"), 2)).unwrap();
+                    let chain_res = match valid_tree.validate_ancestry() {
+                        Ok(()) => {
+                            let d = guarded_ancestry_depth("n2", |id| {
+                                valid_tree.get(id).and_then(|n| n.parent_id.clone())
+                            });
+                            format!("valid:depth={d}")
+                        }
+                        Err(_) => "err".to_string(),
+                    };
+
+                    let mut orphan_tree = AttemptTree::new();
+                    orphan_tree
+                        .add_node(make_node("n1", Some("missing_root"), 1))
+                        .unwrap();
+                    let orphan_res = match orphan_tree.validate_ancestry() {
+                        Err(TreeLogError::OrphanedNode { .. }) => "err:orphaned",
+                        _ => "other",
+                    };
+
+                    let mut cycle_tree = AttemptTree::new();
+                    cycle_tree.add_node(make_node("a", Some("b"), 1)).unwrap();
+                    cycle_tree.add_node(make_node("b", Some("a"), 2)).unwrap();
+                    let cycle_res = match cycle_tree.validate_ancestry() {
+                        Err(TreeLogError::CyclicAncestry { .. }) => "err:cyclic",
+                        _ => "other",
+                    };
+                    format!("chain={chain_res}:orphan={orphan_res}:cycle={cycle_res}")
+                }
+                ("pareto_beta_patience_and_allowance", "max_patience=4,beta_high_mid_low") => {
+                    let measure_patience_and_allowance = |beta: f64| -> (usize, usize) {
+                        let mut pol = ParetoAdaptivePolicy::new();
+                        pol.max_patience = 4;
+                        let prefix = PrefixView::new(
+                            vec![PrefixObservation {
+                                id: "n0".to_string(),
+                                branch_id: "b0".to_string(),
+                                attempt_depth: 0,
+                                parent_id: None,
+                                score: None,
+                                status: AttemptStatus::CompileFailed,
+                                failure_class: Some(FailureClass::RepairableSyntax),
+                                failure_reason: None,
+                                delta_vs_baseline: None,
+                                delta_vs_parent: None,
+                                tokens_used: Some(100),
+                                wall_time_ms: 10,
+                            }],
+                            0.0,
+                            1,
+                        );
+                        let legal = vec![LegalAction::OpenRoot {
+                            node_id: "r1".to_string(),
+                            branch_id: "b_new".to_string(),
+                        }];
+                        let mut steps = 0usize;
+                        loop {
+                            steps += 1;
+                            if matches!(
+                                pol.decide(&prefix, &legal, beta),
+                                PolicyDecision::Stop { .. }
+                            ) {
+                                break;
+                            }
+                        }
+
+                        let mut max_recovered = 0usize;
+                        for consec in 1..=4 {
+                            let mut obs = Vec::new();
+                            obs.push(PrefixObservation {
+                                id: "root_ok".to_string(),
+                                branch_id: "b_rec".to_string(),
+                                attempt_depth: 0,
+                                parent_id: None,
+                                score: Some(0.6),
+                                status: AttemptStatus::Evaluated,
+                                failure_class: None,
+                                failure_reason: None,
+                                delta_vs_baseline: Some(0.1),
+                                delta_vs_parent: None,
+                                tokens_used: Some(50),
+                                wall_time_ms: 10,
+                            });
+                            for i in 1..=consec {
+                                obs.push(PrefixObservation {
+                                    id: format!("f{i}"),
+                                    branch_id: "b_rec".to_string(),
+                                    attempt_depth: i,
+                                    parent_id: Some(if i == 1 {
+                                        "root_ok".to_string()
+                                    } else {
+                                        format!("f{}", i - 1)
+                                    }),
+                                    score: None,
+                                    status: AttemptStatus::CompileFailed,
+                                    failure_class: Some(FailureClass::RepairableSyntax),
+                                    failure_reason: None,
+                                    delta_vs_baseline: None,
+                                    delta_vs_parent: None,
+                                    tokens_used: Some(50),
+                                    wall_time_ms: 10,
+                                });
+                            }
+                            let p_view = PrefixView::new(obs, 0.5, 1);
+                            let actions = vec![LegalAction::RefineFrontier {
+                                node_id: "next_rec".to_string(),
+                                parent_id: format!("f{consec}"),
+                                branch_id: "b_rec".to_string(),
+                            }];
+                            let mut fresh_pol = ParetoAdaptivePolicy::new();
+                            if matches!(
+                                fresh_pol.decide(&p_view, &actions, beta),
+                                PolicyDecision::SelectBatch(_)
+                            ) {
+                                max_recovered = consec;
+                            }
+                        }
+                        (steps, max_recovered)
+                    };
+                    let (p_hi, a_hi) = measure_patience_and_allowance(0.8);
+                    let (p_mid, a_mid) = measure_patience_and_allowance(0.5);
+                    let (p_lo, a_lo) = measure_patience_and_allowance(0.2);
+                    format!("hi={p_hi}/{a_hi}:mid={p_mid}/{a_mid}:lo={p_lo}/{a_lo}")
+                }
+                (
+                    "replay_promotion_readiness_and_stability",
+                    "retain_vs_insufficient_vs_unstable_vs_ready",
+                ) => {
+                    let readiness_label = |r: PromotionReadiness| match r {
+                        PromotionReadiness::Ready { .. } => "ready",
+                        PromotionReadiness::BlockedByInstability { .. } => "blocked_by_instability",
+                        PromotionReadiness::InsufficientEvidence { .. } => "insufficient_evidence",
+                        PromotionReadiness::RetainIncumbent { .. } => "retain_incumbent",
+                    };
+                    let mk_outcome =
+                        |cand_obj: f64, beats: bool, stability: Option<RankingStability>| {
+                            ReplayValidationOutcome {
+                                summaries: vec![
+                                    PolicyValidationSummary {
+                                        policy_name: "ParetoAdaptive".to_string(),
+                                        discovery_probes: 4,
+                                        discovery_tokens: 400,
+                                        discovery_objective: cand_obj,
+                                        validation_terminal_score: cand_obj,
+                                        validation_objective: cand_obj,
+                                        beats_incumbent: beats,
+                                    },
+                                    PolicyValidationSummary {
+                                        policy_name: "IncumbentBaseline".to_string(),
+                                        discovery_probes: 4,
+                                        discovery_tokens: 400,
+                                        discovery_objective: 0.50,
+                                        validation_terminal_score: 0.50,
+                                        validation_objective: 0.50,
+                                        beats_incumbent: false,
+                                    },
+                                ],
+                                discovery_stability: None,
+                                validation_stability: stability,
+                                beta: 0.2,
+                            }
+                            .promotion_readiness()
+                        };
+                    let retain = readiness_label(mk_outcome(
+                        0.50,
+                        false,
+                        Some(RankingStability {
+                            kendall_w: 0.90,
+                            is_stable: true,
+                            tree_count: 5,
+                            policy_count: 2,
+                            per_tree_rankings: vec![],
+                        }),
+                    ));
+                    let insuff = readiness_label(mk_outcome(0.70, true, None));
+                    let unstable = readiness_label(mk_outcome(
+                        0.70,
+                        true,
+                        Some(RankingStability {
+                            kendall_w: 0.50,
+                            is_stable: false,
+                            tree_count: 5,
+                            policy_count: 2,
+                            per_tree_rankings: vec![],
+                        }),
+                    ));
+                    let ready = readiness_label(mk_outcome(
+                        0.70,
+                        true,
+                        Some(RankingStability {
+                            kendall_w: 0.85,
+                            is_stable: true,
+                            tree_count: 5,
+                            policy_count: 2,
+                            per_tree_rankings: vec![],
+                        }),
+                    ));
+                    format!("retain={retain}:insuff={insuff}:unstable={unstable}:ready={ready}")
+                }
+                ("shadow_worktree_name_sanitization", "valid_vs_empty_dash_slash_dotdot_nul") => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let check_name = |name: &str| -> bool {
+                        match create_shadow_worktree_named_at(dir.path(), name, None) {
+                            Err(e) => !e.to_string().contains("Invalid worktree name"),
+                            Ok(_) => true,
+                        }
+                    };
+                    let valid = check_name("gen_01_arm_a");
+                    let empty = check_name("");
+                    let dash = check_name("-flag-inject");
+                    let sep = check_name("sub/path");
+                    let dotdot = check_name("..escape");
+                    format!("valid={valid}:empty={empty}:dash={dash}:sep={sep}:dotdot={dotdot}")
+                }
+                other => panic!("unexpected evolution_policy case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA43 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(obs_op) = domain.strip_prefix("observability_gate:") {
+            use crate::observability::dashboard::TokenUsage;
+            use crate::observability::log_analysis::{
+                LogAnalyzer, LogEntry, LogFormat, LogLevel, RootCauseAnalyzer,
+            };
+            use crate::observability::telemetry::{sanitize_for_log, MAX_LOG_ENTRIES};
+
+            let actual = match (obs_op, spec.as_str()) {
+                ("log_level_parse_and_is_error", "trace_debug_info_warn_error_fatal_unknown") => {
+                    let trace = LogLevel::from_str("trace").is_error();
+                    let debug = LogLevel::from_str("DEBUG").is_error();
+                    let info = LogLevel::from_str("info").is_error();
+                    let warn = LogLevel::from_str("WARNING").is_error();
+                    let error = LogLevel::from_str("ERR").is_error();
+                    let fatal = LogLevel::from_str("CRITICAL").is_error();
+                    let unk = LogLevel::from_str("UNRECOGNIZED").is_error();
+                    format!(
+                        "trace={trace}:debug={debug}:info={info}:warn={warn}:error={error}:fatal={fatal}:unk={unk}"
+                    )
+                }
+                (
+                    "anomaly_source_baseline_and_spike_alert",
+                    "sources_10_vs_11_and_burst_6_alert_gate",
+                ) => {
+                    let analyzer = LogAnalyzer::new(LogFormat::Plain);
+                    for i in 1..=10 {
+                        analyzer.process_entry(LogEntry::new(
+                            LogLevel::Info,
+                            &format!("src_{i}"),
+                            "normal",
+                        ));
+                    }
+                    let s10 = if analyzer.anomalies().summary().anomalies_detected == 0 {
+                        "none".to_string()
+                    } else {
+                        "unexpected".to_string()
+                    };
+
+                    analyzer.process_entry(LogEntry::new(LogLevel::Info, "src_11", "new source"));
+                    let anom_11 = analyzer.anomalies().recent_anomalies(1);
+                    let sev_11 = (anom_11[0].severity * 1000.0).round() as u64;
+                    let s11 = if analyzer.alerts().open_alerts().is_empty() {
+                        format!("anomaly_only:{sev_11}")
+                    } else {
+                        format!("alert_high:{sev_11}")
+                    };
+
+                    let spike_analyzer = LogAnalyzer::new(LogFormat::Plain);
+                    for i in 1..=6 {
+                        let mut entry =
+                            LogEntry::new(LogLevel::Error, "src_1", &format!("err {i}"));
+                        entry.timestamp = 6000;
+                        spike_analyzer.process_entry(entry);
+                    }
+                    let spike_anom = spike_analyzer.anomalies().recent_anomalies(1);
+                    let sev_spike = (spike_anom[0].severity * 1000.0).round() as u64;
+                    let spike = if !spike_analyzer.alerts().open_alerts().is_empty() {
+                        format!("alert_high:{sev_spike}")
+                    } else {
+                        format!("anomaly_only:{sev_spike}")
+                    };
+                    format!("s10={s10}:s11={s11}:spike={spike}")
+                }
+                (
+                    "root_cause_error_filter_and_dedup",
+                    "info_ignored_and_duplicate_network_deduped",
+                ) => {
+                    let rca = RootCauseAnalyzer::new();
+                    let info_causes = rca.analyze(&[
+                        LogEntry::new(LogLevel::Info, "net", "connection refused"),
+                        LogEntry::new(LogLevel::Warn, "mem", "out of memory"),
+                    ]);
+                    let err_causes = rca.analyze(&[
+                        LogEntry::new(LogLevel::Error, "net", "ECONNREFUSED talking to peer"),
+                        LogEntry::new(LogLevel::Error, "net", "operation timed out after 30s"),
+                        LogEntry::new(LogLevel::Fatal, "sys", "out of memory killer invoked"),
+                    ]);
+                    let mut cats: Vec<String> = err_causes
+                        .into_iter()
+                        .map(|c| format!("{:?}", c.category))
+                        .collect();
+                    cats.sort();
+                    format!(
+                        "info_only={}:net_and_res={}",
+                        info_causes.len(),
+                        cats.join(",")
+                    )
+                }
+                (
+                    "dashboard_token_usage_accumulation",
+                    "u1=1000_500_r100_c250,u2=500_250_r50_c125",
+                ) => {
+                    let mut u1 = TokenUsage::new(1000, 500).with_cost(0.10, 0.30);
+                    u1.reasoning = Some(100);
+                    let mut u2 = TokenUsage::new(500, 250).with_cost(0.10, 0.30);
+                    u2.reasoning = Some(50);
+                    u1.add(&u2);
+                    let cost_milli = (u1.cost.unwrap_or(0.0) * 1000.0).round() as u64;
+                    format!(
+                        "in={}:out={}:total={}:reas={}:cost_milli={cost_milli}",
+                        u1.input,
+                        u1.output,
+                        u1.total,
+                        u1.reasoning.unwrap_or(0)
+                    )
+                }
+                ("telemetry_sanitize_and_log_rotation", "ctrl_chars_and_100k_threshold") => {
+                    let sanitized = sanitize_for_log("a\nb\r\t\x1b\0");
+                    assert_eq!(sanitized, "a\\nb\\r\\t\\e\\0");
+                    let below = MAX_LOG_ENTRIES - 1;
+                    let rot_below = below >= MAX_LOG_ENTRIES;
+                    let cnt_below = if rot_below { below / 2 } else { below };
+                    let at = MAX_LOG_ENTRIES;
+                    let rot_at = at >= MAX_LOG_ENTRIES;
+                    let cnt_at = if rot_at { at / 2 } else { at };
+                    format!("rot_below={rot_below}/{cnt_below}:rot_at={rot_at}/{cnt_at}")
+                }
+                other => panic!("unexpected observability_gate case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA44 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(sup_op) = domain.strip_prefix("supervision_lattice:") {
+            let actual = match (sup_op, spec.as_str()) {
+                (
+                    "run_status_terminal_partition_and_registry_str",
+                    "running_paused_active_vs_completed_failed_aborted_terminal",
+                ) => {
+                    use crate::supervision::run_registry::is_terminal_status;
+                    use crate::supervision::run_supervisor::RunStatus;
+                    format!(
+                        "running={}:paused={}:completed={}:failed={}:aborted={}:str_running={}:str_completed={}",
+                        RunStatus::Running.is_terminal(),
+                        RunStatus::Paused.is_terminal(),
+                        RunStatus::Completed.is_terminal(),
+                        RunStatus::Failed.is_terminal(),
+                        RunStatus::Aborted.is_terminal(),
+                        is_terminal_status("Running"),
+                        is_terminal_status("Completed"),
+                    )
+                }
+                (
+                    "run_registry_sticky_terminal_and_effective_stale",
+                    "terminal_status_sticky_on_update_and_dead_owner_pid_effective_stale",
+                ) => {
+                    use crate::supervision::run_registry::{RunRecord, RunRegistry};
+                    let tmp = tempfile::tempdir().expect("tempdir");
+                    let reg = RunRegistry::with_dir(tmp.path().to_path_buf()).expect("with_dir");
+                    let rec = RunRecord {
+                        id: "run-1".to_string(),
+                        pid: u32::MAX,
+                        process_start_time: None,
+                        task: "build".to_string(),
+                        status: "Running".to_string(),
+                        started_unix: 10,
+                        updated_unix: 10,
+                    };
+                    let dead_running_eff = rec.effective_status().to_string();
+                    reg.write(&rec).expect("write record");
+                    reg.update_status("run-1", "Completed", 20)
+                        .expect("update to completed");
+                    let after_complete = reg.get("run-1").expect("get").expect("present");
+                    let dead_completed_eff = after_complete.effective_status().to_string();
+                    reg.update_status("run-1", "Failed", 30)
+                        .expect("sticky terminal update");
+                    let after_late_fail = reg.get("run-1").expect("get").expect("present");
+                    format!(
+                        "dead_running_eff={}:dead_completed_eff={}:after_complete={}/{}:after_late_fail={}/{}",
+                        dead_running_eff,
+                        dead_completed_eff,
+                        after_complete.status,
+                        after_complete.updated_unix,
+                        after_late_fail.status,
+                        after_late_fail.updated_unix,
+                    )
+                }
+                (
+                    "run_registry_abort_outcome_exhaustiveness",
+                    "missing_not_found_terminal_already_done_and_dead_running_was_stale",
+                ) => {
+                    use crate::supervision::run_registry::{AbortOutcome, RunRecord, RunRegistry};
+                    let tmp = tempfile::tempdir().expect("tempdir");
+                    let reg = RunRegistry::with_dir(tmp.path().to_path_buf()).expect("with_dir");
+                    let fmt_outcome = |o: AbortOutcome, rec_id: &str| match o {
+                        AbortOutcome::NotFound => "NotFound".to_string(),
+                        AbortOutcome::AlreadyDone => {
+                            let st = reg
+                                .get(rec_id)
+                                .expect("get")
+                                .map(|r| r.status)
+                                .unwrap_or_default();
+                            format!("AlreadyDone:{st}")
+                        }
+                        AbortOutcome::WasStale => "WasStale".to_string(),
+                        AbortOutcome::Signalled(_)
+                        | AbortOutcome::SignalUnsupported(_)
+                        | AbortOutcome::SignalFailed(_, _) => "Signalled".to_string(),
+                    };
+                    let missing =
+                        fmt_outcome(reg.abort("missing", 15).expect("abort missing"), "missing");
+                    reg.write(&RunRecord {
+                        id: "done-1".to_string(),
+                        pid: u32::MAX,
+                        process_start_time: None,
+                        task: "done".to_string(),
+                        status: "Completed".to_string(),
+                        started_unix: 10,
+                        updated_unix: 12,
+                    })
+                    .expect("write done-1");
+                    let completed =
+                        fmt_outcome(reg.abort("done-1", 15).expect("abort done-1"), "done-1");
+                    reg.write(&RunRecord {
+                        id: "stale-1".to_string(),
+                        pid: u32::MAX,
+                        process_start_time: None,
+                        task: "stale".to_string(),
+                        status: "Running".to_string(),
+                        started_unix: 10,
+                        updated_unix: 10,
+                    })
+                    .expect("write stale-1");
+                    let stale_running =
+                        fmt_outcome(reg.abort("stale-1", 25).expect("abort stale-1"), "stale-1");
+                    let post_stale = reg.get("stale-1").expect("get").expect("present").status;
+                    format!(
+                        "missing={}:completed={}:stale_running={}:post_stale_status={}",
+                        missing, completed, stale_running, post_stale
+                    )
+                }
+                (
+                    "health_status_severity_aggregation_lattice",
+                    "healthy_degraded_warning_critical_fatal_monotone_join",
+                ) => {
+                    use crate::supervision::health::{HealthStatus, Severity};
+                    let rank = |s: &HealthStatus| -> u8 {
+                        match s {
+                            HealthStatus::Healthy => 0,
+                            HealthStatus::Degraded { .. } => 1,
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Warning,
+                                ..
+                            } => 2,
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Critical,
+                                ..
+                            } => 3,
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Fatal,
+                                ..
+                            } => 4,
+                        }
+                    };
+                    let tag = |s: &HealthStatus| -> &'static str {
+                        match s {
+                            HealthStatus::Healthy => "healthy",
+                            HealthStatus::Degraded { .. } => "degraded",
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Warning,
+                                ..
+                            } => "unhealthy/warning",
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Critical,
+                                ..
+                            } => "unhealthy/critical",
+                            HealthStatus::Unhealthy {
+                                severity: Severity::Fatal,
+                                ..
+                            } => "unhealthy/fatal",
+                        }
+                    };
+                    let h_ok = HealthStatus::Healthy;
+                    let h_deg = HealthStatus::Degraded {
+                        reason: "slow".to_string(),
+                    };
+                    let h_crit = HealthStatus::Unhealthy {
+                        reason: "oom".to_string(),
+                        severity: Severity::Critical,
+                    };
+                    let joined = if rank(&h_deg) >= rank(&h_crit) {
+                        &h_deg
+                    } else {
+                        &h_crit
+                    };
+                    format!(
+                        "healthy={}:degraded={}:unhealthy_crit={}:join_deg_crit={}:cfg=30/5/3/1",
+                        tag(&h_ok),
+                        tag(&h_deg),
+                        tag(&h_crit),
+                        tag(joined),
+                    )
+                }
+                (
+                    "supervisor_spawn_settlement_and_circuit_breaker_gate",
+                    "monotonic_run_id_abort_before_finish_and_breaker_open_half_open_close",
+                ) => {
+                    use crate::supervision::circuit_breaker::{
+                        CircuitBreaker, CircuitBreakerConfig, CircuitState,
+                    };
+                    use crate::supervision::run_supervisor::{RunStatus, RunSupervisor};
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("rt");
+                    rt.block_on(async {
+                        let sup = RunSupervisor::new();
+                        let id1 = sup.spawn("fast".to_string(), async { Ok(()) }).await;
+                        for _ in 0..50 {
+                            if sup.status(&id1).await == Some(RunStatus::Completed) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        let _ = sup.abort(&id1).await;
+                        let done_after_abort = sup.status(&id1).await.expect("id1 status");
+
+                        let id2 = sup
+                            .spawn("wait".to_string(), async {
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                Ok(())
+                            })
+                            .await;
+                        let _ = sup.abort(&id2).await;
+                        for _ in 0..50 {
+                            if sup.status(&id2).await == Some(RunStatus::Aborted) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        let aborted_run = sup.status(&id2).await.expect("id2 status");
+
+                        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+                            failure_threshold: 2,
+                            success_threshold: 2,
+                            reset_timeout: std::time::Duration::ZERO,
+                            half_open_max_requests: 1,
+                        });
+                        let s0 = cb.current_state();
+                        cb.on_failure().await;
+                        cb.on_failure().await;
+                        let s1 = cb.current_state();
+                        let _ = cb.call(|| async { Ok::<_, String>(()) }).await;
+                        let s2 = cb.current_state();
+                        cb.on_success().await;
+                        let s3 = cb.current_state();
+                        assert_eq!(
+                            (s0, s1, s2, s3),
+                            (
+                                CircuitState::Closed,
+                                CircuitState::Open,
+                                CircuitState::HalfOpen,
+                                CircuitState::Closed
+                            )
+                        );
+                        format!(
+                            "id1={}:id2={}:done_after_abort={:?}:aborted_run={:?}:cb={:?}->{:?}->{:?}->{:?}",
+                            id1.0, id2.0, done_after_abort, aborted_run, s0, s1, s2, s3
+                        )
+                    })
+                }
+                other => panic!("unexpected supervision_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA45 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(sc_op) = domain.strip_prefix("session_checkpoint:") {
+            let actual = match (sc_op, spec.as_str()) {
+                (
+                    "forecast_call_shapes_cap_and_slowest_retention",
+                    "cap_128_preserves_oldest_slowest_decode_sample_and_newest_tail",
+                ) => {
+                    use crate::api::usage::CallShape;
+                    use crate::session::checkpoint::{
+                        ForecastMeasurements, FORECAST_CALL_SHAPES_MAX,
+                    };
+                    let shapes_old_slow: Vec<CallShape> = (0..130)
+                        .map(|i| CallShape {
+                            prompt_tokens: i as u64,
+                            completion_tokens: 2000,
+                            elapsed_ms: if i == 0 { 10_000 } else { 100 },
+                        })
+                        .collect();
+                    let bounded_old = ForecastMeasurements::bounded(shapes_old_slow, Some(512));
+
+                    let shapes_recent_slow: Vec<CallShape> = (0..130)
+                        .map(|i| CallShape {
+                            prompt_tokens: i as u64,
+                            completion_tokens: 2000,
+                            elapsed_ms: if i == 50 { 10_000 } else { 100 },
+                        })
+                        .collect();
+                    let bounded_recent =
+                        ForecastMeasurements::bounded(shapes_recent_slow, Some(512));
+
+                    format!(
+                        "max={}:old_slow_len={}:old_slow_first_prompt={}:old_slow_last_prompt={}:recent_slow_first_prompt={}:draft={}",
+                        FORECAST_CALL_SHAPES_MAX,
+                        bounded_old.call_shapes.len(),
+                        bounded_old.call_shapes[0].prompt_tokens,
+                        bounded_old.call_shapes.last().expect("last").prompt_tokens,
+                        bounded_recent.call_shapes[0].prompt_tokens,
+                        bounded_old.draft_completion_tokens.unwrap_or(0),
+                    )
+                }
+                (
+                    "endpoint_identity_credential_scrub_and_fingerprint_diff",
+                    "strips_userinfo_query_trailing_slash_and_detects_head_file_drift",
+                ) => {
+                    use crate::session::checkpoint::{endpoint_identity, WorkspaceFingerprint};
+                    let clean_url = endpoint_identity(
+                        "https://user:secret@api.example.com:8443/v1/?token=abc#frag",
+                    );
+                    let bad_url = endpoint_identity("not a url");
+                    let stored = WorkspaceFingerprint {
+                        head: Some("aaa".to_string()),
+                        files: vec![
+                            ("a.rs".to_string(), "h1".to_string()),
+                            ("old.rs".to_string(), "h2".to_string()),
+                        ],
+                    };
+                    let current = WorkspaceFingerprint {
+                        head: Some("bbb".to_string()),
+                        files: vec![
+                            ("a.rs".to_string(), "h1_mod".to_string()),
+                            ("new.rs".to_string(), "h3".to_string()),
+                        ],
+                    };
+                    let same_diffs = stored.differences(&stored).len();
+                    let drift_diffs = stored.differences(&current).len();
+                    format!(
+                        "clean_url={}:bad_url={}:same_diffs={}:drift_diffs={}",
+                        clean_url, bad_url, same_diffs, drift_diffs
+                    )
+                }
+                (
+                    "delta_compute_guardrails_and_apply_hydration",
+                    "append_only_delta_hydrates_while_cap_removal_or_shrunk_messages_reject",
+                ) => {
+                    use crate::api::types::Message;
+                    use crate::session::checkpoint::TaskCheckpoint;
+                    let mut base =
+                        TaskCheckpoint::new("task-delta".to_string(), "Test delta".to_string());
+                    base.max_budget_tokens = Some(10_000);
+                    base.messages = vec![Message::user("hello")];
+
+                    let mut next = base.clone();
+                    next.messages.push(Message::assistant("world"));
+                    next.set_step(2);
+                    let delta = next.compute_delta(&base);
+                    let valid_delta = delta.is_some();
+
+                    let mut hydrated = base.clone();
+                    hydrated
+                        .apply_delta(delta.as_ref().expect("valid delta"))
+                        .expect("apply delta");
+
+                    let mut cap_removed = next.clone();
+                    cap_removed.max_budget_tokens = None;
+                    let cap_removed_delta = cap_removed.compute_delta(&base).is_some();
+
+                    let mut shrunk = next.clone();
+                    shrunk.messages.clear();
+                    let shrunk_msgs_delta = shrunk.compute_delta(&base).is_some();
+
+                    let mut mutated_desc = next.clone();
+                    mutated_desc.task_description = "Changed".to_string();
+                    let mutated_desc_delta = mutated_desc.compute_delta(&base).is_some();
+
+                    let mut wrong_ver = base.clone();
+                    wrong_ver.version = 9;
+                    let bad_base_ver_apply = if wrong_ver
+                        .apply_delta(delta.as_ref().expect("valid delta"))
+                        .is_ok()
+                    {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+
+                    format!(
+                        "valid_delta={}:hydrated_ver={}:hydrated_msgs={}:cap_removed_delta={}:shrunk_msgs_delta={}:mutated_desc_delta={}:bad_base_ver_apply={}",
+                        valid_delta,
+                        hydrated.version,
+                        hydrated.messages.len(),
+                        cap_removed_delta,
+                        shrunk_msgs_delta,
+                        mutated_desc_delta,
+                        bad_base_ver_apply,
+                    )
+                }
+                (
+                    "implicit_resume_blocker_and_edited_description_suffix",
+                    "placeholder_vs_no_user_msg_vs_resumable_and_trimmed_edit_suffix",
+                ) => {
+                    use crate::api::types::Message;
+                    use crate::session::checkpoint::{NotResumableReason, TaskCheckpoint};
+                    let fmt_blocker = |r: Option<NotResumableReason>| match r {
+                        Some(NotResumableReason::PlaceholderDescription) => {
+                            "PlaceholderDescription"
+                        }
+                        Some(NotResumableReason::NoUserMessage) => "NoUserMessage",
+                        None => "none",
+                    };
+                    let cp_place =
+                        TaskCheckpoint::new("t1".to_string(), "TUI session exit".to_string());
+                    let cp_no_user =
+                        TaskCheckpoint::new("t2".to_string(), "Fix bug #42".to_string());
+                    let mut cp_user =
+                        TaskCheckpoint::new("t3".to_string(), "Fix bug #42".to_string());
+                    cp_user.messages.push(Message::user("Please fix #42"));
+
+                    let unmodified_suffix = cp_user.to_summary().edited_suffix();
+                    let mut cp_trim = cp_user.clone();
+                    cp_trim.original_task_description = Some("  Fix bug #42  ".to_string());
+                    let trimmed_same_suffix = cp_trim.to_summary().edited_suffix();
+                    let mut cp_edit = cp_user.clone();
+                    cp_edit.original_task_description = Some("Initial prompt".to_string());
+                    let edited_suffix = cp_edit.to_summary().edited_suffix();
+
+                    format!(
+                        "placeholder={}:no_user={}:with_user={}:unmodified_suffix={}:trimmed_same_suffix={}:edited_suffix={}",
+                        fmt_blocker(cp_place.implicit_resume_blocker()),
+                        fmt_blocker(cp_no_user.implicit_resume_blocker()),
+                        fmt_blocker(cp_user.implicit_resume_blocker()),
+                        unmodified_suffix,
+                        trimmed_same_suffix,
+                        edited_suffix,
+                    )
+                }
+                (
+                    "local_cache_hit_accounting_and_git_path_invalidation",
+                    "hit_rate_bytes_saved_and_selective_git_and_path_eviction",
+                ) => {
+                    use crate::session::local_first::{LocalCache, LocalCacheEntry};
+                    let mut cache = LocalCache::new();
+                    cache.put(LocalCacheEntry {
+                        key: "git_status:/repo".to_string(),
+                        value: "clean".to_string(),
+                        size_bytes: 5,
+                    });
+                    cache.put(LocalCacheEntry {
+                        key: "file_read:src/lib.rs".to_string(),
+                        value: "fn a(){}".to_string(),
+                        size_bytes: 8,
+                    });
+                    cache.put(LocalCacheEntry {
+                        key: "file_read:src/main.rs".to_string(),
+                        value: "fn main(){}".to_string(),
+                        size_bytes: 11,
+                    });
+                    let initial_entries = cache.stats().entry_count;
+
+                    let _ = cache.get("file_read:src/lib.rs");
+                    let _ = cache.get("file_read:src/lib.rs");
+                    cache.record_miss();
+                    cache.record_miss();
+                    let st1 = cache.stats();
+                    let hit_rate_pct = (st1.hit_rate * 100.0).round() as usize;
+
+                    cache.invalidate_git_and_path("src/lib.rs");
+                    let after_invalidate_entries = cache.stats().entry_count;
+                    let main_kept = cache.get("file_read:src/main.rs").is_some();
+
+                    format!(
+                        "initial_entries={}:hits={}:misses={}:bytes_saved={}:hit_rate_pct={}:after_invalidate_entries={}:main_kept={}",
+                        initial_entries,
+                        st1.hits,
+                        st1.misses,
+                        st1.bytes_saved,
+                        hit_rate_pct,
+                        after_invalidate_entries,
+                        main_kept,
+                    )
+                }
+                other => panic!("unexpected session_checkpoint case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA46 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(dp_op) = domain.strip_prefix("devops_process:") {
+            let actual = match (dp_op, spec.as_str()) {
+                (
+                    "process_status_serde_and_empty_inventory_reconcile",
+                    "status_snake_case_tags_and_empty_manager_inventory_reconcile_guards",
+                ) => {
+                    use crate::devops::process_manager::{ProcessManager, ProcessStatus};
+                    let tag = |s: ProcessStatus| -> String {
+                        serde_json::to_value(s)
+                            .expect("json")
+                            .as_str()
+                            .expect("str")
+                            .to_string()
+                    };
+                    let mgr = ProcessManager::new();
+                    let inv = mgr.try_inventory(10).expect("try_inventory");
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("rt");
+                    let (missing_exited, missing_sig, missing_rm, rec_scanned) =
+                        rt.block_on(async {
+                            let ex = match mgr.has_exited("missing").await {
+                                Some(b) => b.to_string(),
+                                None => "none".to_string(),
+                            };
+                            let sig = mgr.signal("missing", false).await.expect("signal");
+                            let rm = if mgr.remove("missing").await.is_ok() {
+                                "ok"
+                            } else {
+                                "err"
+                            };
+                            let rec = mgr.reconcile(true).await;
+                            (ex, sig, rm, rec.scanned)
+                        });
+                    format!(
+                        "starting={}:running={}:failed={}:stopped={}:total={}:missing_exited={}:missing_sig={}:missing_rm={}:reconcile_scanned={}",
+                        tag(ProcessStatus::Starting),
+                        tag(ProcessStatus::Running),
+                        tag(ProcessStatus::HealthCheckFailed),
+                        tag(ProcessStatus::Stopped),
+                        inv.total,
+                        missing_exited,
+                        missing_sig,
+                        missing_rm,
+                        rec_scanned,
+                    )
+                }
+                (
+                    "process_lifecycle_start_active_remove_guard_and_stop",
+                    "running_process_blocks_remove_until_stopped_and_shifts_inventory_bucket",
+                ) => {
+                    use crate::devops::process_manager::{ProcessConfig, ProcessManager};
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("rt");
+                    rt.block_on(async {
+                        tokio::time::pause();
+                        let mgr = ProcessManager::new();
+                        let cfg = ProcessConfig {
+                            id: "pa47-svc".to_string(),
+                            command: "sleep".to_string(),
+                            args: vec!["60".to_string()],
+                            cwd: None,
+                            env: std::collections::HashMap::new(),
+                            health_check_pattern: None,
+                            health_check_timeout_secs: None,
+                            expected_port: None,
+                            auto_restart: false,
+                            max_restart_attempts: 0,
+                        };
+                        let _ = mgr.start(cfg).await.expect("start sleep");
+                        let inv_run = mgr.inventory(5).await;
+                        let exited_while_run = mgr.has_exited("pa47-svc").await.unwrap_or(true);
+                        let rm_while_run = if mgr.remove("pa47-svc").await.is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        };
+                        let stopped = mgr.stop("pa47-svc", true).await.expect("stop");
+                        let stop_status = serde_json::to_value(&stopped.status)
+                            .expect("json")
+                            .as_str()
+                            .expect("str")
+                            .to_string();
+                        let inv_stop = mgr.inventory(5).await;
+                        let rm_after_stop = if mgr.remove("pa47-svc").await.is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        };
+                        let inv_final = mgr.inventory(5).await;
+                        format!(
+                            "run_total={}:run_active={}:run_inactive={}:exited_while_run={}:rm_while_run={}:stop_status={}:stop_inactive={}:rm_after_stop={}:final_total={}",
+                            inv_run.total,
+                            inv_run.running + inv_run.starting + inv_run.restarting,
+                            inv_run.inactive,
+                            exited_while_run,
+                            rm_while_run,
+                            stop_status,
+                            inv_stop.inactive,
+                            rm_after_stop,
+                            inv_final.total,
+                        )
+                    })
+                }
+                (
+                    "container_security_flags_hardened_sealed_unsafe_profiles",
+                    "hardened_10_flags_sealed_13_flags_unsafe_0_and_invalid_rejected",
+                ) => {
+                    use crate::tools::container::security_flags;
+                    let hardened = security_flags(&serde_json::json!({})).expect("hardened");
+                    let sealed =
+                        security_flags(&serde_json::json!({"profile": "sealed"})).expect("sealed");
+                    let unsafe_flags =
+                        security_flags(&serde_json::json!({"profile": "unsafe"})).expect("unsafe");
+                    let sealed_ro = sealed.iter().any(|f| f == "--read-only");
+                    let sealed_user = sealed
+                        .windows(2)
+                        .find(|w| w[0] == "--user")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("");
+                    let bad_profile =
+                        if security_flags(&serde_json::json!({"profile": "custom"})).is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        };
+                    let zero_pids = if security_flags(&serde_json::json!({"pids_limit": 0})).is_ok()
+                    {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let bad_mem =
+                        if security_flags(&serde_json::json!({"memory": "--privileged"})).is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        };
+                    let flag_user = if security_flags(&serde_json::json!({"user": "-root"})).is_ok()
+                    {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    format!(
+                        "hardened_len={}:sealed_len={}:unsafe_len={}:sealed_ro={}:sealed_user={}:bad_profile={}:zero_pids={}:bad_mem={}:flag_user={}",
+                        hardened.len(),
+                        sealed.len(),
+                        unsafe_flags.len(),
+                        sealed_ro,
+                        sealed_user,
+                        bad_profile,
+                        zero_pids,
+                        bad_mem,
+                        flag_user,
+                    )
+                }
+                (
+                    "container_port_mapping_memory_and_user_validation",
+                    "port_range_proto_guard_memory_unit_whitelist_and_user_flag_rejection",
+                ) => {
+                    use crate::tools::container::{
+                        is_valid_memory, is_valid_user, validate_port_mapping,
+                    };
+                    format!(
+                        "p_pair={}:p_ip_tcp={}:p_zero={}:p_sctp={}:p_meta={}:m_512m={}:m_4G={}:m_512mb={}:u_uid={}:u_flag={}",
+                        validate_port_mapping("8080:80"),
+                        validate_port_mapping("127.0.0.1:8443:443/tcp"),
+                        validate_port_mapping("0:80"),
+                        validate_port_mapping("8080:80/sctp"),
+                        validate_port_mapping("8080:80;id"),
+                        is_valid_memory("512m"),
+                        is_valid_memory("4G"),
+                        is_valid_memory("512mb"),
+                        is_valid_user("1000:1000"),
+                        is_valid_user("-u"),
+                    )
+                }
+                (
+                    "container_volume_mount_blocklist_and_traversal_guard",
+                    "allows_workspace_ro_rw_and_blocks_sock_root_etc_cred_traversal_relative_dest",
+                ) => {
+                    use crate::tools::container::validate_volume_spec;
+                    format!(
+                        "rel_ro={}:rel_rwz={}:docker_sock={}:root={}:etc={}:ssh={}:traversal={}:rel_dest={}:bad_opt={}",
+                        validate_volume_spec("./data:/data:ro"),
+                        validate_volume_spec("./data:/data:rw,Z"),
+                        validate_volume_spec("/var/run/docker.sock:/var/run/docker.sock"),
+                        validate_volume_spec("/:/host"),
+                        validate_volume_spec("/etc/passwd:/etc/passwd:ro"),
+                        validate_volume_spec("./.ssh:/keys:ro"),
+                        validate_volume_spec("../outside:/data:ro"),
+                        validate_volume_spec("./data:relative_container"),
+                        validate_volume_spec("./data:/data:exec"),
+                    )
+                }
+                other => panic!("unexpected devops_process case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA47 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(pl_op) = domain.strip_prefix("phi_ledger_posture:") {
+            let actual = match (pl_op, spec.as_str()) {
+                (
+                    "ledger_obligation_discharge_and_deletion_retirement",
+                    "record_change_spawns_two_unknown_cov_increments_and_deletion_retires_prior",
+                ) => {
+                    use crate::phi::ledger::{Ledger, Outcome, Scope};
+                    let mut ledger = Ledger::new();
+                    ledger.record_change("src/a.rs", Some(30), 1, 100);
+                    let after_change = ledger.outstanding().len();
+                    let snap1 = ledger.snapshot();
+                    let ev_unk = ledger.record_test_run(
+                        snap1,
+                        Scope::WorkspaceCoverageUnknown,
+                        Outcome::Passed,
+                        Some("cargo test".to_string()),
+                        110,
+                    );
+                    let dis_unk = ledger
+                        .obligations()
+                        .iter()
+                        .filter(|o| o.satisfied_by == Some(ev_unk))
+                        .count();
+                    let unattributed_runs: usize = ledger
+                        .outstanding()
+                        .iter()
+                        .map(|o| o.passing_runs_without_coverage)
+                        .sum();
+                    let snap2 = ledger.snapshot();
+                    let ev_cov = ledger.record_test_run(
+                        snap2,
+                        Scope::WorkspaceWithCoverage(vec!["src/a.rs".into()]),
+                        Outcome::Passed,
+                        Some("lcov".to_string()),
+                        120,
+                    );
+                    let dis_cov = ledger
+                        .obligations()
+                        .iter()
+                        .filter(|o| o.satisfied_by == Some(ev_cov))
+                        .count();
+                    let after_cov_out = ledger.outstanding().len();
+                    ledger.record_deletion("src/a.rs", None, 2, 130);
+                    let after_del_out = ledger.outstanding().len();
+                    let total_obs = ledger.obligations().len();
+                    format!(
+                        "after_change={}:unknown_cov_discharged={}:unattributed_runs={}:with_cov_discharged={}:after_cov_out={}:after_del_out={}:total_obs={}",
+                        after_change,
+                        dis_unk,
+                        unattributed_runs,
+                        dis_cov,
+                        after_cov_out,
+                        after_del_out,
+                        total_obs,
+                    )
+                }
+                (
+                    "ledger_assess_unsatisfied_rejection_hierarchy",
+                    "wrong_kind_dependents_unknown_failed_predates_raced_and_external_edit_guards",
+                ) => {
+                    use crate::phi::ledger::{Ledger, ObligationKind, Outcome, RunSnapshot, Scope};
+                    let mut ledger = Ledger::new();
+                    ledger.record_change("src/a.rs", Some(10), 1, 100);
+                    let cov_ob = ledger
+                        .obligations()
+                        .iter()
+                        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
+                        .expect("cov ob")
+                        .clone();
+
+                    let snap_wrong = ledger.snapshot();
+                    let ev_wrong_id = ledger.record_human_review(
+                        snap_wrong,
+                        vec!["src/a.rs".into()],
+                        Outcome::Passed,
+                        Some("review".to_string()),
+                        110,
+                    );
+                    let ev_wrong = ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_wrong_id)
+                        .expect("ev_wrong")
+                        .clone();
+                    let wrong_kind =
+                        format!("{:?}", ledger.assess(&ev_wrong, &cov_ob).unwrap_err());
+
+                    ledger.record_deletion("src/del.rs", None, 2, 120);
+                    let del_ob = ledger
+                        .obligations()
+                        .iter()
+                        .find(|o| o.kind == ObligationKind::BrokenByRemoval)
+                        .expect("del ob")
+                        .clone();
+                    let snap_pass = ledger.snapshot();
+                    let ev_pass_id = ledger.record_test_run(
+                        snap_pass,
+                        Scope::WorkspaceWithCoverage(vec!["src/del.rs".into()]),
+                        Outcome::Passed,
+                        Some("test".to_string()),
+                        130,
+                    );
+                    let ev_pass = ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_pass_id)
+                        .expect("ev_pass")
+                        .clone();
+                    let deps_unknown =
+                        format!("{:?}", ledger.assess(&ev_pass, &del_ob).unwrap_err());
+
+                    let snap_fail = ledger.snapshot();
+                    let ev_fail_id = ledger.record_test_run(
+                        snap_fail,
+                        Scope::Paths(vec!["src/a.rs".into()]),
+                        Outcome::Failed,
+                        Some("fail".to_string()),
+                        140,
+                    );
+                    let ev_fail = ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_fail_id)
+                        .expect("ev_fail")
+                        .clone();
+                    let failed = format!("{:?}", ledger.assess(&ev_fail, &cov_ob).unwrap_err());
+
+                    let ev_pred_id = ledger.record_test_run(
+                        RunSnapshot { seq: 0 },
+                        Scope::Paths(vec!["src/a.rs".into()]),
+                        Outcome::Passed,
+                        Some("predates".to_string()),
+                        150,
+                    );
+                    let ev_pred = ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_pred_id)
+                        .expect("ev_pred")
+                        .clone();
+                    let predates = format!("{:?}", ledger.assess(&ev_pred, &cov_ob).unwrap_err());
+
+                    let mut race_ledger = Ledger::new();
+                    race_ledger.record_change("src/r.rs", Some(10), 1, 100);
+                    let r_ob = race_ledger
+                        .obligations()
+                        .iter()
+                        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
+                        .expect("r_ob")
+                        .clone();
+                    let snap_before_race = race_ledger.snapshot();
+                    race_ledger.record_change("src/r.rs", Some(5), 2, 110);
+                    let ev_race_id = race_ledger.record_test_run(
+                        snap_before_race,
+                        Scope::Paths(vec!["src/r.rs".into()]),
+                        Outcome::Passed,
+                        Some("raced".to_string()),
+                        120,
+                    );
+                    let ev_race = race_ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_race_id)
+                        .expect("ev_race")
+                        .clone();
+                    let raced = format!("{:?}", race_ledger.assess(&ev_race, &r_ob).unwrap_err());
+
+                    let mut ext_ledger = Ledger::new();
+                    ext_ledger.record_change("src/e.rs", Some(10), 1, 100);
+                    let e_ob = ext_ledger
+                        .obligations()
+                        .iter()
+                        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
+                        .expect("e_ob")
+                        .clone();
+                    ext_ledger.record_external_change("src/e.rs", 110);
+                    let snap_ext = ext_ledger.snapshot();
+                    let ev_ext_id = ext_ledger.record_test_run(
+                        snap_ext,
+                        Scope::Paths(vec!["src/e.rs".into()]),
+                        Outcome::Passed,
+                        Some("ext".to_string()),
+                        120,
+                    );
+                    let ev_ext = ext_ledger
+                        .evidence()
+                        .iter()
+                        .find(|e| e.id == ev_ext_id)
+                        .expect("ev_ext")
+                        .clone();
+                    let rev_unknown =
+                        format!("{:?}", ext_ledger.assess(&ev_ext, &e_ob).unwrap_err());
+
+                    format!(
+                        "wrong_kind={}:deps_unknown={}:failed={}:predates={}:raced={}:rev_unknown={}",
+                        wrong_kind, deps_unknown, failed, predates, raced, rev_unknown
+                    )
+                }
+                (
+                    "observer_tool_call_classification_and_sizing",
+                    "failed_mutation_unattributed_file_edit_max_lines_and_clippy_fix_opaque",
+                ) => {
+                    use crate::phi::observer::{classify, ObservedEvent, ToolCallRecord};
+                    let args_edit = serde_json::json!({
+                        "path": "src/lib.rs",
+                        "old_str": "a\nb",
+                        "new_str": "a\nb\nc\nd"
+                    });
+                    let ev_fail = classify(&ToolCallRecord {
+                        tool: "file_edit",
+                        arguments: &args_edit,
+                        turn_index: 1,
+                        succeeded: false,
+                        output: None,
+                    });
+                    let failed_tag = match ev_fail.first() {
+                        Some(ObservedEvent::Unattributed { .. }) => "unattributed",
+                        _ => "other",
+                    };
+                    let ev_ok = classify(&ToolCallRecord {
+                        tool: "file_edit",
+                        arguments: &args_edit,
+                        turn_index: 2,
+                        succeeded: true,
+                        output: None,
+                    });
+                    let edit_lines = match ev_ok.first() {
+                        Some(ObservedEvent::Changed { line_count, .. }) => line_count.unwrap_or(0),
+                        _ => 0,
+                    };
+                    let empty_args = serde_json::json!({});
+                    let ev_check = classify(&ToolCallRecord {
+                        tool: "cargo_check",
+                        arguments: &empty_args,
+                        turn_index: 3,
+                        succeeded: true,
+                        output: None,
+                    });
+                    let cargo_check_mut = match ev_check.first() {
+                        Some(ObservedEvent::OpaqueRun {
+                            may_have_mutated, ..
+                        }) => *may_have_mutated,
+                        _ => true,
+                    };
+                    let fix_true = serde_json::json!({"fix": true});
+                    let ev_clippy_fix = classify(&ToolCallRecord {
+                        tool: "cargo_clippy",
+                        arguments: &fix_true,
+                        turn_index: 4,
+                        succeeded: true,
+                        output: None,
+                    });
+                    let clippy_fix_mut = match ev_clippy_fix.first() {
+                        Some(ObservedEvent::OpaqueRun {
+                            may_have_mutated, ..
+                        }) => *may_have_mutated,
+                        _ => false,
+                    };
+                    let fix_false = serde_json::json!({"fix": false});
+                    let ev_clippy_nofix = classify(&ToolCallRecord {
+                        tool: "cargo_clippy",
+                        arguments: &fix_false,
+                        turn_index: 5,
+                        succeeded: true,
+                        output: None,
+                    });
+                    let clippy_nofix_mut = match ev_clippy_nofix.first() {
+                        Some(ObservedEvent::OpaqueRun {
+                            may_have_mutated, ..
+                        }) => *may_have_mutated,
+                        _ => true,
+                    };
+                    format!(
+                        "failed_edit={}:edit_lines={}:cargo_check_mut={}:clippy_fix_mut={}:clippy_nofix_mut={}",
+                        failed_tag, edit_lines, cargo_check_mut, clippy_fix_mut, clippy_nofix_mut
+                    )
+                }
+                (
+                    "policy_debt_ratio_fox_posture_and_steward_priority",
+                    "debt_ratio_clamp_emotion_thresholds_and_repair_verify_repay_orient_order",
+                ) => {
+                    use crate::phi::activity::ActivityPhase;
+                    use crate::phi::ledger::Ledger;
+                    use crate::phi::policy::{
+                        derive_fox_posture_from_counts, FoxEmotion, PhiMediator, PhiPolicy,
+                        PresenceChannel, ProposalKind,
+                    };
+                    let policy = PhiPolicy {
+                        debt_gate_lines: 200,
+                        ..Default::default()
+                    };
+                    let mut ledger = Ledger::new();
+                    let empty_pct = (policy.measured_debt_ratio(&ledger) * 100.0).round() as usize;
+
+                    ledger.record_change("src/a.rs", Some(100), 1, 100);
+                    let change100_pct =
+                        (policy.measured_debt_ratio(&ledger) * 100.0).round() as usize;
+
+                    ledger.record_deletion("src/b.rs", None, 2, 200);
+                    let with_del_pct =
+                        (policy.measured_debt_ratio(&ledger) * 100.0).round() as usize;
+
+                    let emo_high = derive_fox_posture_from_counts(
+                        2,
+                        180,
+                        180,
+                        0,
+                        0,
+                        ActivityPhase::Running,
+                        &policy,
+                        PresenceChannel::Ambient,
+                    )
+                    .emotion;
+                    let emo_mid = derive_fox_posture_from_counts(
+                        2,
+                        100,
+                        100,
+                        0,
+                        0,
+                        ActivityPhase::Running,
+                        &policy,
+                        PresenceChannel::Ambient,
+                    )
+                    .emotion;
+                    let emo_flow = derive_fox_posture_from_counts(
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        ActivityPhase::Completed,
+                        &policy,
+                        PresenceChannel::Ambient,
+                    )
+                    .emotion;
+
+                    let mut guard_ledger = Ledger::new();
+                    guard_ledger.record_change("src/c.rs", Some(250), 1, 100);
+                    let mediator = PhiMediator::new(policy.clone());
+                    let emo_guard = if mediator
+                        .evaluate_outbound("write more", &guard_ledger, 0)
+                        .gate
+                        .is_some()
+                    {
+                        FoxEmotion::Guard
+                    } else {
+                        FoxEmotion::Idle
+                    };
+
+                    let mut kinds = [
+                        ProposalKind::Orient,
+                        ProposalKind::Repay,
+                        ProposalKind::Verify,
+                        ProposalKind::Repair,
+                    ];
+                    kinds.sort_by_key(|k| k.rank());
+                    let steward_order = kinds
+                        .iter()
+                        .map(|k| format!("{k:?}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    format!(
+                        "empty_pct={}:change100_pct={}:with_del_pct={}:emo_high={:?}:emo_mid={:?}:emo_flow={:?}:emo_guard={:?}:steward_order={}",
+                        empty_pct,
+                        change100_pct,
+                        with_del_pct,
+                        emo_high,
+                        emo_mid,
+                        emo_flow,
+                        emo_guard,
+                        steward_order,
+                    )
+                }
+                (
+                    "activity_capture_id_bounds_and_roundtrip",
+                    "empty_or_over_128_ids_rejected_and_atomic_capture_roundtrip_preserves_state",
+                ) => {
+                    use crate::phi::activity::{ActivityCapture, ActivityPhase};
+                    let tmp = tempfile::tempdir().expect("tempdir");
+                    let empty_sess = if ActivityCapture::new(tmp.path(), "", "agent-0").is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let over128_agent =
+                        if ActivityCapture::new(tmp.path(), "sess-1", &"a".repeat(129)).is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        };
+                    let cap =
+                        ActivityCapture::new(tmp.path(), "sess-1", "agent-0").expect("valid cap");
+                    let empty_task = if cap
+                        .write(
+                            "",
+                            ActivityPhase::Completed,
+                            serde_json::json!("Verified"),
+                            false,
+                        )
+                        .is_ok()
+                    {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let valid_write = if cap
+                        .write(
+                            "task-1",
+                            ActivityPhase::Completed,
+                            serde_json::json!("Verified"),
+                            false,
+                        )
+                        .is_ok()
+                    {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let act_dir = tmp.path().join(".selfware/phi/activity");
+                    let entry = std::fs::read_dir(&act_dir)
+                        .expect("read_dir")
+                        .filter_map(|e| e.ok())
+                        .find(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".json")))
+                        .expect("receipt file");
+                    let rec: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(entry.path()).expect("read receipt"))
+                            .expect("parse receipt");
+                    let schema = rec["schema_version"].as_u64().unwrap_or(0);
+                    let phase_str = match rec["phase"].as_str() {
+                        Some("completed") => "Completed",
+                        Some(other) => other,
+                        None => "unknown",
+                    };
+                    let evidence_str = rec["evidence"].as_str().unwrap_or("");
+                    let truncated = rec["observation_truncated"].as_bool().unwrap_or(true);
+                    format!(
+                        "empty_sess={}:over128_agent={}:empty_task={}:valid_write={}:schema={}:phase={}:evidence={}:truncated={}",
+                        empty_sess,
+                        over128_agent,
+                        empty_task,
+                        valid_write,
+                        schema,
+                        phase_str,
+                        evidence_str,
+                        truncated,
+                    )
+                }
+                other => panic!("unexpected phi_ledger_posture case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA48 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -4576,7 +6630,7 @@ steps:
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 207, "all 207 PA1–PA40 rows must be checked");
+    assert_eq!(checked, 247, "all 247 PA1–PA48 rows must be checked");
 }
 
 #[test]
@@ -5268,4 +7322,321 @@ fn pa40_evolve_readiness_quality_dedup_and_dead_code_invariants() {
     let dead = DeadCodeAnalyzer::new(dir.path()).find().unwrap();
     assert_eq!(dead.len(), 1);
     assert_eq!(dead[0].name, "unused_fn");
+}
+
+#[test]
+fn pa41_hook_dispatch_registry_quoting_and_description_invariants() {
+    use crate::hooks::{
+        builtin, pre_tool_skip_message, HookAction, HookConfig, HookContext, HookEvent,
+        HookRegistry, SkipKind,
+    };
+    use crate::tools::workspace_root::WorkspaceRoot;
+
+    let fmt = builtin::format_on_save_rust();
+    let stop = builtin::test_on_stop_rust();
+    let reg = HookRegistry::from_config(&[fmt, stop]);
+    assert!(reg.has_hooks_for(&HookEvent::PostToolUse));
+    assert!(reg.has_hooks_for(&HookEvent::Stop));
+    assert!(!reg.has_hooks_for(&HookEvent::PreToolUse));
+    assert!(reg.matches_any(&HookContext::stop()));
+
+    let (_, _, pol_tag) = pre_tool_skip_message("file_write", "policy", SkipKind::Policy);
+    let (_, _, fail_tag) = pre_tool_skip_message("file_write", "timeout", SkipKind::HookFailure);
+    assert_eq!(pol_tag, "hook_policy");
+    assert_eq!(fail_tag, "hook_failure");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = WorkspaceRoot::fixed(dir.path());
+    let ctx = HookContext::pre_tool("file_write", r#"{"path":"src/lib.rs"}"#);
+    let unsafe_reg = HookRegistry::from_config(&[HookConfig {
+        event: HookEvent::PreToolUse,
+        command: "echo `{path}`".to_string(),
+        match_tools: vec![],
+        timeout_secs: 5,
+    }]);
+    let outcome = rt.block_on(unsafe_reg.fire_in_root(&ctx, &root));
+    assert!(matches!(
+        outcome,
+        HookAction::Skip {
+            kind: SkipKind::HookFailure,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn pa42_mcp_protocol_discovery_framing_and_server_gates() {
+    use crate::config::SafetyConfig;
+    use crate::mcp::server::{JsonRpcRequest, McpServer};
+    use crate::mcp::transport::{detect_framing, Framing};
+    use serde_json::Value;
+    use tokio::io::BufReader;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut eof_reader = BufReader::new(&b""[..]);
+        let mut cl_reader = BufReader::new(&b"Content-Length: 2\r\n\r\n{}"[..]);
+        let mut nd_reader = BufReader::new(&b"{\"jsonrpc\":\"2.0\"}\n"[..]);
+        assert_eq!(detect_framing(&mut eof_reader).await.unwrap(), None);
+        assert_eq!(
+            detect_framing(&mut cl_reader).await.unwrap(),
+            Some(Framing::ContentLength)
+        );
+        assert_eq!(
+            detect_framing(&mut nd_reader).await.unwrap(),
+            Some(Framing::NewlineDelimited)
+        );
+
+        let server = McpServer::with_explicit_safety_config(SafetyConfig::default());
+        let pre = server
+            .handle_request(&JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(Value::from(1)),
+                method: "tools/list".to_string(),
+                params: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(pre.error.unwrap().code, -32600);
+    });
+}
+
+#[test]
+fn pa43_evolution_policy_ancestry_patience_and_replay_readiness() {
+    use crate::evolution::tree_log::{
+        guarded_ancestry_depth, ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass,
+        TreeLogError,
+    };
+
+    assert!(FailureClass::RepairableSyntax.is_repairable());
+    assert!(!FailureClass::SafetyViolation.is_repairable());
+
+    let mut cycle_tree = AttemptTree::new();
+    let mk = |id: &str, pid: &str| AttemptNode {
+        id: id.to_string(),
+        parent_id: Some(pid.to_string()),
+        generation: 1,
+        branch_id: "b".to_string(),
+        hypothesis_id: "h".to_string(),
+        description: "d".to_string(),
+        diff_sha256: "00".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.5),
+        tokens_used: Some(10),
+        wall_time_ms: 1,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: Some(ActionType::RefineFrontier),
+        git_tree_id: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    };
+    cycle_tree.add_node(mk("a", "b")).unwrap();
+    cycle_tree.add_node(mk("b", "a")).unwrap();
+    assert!(matches!(
+        cycle_tree.validate_ancestry(),
+        Err(TreeLogError::CyclicAncestry { .. })
+    ));
+    let depth = guarded_ancestry_depth("a", |id| {
+        cycle_tree.get(id).and_then(|n| n.parent_id.clone())
+    });
+    assert_eq!(depth, 1);
+}
+
+#[test]
+fn pa44_observability_log_levels_anomalies_and_telemetry_rotation() {
+    use crate::observability::dashboard::TokenUsage;
+    use crate::observability::log_analysis::{LogAnalyzer, LogEntry, LogFormat, LogLevel};
+    use crate::observability::telemetry::{sanitize_for_log, MAX_LOG_ENTRIES};
+
+    assert!(!LogLevel::from_str("WARN").is_error());
+    assert!(LogLevel::from_str("ERROR").is_error());
+    assert!(LogLevel::from_str("FATAL").is_error());
+
+    let analyzer = LogAnalyzer::new(LogFormat::Plain);
+    for i in 1..=6 {
+        let mut entry = LogEntry::new(LogLevel::Error, "db", &format!("err {i}"));
+        entry.timestamp = 1200;
+        analyzer.process_entry(entry);
+    }
+    assert_eq!(analyzer.alerts().open_alerts().len(), 1);
+
+    let mut u1 = TokenUsage::new(400, 100);
+    let u2 = TokenUsage::new(200, 300);
+    u1.add(&u2);
+    assert_eq!(u1.total, u1.input + u1.output);
+    assert_eq!(MAX_LOG_ENTRIES, 100_000);
+    assert_eq!(sanitize_for_log("x\ny"), "x\\ny");
+}
+
+#[test]
+fn pa45_supervision_lifecycle_and_health_lattice_invariants() {
+    use crate::supervision::run_registry::{
+        is_terminal_status, AbortOutcome, RunRecord, RunRegistry,
+    };
+    use crate::supervision::run_supervisor::RunStatus;
+
+    assert!(!RunStatus::Running.is_terminal());
+    assert!(RunStatus::Completed.is_terminal());
+    assert!(RunStatus::Aborted.is_terminal());
+    assert!(!is_terminal_status("Running"));
+    assert!(is_terminal_status("Completed"));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = RunRegistry::with_dir(tmp.path().to_path_buf()).unwrap();
+    assert_eq!(reg.abort("missing", 10).unwrap(), AbortOutcome::NotFound);
+    reg.write(&RunRecord {
+        id: "r1".to_string(),
+        pid: u32::MAX,
+        process_start_time: None,
+        task: "test".to_string(),
+        status: "Running".to_string(),
+        started_unix: 1,
+        updated_unix: 1,
+    })
+    .unwrap();
+    assert_eq!(reg.abort("r1", 2).unwrap(), AbortOutcome::WasStale);
+}
+
+#[test]
+fn pa46_session_checkpoint_delta_and_local_cache_invariants() {
+    use crate::api::usage::CallShape;
+    use crate::session::checkpoint::{
+        endpoint_identity, ForecastMeasurements, TaskCheckpoint, FORECAST_CALL_SHAPES_MAX,
+    };
+    use crate::session::local_first::{LocalCache, LocalCacheEntry};
+
+    let shapes: Vec<CallShape> = (0..130)
+        .map(|i| CallShape {
+            prompt_tokens: i as u64,
+            completion_tokens: 2000,
+            elapsed_ms: if i == 0 { 10_000 } else { 100 },
+        })
+        .collect();
+    let bounded = ForecastMeasurements::bounded(shapes, Some(256));
+    assert_eq!(bounded.call_shapes.len(), FORECAST_CALL_SHAPES_MAX);
+    assert_eq!(bounded.call_shapes[0].prompt_tokens, 0);
+
+    assert_eq!(
+        endpoint_identity("https://user:pass@api.example.com/v1/?key=secret"),
+        "https://api.example.com/v1"
+    );
+
+    let cp = TaskCheckpoint::new("t1".to_string(), "TUI session exit".to_string());
+    assert!(cp.implicit_resume_blocker().is_some());
+
+    let mut cache = LocalCache::new();
+    cache.put(LocalCacheEntry {
+        key: "file_read:src/a.rs".to_string(),
+        value: "fn a() {}".to_string(),
+        size_bytes: 9,
+    });
+    cache.put(LocalCacheEntry {
+        key: "file_read:src/b.rs".to_string(),
+        value: "fn b() {}".to_string(),
+        size_bytes: 9,
+    });
+    cache.invalidate_git_and_path("src/a.rs");
+    assert!(cache.get("file_read:src/a.rs").is_none());
+    assert!(cache.get("file_read:src/b.rs").is_some());
+}
+
+#[test]
+fn pa47_devops_process_and_container_security_invariants() {
+    use crate::devops::process_manager::ProcessManager;
+    use crate::tools::container::{
+        is_valid_memory, is_valid_user, security_flags, validate_port_mapping, validate_volume_spec,
+    };
+
+    let mgr = ProcessManager::new();
+    assert_eq!(mgr.try_inventory(5).unwrap().total, 0);
+
+    assert_eq!(security_flags(&serde_json::json!({})).unwrap().len(), 12);
+    assert_eq!(
+        security_flags(&serde_json::json!({"profile": "sealed"}))
+            .unwrap()
+            .len(),
+        15
+    );
+    assert!(validate_port_mapping("8080:80"));
+    assert!(!validate_port_mapping("0:80"));
+    assert!(is_valid_memory("512m"));
+    assert!(!is_valid_memory("512mb"));
+    assert!(is_valid_user("1000:1000"));
+    assert!(!is_valid_user("-root"));
+    assert!(validate_volume_spec("./data:/data:ro"));
+    assert!(!validate_volume_spec(
+        "/var/run/docker.sock:/var/run/docker.sock"
+    ));
+}
+
+#[test]
+fn pa48_phi_ledger_observer_policy_and_activity_invariants() {
+    use crate::phi::activity::{ActivityCapture, ActivityPhase};
+    use crate::phi::ledger::{Ledger, Outcome, Scope};
+    use crate::phi::policy::{
+        derive_fox_posture_from_counts, FoxEmotion, PhiPolicy, PresenceChannel,
+    };
+
+    let mut ledger = Ledger::new();
+    ledger.record_change("src/lib.rs", Some(40), 1, 100);
+    assert_eq!(ledger.outstanding().len(), 2);
+    let snap = ledger.snapshot();
+    let ev_id = ledger.record_test_run(
+        snap,
+        Scope::WorkspaceCoverageUnknown,
+        Outcome::Passed,
+        Some("cargo test".to_string()),
+        110,
+    );
+    assert_eq!(
+        ledger
+            .obligations()
+            .iter()
+            .filter(|o| o.satisfied_by == Some(ev_id))
+            .count(),
+        0
+    );
+
+    let policy = PhiPolicy::default();
+    assert!(policy.measured_debt_ratio(&ledger) > 0.0);
+    assert_eq!(
+        derive_fox_posture_from_counts(
+            2,
+            180,
+            180,
+            0,
+            0,
+            ActivityPhase::Running,
+            &policy,
+            PresenceChannel::Ambient
+        )
+        .emotion,
+        FoxEmotion::Unimpressed
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(ActivityCapture::new(tmp.path(), "", "agent-0").is_err());
+    let cap = ActivityCapture::new(tmp.path(), "s1", "a1").unwrap();
+    assert!(cap
+        .write(
+            "t1",
+            ActivityPhase::Completed,
+            serde_json::json!("ok"),
+            false
+        )
+        .is_ok());
 }

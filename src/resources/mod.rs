@@ -39,17 +39,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use crate::config::ResourceQuotas;
 pub use crate::lifecycle::{ResourceEvent, ResourceKind, ResourceState};
-pub use context::{session_id, Owner};
+pub use context::{current_owner, session_id, session_owner, session_owner_of, Owner};
 pub use disk::DiskManager;
-pub use driver::{Probe, ResourceDriver, SystemDriver};
-pub use gpu::GpuManager;
+pub use driver::{process_start_time, Probe, ResourceDriver, SystemDriver};
+pub use gpu::{GpuDevice, GpuManager};
 pub use hardware::{
     global_resource_pressure, ResourceManager, ResourcePressure, ResourceRequest,
     ResourceReservation, ResourceUsage,
 };
 pub use memory::MemoryManager;
 pub use quotas::AdaptiveQuotas;
+pub use reaper::ReapReport;
 pub use registry::{NewResource, ResourceRegistry, SessionRecord, TransitionError};
 pub use teardown::{DrainReport, TeardownPolicy};
 
