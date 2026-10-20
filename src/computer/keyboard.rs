@@ -394,13 +394,6 @@ impl KeyboardController {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             if !text.is_empty() {
-                if self.typing_profile.base_delay_ms > 0 {
-                    for ch in text.chars() {
-                        let delay = self.typing_profile.base_delay_ms;
-                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                        debug!("Typed: '{}'", ch);
-                    }
-                }
                 // Never silently succeed without typing anything.
                 bail!("keyboard type_text is not supported on this platform");
             }
@@ -511,6 +504,13 @@ impl KeyboardController {
     pub async fn key_down(&self, key: &str) -> Result<()> {
         if !self.rate_limiter.check() {
             bail!("Keyboard action rate limit exceeded");
+        }
+
+        if is_blocked_combo(key) {
+            bail!(
+                "Key '{}' is blocked for safety. Blocked combos cannot be executed.",
+                key
+            );
         }
 
         let mapped = map_key_name(key);

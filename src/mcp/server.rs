@@ -720,6 +720,14 @@ impl McpServer {
 
         match result {
             Ok(result) => {
+                // Honor structured tool error indicators (AGENTS.md Rule 3)
+                // before redacting the payload into text.
+                let is_error = result
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || result.get("success").and_then(Value::as_bool) == Some(false);
+
                 // Convert tool result to MCP content format, secrets
                 // redacted before the content leaves the process.
                 let text = redact_tool_result(result);
@@ -731,7 +739,7 @@ impl McpServer {
                             "text": text
                         }
                     ],
-                    "isError": false
+                    "isError": is_error
                 });
                 (Some(response), None)
             }

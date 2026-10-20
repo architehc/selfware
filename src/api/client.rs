@@ -1168,6 +1168,7 @@ impl ApiClient {
         max_tokens: Option<usize>,
         stop: Option<Vec<String>>,
     ) -> Result<CompletionResponse> {
+        crate::safety::killswitch::check_killswitch(None)?;
         let _call_timing =
             self.usage_ledger
                 .timing_guard(&self.config.model, "completion", Instant::now());
@@ -2908,6 +2909,7 @@ impl ApiClient {
         thinking: ThinkingMode,
         profile: &crate::config::ModelProfile,
     ) -> Result<ChatResponse> {
+        crate::safety::killswitch::check_killswitch(None)?;
         // Profile calls (audits, swarm members) are billable LLM calls too —
         // their wall time folds into the same run latency stats.
         let _call_timing =

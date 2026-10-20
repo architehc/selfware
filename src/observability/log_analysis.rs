@@ -909,62 +909,66 @@ impl RootCauseAnalyzer {
     }
 
     fn add_default_rules(&mut self) {
-        // Connection refused
-        if let Ok(pattern) = regex::Regex::new(r"(?i)connection refused|ECONNREFUSED") {
-            self.rules.push(AnalysisRule {
-                name: "connection_refused".to_string(),
-                pattern,
-                category: RootCauseCategory::Network,
-                description: "Service connection refused - target service may be down".to_string(),
-                fix: "Check if target service is running and accessible".to_string(),
+        static RE_CONNECTION_REFUSED: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"(?i)connection refused|ECONNREFUSED")
+                    .expect("valid connection_refused regex")
             });
-        }
+        static RE_OOM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?i)out of memory|OOM|memory exhausted").expect("valid oom regex")
+        });
+        static RE_TIMEOUT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?i)timeout|timed out|deadline exceeded")
+                .expect("valid timeout regex")
+        });
+        static RE_PERMISSION_DENIED: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"(?i)permission denied|access denied|forbidden|EACCES")
+                    .expect("valid permission_denied regex")
+            });
+        static RE_DISK_FULL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?i)no space left|disk full|ENOSPC").expect("valid disk_full regex")
+        });
 
-        // Out of memory
-        if let Ok(pattern) = regex::Regex::new(r"(?i)out of memory|OOM|memory exhausted") {
-            self.rules.push(AnalysisRule {
-                name: "out_of_memory".to_string(),
-                pattern,
-                category: RootCauseCategory::Resource,
-                description: "Memory exhaustion detected".to_string(),
-                fix: "Increase memory limits or optimize memory usage".to_string(),
-            });
-        }
+        self.rules.push(AnalysisRule {
+            name: "connection_refused".to_string(),
+            pattern: RE_CONNECTION_REFUSED.clone(),
+            category: RootCauseCategory::Network,
+            description: "Service connection refused - target service may be down".to_string(),
+            fix: "Check if target service is running and accessible".to_string(),
+        });
 
-        // Timeout
-        if let Ok(pattern) = regex::Regex::new(r"(?i)timeout|timed out|deadline exceeded") {
-            self.rules.push(AnalysisRule {
-                name: "timeout".to_string(),
-                pattern,
-                category: RootCauseCategory::Network,
-                description: "Operation timed out".to_string(),
-                fix: "Check network latency and increase timeout if needed".to_string(),
-            });
-        }
+        self.rules.push(AnalysisRule {
+            name: "out_of_memory".to_string(),
+            pattern: RE_OOM.clone(),
+            category: RootCauseCategory::Resource,
+            description: "Memory exhaustion detected".to_string(),
+            fix: "Increase memory limits or optimize memory usage".to_string(),
+        });
 
-        // Permission denied
-        if let Ok(pattern) =
-            regex::Regex::new(r"(?i)permission denied|access denied|forbidden|EACCES")
-        {
-            self.rules.push(AnalysisRule {
-                name: "permission_denied".to_string(),
-                pattern,
-                category: RootCauseCategory::Configuration,
-                description: "Permission/access issue".to_string(),
-                fix: "Check file permissions and access credentials".to_string(),
-            });
-        }
+        self.rules.push(AnalysisRule {
+            name: "timeout".to_string(),
+            pattern: RE_TIMEOUT.clone(),
+            category: RootCauseCategory::Network,
+            description: "Operation timed out".to_string(),
+            fix: "Check network latency and increase timeout if needed".to_string(),
+        });
 
-        // Disk full
-        if let Ok(pattern) = regex::Regex::new(r"(?i)no space left|disk full|ENOSPC") {
-            self.rules.push(AnalysisRule {
-                name: "disk_full".to_string(),
-                pattern,
-                category: RootCauseCategory::Resource,
-                description: "Disk space exhausted".to_string(),
-                fix: "Free up disk space or add more storage".to_string(),
-            });
-        }
+        self.rules.push(AnalysisRule {
+            name: "permission_denied".to_string(),
+            pattern: RE_PERMISSION_DENIED.clone(),
+            category: RootCauseCategory::Configuration,
+            description: "Permission/access issue".to_string(),
+            fix: "Check file permissions and access credentials".to_string(),
+        });
+
+        self.rules.push(AnalysisRule {
+            name: "disk_full".to_string(),
+            pattern: RE_DISK_FULL.clone(),
+            category: RootCauseCategory::Resource,
+            description: "Disk space exhausted".to_string(),
+            fix: "Free up disk space or add more storage".to_string(),
+        });
     }
 
     /// Analyze log entries for root cause

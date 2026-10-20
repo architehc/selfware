@@ -222,7 +222,7 @@ impl StreamingResponse {
             let mut accumulator = ToolCallAccumulator::new();
             let chunk_timeout = self.chunk_timeout;
             let deadline = self.deadline;
-            let mut saw_valid_event = false;
+            let mut saw_terminal_event = false;
             let mut received_bytes = 0usize;
             let response_byte_limit = self.response_byte_limit;
 
@@ -310,7 +310,12 @@ impl StreamingResponse {
                             buffer = buffer[pos + 2..].to_string();
 
                             for mut chunk in parse_sse_event(&event, &mut accumulator) {
-                                saw_valid_event = true;
+                                if matches!(
+                                    &chunk,
+                                    StreamChunk::Done | StreamChunk::FinishReason(_)
+                                ) {
+                                    saw_terminal_event = true;
+                                }
                                 observe_attempt(&attempt, &chunk);
                                 if let StreamChunk::Usage(usage, _) = &mut chunk {
                                     super::usage::add_response_usage(usage, &prior_usage);
@@ -345,7 +350,9 @@ impl StreamingResponse {
             let remaining = buffer.trim().to_string();
             if !remaining.is_empty() {
                 for mut chunk in parse_sse_event(&remaining, &mut accumulator) {
-                    saw_valid_event = true;
+                    if matches!(&chunk, StreamChunk::Done | StreamChunk::FinishReason(_)) {
+                        saw_terminal_event = true;
+                    }
                     observe_attempt(&attempt, &chunk);
                     if let StreamChunk::Usage(usage, _) = &mut chunk {
                         super::usage::add_response_usage(usage, &prior_usage);
@@ -359,15 +366,15 @@ impl StreamingResponse {
 
             // Flush any remaining accumulated tool calls
             for call in accumulator.flush() {
-                saw_valid_event = true;
                 if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
                     warn!("Streaming receiver dropped while flushing final tool calls");
                     return;
                 }
             }
-            // A clean EOF after valid SSE events is accepted by collect(),
-            // including providers that finish with finish_reason but no [DONE].
-            if saw_valid_event {
+            // Only mark the attempt Completed when an accepted terminal
+            // indication ([DONE] or finish_reason) arrived before EOF,
+            // matching collect()'s truncated-stream rejection.
+            if saw_terminal_event {
                 if let Some(attempt) = &attempt {
                     attempt.complete();
                 }

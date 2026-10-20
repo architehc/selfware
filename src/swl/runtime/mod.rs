@@ -248,6 +248,9 @@ pub struct SwlRuntime {
     /// Gates every workflow-step tool call the same way the CLI/TUI agent
     /// loop and MCP server do. See `execute_tool_call`.
     safety: crate::safety::SafetyChecker,
+    /// Optional guardrail enforcer shared with `GuardedSwlRuntime` so
+    /// `PreTool` and `PostTool` guardrails are evaluated on every tool call.
+    pub(crate) enforcer: Option<Arc<Mutex<crate::swl::guardrails::GuardrailEnforcer>>>,
 }
 
 /// Load the safety config for an SWL runtime. Falls back to defaults (which
@@ -280,6 +283,7 @@ impl SwlRuntime {
             max_tool_iterations: 50,
             workflow_name: None,
             safety: crate::safety::SafetyChecker::new(&safety_config),
+            enforcer: None,
         }
     }
 
@@ -294,6 +298,7 @@ impl SwlRuntime {
             max_tool_iterations: 50,
             workflow_name: None,
             safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
+            enforcer: None,
         }
     }
 
@@ -312,6 +317,7 @@ impl SwlRuntime {
             max_tool_iterations: 50,
             workflow_name: None,
             safety: crate::safety::SafetyChecker::new(&config.safety),
+            enforcer: None,
         }
     }
 
@@ -333,7 +339,17 @@ impl SwlRuntime {
             max_tool_iterations: 50,
             workflow_name: Some(workflow_name.to_string()),
             safety: crate::safety::SafetyChecker::new(&safety_config),
+            enforcer: None,
         })
+    }
+
+    /// Attach a guardrail enforcer for pre/post tool evaluation.
+    pub(crate) fn with_enforcer(
+        mut self,
+        enforcer: Arc<Mutex<crate::swl::guardrails::GuardrailEnforcer>>,
+    ) -> Self {
+        self.enforcer = Some(enforcer);
+        self
     }
 
     /// Set the maximum number of tool iterations per agent execution
@@ -524,14 +540,10 @@ impl SwlRuntime {
         for (agent_name, agent) in &doc.agents {
             let agent_name = agent_name.clone();
             let agent = agent.clone();
-            let client = Arc::clone(&self.client);
-            let tool_registry = Arc::clone(&self.tool_registry);
+            let runtime = self.clone();
             let context = Arc::clone(&self.context);
-            let max_iterations = self.max_tool_iterations;
 
             let handle = tokio::spawn(async move {
-                let runtime = SwlRuntime::with_tool_registry(client, tool_registry)
-                    .with_max_tool_iterations(max_iterations);
                 let output = runtime.execute_agent(&agent_name, &agent).await?;
 
                 // Store in shared context
@@ -957,13 +969,55 @@ Wait for tool results before proceeding. When done, respond with plain text only
         // src/safety/ applied.
         self.safety.check_tool_call(tool_call)?;
 
+        if let Some(enforcer_arc) = &self.enforcer {
+            let pre_ctx = crate::swl::guardrails::GuardrailContext::new()
+                .with_current_tool(&tool_call.function.name)
+                .with_tool_input(&tool_call.function.arguments);
+            let summary = {
+                let enforcer = enforcer_arc.lock().await;
+                enforcer
+                    .check(crate::swl::guardrails::GuardrailType::PreTool, &pre_ctx)
+                    .await?
+            };
+            if summary.should_block() {
+                anyhow::bail!(
+                    "Tool '{}' blocked by pre-tool guardrails ({} violation(s))",
+                    tool_call.function.name,
+                    summary.blocking_violations().len()
+                );
+            }
+        }
+
         // Parse arguments
         let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
 
         // Execute the tool
-        self.tool_registry
+        let result = self
+            .tool_registry
             .execute(&tool_call.function.name, args)
-            .await
+            .await?;
+
+        if let Some(enforcer_arc) = &self.enforcer {
+            let post_ctx = crate::swl::guardrails::GuardrailContext::new()
+                .with_current_tool(&tool_call.function.name)
+                .with_tool_input(&tool_call.function.arguments)
+                .with_tool_output(result.to_string());
+            let summary = {
+                let enforcer = enforcer_arc.lock().await;
+                enforcer
+                    .check(crate::swl::guardrails::GuardrailType::PostTool, &post_ctx)
+                    .await?
+            };
+            if summary.should_block() {
+                anyhow::bail!(
+                    "Tool '{}' output blocked by post-tool guardrails ({} violation(s))",
+                    tool_call.function.name,
+                    summary.blocking_violations().len()
+                );
+            }
+        }
+
+        Ok(result)
     }
 
     /// Get execution context
@@ -1108,6 +1162,7 @@ impl Clone for SwlRuntime {
             max_tool_iterations: self.max_tool_iterations,
             workflow_name: self.workflow_name.clone(),
             safety: crate::safety::SafetyChecker::new(&self.safety.config),
+            enforcer: self.enforcer.as_ref().map(Arc::clone),
         }
     }
 }

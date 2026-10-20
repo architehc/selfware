@@ -38,27 +38,31 @@ pub struct GuardedSwlRuntime {
 impl GuardedSwlRuntime {
     /// Create a new guarded runtime with API client
     pub fn new(client: Arc<ApiClient>) -> Self {
+        let enforcer = Arc::new(Mutex::new(GuardrailEnforcer::new()));
         Self {
-            base: SwlRuntime::new(client),
-            enforcer: Arc::new(Mutex::new(GuardrailEnforcer::new())),
+            base: SwlRuntime::new(client).with_enforcer(Arc::clone(&enforcer)),
+            enforcer,
             current_workflow: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Create a new guarded runtime with a custom tool registry
     pub fn with_tool_registry(client: Arc<ApiClient>, tool_registry: Arc<ToolRegistry>) -> Self {
+        let enforcer = Arc::new(Mutex::new(GuardrailEnforcer::new()));
         Self {
-            base: SwlRuntime::with_tool_registry(client, tool_registry),
-            enforcer: Arc::new(Mutex::new(GuardrailEnforcer::new())),
+            base: SwlRuntime::with_tool_registry(client, tool_registry)
+                .with_enforcer(Arc::clone(&enforcer)),
+            enforcer,
             current_workflow: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Create a dry-run guarded runtime
     pub fn new_dry_run() -> Self {
+        let enforcer = Arc::new(Mutex::new(GuardrailEnforcer::new()));
         Self {
-            base: SwlRuntime::new_dry_run(),
-            enforcer: Arc::new(Mutex::new(GuardrailEnforcer::new())),
+            base: SwlRuntime::new_dry_run().with_enforcer(Arc::clone(&enforcer)),
+            enforcer,
             current_workflow: Arc::new(Mutex::new(None)),
         }
     }
@@ -159,7 +163,10 @@ impl GuardedSwlRuntime {
         }
 
         // Record telemetry
-        let _duration_ms = workflow_start.elapsed().as_millis() as u64;
+        let duration_ms = workflow_start.elapsed().as_millis() as u64;
+        self.base
+            .last_workflow_duration_ms
+            .store(duration_ms, Ordering::Relaxed);
 
         match &result {
             Ok(res) if res.status == super::ExecutionStatus::Completed => {
@@ -632,7 +639,8 @@ impl GuardedRuntimeBuilder {
 
     /// Build the runtime
     pub fn build(self) -> GuardedSwlRuntime {
-        if self.dry_run || self.client.is_none() {
+        let enforcer = Arc::new(Mutex::new(self.enforcer));
+        let mut runtime = if self.dry_run || self.client.is_none() {
             GuardedSwlRuntime::new_dry_run()
         } else if let Some(client) = self.client {
             if let Some(registry) = self.tool_registry {
@@ -642,7 +650,10 @@ impl GuardedRuntimeBuilder {
             }
         } else {
             GuardedSwlRuntime::new_dry_run()
-        }
+        };
+        runtime.base = runtime.base.with_enforcer(Arc::clone(&enforcer));
+        runtime.enforcer = enforcer;
+        runtime
     }
 }
 

@@ -102,6 +102,7 @@ impl LongTermStore {
 
         let mut stored = 0;
         let mut errors = Vec::new();
+        let mut persisted_records = Vec::new();
 
         for record in records {
             let safe_id = sanitize_record_id(&record.id);
@@ -109,10 +110,15 @@ impl LongTermStore {
 
             match serde_json::to_string_pretty(record) {
                 Ok(json) => {
-                    if let Err(e) = tokio::fs::write(&path, &json).await {
+                    if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+                        &path,
+                        json.as_bytes(),
+                        0o600,
+                    ) {
                         errors.push(format!("Failed to write {}: {e}", record.id));
                     } else {
                         stored += 1;
+                        persisted_records.push(record);
                         debug!(
                             record_id = %record.id,
                             sources = record.source_ids.len(),
@@ -126,9 +132,9 @@ impl LongTermStore {
             }
         }
 
-        // Index records into the in-memory vector store for retrieval.
+        // Index only persisted records into the in-memory vector store for retrieval.
         // Embedding failures are non-fatal — the JSON is already persisted.
-        for record in records {
+        for record in persisted_records {
             let text = record_text(record);
             match self.embedder.embed(&text).await {
                 Ok(embedding) => {
@@ -187,7 +193,16 @@ impl LongTermStore {
         }
 
         for path in json_paths {
-            let content = std::fs::read_to_string(&path)?;
+            let content = match crate::tools::file::read_to_string_capped(
+                &path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            ) {
+                Ok(content) => content,
+                Err(e) => {
+                    tracing::warn!("Failed to read {}: {e}", path.display());
+                    continue;
+                }
+            };
             match serde_json::from_str::<TemporalRecord>(&content) {
                 Ok(record) => records.push(record),
                 Err(e) => {

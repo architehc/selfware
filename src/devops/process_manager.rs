@@ -1861,16 +1861,25 @@ async fn monitor_process(
                             ));
                         } else {
                             restart_health_deadline = None;
-                            // Mark as running after brief startup
+                            // Mark as running after brief startup only if the
+                            // replacement is still alive (AGENTS.md Rule 3).
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                            let mut procs = processes.write().await;
-                            if let Some(proc) = procs.get_mut(&id).filter(|proc| {
-                                proc.generation == generation
-                                    && proc.incarnation == u64::from(restart_attempt)
-                            }) {
-                                if matches!(proc.status, ProcessStatus::Starting) {
-                                    proc.status = ProcessStatus::Running;
-                                    proc.health_matched = true;
+                            let still_alive = {
+                                let mut child_guard = child_handle.write().await;
+                                child_guard
+                                    .as_mut()
+                                    .is_some_and(|c| matches!(try_wait_managed(c), Ok(None)))
+                            };
+                            if still_alive {
+                                let mut procs = processes.write().await;
+                                if let Some(proc) = procs.get_mut(&id).filter(|proc| {
+                                    proc.generation == generation
+                                        && proc.incarnation == u64::from(restart_attempt)
+                                }) {
+                                    if matches!(proc.status, ProcessStatus::Starting) {
+                                        proc.status = ProcessStatus::Running;
+                                        proc.health_matched = true;
+                                    }
                                 }
                             }
                         }

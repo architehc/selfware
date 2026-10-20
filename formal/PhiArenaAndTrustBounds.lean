@@ -2195,6 +2195,553 @@ theorem health_prediction_monotone_in_unhealthy
   all_goals try split
   all_goals (simp [PredictedHealthModel.severity]; try omega)
 
+/-! ## Part XXIX — PA29: `evolution::investigate` 4-Check Static Governance & Safety Veto Lattice (`src/evolution/investigate.rs`) -/
+
+/-- Attempt execution status (`evolution::tree_log::AttemptStatus`). -/
+inductive AttemptStatusModel where
+  | baseline
+  | evaluated
+  | compileFailed
+  | testFailed
+  | clippyFailed
+  | formatFailed
+  | safetyRejected
+  | patchFailed
+  | buildFailed
+  | timeout
+  | duplicateRejected
+  | cancelled
+  | internalError
+  deriving DecidableEq, Repr
+
+/-- Provenance check outcome in `simulate_10000_reviewer_governance_resolved` when `diff_sha256.len() == 64`
+    and `is_verified_success` holds. -/
+inductive ProvenanceCheckStatus where
+  | verified
+  | incomplete
+  | integrityMismatch
+  deriving DecidableEq, Repr
+
+/-- Governance verdict (`evolution::investigate::GovernanceDecision`). -/
+inductive GovernanceDecisionModel where
+  | approveForPromotion
+  | conditionalClarification
+  | quarantineForExperimentation
+  | hardRejectVeto
+  deriving DecidableEq, Repr
+
+def GovernanceDecisionModel.label : GovernanceDecisionModel → String
+  | .approveForPromotion => "approve_for_promotion"
+  | .conditionalClarification => "conditional_clarification"
+  | .quarantineForExperimentation => "quarantine_for_experimentation"
+  | .hardRejectVeto => "hard_reject_veto"
+
+/-- Input to the 4-check static and empirical governance panel (`simulate_10000_reviewer_governance_resolved`). -/
+structure GovernanceInput where
+  status              : AttemptStatusModel
+  hasCompositeScore   : Bool
+  protectedPathsClean : Bool
+  hasKillswitchBypass : Bool
+  merkleMismatch      : Bool
+  hasCriticalFinding  : Bool
+  hasWarningFinding   : Bool
+  diffSha256Valid     : Bool
+  provenance          : ProvenanceCheckStatus
+  deriving DecidableEq, Repr
+
+/-- Synthesized 4-perspective governance outcome (`evolution::investigate::ReviewerConsensus`). -/
+structure GovernanceConsensusModel where
+  votesApprove       : Nat
+  votesClarification : Nat
+  votesQuarantine    : Nat
+  votesVeto          : Nat
+  decision           : GovernanceDecisionModel
+  hasSafetyVeto      : Bool
+  deriving DecidableEq, Repr
+
+def evalSafetyCheck (safetyVeto isVerifiedSuccess hasCritical : Bool) : Nat × Nat × Nat × Nat :=
+  if safetyVeto || !isVerifiedSuccess then (0, 0, 0, 1)
+  else if hasCritical then (0, 0, 1, 0)
+  else (1, 0, 0, 0)
+
+def evalSystemsCheck (status : AttemptStatusModel) (isVerifiedSuccess hasCritical : Bool) : Nat × Nat × Nat × Nat :=
+  if status == .timeout || status == .buildFailed || status == .internalError then
+    (0, 0, 0, 1)
+  else if status == .cancelled || !isVerifiedSuccess || hasCritical then
+    (0, 0, 1, 0)
+  else
+    (1, 0, 0, 0)
+
+def evalSweCheck (status : AttemptStatusModel) (isVerifiedSuccess hasCritical hasWarning : Bool) : Nat × Nat × Nat × Nat :=
+  let sweFailed :=
+    status == .compileFailed || status == .buildFailed ||
+    status == .testFailed || status == .clippyFailed ||
+    status == .formatFailed || status == .patchFailed
+  if sweFailed then (0, 0, 0, 1)
+  else if !isVerifiedSuccess || hasCritical then (0, 0, 1, 0)
+  else if hasWarning then (0, 1, 0, 0)
+  else (1, 0, 0, 0)
+
+def evalProvenanceCheck
+    (status : AttemptStatusModel)
+    (isVerifiedSuccess diffSha256Valid : Bool)
+    (prov : ProvenanceCheckStatus) : Nat × Nat × Nat × Nat × Bool :=
+  if !diffSha256Valid then (0, 0, 0, 1, true)
+  else if status == .internalError || !isVerifiedSuccess then (0, 0, 1, 0, false)
+  else match prov with
+    | .integrityMismatch => (0, 0, 0, 1, true)
+    | .verified => (1, 0, 0, 0, false)
+    | .incomplete => (0, 1, 0, 0, false)
+
+/-- Evaluates the 4 deterministic static & empirical governance checks
+    (Safety, Systems, Architecture, Provenance) in `simulate_10000_reviewer_governance_resolved`. -/
+def evaluateGovernance4Check (inp : GovernanceInput) : GovernanceConsensusModel :=
+  let isVerifiedSuccess :=
+    (inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline
+  let safetyVeto :=
+    !inp.protectedPathsClean || inp.hasKillswitchBypass || inp.merkleMismatch ||
+    inp.status == .safetyRejected
+  let (sApp, sCla, sQua, sVet) :=
+    evalSafetyCheck safetyVeto isVerifiedSuccess inp.hasCriticalFinding
+  let (sysApp, sysCla, sysQua, sysVet) :=
+    evalSystemsCheck inp.status isVerifiedSuccess inp.hasCriticalFinding
+  let (sweApp, sweCla, sweQua, sweVet) :=
+    evalSweCheck inp.status isVerifiedSuccess inp.hasCriticalFinding inp.hasWarningFinding
+  let (provApp, provCla, provQua, provVet, integrityVeto) :=
+    evalProvenanceCheck inp.status isVerifiedSuccess inp.diffSha256Valid inp.provenance
+  let totApp := sApp + sysApp + sweApp + provApp
+  let totCla := sCla + sysCla + sweCla + provCla
+  let totQua := sQua + sysQua + sweQua + provQua
+  let totVet := sVet + sysVet + sweVet + provVet
+  let decision : GovernanceDecisionModel :=
+    if safetyVeto || integrityVeto || decide (totVet ≥ 1) || !isVerifiedSuccess then
+      .hardRejectVeto
+    else if decide (totApp * 100 ≥ 85 * 4) then
+      .approveForPromotion
+    else if decide (totApp * 100 ≥ 65 * 4) then
+      .conditionalClarification
+    else
+      .quarantineForExperimentation
+  { votesApprove := totApp
+  , votesClarification := totCla
+  , votesQuarantine := totQua
+  , votesVeto := totVet
+  , decision := decision
+  , hasSafetyVeto := safetyVeto || integrityVeto
+  }
+
+theorem protected_path_breach_always_vetoes (inp : GovernanceInput)
+    (h : inp.protectedPathsClean = false) :
+    (evaluateGovernance4Check inp).decision = .hardRejectVeto ∧
+    (evaluateGovernance4Check inp).hasSafetyVeto = true := by
+  unfold evaluateGovernance4Check
+  simp [h]
+
+theorem killswitch_or_merkle_breach_always_vetoes (inp : GovernanceInput)
+    (h : inp.hasKillswitchBypass = true ∨ inp.merkleMismatch = true) :
+    (evaluateGovernance4Check inp).decision = .hardRejectVeto ∧
+    (evaluateGovernance4Check inp).hasSafetyVeto = true := by
+  unfold evaluateGovernance4Check
+  rcases h with hKill | hMerk
+  · cases inp.protectedPathsClean <;> simp [hKill]
+  · cases inp.protectedPathsClean <;> cases inp.hasKillswitchBypass <;> simp [hMerk]
+
+theorem unverified_attempt_never_promoted (inp : GovernanceInput)
+    (hNotEval : inp.status ≠ .evaluated) (hNotBase : inp.status ≠ .baseline) :
+    (evaluateGovernance4Check inp).decision = .hardRejectVeto := by
+  unfold evaluateGovernance4Check
+  have h1 : (inp.status == .evaluated) = false := beq_false_of_ne hNotEval
+  have h2 : (inp.status == .baseline) = false := beq_false_of_ne hNotBase
+  simp [h1, h2]
+
+theorem evalSafety_crit_zero (sv ver : Bool) : (evalSafetyCheck sv ver true).1 = 0 := by
+  unfold evalSafetyCheck
+  split <;> rfl
+
+theorem evalSystems_crit_zero (st : AttemptStatusModel) (ver : Bool) :
+    (evalSystemsCheck st ver true).1 = 0 := by
+  unfold evalSystemsCheck
+  split
+  · rfl
+  · simp
+
+theorem evalSwe_crit_zero (st : AttemptStatusModel) (ver warn : Bool) :
+    (evalSweCheck st ver true warn).1 = 0 := by
+  unfold evalSweCheck
+  dsimp
+  split
+  · rfl
+  · simp
+
+theorem evalProv_app_le_one (st : AttemptStatusModel) (ver sha : Bool) (p : ProvenanceCheckStatus) :
+    (evalProvenanceCheck st ver sha p).1 ≤ 1 := by
+  unfold evalProvenanceCheck
+  split
+  · omega
+  · split
+    · omega
+    · cases p <;> decide
+
+theorem critical_finding_blocks_promotion (inp : GovernanceInput)
+    (hCrit : inp.hasCriticalFinding = true) :
+    (evaluateGovernance4Check inp).decision ≠ .approveForPromotion := by
+  unfold evaluateGovernance4Check
+  dsimp
+  rw [hCrit]
+  have hs := evalSafety_crit_zero
+    (!inp.protectedPathsClean || inp.hasKillswitchBypass || inp.merkleMismatch || inp.status == .safetyRejected)
+    ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline)
+  have hsys := evalSystems_crit_zero inp.status
+    ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline)
+  have hswe := evalSwe_crit_zero inp.status
+    ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline)
+    inp.hasWarningFinding
+  have hprov := evalProv_app_le_one inp.status
+    ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline)
+    inp.diffSha256Valid inp.provenance
+  have hNot85 : decide ((
+    (evalSafetyCheck (!inp.protectedPathsClean || inp.hasKillswitchBypass || inp.merkleMismatch || inp.status == .safetyRejected) ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline) true).1 +
+    (evalSystemsCheck inp.status ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline) true).1 +
+    (evalSweCheck inp.status ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline) true inp.hasWarningFinding).1 +
+    (evalProvenanceCheck inp.status ((inp.status == .evaluated && inp.hasCompositeScore) || inp.status == .baseline) inp.diffSha256Valid inp.provenance).1) * 100 ≥ 85 * 4) = false := by
+    rw [hs, hsys, hswe]
+    simp only [Nat.zero_add, decide_eq_false_iff_not]
+    omega
+  rw [hNot85]
+  split
+  · decide
+  · split
+    · contradiction
+    · split <;> decide
+
+/-! ## Part XXX — PA30: `evolution::micro_mode` Small-Model Classification & Hypothesis Gate (`src/evolution/micro_mode.rs`) -/
+
+def microMaxFiles : Nat := 3
+def microMaxEdits : Nat := 2
+def microMaxSearchChars : Nat := 500
+def microMaxReplaceChars : Nat := 1000
+
+/-- Word-bounded small-model classification (`evolution::micro_mode::is_micro_model`). -/
+def classifyMicroModelName
+    (hasTinyOrSmallKeyword hasMicroSizeToken prevBoundaryNonAlnum nextBoundaryNonAlnum : Bool) : Bool :=
+  hasTinyOrSmallKeyword || (hasMicroSizeToken && prevBoundaryNonAlnum && nextBoundaryNonAlnum)
+
+/-- Population size clamp in `evolution::micro_mode::build_micro_system_prompt`: `population_size.min(3)`. -/
+def clampMicroPopulation (populationSize : Nat) : Nat :=
+  if populationSize ≤ 3 then populationSize else 3
+
+/-- Validation outcome for `evolution::micro_mode::validate_micro_hypothesis`. -/
+inductive MicroValidationOutcome where
+  | ok
+  | errTargetFiles
+  | errTargetProtected
+  | errEditCount
+  | errEditProtected
+  | errSearchLen
+  | errReplaceLen
+  | errDiffFiles
+  | errDiffProtected
+  | errDiffHunks
+  deriving DecidableEq, Repr
+
+def MicroValidationOutcome.isOk : MicroValidationOutcome → Bool
+  | .ok => true
+  | _ => false
+
+def MicroValidationOutcome.label : MicroValidationOutcome → String
+  | .ok => "ok:true"
+  | .errTargetFiles => "err:target_files"
+  | .errTargetProtected => "err:target_protected"
+  | .errEditCount => "err:edit_count"
+  | .errEditProtected => "err:edit_protected"
+  | .errSearchLen => "err:search_len"
+  | .errReplaceLen => "err:replace_len"
+  | .errDiffFiles => "err:diff_files"
+  | .errDiffProtected => "err:diff_protected"
+  | .errDiffHunks => "err:diff_hunks"
+
+structure MicroHypothesisInput where
+  targetFileCount    : Nat
+  targetHasProtected : Bool
+  isJsonPatch        : Bool
+  editCount          : Nat
+  editHasProtected   : Bool
+  maxSearchLen       : Nat
+  maxReplaceLen      : Nat
+  diffFileCount      : Nat
+  diffHasProtected   : Bool
+  diffHunkCount      : Nat
+  deriving DecidableEq, Repr
+
+/-- Models `evolution::micro_mode::validate_micro_hypothesis`. -/
+def validateMicroHypothesis (inp : MicroHypothesisInput) : MicroValidationOutcome :=
+  if inp.targetFileCount > microMaxFiles then
+    .errTargetFiles
+  else if inp.targetHasProtected then
+    .errTargetProtected
+  else if inp.isJsonPatch then
+    if inp.editCount > microMaxEdits then
+      .errEditCount
+    else if inp.editHasProtected then
+      .errEditProtected
+    else if inp.maxSearchLen > microMaxSearchChars then
+      .errSearchLen
+    else if inp.maxReplaceLen > microMaxReplaceChars then
+      .errReplaceLen
+    else
+      .ok
+  else
+    if inp.diffFileCount > microMaxFiles then
+      .errDiffFiles
+    else if inp.diffHasProtected then
+      .errDiffProtected
+    else if inp.diffHunkCount > microMaxEdits then
+      .errDiffHunks
+    else
+      .ok
+
+theorem word_boundary_blocks_false_positive_micro
+    (hasMicro nextOk : Bool) :
+    classifyMicroModelName false hasMicro false nextOk = false := by
+  unfold classifyMicroModelName
+  cases hasMicro <;> rfl
+
+theorem micro_population_clamped_at_three (pop : Nat) :
+    clampMicroPopulation pop ≤ 3 := by
+  unfold clampMicroPopulation
+  split <;> omega
+
+theorem protected_target_or_edit_rejected_in_micro (inp : MicroHypothesisInput)
+    (h : inp.targetHasProtected = true ∨
+         (inp.isJsonPatch = true ∧ inp.editHasProtected = true) ∨
+         (inp.isJsonPatch = false ∧ inp.diffHasProtected = true)) :
+    (validateMicroHypothesis inp).isOk = false := by
+  unfold validateMicroHypothesis
+  rcases h with hT | ⟨hJ, hE⟩ | ⟨hNotJ, hD⟩
+  · rw [hT]
+    split <;> rfl
+  · rw [hJ, hE]
+    split
+    · rfl
+    · split
+      · rfl
+      · dsimp
+        split <;> rfl
+  · rw [hNotJ, hD]
+    split
+    · rfl
+    · split
+      · rfl
+      · dsimp
+        split <;> rfl
+
+theorem oversized_search_or_replace_rejected_in_micro (inp : MicroHypothesisInput)
+    (hJson : inp.isJsonPatch = true)
+    (hOver : inp.maxSearchLen > microMaxSearchChars ∨ inp.maxReplaceLen > microMaxReplaceChars) :
+    (validateMicroHypothesis inp).isOk = false := by
+  unfold validateMicroHypothesis
+  rw [hJson]
+  split
+  · rfl
+  · split
+    · rfl
+    · dsimp
+      split
+      · rfl
+      · split
+        · rfl
+        · split
+          · rfl
+          · split
+            · rfl
+            · rcases hOver with hS | hR <;> contradiction
+
+/-! ## Part XXXI — PA31: `cognitive::meta_learning` Strategy Effectiveness & PDVR Cycle Lattice (`src/cognitive/meta_learning.rs`, `src/cognitive/state.rs`) -/
+
+/-- Minimum attempts before exploration bonus expires (`attempts < 3` in `StrategyScore::priority_weight`). -/
+def minAttemptsWithoutExplorationBonus : Nat := 3
+
+/-- Success rate in percentage points (`0..=100`), matching `StrategyScore::success_rate`:
+    returns 50% prior when `attempts == 0`, else `(successes * 100) / attempts`. -/
+def strategySuccessRatePct (attempts successes : Nat) : Nat :=
+  if attempts = 0 then 50 else (successes * 100) / attempts
+
+/-- Exploration bonus in percentage points (`20` when `attempts < 3`, else `0`). -/
+def strategyExplorationBonusPct (attempts : Nat) : Nat :=
+  if attempts < minAttemptsWithoutExplorationBonus then 20 else 0
+
+/-- Priority weight in percentage points (`StrategyScore::priority_weight * 100`):
+    returns `0` when in cooldown, otherwise `0.5 * success_rate + 0.5 * avg_effectiveness.max(0.0) + exploration_bonus`. -/
+def strategyPriorityWeightPct
+    (inCooldown : Bool)
+    (attempts successes : Nat)
+    (avgEffNegative : Bool)
+    (avgEffMagPct : Nat) : Nat :=
+  if inCooldown then
+    0
+  else
+    let sr := strategySuccessRatePct attempts successes
+    let eff := if avgEffNegative then 0 else avgEffMagPct
+    let bonus := strategyExplorationBonusPct attempts
+    (sr + eff) / 2 + bonus
+
+/-- PDVR cycle phase (`cognitive::state::CyclePhase`). -/
+inductive CyclePhaseModel where
+  | plan
+  | doPhase
+  | verify
+  | reflect
+  deriving DecidableEq, Repr
+
+def CyclePhaseModel.asStr : CyclePhaseModel → String
+  | .plan => "plan"
+  | .doPhase => "do"
+  | .verify => "verify"
+  | .reflect => "reflect"
+
+/-- `CyclePhase::next` (`Plan -> Do -> Verify -> Reflect -> Plan`). -/
+def CyclePhaseModel.next : CyclePhaseModel → CyclePhaseModel
+  | .plan => .doPhase
+  | .doPhase => .verify
+  | .verify => .reflect
+  | .reflect => .plan
+
+/-- Working memory approach stack cap (`MAX_APPROACH_DEPTH = 20` in `src/cognitive/state.rs`). -/
+def maxApproachDepth : Nat := 20
+
+def capApproachStackDepth (pushed : Nat) : Nat :=
+  if pushed ≤ maxApproachDepth then pushed else maxApproachDepth
+
+theorem cooldown_always_zeros_priority_weight
+    (attempts successes mag : Nat) (neg : Bool) :
+    strategyPriorityWeightPct true attempts successes neg mag = 0 :=
+  rfl
+
+theorem negative_effectiveness_clamped_to_zero
+    (attempts successes mag : Nat) :
+    strategyPriorityWeightPct false attempts successes true mag =
+      strategyPriorityWeightPct false attempts successes false 0 :=
+  rfl
+
+theorem exploration_bonus_strictly_boosts_under_three
+    (sr eff : Nat) :
+    (sr + eff) / 2 + strategyExplorationBonusPct 1 >
+      (sr + eff) / 2 + strategyExplorationBonusPct 3 := by
+  have h1 : strategyExplorationBonusPct 1 = 20 := rfl
+  have h3 : strategyExplorationBonusPct 3 = 0 := rfl
+  rw [h1, h3]
+  omega
+
+theorem cycle_phase_four_step_period (p : CyclePhaseModel) :
+    p.next.next.next.next = p := by
+  cases p <;> rfl
+
+theorem cycle_phase_no_fixed_point (p : CyclePhaseModel) :
+    p.next ≠ p := by
+  cases p <;> decide
+
+theorem approach_stack_bounded_at_twenty (pushed : Nat) :
+    capApproachStackDepth pushed ≤ maxApproachDepth := by
+  unfold capApproachStackDepth maxApproachDepth
+  split <;> omega
+
+/-! ## Part XXXII — PA32: `orchestration::swarm::coordinator` Assigned-Agent Task Completion Lattice (`src/orchestration/swarm/coordinator.rs`) -/
+
+inductive SwarmTaskStatusModel where
+  | pending
+  | inProgress
+  | completed
+  | partialStatus
+  | failed
+  deriving DecidableEq, Repr
+
+def SwarmTaskStatusModel.label : SwarmTaskStatusModel → String
+  | .pending => "pending"
+  | .inProgress => "in_progress"
+  | .completed => "completed"
+  | .partialStatus => "partial"
+  | .failed => "failed"
+
+/-- Task status derivation in `Swarm::complete_task`:
+    - When `assignedCount == 0`, the task cannot complete and retains `currentStatus`.
+    - When `reportedAssignedCount < assignedCount`, not all assigned agents have reported, so `currentStatus` is retained.
+    - When all assigned agents have reported:
+      * `succeededAssignedCount == 0` -> `.failed`
+      * `succeededAssignedCount == assignedCount` -> `.completed`
+      * otherwise -> `.partialStatus`. -/
+def resolveSwarmTaskCompletion
+    (currentStatus : SwarmTaskStatusModel)
+    (assignedCount reportedAssignedCount succeededAssignedCount : Nat) : SwarmTaskStatusModel :=
+  if assignedCount = 0 then
+    currentStatus
+  else if reportedAssignedCount < assignedCount then
+    currentStatus
+  else if succeededAssignedCount = 0 then
+    .failed
+  else if succeededAssignedCount = assignedCount then
+    .completed
+  else
+    .partialStatus
+
+/-- Per-agent trust score update in percentage points (`Agent::complete_task` in `src/orchestration/swarm/types.rs`):
+    success adds 10% capped at 100%; failure subtracts 10% floored at 5%. -/
+def stepAgentTrustPct (trustPct : Nat) (success : Bool) : Nat :=
+  if success then
+    if trustPct + 10 ≤ 100 then trustPct + 10 else 100
+  else
+    if trustPct ≥ 15 then trustPct - 10 else 5
+
+theorem unassigned_task_never_completes
+    (st : SwarmTaskStatusModel) (rep succ : Nat) :
+    resolveSwarmTaskCompletion st 0 rep succ = st :=
+  rfl
+
+theorem incomplete_reporting_preserves_status
+    (st : SwarmTaskStatusModel) (assigned rep succ : Nat)
+    (hPos : assigned > 0) (hWait : rep < assigned) :
+    resolveSwarmTaskCompletion st assigned rep succ = st := by
+  unfold resolveSwarmTaskCompletion
+  have hNe : assigned ≠ 0 := by omega
+  simp [hNe, hWait]
+
+theorem all_failed_reports_yield_failed
+    (st : SwarmTaskStatusModel) (assigned : Nat) (hPos : assigned > 0) :
+    resolveSwarmTaskCompletion st assigned assigned 0 = .failed := by
+  unfold resolveSwarmTaskCompletion
+  have hNe : assigned ≠ 0 := by omega
+  have hNotLt : ¬(assigned < assigned) := Nat.lt_irrefl assigned
+  simp [hNe, hNotLt]
+
+theorem all_succeeded_reports_yield_completed
+    (st : SwarmTaskStatusModel) (assigned : Nat) (hPos : assigned > 0) :
+    resolveSwarmTaskCompletion st assigned assigned assigned = .completed := by
+  unfold resolveSwarmTaskCompletion
+  have hNe : assigned ≠ 0 := by omega
+  have hNotLt : ¬(assigned < assigned) := Nat.lt_irrefl assigned
+  simp [hNe, hNotLt]
+
+theorem mixed_reports_yield_partial
+    (st : SwarmTaskStatusModel) (assigned succ : Nat)
+    (hSome : succ > 0) (hNotAll : succ < assigned) :
+    resolveSwarmTaskCompletion st assigned assigned succ = .partialStatus := by
+  unfold resolveSwarmTaskCompletion
+  have hNe : assigned ≠ 0 := by omega
+  have hNotLt : ¬(assigned < assigned) := Nat.lt_irrefl assigned
+  have hSuccNe : succ ≠ 0 := by omega
+  have hSuccNeAss : succ ≠ assigned := by omega
+  simp [hNe, hNotLt, hSuccNe, hSuccNeAss]
+
+theorem agent_trust_bounded_in_5_to_100
+    (trust : Nat) (ok : Bool) (hHi : trust ≤ 100) :
+    5 ≤ stepAgentTrustPct trust ok ∧ stepAgentTrustPct trust ok ≤ 100 := by
+  cases ok
+  · unfold stepAgentTrustPct
+    dsimp
+    split <;> omega
+  · unfold stepAgentTrustPct
+    dsimp
+    split <;> omega
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -2577,7 +3124,142 @@ def exportTable : String :=
       s!"[\"self_healing:health_predictor_failure_imminent\",\"len=10,u=7,trend=0,rt=100\",\"{hpFail}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows) ++ "]"
+  -- 29–32. PA29–PA32 rows
+  let wave7Rows : List String :=
+    [ let gov1 := evaluateGovernance4Check {
+        status := .baseline, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .verified
+      }
+      s!"[\"investigate_governance:clean_verified_approved\",\"baseline:clean,prov=verified\",\"{gov1.decision.label}:app={gov1.votesApprove}:cla={gov1.votesClarification}:qua={gov1.votesQuarantine}:vet={gov1.votesVeto}:sveto={gov1.hasSafetyVeto}\"]"
+    , let govWarn := evaluateGovernance4Check {
+        status := .baseline, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := true, diffSha256Valid := true, provenance := .verified
+      }
+      let govInc := evaluateGovernance4Check {
+        status := .evaluated, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .incomplete
+      }
+      s!"[\"investigate_governance:warning_or_incomplete_clarification\",\"warn_finding_vs_incomplete_prov\",\"warn={govWarn.decision.label}:{govWarn.votesApprove}:{govWarn.votesClarification}:inc={govInc.decision.label}:{govInc.votesApprove}:{govInc.votesClarification}\"]"
+    , let govCrit := evaluateGovernance4Check {
+        status := .baseline, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := true,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .verified
+      }
+      s!"[\"investigate_governance:critical_finding_quarantined\",\"baseline:critical_unwrap_finding\",\"{govCrit.decision.label}:app={govCrit.votesApprove}:cla={govCrit.votesClarification}:qua={govCrit.votesQuarantine}:vet={govCrit.votesVeto}:sveto={govCrit.hasSafetyVeto}\"]"
+    , let govProt := evaluateGovernance4Check {
+        status := .baseline, hasCompositeScore := true, protectedPathsClean := false,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .verified
+      }
+      let govMerk := evaluateGovernance4Check {
+        status := .baseline, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := true, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .verified
+      }
+      s!"[\"investigate_governance:safety_or_merkle_breach_vetoed\",\"protected_path_or_merkle_mismatch\",\"prot={govProt.decision.label}:{govProt.hasSafetyVeto}:merkle={govMerk.decision.label}:{govMerk.hasSafetyVeto}\"]"
+    , let govHash := evaluateGovernance4Check {
+        status := .evaluated, hasCompositeScore := true, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .integrityMismatch
+      }
+      let govTest := evaluateGovernance4Check {
+        status := .testFailed, hasCompositeScore := false, protectedPathsClean := true,
+        hasKillswitchBypass := false, merkleMismatch := false, hasCriticalFinding := false,
+        hasWarningFinding := false, diffSha256Valid := true, provenance := .verified
+      }
+      s!"[\"investigate_governance:hash_mismatch_and_test_failure_vetoed\",\"patch_sha256_mismatch_vs_test_failed\",\"hash={govHash.decision.label}:{govHash.hasSafetyVeto}:{govHash.votesVeto}:test={govTest.decision.label}:{govTest.hasSafetyVeto}:{govTest.votesVeto}\"]"
+    , let m15b := classifyMicroModelName false true true true
+      let mSmall := classifyMicroModelName true false false false
+      let m32b := classifyMicroModelName false true false true
+      let m13b := classifyMicroModelName false true false true
+      let popClamp := clampMicroPopulation 8
+      s!"[\"micro_mode:model_classification_word_boundaries\",\"1.5b_small_vs_32b_13b_and_pop8\",\"1.5b={m15b}:small={mSmall}:32b={m32b}:13b={m13b}:pop_clamp={popClamp}\"]"
+    , let mvOk := validateMicroHypothesis {
+        targetFileCount := 2, targetHasProtected := false, isJsonPatch := true,
+        editCount := 2, editHasProtected := false, maxSearchLen := 500, maxReplaceLen := 1000,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      s!"[\"micro_mode:valid_json_hypothesis_accepted\",\"files=2,edits=2,search=500,replace=1000\",\"{mvOk.label}\"]"
+    , let mvFiles4 := validateMicroHypothesis {
+        targetFileCount := 4, targetHasProtected := false, isJsonPatch := true,
+        editCount := 1, editHasProtected := false, maxSearchLen := 20, maxReplaceLen := 20,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      let mvEdits3 := validateMicroHypothesis {
+        targetFileCount := 2, targetHasProtected := false, isJsonPatch := true,
+        editCount := 3, editHasProtected := false, maxSearchLen := 20, maxReplaceLen := 20,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      s!"[\"micro_mode:target_and_edit_limits_enforced\",\"target_files=4_vs_json_edits=3\",\"files4={mvFiles4.label}:edits3={mvEdits3.label}\"]"
+    , let mvProt := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := true,
+        editCount := 1, editHasProtected := true, maxSearchLen := 20, maxReplaceLen := 20,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      let mvSearch501 := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := true,
+        editCount := 1, editHasProtected := false, maxSearchLen := 501, maxReplaceLen := 20,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      let mvReplace1001 := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := true,
+        editCount := 1, editHasProtected := false, maxSearchLen := 20, maxReplaceLen := 1001,
+        diffFileCount := 0, diffHasProtected := false, diffHunkCount := 0
+      }
+      s!"[\"micro_mode:protected_path_and_search_replace_bounds\",\"edit_protected_search501_replace1001\",\"prot={mvProt.label}:search501={mvSearch501.label}:replace1001={mvReplace1001.label}\"]"
+    , let mvDiffProt := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := false,
+        editCount := 0, editHasProtected := false, maxSearchLen := 0, maxReplaceLen := 0,
+        diffFileCount := 1, diffHasProtected := true, diffHunkCount := 1
+      }
+      let mvHunks3 := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := false,
+        editCount := 0, editHasProtected := false, maxSearchLen := 0, maxReplaceLen := 0,
+        diffFileCount := 1, diffHasProtected := false, diffHunkCount := 3
+      }
+      let mvHunks2 := validateMicroHypothesis {
+        targetFileCount := 1, targetHasProtected := false, isJsonPatch := false,
+        editCount := 0, editHasProtected := false, maxSearchLen := 0, maxReplaceLen := 0,
+        diffFileCount := 1, diffHasProtected := false, diffHunkCount := 2
+      }
+      s!"[\"micro_mode:unified_diff_protected_and_hunk_ceiling\",\"diff_protected_and_hunks_3_vs_2\",\"diff_prot={mvDiffProt.label}:hunks3={mvHunks3.label}:hunks2={mvHunks2.label}\"]"
+    , let sr0 := strategySuccessRatePct 0 0
+      let w0 := strategyPriorityWeightPct false 0 0 false 0
+      let w1 := strategyPriorityWeightPct false 1 1 false 50
+      s!"[\"meta_learning:untried_prior_and_exploration_bonus\",\"att=0_vs_att=1_succ=1_eff=50\",\"sr0={sr0}:w0={w0}:w1={w1}\"]"
+    , let wMature := strategyPriorityWeightPct false 10 8 false 60
+      let wNegClamp := strategyPriorityWeightPct false 4 2 true 40
+      s!"[\"meta_learning:mature_blend_and_negative_eff_clamp\",\"att=10_succ=8_eff=60_vs_att=4_succ=2_eff=-40\",\"mature={wMature}:neg_clamp={wNegClamp}\"]"
+    , let wCool := strategyPriorityWeightPct true 10 9 false 90
+      let wActive := strategyPriorityWeightPct false 10 9 false 80
+      s!"[\"meta_learning:cooldown_blocks_priority_weight\",\"cooldown=true_vs_false\",\"cooldown={wCool}:active={wActive}\"]"
+    , let p0 : CyclePhaseModel := .plan
+      let p1 := p0.next
+      let p2 := p1.next
+      let p3 := p2.next
+      let p4 := p3.next
+      s!"[\"meta_learning:pdvr_cycle_four_step_period\",\"plan->do->verify->reflect->plan\",\"{p0.asStr}->{p1.asStr}->{p2.asStr}->{p3.asStr}->{p4.asStr}\"]"
+    , let cap25 := capApproachStackDepth 25
+      s!"[\"meta_learning:working_memory_plan_and_approach_cap\",\"steps=3:complete1,fail2:approaches=25\",\"Progress: 1/3 steps (1 failed):cap={cap25}\"]"
+    , let stUnassigned := resolveSwarmTaskCompletion .pending 0 1 1
+      s!"[\"swarm_task:unassigned_task_stays_pending\",\"assigned=0,reported=1\",\"{stUnassigned.label}:assigned=0:agent_idle=true\"]"
+    , let stPartialRep := resolveSwarmTaskCompletion .inProgress 2 1 1
+      let trCoder := stepAgentTrustPct 50 true
+      s!"[\"swarm_task:partial_reporting_stays_in_progress\",\"assigned=2,reported=1/2,succ=1\",\"{stPartialRep.label}:reported=1/2:coder_idle=true:trust={trCoder}\"]"
+    , let stAllSucc := resolveSwarmTaskCompletion .inProgress 2 2 2
+      s!"[\"swarm_task:all_assigned_succeed_completes\",\"assigned=2,reported=2/2,succ=2\",\"{stAllSucc.label}:succ=2/2:failed_len=0\"]"
+    , let stMixed := resolveSwarmTaskCompletion .inProgress 2 2 1
+      let trTester := stepAgentTrustPct 50 false
+      s!"[\"swarm_task:mixed_outcomes_yield_partial\",\"assigned=2,reported=2/2,succ=1\",\"{stMixed.label}:succ=1/2:failed_len=1:tester_trust={trTester}\"]"
+    , let stAllFail := resolveSwarmTaskCompletion .inProgress 2 2 0
+      let trFloor := stepAgentTrustPct (stepAgentTrustPct (stepAgentTrustPct (stepAgentTrustPct (stepAgentTrustPct 50 false) false) false) false) false
+      s!"[\"swarm_task:all_assigned_fail_yields_failed_and_trust_floor\",\"assigned=2,reported=2/2,succ=0,streaks=5\",\"{stAllFail.label}:succ=0/2:floor_pct={trFloor}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

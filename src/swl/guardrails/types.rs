@@ -257,6 +257,12 @@ impl GuardrailContext {
         self
     }
 
+    /// Set tool output
+    pub fn with_tool_output(mut self, output: impl Into<String>) -> Self {
+        self.tool_output = Some(output.into());
+        self
+    }
+
     /// Add workflow input
     pub fn with_workflow_input(
         mut self,

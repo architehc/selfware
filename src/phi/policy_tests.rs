@@ -2265,6 +2265,575 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
                 "Lean PA28 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(gov_op) = domain.strip_prefix("investigate_governance:") {
+            use crate::evolution::investigate::{
+                simulate_10000_reviewer_governance, Degree5Safety, FindingSeverity,
+                GovernanceDecision, GroundedCitation, OpaqueCategory, OpaqueStructureFinding,
+            };
+            use crate::evolution::tree_log::{compute_sha256, AttemptNode, AttemptStatus};
+            use crate::evolution::FitnessMetrics;
+
+            let dec_label = |d: GovernanceDecision| -> &'static str {
+                match d {
+                    GovernanceDecision::ApproveForPromotion => "approve_for_promotion",
+                    GovernanceDecision::ConditionalClarification => "conditional_clarification",
+                    GovernanceDecision::QuarantineForExperimentation => {
+                        "quarantine_for_experimentation"
+                    }
+                    GovernanceDecision::HardRejectVeto => "hard_reject_veto",
+                }
+            };
+            let base_metrics = FitnessMetrics {
+                sab_score: 88.0,
+                tokens_used: Some(1000),
+                token_budget: 500_000,
+                wall_clock_secs: 1.0,
+                timeout_secs: 3600.0,
+                full_evaluation_secs: Some(1.0),
+                test_pass_pct: 100.0,
+                binary_size_mb: 10.0,
+                max_binary_size_mb: 50.0,
+                tests_passed: 50,
+                tests_total: 50,
+                visual_score: 0.0,
+            };
+            let mk_node = |status: AttemptStatus| -> AttemptNode {
+                AttemptNode {
+                    id: "att-1".into(),
+                    parent_id: None,
+                    generation: 1,
+                    branch_id: "b1".into(),
+                    hypothesis_id: "h1".into(),
+                    description: "test attempt".into(),
+                    diff_sha256: "0".repeat(64),
+                    patch: None,
+                    sab_report_path: None,
+                    metrics: Some(base_metrics.clone()),
+                    composite_score: Some(0.90),
+                    tokens_used: Some(1000),
+                    wall_time_ms: 100,
+                    status,
+                    failure_class: None,
+                    failure_reason: None,
+                    output_tail: None,
+                    binary_sha256: None,
+                    base_commit: None,
+                    committed_commit: None,
+                    action_type: None,
+                    git_tree_id: None,
+                    created_at: "2026-10-20T00:00:00Z".into(),
+                }
+            };
+            let clean_safety = Degree5Safety {
+                protected_paths_clean: true,
+                rule1_verified: true,
+                merkle_tree_equality: Some(true),
+                has_killswitch_bypass: false,
+            };
+            let mk_finding = |severity: FindingSeverity| -> OpaqueStructureFinding {
+                OpaqueStructureFinding {
+                    category: OpaqueCategory::UncheckedUnwrap,
+                    severity,
+                    title: "finding".into(),
+                    explanation: "explanation".into(),
+                    citation: GroundedCitation {
+                        citation_id: "c1".into(),
+                        file_path: "src/foo.rs".into(),
+                        line_range: (1, 1),
+                        symbol: None,
+                        content_hash: "0".repeat(64),
+                        git_commit: None,
+                        attempt_id: Some("att-1".into()),
+                        exact_excerpt: "x.unwrap()".into(),
+                        hyperlink: "file://src/foo.rs#L1-L1".into(),
+                        before_excerpt: None,
+                        after_excerpt: None,
+                        before_content_hash: None,
+                    },
+                    remediation: "use ?".into(),
+                }
+            };
+            let actual = match gov_op {
+                "clean_verified_approved" => {
+                    let node = mk_node(AttemptStatus::Baseline);
+                    let c = simulate_10000_reviewer_governance(&node, &[], &clean_safety);
+                    format!(
+                        "{}:app={}:cla={}:qua={}:vet={}:sveto={}",
+                        dec_label(c.decision),
+                        c.votes_approve,
+                        c.votes_clarification,
+                        c.votes_quarantine,
+                        c.votes_veto,
+                        c.has_safety_veto
+                    )
+                }
+                "warning_or_incomplete_clarification" => {
+                    let node_warn = mk_node(AttemptStatus::Baseline);
+                    let c_warn = simulate_10000_reviewer_governance(
+                        &node_warn,
+                        &[mk_finding(FindingSeverity::Warning)],
+                        &clean_safety,
+                    );
+                    let mut node_inc = mk_node(AttemptStatus::Evaluated);
+                    let patch_text = "diff --git a/src/foo.rs b/src/foo.rs\n";
+                    node_inc.diff_sha256 = compute_sha256(patch_text.as_bytes());
+                    node_inc.patch = Some(patch_text.into());
+                    node_inc.sab_report_path = None;
+                    let c_inc = simulate_10000_reviewer_governance(&node_inc, &[], &clean_safety);
+                    format!(
+                        "warn={}:{}:{}:inc={}:{}:{}",
+                        dec_label(c_warn.decision),
+                        c_warn.votes_approve,
+                        c_warn.votes_clarification,
+                        dec_label(c_inc.decision),
+                        c_inc.votes_approve,
+                        c_inc.votes_clarification
+                    )
+                }
+                "critical_finding_quarantined" => {
+                    let node = mk_node(AttemptStatus::Baseline);
+                    let c = simulate_10000_reviewer_governance(
+                        &node,
+                        &[mk_finding(FindingSeverity::Critical)],
+                        &clean_safety,
+                    );
+                    format!(
+                        "{}:app={}:cla={}:qua={}:vet={}:sveto={}",
+                        dec_label(c.decision),
+                        c.votes_approve,
+                        c.votes_clarification,
+                        c.votes_quarantine,
+                        c.votes_veto,
+                        c.has_safety_veto
+                    )
+                }
+                "safety_or_merkle_breach_vetoed" => {
+                    let node = mk_node(AttemptStatus::Baseline);
+                    let mut bad_prot = clean_safety.clone();
+                    bad_prot.protected_paths_clean = false;
+                    let c_prot = simulate_10000_reviewer_governance(&node, &[], &bad_prot);
+                    let mut bad_merkle = clean_safety.clone();
+                    bad_merkle.merkle_tree_equality = Some(false);
+                    let c_merk = simulate_10000_reviewer_governance(&node, &[], &bad_merkle);
+                    format!(
+                        "prot={}:{}:merkle={}:{}",
+                        dec_label(c_prot.decision),
+                        c_prot.has_safety_veto,
+                        dec_label(c_merk.decision),
+                        c_merk.has_safety_veto
+                    )
+                }
+                "hash_mismatch_and_test_failure_vetoed" => {
+                    let mut node_hash = mk_node(AttemptStatus::Evaluated);
+                    node_hash.diff_sha256 = "a".repeat(64);
+                    node_hash.patch = Some("mismatched patch content".into());
+                    let c_hash = simulate_10000_reviewer_governance(&node_hash, &[], &clean_safety);
+                    let mut node_test = mk_node(AttemptStatus::TestFailed);
+                    node_test.composite_score = None;
+                    let c_test = simulate_10000_reviewer_governance(&node_test, &[], &clean_safety);
+                    format!(
+                        "hash={}:{}:{}:test={}:{}:{}",
+                        dec_label(c_hash.decision),
+                        c_hash.has_safety_veto,
+                        c_hash.votes_veto,
+                        dec_label(c_test.decision),
+                        c_test.has_safety_veto,
+                        c_test.votes_veto
+                    )
+                }
+                other => panic!("unknown investigate_governance op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA29 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(mm_op) = domain.strip_prefix("micro_mode:") {
+            use crate::evolution::micro_mode::{
+                build_micro_system_prompt, is_micro_model, validate_micro_hypothesis,
+            };
+            use crate::evolution::tournament::Hypothesis;
+
+            let classify_micro_res = |res: Result<(), String>| -> &'static str {
+                match res {
+                    Ok(()) => "ok:true",
+                    Err(msg) if msg.contains("hypothesis targets") => "err:target_files",
+                    Err(msg) if msg.contains("target file") && msg.contains("is protected") => {
+                        "err:target_protected"
+                    }
+                    Err(msg) if msg.contains("hypothesis has") && msg.contains("edits") => {
+                        "err:edit_count"
+                    }
+                    Err(msg) if msg.contains("targets protected path") => "err:edit_protected",
+                    Err(msg) if msg.contains("search too long") => "err:search_len",
+                    Err(msg) if msg.contains("replace too long") => "err:replace_len",
+                    Err(msg) if msg.contains("diff touches") && msg.contains("files") => {
+                        "err:diff_files"
+                    }
+                    Err(msg) if msg.contains("diff touches protected path") => "err:diff_protected",
+                    Err(msg) if msg.contains("diff has") && msg.contains("hunks") => {
+                        "err:diff_hunks"
+                    }
+                    Err(other) => panic!("unexpected micro validation error: {other}"),
+                }
+            };
+            let actual = match mm_op {
+                "model_classification_word_boundaries" => {
+                    let prompt = build_micro_system_prompt(8);
+                    let pop_clamp = if prompt.contains("Generate 3 code mutations.") {
+                        3
+                    } else {
+                        0
+                    };
+                    format!(
+                        "1.5b={}:small={}:32b={}:13b={}:pop_clamp={pop_clamp}",
+                        is_micro_model("qwen3-1.5b-instruct"),
+                        is_micro_model("phi-3-small"),
+                        is_micro_model("qwen3-32b"),
+                        is_micro_model("llama-13b")
+                    )
+                }
+                "valid_json_hypothesis_accepted" => {
+                    let s500 = "a".repeat(500);
+                    let r1000 = "b".repeat(1000);
+                    let h = Hypothesis {
+                        id: "h-ok".into(),
+                        description: "valid micro".into(),
+                        patch: serde_json::json!([
+                            { "file": "src/foo.rs", "search": s500, "replace": r1000 },
+                            { "file": "src/bar.rs", "search": "x", "replace": "y" }
+                        ])
+                        .to_string(),
+                        target_files: vec![
+                            PathBuf::from("src/foo.rs"),
+                            PathBuf::from("src/bar.rs"),
+                        ],
+                        property_test: None,
+                    };
+                    classify_micro_res(validate_micro_hypothesis(&h)).to_string()
+                }
+                "target_and_edit_limits_enforced" => {
+                    let h_files4 = Hypothesis {
+                        id: "h-f4".into(),
+                        description: "too many files".into(),
+                        patch: "[]".into(),
+                        target_files: vec![
+                            PathBuf::from("src/a.rs"),
+                            PathBuf::from("src/b.rs"),
+                            PathBuf::from("src/c.rs"),
+                            PathBuf::from("src/d.rs"),
+                        ],
+                        property_test: None,
+                    };
+                    let h_edits3 = Hypothesis {
+                        id: "h-e3".into(),
+                        description: "too many edits".into(),
+                        patch: serde_json::json!([
+                            { "file": "src/a.rs", "search": "a", "replace": "b" },
+                            { "file": "src/a.rs", "search": "c", "replace": "d" },
+                            { "file": "src/b.rs", "search": "e", "replace": "f" }
+                        ])
+                        .to_string(),
+                        target_files: vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")],
+                        property_test: None,
+                    };
+                    format!(
+                        "files4={}:edits3={}",
+                        classify_micro_res(validate_micro_hypothesis(&h_files4)),
+                        classify_micro_res(validate_micro_hypothesis(&h_edits3))
+                    )
+                }
+                "protected_path_and_search_replace_bounds" => {
+                    let h_prot = Hypothesis {
+                        id: "h-prot".into(),
+                        description: "protected edit".into(),
+                        patch: serde_json::json!([
+                            { "file": "src/safety/checker.rs", "search": "a", "replace": "b" }
+                        ])
+                        .to_string(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    let h_s501 = Hypothesis {
+                        id: "h-s501".into(),
+                        description: "oversized search".into(),
+                        patch: serde_json::json!([
+                            { "file": "src/foo.rs", "search": "s".repeat(501), "replace": "b" }
+                        ])
+                        .to_string(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    let h_r1001 = Hypothesis {
+                        id: "h-r1001".into(),
+                        description: "oversized replace".into(),
+                        patch: serde_json::json!([
+                            { "file": "src/foo.rs", "search": "a", "replace": "r".repeat(1001) }
+                        ])
+                        .to_string(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    format!(
+                        "prot={}:search501={}:replace1001={}",
+                        classify_micro_res(validate_micro_hypothesis(&h_prot)),
+                        classify_micro_res(validate_micro_hypothesis(&h_s501)),
+                        classify_micro_res(validate_micro_hypothesis(&h_r1001))
+                    )
+                }
+                "unified_diff_protected_and_hunk_ceiling" => {
+                    let h_diff_prot = Hypothesis {
+                        id: "h-dp".into(),
+                        description: "diff protected".into(),
+                        patch: "--- a/src/evolution/daemon.rs\n+++ b/src/evolution/daemon.rs\n@@ -1 +1 @@\n-a\n+b\n".into(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    let h_hunks3 = Hypothesis {
+                        id: "h-h3".into(),
+                        description: "3 hunks".into(),
+                        patch: "--- a/src/foo.rs\n+++ b/src/foo.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-c\n+d\n@@ -20 +20 @@\n-e\n+f\n".into(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    let h_hunks2 = Hypothesis {
+                        id: "h-h2".into(),
+                        description: "2 hunks".into(),
+                        patch: "--- a/src/foo.rs\n+++ b/src/foo.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-c\n+d\n".into(),
+                        target_files: vec![PathBuf::from("src/foo.rs")],
+                        property_test: None,
+                    };
+                    format!(
+                        "diff_prot={}:hunks3={}:hunks2={}",
+                        classify_micro_res(validate_micro_hypothesis(&h_diff_prot)),
+                        classify_micro_res(validate_micro_hypothesis(&h_hunks3)),
+                        classify_micro_res(validate_micro_hypothesis(&h_hunks2))
+                    )
+                }
+                other => panic!("unknown micro_mode op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA30 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(ml_op) = domain.strip_prefix("meta_learning:") {
+            use crate::cognitive::meta_learning::StrategyScore;
+            use crate::cognitive::self_edit::ImprovementCategory;
+            use crate::cognitive::state::{CyclePhase, WorkingMemory};
+
+            let pct = |x: f64| -> u64 { (x * 100.0).round() as u64 };
+            let actual = match ml_op {
+                "untried_prior_and_exploration_bonus" => {
+                    let s0 = StrategyScore::new(ImprovementCategory::ErrorHandling);
+                    let mut s1 = StrategyScore::new(ImprovementCategory::ErrorHandling);
+                    s1.attempts = 1;
+                    s1.successes = 1;
+                    s1.avg_effectiveness = 0.5;
+                    format!(
+                        "sr0={}:w0={}:w1={}",
+                        pct(s0.success_rate()),
+                        pct(s0.priority_weight()),
+                        pct(s1.priority_weight())
+                    )
+                }
+                "mature_blend_and_negative_eff_clamp" => {
+                    let mut mature = StrategyScore::new(ImprovementCategory::CodeQuality);
+                    mature.attempts = 10;
+                    mature.successes = 8;
+                    mature.avg_effectiveness = 0.6;
+                    let mut neg = StrategyScore::new(ImprovementCategory::CodeQuality);
+                    neg.attempts = 4;
+                    neg.successes = 2;
+                    neg.avg_effectiveness = -0.4;
+                    format!(
+                        "mature={}:neg_clamp={}",
+                        pct(mature.priority_weight()),
+                        pct(neg.priority_weight())
+                    )
+                }
+                "cooldown_blocks_priority_weight" => {
+                    let mut cool = StrategyScore::new(ImprovementCategory::ToolPipeline);
+                    cool.attempts = 10;
+                    cool.successes = 9;
+                    cool.avg_effectiveness = 0.9;
+                    cool.cooldown_until = u64::MAX;
+                    let mut active = StrategyScore::new(ImprovementCategory::ToolPipeline);
+                    active.attempts = 10;
+                    active.successes = 9;
+                    active.avg_effectiveness = 0.8;
+                    active.cooldown_until = 0;
+                    format!(
+                        "cooldown={}:active={}",
+                        pct(cool.priority_weight()),
+                        pct(active.priority_weight())
+                    )
+                }
+                "pdvr_cycle_four_step_period" => {
+                    let p0 = CyclePhase::Plan;
+                    let p1 = p0.next();
+                    let p2 = p1.next();
+                    let p3 = p2.next();
+                    let p4 = p3.next();
+                    format!(
+                        "{}->{}->{}->{}->{}",
+                        p0.as_str(),
+                        p1.as_str(),
+                        p2.as_str(),
+                        p3.as_str(),
+                        p4.as_str()
+                    )
+                }
+                "working_memory_plan_and_approach_cap" => {
+                    let mut wm = WorkingMemory::new();
+                    wm.set_plan("Verify Wave 7", vec!["s1".into(), "s2".into(), "s3".into()]);
+                    wm.complete_step(1, None);
+                    wm.fail_step(2, "err");
+                    for i in 0..25 {
+                        wm.push_approach(&format!("attempt-{i}"), vec![]);
+                    }
+                    format!("{}:cap={}", wm.progress_summary(), wm.approach_stack.len())
+                }
+                other => panic!("unknown meta_learning op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA31 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(sw_op) = domain.strip_prefix("swarm_task:") {
+            use crate::swarm::{Agent, AgentRole, AgentStatus, Swarm, SwarmTask, TaskStatus};
+
+            let status_label = |s: TaskStatus| -> &'static str {
+                match s {
+                    TaskStatus::Pending => "pending",
+                    TaskStatus::InProgress => "in_progress",
+                    TaskStatus::Completed => "completed",
+                    TaskStatus::Partial => "partial",
+                    TaskStatus::Failed => "failed",
+                }
+            };
+            let actual = match sw_op {
+                "unassigned_task_stays_pending" => {
+                    let mut swarm = Swarm::new();
+                    let a1 = swarm.add_agent(Agent::new("coder", AgentRole::Coder));
+                    let task = SwarmTask::new("unassigned work").with_role(AgentRole::Coder);
+                    let tid = task.id.clone();
+                    swarm.queue_task(task).unwrap();
+                    let popped = swarm.next_task().unwrap();
+                    assert_eq!(popped, tid);
+                    swarm.complete_task(&tid, &a1, "premature", true);
+                    let t = swarm.get_task(&tid).unwrap();
+                    let ag = swarm.get_agent(&a1).unwrap();
+                    format!(
+                        "{}:assigned={}:agent_idle={}",
+                        status_label(t.status),
+                        t.assigned_agents.len(),
+                        ag.status == AgentStatus::Idle
+                    )
+                }
+                "partial_reporting_stays_in_progress" => {
+                    let mut swarm = Swarm::new();
+                    let coder = swarm.add_agent(Agent::new("coder", AgentRole::Coder));
+                    let _tester = swarm.add_agent(Agent::new("tester", AgentRole::Tester));
+                    let task = SwarmTask::new("implement and test")
+                        .with_role(AgentRole::Coder)
+                        .with_role(AgentRole::Tester);
+                    let tid = task.id.clone();
+                    swarm.queue_task(task).unwrap();
+                    let assigned = swarm.assign_task(&tid);
+                    assert_eq!(assigned.len(), 2);
+                    swarm.complete_task(&tid, &coder, "code done", true);
+                    let t = swarm.get_task(&tid).unwrap();
+                    let ag = swarm.get_agent(&coder).unwrap();
+                    let trust_pct = (ag.trust_score * 100.0).round() as u32;
+                    format!(
+                        "{}:reported={}/{}:coder_idle={}:trust={trust_pct}",
+                        status_label(t.status),
+                        t.results.len(),
+                        t.assigned_agents.len(),
+                        ag.status == AgentStatus::Idle
+                    )
+                }
+                "all_assigned_succeed_completes" => {
+                    let mut swarm = Swarm::new();
+                    let coder = swarm.add_agent(Agent::new("coder", AgentRole::Coder));
+                    let tester = swarm.add_agent(Agent::new("tester", AgentRole::Tester));
+                    let task = SwarmTask::new("full pass")
+                        .with_role(AgentRole::Coder)
+                        .with_role(AgentRole::Tester);
+                    let tid = task.id.clone();
+                    swarm.queue_task(task).unwrap();
+                    let _ = swarm.assign_task(&tid);
+                    swarm.complete_task(&tid, &coder, "ok1", true);
+                    swarm.complete_task(&tid, &tester, "ok2", true);
+                    let t = swarm.get_task(&tid).unwrap();
+                    let succ = t.result_success.values().filter(|&&ok| ok).count();
+                    format!(
+                        "{}:succ={}/{}:failed_len={}",
+                        status_label(t.status),
+                        succ,
+                        t.assigned_agents.len(),
+                        t.failed_results().len()
+                    )
+                }
+                "mixed_outcomes_yield_partial" => {
+                    let mut swarm = Swarm::new();
+                    let coder = swarm.add_agent(Agent::new("coder", AgentRole::Coder));
+                    let tester = swarm.add_agent(Agent::new("tester", AgentRole::Tester));
+                    let task = SwarmTask::new("mixed pass")
+                        .with_role(AgentRole::Coder)
+                        .with_role(AgentRole::Tester);
+                    let tid = task.id.clone();
+                    swarm.queue_task(task).unwrap();
+                    let _ = swarm.assign_task(&tid);
+                    swarm.complete_task(&tid, &coder, "ok", true);
+                    swarm.complete_task(&tid, &tester, "assertion failed", false);
+                    let t = swarm.get_task(&tid).unwrap();
+                    let succ = t.result_success.values().filter(|&&ok| ok).count();
+                    let tester_trust =
+                        (swarm.get_agent(&tester).unwrap().trust_score * 100.0).round() as u32;
+                    format!(
+                        "{}:succ={}/{}:failed_len={}:tester_trust={tester_trust}",
+                        status_label(t.status),
+                        succ,
+                        t.assigned_agents.len(),
+                        t.failed_results().len()
+                    )
+                }
+                "all_assigned_fail_yields_failed_and_trust_floor" => {
+                    let mut swarm = Swarm::new();
+                    let coder = swarm.add_agent(Agent::new("coder", AgentRole::Coder));
+                    let tester = swarm.add_agent(Agent::new("tester", AgentRole::Tester));
+                    let task = SwarmTask::new("all fail")
+                        .with_role(AgentRole::Coder)
+                        .with_role(AgentRole::Tester);
+                    let tid = task.id.clone();
+                    swarm.queue_task(task).unwrap();
+                    let _ = swarm.assign_task(&tid);
+                    swarm.complete_task(&tid, &coder, "err1", false);
+                    swarm.complete_task(&tid, &tester, "err2", false);
+                    let t = swarm.get_task(&tid).unwrap();
+                    let succ = t.result_success.values().filter(|&&ok| ok).count();
+                    let mut floor_agent = Agent::new("streak", AgentRole::General);
+                    for _ in 0..5 {
+                        floor_agent.complete_task(false);
+                    }
+                    let floor_pct = (floor_agent.trust_score * 100.0).round() as u32;
+                    format!(
+                        "{}:succ={}/{}:floor_pct={floor_pct}",
+                        status_label(t.status),
+                        succ,
+                        t.assigned_agents.len()
+                    )
+                }
+                other => panic!("unknown swarm_task op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA32 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -2274,7 +2843,7 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 147, "all 147 PA1–PA28 rows must be checked");
+    assert_eq!(checked, 167, "all 167 PA1–PA32 rows must be checked");
 }
 
 #[test]
@@ -2446,4 +3015,176 @@ fn pa28_self_healing_escalation_and_health_monotone_invariants() {
         );
         prev_rank = r;
     }
+}
+
+#[test]
+fn pa29_investigate_governance_veto_and_critical_quarantine_invariants() {
+    use crate::evolution::investigate::{
+        simulate_10000_reviewer_governance, Degree5Safety, FindingSeverity, GovernanceDecision,
+        GroundedCitation, OpaqueCategory, OpaqueStructureFinding,
+    };
+    use crate::evolution::tree_log::{AttemptNode, AttemptStatus};
+
+    let node = AttemptNode {
+        id: "att-gov".into(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "b1".into(),
+        hypothesis_id: "h1".into(),
+        description: "gov check".into(),
+        diff_sha256: "0".repeat(64),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.95),
+        tokens_used: Some(500),
+        wall_time_ms: 50,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: None,
+        git_tree_id: None,
+        created_at: "2026-10-20T00:00:00Z".into(),
+    };
+    let killswitch_safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: true,
+        merkle_tree_equality: Some(true),
+        has_killswitch_bypass: true,
+    };
+    let c_kill = simulate_10000_reviewer_governance(&node, &[], &killswitch_safety);
+    assert_eq!(
+        c_kill.decision,
+        GovernanceDecision::HardRejectVeto,
+        "Lean theorem killswitch_or_merkle_breach_always_vetoes"
+    );
+    assert!(c_kill.has_safety_veto);
+
+    let clean_safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: true,
+        merkle_tree_equality: Some(true),
+        has_killswitch_bypass: false,
+    };
+    let crit_finding = OpaqueStructureFinding {
+        category: OpaqueCategory::ContractBreakage,
+        severity: FindingSeverity::Critical,
+        title: "public contract erased".into(),
+        explanation: "pub fn removed".into(),
+        citation: GroundedCitation {
+            citation_id: "c1".into(),
+            file_path: "src/lib.rs".into(),
+            line_range: (1, 1),
+            symbol: None,
+            content_hash: "0".repeat(64),
+            git_commit: None,
+            attempt_id: None,
+            exact_excerpt: "pub fn x()".into(),
+            hyperlink: "file://src/lib.rs#L1-L1".into(),
+            before_excerpt: None,
+            after_excerpt: None,
+            before_content_hash: None,
+        },
+        remediation: "keep pub fn".into(),
+    };
+    let c_crit = simulate_10000_reviewer_governance(&node, &[crit_finding], &clean_safety);
+    assert_ne!(
+        c_crit.decision,
+        GovernanceDecision::ApproveForPromotion,
+        "Lean theorem critical_finding_blocks_promotion"
+    );
+}
+
+#[test]
+fn pa30_micro_mode_word_boundary_and_hypothesis_gate_invariants() {
+    use crate::evolution::micro_mode::{is_micro_model, validate_micro_hypothesis};
+    use crate::evolution::tournament::Hypothesis;
+
+    assert!(is_micro_model("qwen2.5-0.8b"));
+    assert!(is_micro_model("llama-3b-instruct"));
+    assert!(!is_micro_model("qwen3-32b"));
+    assert!(!is_micro_model("codellama-13b"));
+
+    let protected_target = Hypothesis {
+        id: "h-prot-target".into(),
+        description: "touches AGENTS.md".into(),
+        patch: "[]".into(),
+        target_files: vec![PathBuf::from("AGENTS.md")],
+        property_test: None,
+    };
+    assert!(
+        validate_micro_hypothesis(&protected_target).is_err(),
+        "Lean theorem protected_target_or_edit_rejected_in_micro"
+    );
+}
+
+#[test]
+fn pa31_meta_learning_priority_weight_and_pdvr_cycle_invariants() {
+    use crate::cognitive::meta_learning::StrategyScore;
+    use crate::cognitive::self_edit::ImprovementCategory;
+    use crate::cognitive::state::CyclePhase;
+
+    let mut s_under = StrategyScore::new(ImprovementCategory::ErrorHandling);
+    s_under.attempts = 2;
+    s_under.successes = 1;
+    s_under.avg_effectiveness = 0.4;
+
+    let mut s_over = s_under.clone();
+    s_over.attempts = 4;
+    s_over.successes = 2;
+    assert!(
+        s_under.priority_weight() > s_over.priority_weight(),
+        "Lean theorem exploration_bonus_strictly_boosts_under_three"
+    );
+
+    for phase in [
+        CyclePhase::Plan,
+        CyclePhase::Do,
+        CyclePhase::Verify,
+        CyclePhase::Reflect,
+    ] {
+        assert_ne!(
+            phase.next(),
+            phase,
+            "Lean theorem cycle_phase_no_fixed_point"
+        );
+        assert_eq!(
+            phase.next().next().next().next(),
+            phase,
+            "Lean theorem cycle_phase_four_step_period"
+        );
+    }
+}
+
+#[test]
+fn pa32_swarm_task_completion_and_trust_bounds_invariants() {
+    use crate::swarm::{Agent, AgentRole, Swarm, SwarmTask, TaskStatus};
+
+    let mut swarm = Swarm::new();
+    let a1 = swarm.add_agent(Agent::new("sec", AgentRole::Security));
+    let a2 = swarm.add_agent(Agent::new("rev", AgentRole::Reviewer));
+    let task = SwarmTask::new("security review")
+        .with_role(AgentRole::Security)
+        .with_role(AgentRole::Reviewer);
+    let tid = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    let _ = swarm.assign_task(&tid);
+
+    swarm.complete_task(&tid, &a1, "failed audit", false);
+    assert_eq!(
+        swarm.get_task(&tid).unwrap().status,
+        TaskStatus::InProgress,
+        "Lean theorem incomplete_reporting_preserves_status"
+    );
+
+    swarm.complete_task(&tid, &a2, "passed review", true);
+    assert_eq!(
+        swarm.get_task(&tid).unwrap().status,
+        TaskStatus::Partial,
+        "Lean theorem mixed_reports_yield_partial"
+    );
 }
