@@ -14,13 +14,20 @@ pub mod tool_calling;
 pub mod types;
 pub mod usage;
 
-pub use client::{ApiClient, RetryConfig};
+pub use client::{
+    apply_reasoning_step_down, detect_backend, extra_body_pins_reasoning, ApiClient,
+    CallTimeBudgetExceeded, ReasoningStepDown, RetryConfig, SideCall, SideCallTimeout,
+    UsageBudgetExceeded, WallClockBudgetExceeded,
+};
 pub use streaming::{StreamChunk, StreamingResponse};
 pub use tool_calling::{
-    attach_tools, extract_tool_calls, extract_tool_calls_from_text, parsed_to_tool_call,
+    attach_tools, extract_tool_calls, extract_tool_calls_detailed, extract_tool_calls_from_text,
+    extract_tool_calls_from_text_detailed, parsed_to_tool_call, ExtractedToolCalls,
 };
 pub use types::*;
-pub use usage::UsageCoverage;
+pub use usage::{
+    AttemptOutcome, CallLatencyStats, CallShape, SlowestCall, UsageAttempt, UsageCoverage,
+};
 
 const DISABLED_THINKING_SYSTEM_MESSAGE: &str =
     "CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.";

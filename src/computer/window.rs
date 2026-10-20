@@ -53,7 +53,7 @@ pub use crate::config::{VisibleRegion, WindowPolicy};
 /// through. Division truncates: exact for multiples of `scale`, otherwise at
 /// most `scale - 1` device pixels short — never past the target.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn wmctrl_request_position(x: i32, y: i32, scale: u32) -> (i32, i32) {
+pub(crate) fn wmctrl_request_position(x: i32, y: i32, scale: u32) -> (i32, i32) {
     let s = scale.max(1) as i32;
     (x / s, y / s)
 }
@@ -61,7 +61,7 @@ fn wmctrl_request_position(x: i32, y: i32, scale: u32) -> (i32, i32) {
 /// Whether a window at (x, y) of `width` x `height` lies entirely inside
 /// `region`.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn placement_inside_region(
+pub(crate) fn placement_inside_region(
     region: &VisibleRegion,
     x: i32,
     y: i32,
@@ -80,7 +80,13 @@ fn placement_inside_region(
 /// correction step. A window larger than the region is pinned to its
 /// top-left corner.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn clamp_to_region(region: &VisibleRegion, x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
+pub(crate) fn clamp_to_region(
+    region: &VisibleRegion,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> (i32, i32) {
     let w = i32::try_from(width).unwrap_or(i32::MAX);
     let h = i32::try_from(height).unwrap_or(i32::MAX);
     let x_max = region.x_max.saturating_sub(w).max(region.x_min);
@@ -91,7 +97,7 @@ fn clamp_to_region(region: &VisibleRegion, x: i32, y: i32, width: u32, height: u
 /// Whether `title` is owned under `prefix` (trimmed title starts with it).
 /// No prefix means every window is owned.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn window_title_owned(prefix: Option<&str>, title: &str) -> bool {
+pub(crate) fn window_title_owned(prefix: Option<&str>, title: &str) -> bool {
     match prefix {
         None => true,
         Some(p) => title.trim().starts_with(p),

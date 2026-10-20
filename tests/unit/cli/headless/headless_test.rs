@@ -1291,17 +1291,22 @@ fn stream_json_stdout_carries_only_json_lines() {
     let mut non_json_lines = 0usize;
     let mut json_lines = 0usize;
     for (idx, raw) in captured.lines().enumerate() {
-        let line = strip_ansi(raw).trim().to_string();
+        let mut line = strip_ansi(raw).trim().to_string();
         if line.is_empty() {
             continue;
         }
         if line.starts_with("test ") {
             // libtest's own `test <path> ... ok` status lines land on the
             // test process's shared fd 1 while the redirect is active (a
-            // parallel test completed mid-window). They are harness
-            // infrastructure, not application output — the contract being
-            // pinned is that everything the APPLICATION emits to stdout in
-            // stream-json mode is valid JSON.
+            // parallel test completed mid-window). If a JSON event landed
+            // between `test <path> ... ` and `ok\n`, validate the JSON tail.
+            if let Some(json_start) = line.find("{\"") {
+                line = line[json_start..].to_string();
+            } else {
+                continue;
+            }
+        } else if matches!(line.as_str(), "ok" | "FAILED" | "ignored") {
+            // Second half of a split libtest `test <path> ... ok` write.
             continue;
         }
         if idx == 0 && !line.starts_with('{') {

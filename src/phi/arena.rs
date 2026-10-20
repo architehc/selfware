@@ -779,7 +779,7 @@ pub fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value 
     })
 }
 
-/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA48 and PT1–PT5.
+/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA52 and PT1–PT5.
 ///
 /// Honest status (`AGENTS.md` Rule 3): `trust_state` is `"table_conformance_verified"` because
 /// Lean 4 kernel elaboration runs in `scripts/check_formal.sh` while the live binary verifies
@@ -1095,6 +1095,30 @@ pub fn verify_phi_formal_invariants() -> Value {
             "Phi Ledger Obligation Assessment, Observer Sizing, FoxPosture & Activity Capture Bounds",
             &["evidence_discharges_bijection", "workspace_unknown_cov_never_discharges", "high_debt_forces_unimpressed"],
             "src/phi/ledger.rs:210",
+        ),
+        inv(
+            "PA49",
+            "Config & CLI Endpoint Redaction, Context Budget & Validation Lattice",
+            &["spoofed_userinfo_never_local", "derive_context_budget_guarantees_min_conversation"],
+            "src/config/mod.rs:345",
+        ),
+        inv(
+            "PA50",
+            "Tool Call Extraction & Measured Token Accounting Invariants",
+            &["closed_fence_blocks_and_unclosed_opener_recovers", "code_shaped_ge_64_strictly_boosted"],
+            "src/token_count.rs:145",
+        ),
+        inv(
+            "PA51",
+            "LSP Language Detection & Computer Window/Input/Screen Guards",
+            &["ctrl_alt_del_and_cmd_q_blocked", "unowned_or_above_visible_top_rejected_rule6"],
+            "src/computer/window.rs:75",
+        ),
+        inv(
+            "PA52",
+            "UI Theme Palette, Spinner Honesty, Output Sink & Arena Drills",
+            &["ui_theme_roundtrip", "json_mode_routes_diagnostics_to_stderr_and_blocks_hyperlinks"],
+            "src/ui/theme.rs:110",
         ),
         inv(
             "PT1-PT5",
@@ -1616,6 +1640,42 @@ pub fn generate_formal_drill(seed: usize) -> BossBattleDrill {
             correct: "Discharges 0 `UnconfirmedCoverage` obligations (`CoverageUnknown`) and increments `passing_runs_without_coverage` instead",
             wrong_a: "Discharges all `UnconfirmedCoverage` obligations in the workspace",
             wrong_b: "Discharges `UnreviewedChange` obligations",
+        },
+        ProofQuestion {
+            id: "PA49:spoofed_userinfo_never_local",
+            question: "PROOF DRILL [PA49]: Under `spoofed_userinfo_never_local` & `http_with_userinfo_always_insecure_remote`, how does `is_local_endpoint` classify `http://localhost@evil.example/v1`?",
+            citation: "src/config/api_key.rs:115",
+            snippet: "theorem spoofed_userinfo_never_local (e : EndpointSecurityState) (h : e.hasUserinfo = true) : isLocalEndpointModel e = false",
+            correct: "Returns `false` (and `is_insecure_remote_endpoint` returns `true`) because userinfo spoofing never qualifies as a local loopback endpoint",
+            wrong_a: "Returns `true` because the URL begins with `http://localhost`",
+            wrong_b: "Automatically rewrites the scheme to `https://`",
+        },
+        ProofQuestion {
+            id: "PA50:code_shaped_ge_64_strictly_boosted",
+            question: "PROOF DRILL [PA50]: Under `code_shaped_ge_64_strictly_boosted` (`AGENTS.md` Rule 4), how does `estimate_content_tokens` calibrate code-shaped inputs with `>= 64` raw BPE tokens?",
+            citation: "src/token_count.rs:145",
+            snippet: "theorem code_shaped_ge_64_strictly_boosted (raw : Nat) (h : raw ≥ 64) : estimateContentTokensModel raw true > raw",
+            correct: "Applies the measured 1.10x ceiling calibration (`(raw * 110 + 99) / 100`) while keeping prose and short snippets uncalibrated",
+            wrong_a: "Divides character length by 4",
+            wrong_b: "Truncates token counts to 64",
+        },
+        ProofQuestion {
+            id: "PA51:unowned_or_above_visible_top_rejected_rule6",
+            question: "PROOF DRILL [PA51]: Under `unowned_or_above_visible_top_rejected_rule6` (`AGENTS.md` Rule 6), when does `WindowManager::move_resize` reject a window placement?",
+            citation: "src/computer/window.rs:75",
+            snippet: "theorem unowned_or_above_visible_top_rejected_rule6 (hAbove : y < minY) : checkWindowPlacementRule6Model false ... = false ∧ checkWindowPlacementRule6Model true ... = false",
+            correct: "Whenever the window title lacks an owned prefix (e.g. `sw-`) or the target box falls outside the visible region (`y < 768` or `x + width > 7680`)",
+            wrong_a: "Allows moving any desktop window if width and height are positive",
+            wrong_b: "Allows `y = 0` on the top VGA strip for all windows",
+        },
+        ProofQuestion {
+            id: "PA52:json_mode_routes_diagnostics_to_stderr",
+            question: "PROOF DRILL [PA52]: Under `json_mode_routes_diagnostics_to_stderr_and_blocks_hyperlinks`, what do `diagnostic_sink_for(true)` and `hyperlinks_wanted(..., true, ...)` guarantee?",
+            citation: "src/output/mod.rs:42",
+            snippet: "theorem json_mode_routes_diagnostics_to_stderr_and_blocks_hyperlinks : diagnosticSinkForModel true = .stderr ∧ hyperlinksWantedModel styled true env dumb = false",
+            correct: "JSON mode routes all diagnostics to `Stderr` and suppresses OSC-8 terminal hyperlinks so `Stdout` remains machine-parseable JSON",
+            wrong_a: "Emits OSC-8 hyperlinks to `Stdout` when `SELFWARE_HYPERLINKS=1`",
+            wrong_b: "Routes diagnostics to `Stdout` in JSON mode",
         },
         ProofQuestion {
             id: "PT1:tests_never_discharge_review",

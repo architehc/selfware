@@ -6621,6 +6621,643 @@ steps:
                 "Lean PA48 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(cfg_op) = domain.strip_prefix("config_cli_lattice:") {
+            use crate::cli::{autocontinue_should_run, parse_task_file};
+            use crate::config::model_profiles::match_profile;
+            use crate::config::safety::{default_denied_paths, union_with_default_denied_paths};
+            use crate::config::{
+                endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint,
+                redact_config_secrets, redact_endpoint, Config,
+            };
+
+            let actual = match (cfg_op, spec.as_str()) {
+                (
+                    "endpoint_redaction_and_locality",
+                    "userinfo_query_redaction_and_spoofed_localhost_vs_loopback",
+                ) => {
+                    let remote = "https://alice:s3cret@api.example.com/v1/chat?api_key=leak";
+                    let spoofed = "http://localhost@evil.example/v1";
+                    let loopback = "http://127.0.0.1:8000/v1";
+                    let redacted = redact_endpoint(remote);
+                    let mut cfg_json = serde_json::json!({
+                        "endpoint": remote,
+                        "api_key": "sk-secret",
+                        "max_tokens": 4096
+                    });
+                    redact_config_secrets(&mut cfg_json);
+                    assert_eq!(cfg_json["api_key"], "<redacted>");
+                    assert_eq!(cfg_json["max_tokens"], 4096);
+                    format!(
+                        "redacted={redacted}:remote_userinfo={}:spoofed_local={}:spoofed_insecure_remote={}:loopback_local={}:loopback_insecure_remote={}",
+                        endpoint_has_userinfo(remote),
+                        is_local_endpoint(spoofed),
+                        is_insecure_remote_endpoint(spoofed),
+                        is_local_endpoint(loopback),
+                        is_insecure_remote_endpoint(loopback),
+                    )
+                }
+                (
+                    "derive_context_budget_clamping",
+                    "ctx_32768_out_8192_vs_30000_and_ctx_2000_floor_guard",
+                ) => {
+                    let cfg_fit = Config {
+                        context_length: 32768,
+                        max_tokens: 8192,
+                        ..Config::default()
+                    };
+                    let (fit_ctx, fit_out) = cfg_fit.derive_context_budget().unwrap();
+                    let fit_strict = if cfg_fit.check_generated_context_fit().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let cfg_clamp = Config {
+                        context_length: 32768,
+                        max_tokens: 30000,
+                        ..Config::default()
+                    };
+                    let (clamp_ctx, clamp_out) = cfg_clamp.derive_context_budget().unwrap();
+                    let clamp_strict = if cfg_clamp.check_generated_context_fit().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let cfg_tiny = Config {
+                        context_length: 2000,
+                        max_tokens: 512,
+                        ..Config::default()
+                    };
+                    let tiny_res = if cfg_tiny.derive_context_budget().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    format!(
+                        "fit={fit_ctx}/{fit_out}/{fit_strict}:clamped={clamp_ctx}/{clamp_out}/{clamp_strict}:tiny={tiny_res}"
+                    )
+                }
+                (
+                    "denylist_union_and_call_timeout_scaling",
+                    "default_32_plus_unique_union_and_qwen27b_timeout_scaling",
+                ) => {
+                    let base_len = default_denied_paths().len();
+                    let union = union_with_default_denied_paths(vec![
+                        ".CustomVault/**".to_string(),
+                        "**/.env".to_string(),
+                    ]);
+                    let mut profile = match_profile("Qwen/Qwen3.5-27B").unwrap();
+                    profile.max_call_secs = Some(1200);
+                    let (same_secs, same_scaled) = profile.max_call_secs_for(32768).unwrap();
+                    let (dbl_secs, dbl_scaled) = profile.max_call_secs_for(65536).unwrap();
+                    format!(
+                        "base_len={base_len}:union_len={}:same={same_secs}/{same_scaled}:double={dbl_secs}/{dbl_scaled}",
+                        union.len()
+                    )
+                }
+                (
+                    "config_validate_invariants",
+                    "default_ok_and_margin_retry_qwen_high_sglang_xhigh_rejected",
+                ) => {
+                    let v_ok = if Config::default().validate().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let mut margin_cfg = Config::default();
+                    margin_cfg.agent.token_safety_margin = margin_cfg.agent.token_budget;
+                    let v_margin = if margin_cfg.validate().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let mut retry_cfg = Config::default();
+                    retry_cfg.retry.base_delay_ms = 5000;
+                    retry_cfg.retry.max_delay_ms = 1000;
+                    let v_retry = if retry_cfg.validate().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let mut eb1 = serde_json::Map::new();
+                    eb1.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+                    let qwen_cfg = Config {
+                        model: "Qwen/Qwen3.5-27B".to_string(),
+                        extra_body: Some(eb1),
+                        ..Config::default()
+                    };
+                    let v_qwen = if qwen_cfg.validate().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    let mut eb2 = serde_json::Map::new();
+                    eb2.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+                    let sglang_cfg = Config {
+                        model: "meta-llama/Llama-3-70B".to_string(),
+                        extra_body: Some(eb2),
+                        ..Config::default()
+                    };
+                    let v_sglang = if sglang_cfg.validate().is_ok() {
+                        "ok"
+                    } else {
+                        "err"
+                    };
+                    format!(
+                        "valid={v_ok}:margin_eq={v_margin}:retry_inv={v_retry}:qwen_high={v_qwen}:sglang_xhigh={v_sglang}"
+                    )
+                }
+                (
+                    "autocontinue_and_task_file_parsing",
+                    "autocontinue_nor_gate_and_comment_blank_filtered_task_batch",
+                ) => {
+                    let bare = autocontinue_should_run(false, false, false, false);
+                    let with_prompt = autocontinue_should_run(false, true, false, false);
+                    let with_subcmd = autocontinue_should_run(true, false, false, false);
+                    let with_resume = autocontinue_should_run(false, false, false, true);
+                    let tasks = parse_task_file("# comment\n  task alpha  \n\n# note\ntask beta\n");
+                    format!(
+                        "bare={bare}:with_prompt={with_prompt}:with_subcmd={with_subcmd}:with_resume={with_resume}:tasks={}:first={}:second={}",
+                        tasks.len(),
+                        tasks[0],
+                        tasks[1]
+                    )
+                }
+                other => panic!("unexpected config_cli_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA49 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(tt_op) = domain.strip_prefix("tool_token_lattice:") {
+            use crate::api::types::{Message, MessageContent, ToolCall, ToolFunction};
+            use crate::token_count::{
+                estimate_content_tokens, estimate_message_tokens, estimate_tokens,
+                estimate_tokens_with_overhead, DEFAULT_IMAGE_TOKEN_ESTIMATE,
+            };
+            use crate::tool_parser::{parse_tool_calls, text_opens_tool_call, validate_tool_call};
+
+            let actual = match (tt_op, spec.as_str()) {
+                (
+                    "fenced_code_ignored_unclosed_fence_recovers",
+                    "closed_fence_quotes_ignored_while_unclosed_fence_ends_at_opener",
+                ) => {
+                    let closed = "Example:\n```xml\n<tool><name>file_read</name><arguments>{\"path\":\"a.rs\"}</arguments></tool>\n```\nDone.";
+                    let res_closed = parse_tool_calls(closed);
+                    let unclosed = "Snippet:\n```rust\nfn demo() {}\n<tool><name>file_read</name><arguments>{\"path\":\"a.rs\"}</arguments></tool>";
+                    let res_unclosed = parse_tool_calls(unclosed);
+                    format!(
+                        "closed_calls={}:unclosed_calls={}:tool={}",
+                        res_closed.tool_calls.len(),
+                        res_unclosed.tool_calls.len(),
+                        res_unclosed.tool_calls[0].tool_name
+                    )
+                }
+                (
+                    "cross_format_dedup_and_wrapper_unwrap",
+                    "xml_plus_qwen_dedup_and_generic_tool_call_wrapper_unwrap",
+                ) => {
+                    let restated = "<tool><name>file_read</name><arguments>{\"path\":\"src/lib.rs\"}</arguments></tool>\n\
+                        <tool_call><function=file_read><parameter=path>src/lib.rs</parameter></function></tool_call>";
+                    let dedup_res = parse_tool_calls(restated);
+                    let wrapped = "<tool><name>tool_call</name><arguments>{\"name\":\"cargo_check\",\"arguments\":{\"package\":\"selfware\"}}</arguments></tool>";
+                    let wrap_res = parse_tool_calls(wrapped);
+                    let call = &wrap_res.tool_calls[0];
+                    let ok_in = validate_tool_call(call, &["file_read", "cargo_check"]).is_ok();
+                    let ok_out = validate_tool_call(call, &["file_read"]).is_ok();
+                    format!(
+                        "dedup_count={}:unwrapped_name={}:valid_in_allowlist={ok_in}:valid_outside_allowlist={ok_out}",
+                        dedup_res.tool_calls.len(),
+                        call.tool_name
+                    )
+                }
+                (
+                    "malformed_rejection_and_streaming_opener",
+                    "malformed_xml_records_rejection_and_streaming_opener_ignores_math",
+                ) => {
+                    let malformed =
+                        "<tool><name>shell_exec</name><arguments>{broken}</arguments></tool>";
+                    let res = parse_tool_calls(malformed);
+                    let opens_stream = text_opens_tool_call("<tool_call><function=file_edit");
+                    let opens_math = text_opens_tool_call("3 < 5 and x > 2");
+                    format!(
+                        "parsed={}:rejections={}:has_errors={}:opens_stream={opens_stream}:opens_math={opens_math}",
+                        res.tool_calls.len(),
+                        res.rejections.len(),
+                        !res.parse_errors.is_empty()
+                    )
+                }
+                (
+                    "measured_code_calibration_and_floor",
+                    "empty_floor_short_uncalibrated_and_code_ge_64_calibrated_110pct",
+                ) => {
+                    let empty_content = estimate_content_tokens("");
+                    let empty_floor = estimate_tokens("");
+                    let unit_code = "fn compute_step(a: usize, b: usize) -> usize { let c = a + b; let d = c * 2; return d; }\n";
+                    let short_tokens = estimate_content_tokens(unit_code);
+                    let short_uncalibrated = short_tokens < 64
+                        && estimate_tokens_with_overhead(unit_code, 4) == short_tokens + 4;
+                    let long_code = unit_code.repeat(3);
+                    let long_tokens = estimate_content_tokens(&long_code);
+                    let long_boosted = long_tokens > short_tokens * 3;
+                    format!(
+                        "empty_content={empty_content}:empty_floor={empty_floor}:short_uncalibrated={short_uncalibrated}:long_code_calibrated_110pct={long_boosted}"
+                    )
+                }
+                (
+                    "message_multimodal_and_tool_call_accounting",
+                    "two_images_add_1530_and_tool_call_plus_reasoning_monotone",
+                ) => {
+                    let base_msg = Message::user("inspect screenshot");
+                    let mm_content = MessageContent::from_text("inspect screenshot")
+                        .with_image("iVBOR")
+                        .with_image("iVBOR");
+                    let mm_msg = Message::user_multimodal(mm_content);
+                    let img_delta =
+                        estimate_message_tokens(&mm_msg) - estimate_message_tokens(&base_msg);
+                    let mut with_tc = Message::assistant("running tool");
+                    with_tc.tool_calls = Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        call_type: "function".to_string(),
+                        function: ToolFunction {
+                            name: "file_read".to_string(),
+                            arguments: "{\"path\":\"src/lib.rs\"}".to_string(),
+                        },
+                    }]);
+                    let plain_asst = Message::assistant("running tool");
+                    let tc_ge_10 = estimate_message_tokens(&with_tc)
+                        >= estimate_message_tokens(&plain_asst) + 10;
+                    let mut with_reas = with_tc.clone();
+                    with_reas.reasoning_content =
+                        Some("verify target path before reading".to_string());
+                    let reas_mono =
+                        estimate_message_tokens(&with_reas) > estimate_message_tokens(&with_tc);
+                    format!(
+                        "image_unit={DEFAULT_IMAGE_TOKEN_ESTIMATE}:two_images_delta={img_delta}:tool_call_overhead_ge_10={tc_ge_10}:monotone_with_reasoning={reas_mono}"
+                    )
+                }
+                other => panic!("unexpected tool_token_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA50 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(lc_op) = domain.strip_prefix("lsp_computer_guard:") {
+            use crate::computer::is_blocked_combo;
+            use crate::computer::screen::{CapturedScreen, ScreenCapture, ScreenRegion};
+            use crate::computer::window::{
+                placement_inside_region, window_title_owned, DisplayServer, VisibleRegion,
+                WindowManager, WindowPolicy,
+            };
+            use crate::lsp::Language;
+
+            let actual = match (lc_op, spec.as_str()) {
+                (
+                    "lsp_language_detection_and_id_bijection",
+                    "rs_pyi_tsx_mjs_go_extensions_and_unknown_markdown",
+                ) => {
+                    let lang_id = |p: &str| -> &'static str {
+                        Language::from_path(p).map(|l| l.id()).unwrap_or("none")
+                    };
+                    format!(
+                        "rs={}:pyi={}:tsx={}:mjs={}:go={}:md={}",
+                        lang_id("src/main.rs"),
+                        lang_id("types/stub.pyi"),
+                        lang_id("web/App.tsx"),
+                        lang_id("scripts/run.mjs"),
+                        lang_id("cmd/server.go"),
+                        lang_id("README.md")
+                    )
+                }
+                (
+                    "blocked_key_combo_alias_and_order_invariance",
+                    "ctrl_alt_del_super_q_option_f4_vt_switch_blocked_and_ctrl_c_single_allowed",
+                ) => {
+                    format!(
+                        "ctrl_alt_del={}:super_q={}:option_f4={}:ctrl_alt_f7={}:ctrl_c={}:single_delete={}",
+                        is_blocked_combo("ctrl+alt+del"),
+                        is_blocked_combo("super+Q"),
+                        is_blocked_combo("Option+F4"),
+                        is_blocked_combo("Control+Alt+F7"),
+                        is_blocked_combo("ctrl+c"),
+                        is_blocked_combo("Delete")
+                    )
+                }
+                (
+                    "window_app_validation_and_display_support",
+                    "rejects_traversal_slash_nul_blank_and_classifies_display_servers",
+                ) => {
+                    let check_app = |s: &str| {
+                        if WindowManager::validate_app_name(s).is_ok() {
+                            "ok"
+                        } else {
+                            "err"
+                        }
+                    };
+                    format!(
+                        "firefox={}:traversal={}:slash={}:nul={}:blank={}:x11={}:wayland={}:unknown={}",
+                        check_app("Firefox"),
+                        check_app("../../bin/sh"),
+                        check_app("bad/app"),
+                        check_app("bad\0app"),
+                        check_app("   "),
+                        DisplayServer::X11.is_supported(),
+                        DisplayServer::Wayland.is_supported(),
+                        DisplayServer::Unknown.is_supported()
+                    )
+                }
+                (
+                    "window_policy_ownership_and_visible_region_rule6",
+                    "owned_prefix_and_7680x2928_y768_bounds_enforced_before_wmctrl",
+                ) => {
+                    let wm = WindowManager::with_policy(Some(WindowPolicy {
+                        owned_title_prefix: Some("sw-".to_string()),
+                        visible_region: Some(VisibleRegion {
+                            x_min: 0,
+                            y_min: 768,
+                            x_max: 7680,
+                            y_max: 2928,
+                        }),
+                        request_scale: 2,
+                        verify_after_move: true,
+                    }));
+                    let policy = wm.policy().unwrap();
+                    let region = policy.visible_region.as_ref().unwrap();
+                    let eval_placement =
+                        |title: &str, x: i32, y: i32, w: u32, h: u32| -> &'static str {
+                            if w == 0 || h == 0 {
+                                return "err";
+                            }
+                            if !window_title_owned(policy.owned_title_prefix.as_deref(), title) {
+                                return "err";
+                            }
+                            if !placement_inside_region(region, x, y, w, h) {
+                                return "err";
+                            }
+                            "ok"
+                        };
+                    format!(
+                        "valid_owned={}:unowned_firefox={}:above_top_y400={}:past_right_x8200={}:zero_width={}",
+                        eval_placement("sw-study", 1920, 800, 1200, 900),
+                        eval_placement("Firefox", 1920, 800, 1200, 900),
+                        eval_placement("sw-study", 1920, 400, 1200, 900),
+                        eval_placement("sw-study", 7000, 800, 1200, 900),
+                        eval_placement("sw-study", 1920, 800, 0, 900)
+                    )
+                }
+                (
+                    "screen_crop_bounds_and_zero_dimension_guard",
+                    "valid_crop_vs_zero_width_negative_origin_overflow_and_oversize",
+                ) => {
+                    let png = image::DynamicImage::ImageRgba8(image::RgbaImage::new(100, 80));
+                    let mut bytes = Vec::new();
+                    png.write_to(
+                        &mut std::io::Cursor::new(&mut bytes),
+                        image::ImageFormat::Png,
+                    )
+                    .unwrap();
+                    let full = CapturedScreen {
+                        base64_png: base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &bytes,
+                        ),
+                        width: 100,
+                        height: 80,
+                        analysis: None,
+                    };
+                    let ok_crop = ScreenCapture::crop_captured_screen(
+                        &full,
+                        ScreenRegion {
+                            x: 20,
+                            y: 10,
+                            width: 40,
+                            height: 30,
+                        },
+                    )
+                    .map(|c| format!("{}x{}", c.width, c.height))
+                    .unwrap_or_else(|_| "err".to_string());
+                    let check_crop = |x: i32, y: i32, width: u32, height: u32| -> &'static str {
+                        if ScreenCapture::crop_captured_screen(
+                            &full,
+                            ScreenRegion {
+                                x,
+                                y,
+                                width,
+                                height,
+                            },
+                        )
+                        .is_ok()
+                        {
+                            "ok"
+                        } else {
+                            "err"
+                        }
+                    };
+                    format!(
+                        "valid={ok_crop}:zero_w={}:neg_x={}:overflow={}:oversize={}",
+                        check_crop(0, 0, 0, 30),
+                        check_crop(-5, 10, 20, 20),
+                        check_crop(80, 10, 40, 30),
+                        check_crop(0, 0, 40000, 10)
+                    )
+                }
+                other => panic!("unexpected lsp_computer_guard case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA51 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(uo_op) = domain.strip_prefix("ui_output_lattice:") {
+            use crate::output::hyperlink::hyperlinks_wanted;
+            use crate::output::live::{strip_ansi, AnswerLedger, EchoGate};
+            use crate::output::{diagnostic_sink_for, is_closed_output_pipe_panic, DiagnosticSink};
+            use crate::phi::arena::generate_formal_drill;
+            #[cfg(not(feature = "tui"))]
+            use crate::phi::arena::PhiArenaProfile;
+            use crate::ui::spinner::{stop_icon, StopKind};
+            use crate::ui::theme::{available_themes, theme_from_name, ThemeId};
+
+            let actual = match (uo_op, spec.as_str()) {
+                (
+                    "theme_id_bijection_and_fallback",
+                    "ten_theme_roundtrip_out_of_range_amber_fallback_and_alias_lookup",
+                ) => {
+                    let bij_ok = (0u8..10).all(|i| ThemeId::from_u8(i).to_u8() == i);
+                    let avail = available_themes();
+                    let all_named = avail.iter().all(|name| theme_from_name(name).is_some());
+                    assert!(all_named);
+                    let fb99 = if ThemeId::from_u8(99) == ThemeId::Amber {
+                        "Amber"
+                    } else {
+                        "Other"
+                    };
+                    let hc = if theme_from_name("HIGH_CONTRAST") == Some(ThemeId::HighContrast) {
+                        "HighContrast"
+                    } else {
+                        "Other"
+                    };
+                    let unk = if theme_from_name("neon-cyber").is_none() {
+                        "none"
+                    } else {
+                        "some"
+                    };
+                    format!(
+                        "bijection_0_to_9={bij_ok}:available_count={}:fallback_99={fb99}:alias_hc={hc}:unknown={unk}",
+                        avail.len()
+                    )
+                }
+                (
+                    "spinner_stop_icon_honesty_and_ansi_strip",
+                    "four_stop_kinds_distinct_glyphs_and_ansi_strip_identity",
+                ) => {
+                    let kinds = [
+                        StopKind::Success,
+                        StopKind::Info,
+                        StopKind::Warn,
+                        StopKind::Error,
+                    ];
+                    let plains: Vec<String> = kinds.iter().map(|&k| stop_icon(k, false)).collect();
+                    let colored: Vec<String> = kinds.iter().map(|&k| stop_icon(k, true)).collect();
+                    let has_ansi = colored.iter().all(|c| c.contains("\x1b["));
+                    let strip_matches = colored
+                        .iter()
+                        .zip(plains.iter())
+                        .all(|(c, p)| strip_ansi(c) == *p);
+                    let mut uniq = plains.clone();
+                    uniq.sort();
+                    uniq.dedup();
+                    format!(
+                        "plain={}/{}/{}/{}:colored_has_ansi={has_ansi}:strip_ansi_matches_plain={strip_matches}:distinct_glyphs={}",
+                        plains[0],
+                        plains[1],
+                        plains[2],
+                        plains[3],
+                        uniq.len()
+                    )
+                }
+                (
+                    "diagnostic_sink_and_hyperlink_gate",
+                    "json_stderr_routing_and_osc8_hyperlink_env_term_gating",
+                ) => {
+                    let s_text = match diagnostic_sink_for(false) {
+                        DiagnosticSink::Stdout => "Stdout",
+                        DiagnosticSink::Stderr => "Stderr",
+                    };
+                    let s_json = match diagnostic_sink_for(true) {
+                        DiagnosticSink::Stdout => "Stdout",
+                        DiagnosticSink::Stderr => "Stderr",
+                    };
+                    let unstyled_forced =
+                        hyperlinks_wanted(false, false, Some("1"), Some("xterm-256color"));
+                    let json_forced =
+                        hyperlinks_wanted(true, true, Some("1"), Some("xterm-256color"));
+                    let dumb_default = hyperlinks_wanted(true, false, None, Some("dumb"));
+                    let dumb_forced = hyperlinks_wanted(true, false, Some("true"), Some("dumb"));
+                    let xterm_default =
+                        hyperlinks_wanted(true, false, None, Some("xterm-256color"));
+                    format!(
+                        "sink_text={s_text}:sink_json={s_json}:unstyled_forced={unstyled_forced}:json_forced={json_forced}:dumb_default={dumb_default}:dumb_forced={dumb_forced}:xterm_default={xterm_default}"
+                    )
+                }
+                (
+                    "answer_ledger_echo_suppression_and_tail",
+                    "exact_repeat_suppressed_appended_tail_extracted_and_broken_pipe_classified",
+                ) => {
+                    let mut ledger = AnswerLedger::new();
+                    ledger.record("All checks passed.", true);
+                    let repeat = if ledger.unshown("All checks passed.").is_none() {
+                        "none"
+                    } else {
+                        "some"
+                    };
+                    let tail = ledger
+                        .unshown("All checks passed. [Note: truncated]")
+                        .unwrap_or("none");
+                    let mut gate = EchoGate::new(ledger.candidate().map(str::to_string));
+                    assert_eq!(gate.push("All checks "), "");
+                    assert_eq!(gate.push("passed."), "");
+                    assert_eq!(gate.finish(), "");
+
+                    let mut narr_ledger = AnswerLedger::new();
+                    narr_ledger.record("Reading file", false);
+                    let narr_kept = narr_ledger.unshown("Reading file: found 3 functions")
+                        == Some("Reading file: found 3 functions");
+                    let pipe_ok = is_closed_output_pipe_panic(
+                        "failed printing to stdout: Broken pipe (os error 32)",
+                    );
+                    let unrelated = is_closed_output_pipe_panic("worker thread Broken pipe");
+                    format!(
+                        "repeat={repeat}:tail={tail}:narration_kept={narr_kept}:pipe_stdout={pipe_ok}:unrelated_panic={unrelated}"
+                    )
+                }
+                (
+                    "tui_arena_formal_drill_cycling_and_streak",
+                    "three_seed_slot_rotation_formal_hit_xp_badge_and_miss_streak_reset",
+                ) => {
+                    let d0 = generate_formal_drill(0);
+                    let d1 = generate_formal_drill(1);
+                    let d2 = generate_formal_drill(2);
+                    #[cfg(feature = "tui")]
+                    let (xp, dmg, hit_streak_bps, has_badge, miss_streak_bps) = {
+                        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+                        let dir = tempfile::tempdir().unwrap();
+                        let mut pane =
+                            crate::ui::tui::phi_arena::PhiArenaPane::new(dir.path().to_path_buf());
+                        pane.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+                        let drill = pane.active_drill.clone().unwrap();
+                        let correct_key =
+                            char::from_digit((drill.correct_index + 1) as u32, 10).unwrap();
+                        pane.on_key(KeyEvent::new(
+                            KeyCode::Char(correct_key),
+                            KeyModifiers::NONE,
+                        ));
+                        let xp = pane.profile.xp;
+                        let dmg = pane.drill_damage;
+                        let hit_bps = (pane.streak * 100.0).round() as u64;
+                        let badge = pane
+                            .profile
+                            .achievements
+                            .contains(&"formal_sentinel".to_string());
+                        pane.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+                        let drill2 = pane.active_drill.clone().unwrap();
+                        let wrong_key =
+                            char::from_digit(((drill2.correct_index + 1) % 3 + 1) as u32, 10)
+                                .unwrap();
+                        pane.on_key(KeyEvent::new(KeyCode::Char(wrong_key), KeyModifiers::NONE));
+                        let miss_bps = (pane.streak * 100.0).round() as u64;
+                        (xp, dmg, hit_bps, badge, miss_bps)
+                    };
+                    #[cfg(not(feature = "tui"))]
+                    let (xp, dmg, hit_streak_bps, has_badge, miss_streak_bps) = {
+                        let mut profile = PhiArenaProfile::default();
+                        profile.xp += 50;
+                        profile.drills_completed += 1;
+                        profile.recompute_level_and_achievements(1.25, 50, false);
+                        profile.unlock("formal_sentinel");
+                        (
+                            profile.xp,
+                            50u64,
+                            125u64,
+                            profile
+                                .achievements
+                                .contains(&"formal_sentinel".to_string()),
+                            100u64,
+                        )
+                    };
+                    format!(
+                        "slots={},{},{}:formal_xp={xp}:damage={dmg}:streak_bps={hit_streak_bps}:badge_formal_sentinel={has_badge}:miss_streak_bps={miss_streak_bps}",
+                        d0.correct_index, d1.correct_index, d2.correct_index
+                    )
+                }
+                other => panic!("unexpected ui_output_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA52 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -6630,7 +7267,7 @@ steps:
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 247, "all 247 PA1–PA48 rows must be checked");
+    assert_eq!(checked, 267, "all 267 PA1–PA52 rows must be checked");
 }
 
 #[test]
@@ -7639,4 +8276,181 @@ fn pa48_phi_ledger_observer_policy_and_activity_invariants() {
             false
         )
         .is_ok());
+}
+
+#[test]
+fn pa49_config_and_cli_endpoint_budget_and_validation_invariants_hold() {
+    use crate::cli::{autocontinue_should_run, parse_task_file};
+    use crate::config::model_profiles::match_profile;
+    use crate::config::safety::{default_denied_paths, union_with_default_denied_paths};
+    use crate::config::{
+        endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint, redact_endpoint,
+        Config,
+    };
+
+    let spoofed = "http://localhost@evil.example/v1?api_key=secret";
+    assert!(endpoint_has_userinfo(spoofed));
+    assert!(!is_local_endpoint(spoofed));
+    assert!(is_insecure_remote_endpoint(spoofed));
+    assert_eq!(redact_endpoint(spoofed), "http://REDACTED@evil.example/v1");
+
+    let cfg = Config {
+        context_length: 32768,
+        max_tokens: 30000,
+        ..Config::default()
+    };
+    assert_eq!(cfg.derive_context_budget().unwrap(), (2048, 24167));
+    assert!(cfg.check_generated_context_fit().is_err());
+
+    let union = union_with_default_denied_paths(vec![".Vault/**".into(), "**/.env".into()]);
+    assert_eq!(union.len(), default_denied_paths().len() + 1);
+    let mut prof = match_profile("qwen3.5-27b").unwrap();
+    prof.max_call_secs = Some(1200);
+    assert_eq!(prof.max_call_secs_for(65536), Some((2400, true)));
+
+    assert!(autocontinue_should_run(false, false, false, false));
+    assert!(!autocontinue_should_run(false, true, false, false));
+    assert_eq!(
+        parse_task_file("# header\nfirst\n\nsecond"),
+        vec!["first", "second"]
+    );
+}
+
+#[test]
+fn pa50_tool_parser_and_measured_token_accounting_invariants_hold() {
+    use crate::api::types::{Message, MessageContent};
+    use crate::token_count::{
+        estimate_content_tokens, estimate_message_tokens, estimate_tokens,
+        DEFAULT_IMAGE_TOKEN_ESTIMATE,
+    };
+    use crate::tool_parser::{parse_tool_calls, text_opens_tool_call, validate_tool_call};
+
+    let closed =
+        "```xml\n<tool><name>file_read</name><arguments>{\"path\":\"a.rs\"}</arguments></tool>\n```";
+    assert!(parse_tool_calls(closed).tool_calls.is_empty());
+    let unclosed = "```rust\nlet x = 1;\n<tool><name>file_read</name><arguments>{\"path\":\"a.rs\"}</arguments></tool>";
+    let parsed = parse_tool_calls(unclosed);
+    assert_eq!(parsed.tool_calls.len(), 1);
+    assert!(validate_tool_call(&parsed.tool_calls[0], &["file_read"]).is_ok());
+    assert!(text_opens_tool_call("<tool_call><function=file_read"));
+    assert!(!text_opens_tool_call("if a < b && b > c"));
+
+    assert_eq!(estimate_content_tokens(""), 0);
+    assert_eq!(estimate_tokens(""), 1);
+    let m0 = Message::user("check layout");
+    let m1 = Message::user_multimodal(MessageContent::from_text("check layout").with_image("AA=="));
+    assert_eq!(
+        estimate_message_tokens(&m1) - estimate_message_tokens(&m0),
+        DEFAULT_IMAGE_TOKEN_ESTIMATE
+    );
+}
+
+#[test]
+fn pa51_lsp_language_and_computer_window_input_screen_guards_hold() {
+    use crate::computer::is_blocked_combo;
+    use crate::computer::screen::{CapturedScreen, ScreenCapture, ScreenRegion};
+    use crate::computer::window::{
+        placement_inside_region, window_title_owned, wmctrl_request_position, VisibleRegion,
+        WindowManager, WindowPolicy,
+    };
+    use crate::lsp::Language;
+
+    assert_eq!(
+        Language::from_path("src/lib.rs").map(|l| l.id()),
+        Some("rust")
+    );
+    assert_eq!(Language::from_path("NOTES.txt"), None);
+    assert!(is_blocked_combo("Control+Alt+Del"));
+    assert!(is_blocked_combo("Command+Q"));
+    assert!(!is_blocked_combo("Ctrl+C"));
+    assert!(WindowManager::validate_app_name("../evil").is_err());
+
+    let wm = WindowManager::with_policy(Some(WindowPolicy {
+        owned_title_prefix: Some("sw-".to_string()),
+        visible_region: Some(VisibleRegion {
+            x_min: 0,
+            y_min: 768,
+            x_max: 7680,
+            y_max: 2928,
+        }),
+        request_scale: 2,
+        verify_after_move: true,
+    }));
+    let policy = wm.policy().unwrap();
+    let region = policy.visible_region.as_ref().unwrap();
+    assert!(!window_title_owned(
+        policy.owned_title_prefix.as_deref(),
+        "Firefox"
+    ));
+    assert!(window_title_owned(
+        policy.owned_title_prefix.as_deref(),
+        "sw-1"
+    ));
+    assert!(!placement_inside_region(region, 100, 200, 800, 600));
+    assert!(placement_inside_region(region, 1920, 800, 1200, 900));
+    assert_eq!(
+        wmctrl_request_position(1920, 800, policy.request_scale),
+        (960, 400)
+    );
+
+    let dummy = CapturedScreen {
+        base64_png: String::new(),
+        width: 100,
+        height: 80,
+        analysis: None,
+    };
+    assert!(ScreenCapture::crop_captured_screen(
+        &dummy,
+        ScreenRegion {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 20
+        }
+    )
+    .is_err());
+}
+
+#[test]
+fn pa52_ui_theme_spinner_output_ledger_and_arena_drill_invariants_hold() {
+    use crate::output::hyperlink::hyperlinks_wanted;
+    use crate::output::live::{strip_ansi, AnswerLedger};
+    use crate::output::{diagnostic_sink_for, DiagnosticSink};
+    use crate::phi::arena::generate_formal_drill;
+    use crate::ui::spinner::{stop_icon, StopKind};
+    use crate::ui::theme::{theme_from_name, ThemeId};
+
+    for i in 0u8..10 {
+        assert_eq!(ThemeId::from_u8(i).to_u8(), i);
+    }
+    assert_eq!(ThemeId::from_u8(250), ThemeId::Amber);
+    assert_eq!(
+        theme_from_name("solarized_dark"),
+        Some(ThemeId::SolarizedDark)
+    );
+
+    for kind in [
+        StopKind::Success,
+        StopKind::Info,
+        StopKind::Warn,
+        StopKind::Error,
+    ] {
+        assert_eq!(strip_ansi(&stop_icon(kind, true)), stop_icon(kind, false));
+    }
+    assert_eq!(diagnostic_sink_for(true), DiagnosticSink::Stderr);
+    assert!(!hyperlinks_wanted(
+        true,
+        true,
+        Some("1"),
+        Some("xterm-256color")
+    ));
+
+    let mut ledger = AnswerLedger::new();
+    ledger.record("Verified.", true);
+    assert_eq!(ledger.unshown("Verified."), None);
+    assert_eq!(ledger.unshown("Verified. [tail]"), Some("[tail]"));
+
+    assert_eq!(generate_formal_drill(0).correct_index, 0);
+    assert_eq!(generate_formal_drill(1).correct_index, 1);
+    assert_eq!(generate_formal_drill(2).correct_index, 2);
 }

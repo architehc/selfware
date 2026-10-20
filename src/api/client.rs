@@ -1269,10 +1269,11 @@ impl ApiClient {
                 Ok(response) => {
                     let status = response.status();
                     attempt_usage.status(status.as_u16());
+                    let retry_after = Self::parse_retry_after(response.headers());
                     let text = self.read_error_body_bounded(response).await;
                     let _ = attempt_usage.record_json(&text);
                     if Self::is_retryable_status(status) && attempt < max_attempts {
-                        let sleep_ms = self.retry_sleep_ms(delay_ms, None);
+                        let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
                         warn!(
                             "completion retryable error {} (attempt {}/{}); retrying after {}ms (jittered)",
                             status, attempt, max_attempts, sleep_ms
@@ -2660,7 +2661,7 @@ impl ApiClient {
                                     "Non-streaming response body read timed out after {}s (attempt {}/{})",
                                     response_timeout_secs,
                                     attempt + 1,
-                                    self.retry_config.max_retries + 1
+                                    max_retries + 1
                                 );
                                 last_error = Some(
                                     ApiError::Network(format!(
@@ -2912,7 +2913,7 @@ impl ApiClient {
         crate::safety::killswitch::check_killswitch(None)?;
         // Profile calls (audits, swarm members) are billable LLM calls too —
         // their wall time folds into the same run latency stats.
-        let _call_timing =
+        let call_timing =
             self.usage_ledger
                 .timing_guard(&profile.model, "chat_with_profile", Instant::now());
         let messages: Vec<Message> = if !profile.supports_vision() {
@@ -2978,6 +2979,9 @@ impl ApiClient {
             "model profile chat request",
             Some(&profile.endpoint),
         )?;
+        if matches!(thinking, ThinkingMode::StepDown(_)) {
+            let _ = apply_reasoning_step_down(&mut body, &profile.model);
+        }
 
         if !native_fc || self.tool_mode_latched(&profile.endpoint, &profile.model) {
             convert_body_to_xml(&mut body, &tools, profile.context_length)?;
@@ -2999,7 +3003,7 @@ impl ApiClient {
             .await?;
         if let Some(reasoning_chars) = reasoning_budget_exhausted(&response) {
             let pinned = extra_body_pins_reasoning(profile.extra_body.as_ref());
-            if pinned {
+            if pinned || matches!(thinking, ThinkingMode::StepDown(_)) {
                 return Err(ApiError::ReasoningBudgetExhausted {
                     reasoning_chars,
                     retry: None,
@@ -3032,6 +3036,17 @@ impl ApiClient {
                 .into());
             }
             super::usage::add_response_usage(&mut response.usage, &discarded);
+        }
+        let elapsed_ms = call_timing.elapsed_ms();
+        self.record_call_shape(
+            response.usage.prompt_tokens as u64,
+            response.usage.completion_tokens as u64,
+            elapsed_ms,
+        );
+        if elapsed_ms >= self.zero_content_long_call_threshold_ms()
+            && zero_content_response(&response)
+        {
+            return Err(ApiError::ZeroContentLongCall { elapsed_ms }.into());
         }
         Ok(response)
     }
@@ -3224,7 +3239,7 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
     {
         return None;
     }
-    if !choice.message.content.text().trim().is_empty() {
+    if !choice.message.content.text_all().trim().is_empty() {
         return None;
     }
     let reasoning = choice

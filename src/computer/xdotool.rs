@@ -36,12 +36,15 @@ pub(crate) fn can_use_wsl_powershell() -> bool {
     }
 }
 
-fn is_wsl_environment() -> bool {
+pub(crate) fn is_wsl_environment() -> bool {
     std::env::var_os("WSL_INTEROP").is_some()
         || std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|r| r.to_ascii_lowercase().contains("microsoft"))
-            .unwrap_or(false)
+        || crate::tools::file::read_to_string_capped(
+            std::path::Path::new("/proc/sys/kernel/osrelease"),
+            4096,
+        )
+        .map(|r| r.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false)
 }
 
 /// Execute an xdotool command. Returns error if xdotool is not available.

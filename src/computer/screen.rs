@@ -285,13 +285,10 @@ $stream.Dispose()
     }
 
     fn is_wsl_environment() -> bool {
-        std::env::var_os("WSL_INTEROP").is_some()
-            || std::env::var_os("WSL_DISTRO_NAME").is_some()
-            || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-                .map(|release| Self::osrelease_looks_like_wsl(&release))
-                .unwrap_or(false)
+        super::xdotool::is_wsl_environment()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn osrelease_looks_like_wsl(release: &str) -> bool {
         release.to_ascii_lowercase().contains("microsoft")
     }

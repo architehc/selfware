@@ -32,17 +32,21 @@ mod validation;
 
 pub use agent::*;
 pub use api_key::{
-    is_keyless_endpoint, is_local_endpoint, is_openrouter_endpoint, load_api_key_from_keyring,
-    redact_endpoint, save_api_key_to_keyring, set_api_key_for_endpoint,
+    assert_credential_endpoint_safe, authorize_request, endpoint_has_userinfo,
+    is_insecure_remote_endpoint, is_keyless_endpoint, is_local_endpoint, is_openrouter_endpoint,
+    load_api_key_from_keyring, plaintext_remote_allowed, redact_endpoint, save_api_key_to_keyring,
+    set_api_key_for_endpoint, ApiKeySource,
 };
 pub use auto_config::*;
 pub use debug::DebugConfig;
 pub(crate) use loader::normalize_legacy_model_override;
 pub use model::*;
 pub use model_profiles::{
-    apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile, AppliedFields,
-    MeasuredQuota, ModelDefaultsProfile, TurnWorkload, UserExplicitFields, WorkloadQuota,
-    WorkloadQuotas,
+    apply_profile as apply_model_defaults_profile, builtin_profiles,
+    extra_body_pins_enable_thinking, glob_matches, match_profile, measured_quota_lines,
+    pattern_matches_model, workload_quota_lines, AppliedFields, MeasuredQuota,
+    ModelDefaultsProfile, TurnWorkload, UserExplicitFields, WorkloadQuota, WorkloadQuotas,
+    DEEPSEEK_V4_MEASURED, DEEPSEEK_V4_WORKLOAD_QUOTAS, QWEN38_MEASURED, QWEN38_WORKLOAD_QUOTAS,
 };
 pub use prompt_profiles::PromptProfile;
 #[cfg(feature = "bench-harness")]
@@ -53,13 +57,17 @@ pub use provenance::{
 };
 pub use resources::*;
 pub use safety::*;
-pub use trust::{is_config_trusted, trusted_repos_file};
+pub use trust::{add_trusted_config, is_config_trusted, trusted_repos_file};
 pub use types::*;
-pub use unpack::{scan_local_endpoints, DiscoveredEndpoint};
+pub use unpack::{
+    auto_calibrate, auto_calibrate_with_options, save_unpack_config, scan_local_endpoints, unpack,
+    unpack_with_options, DiscoveredEndpoint,
+};
 pub use validation::{
     check_sglang_backend, clear_sglang_capability_cache, get_sglang_capability,
     is_known_non_sglang_endpoint, is_sglang_backend, is_sglang_server_info_body,
-    is_sglang_serving_deployment, set_sglang_capability,
+    is_sglang_serving_deployment, normalize_endpoint_base, probe_sglang_backend_async,
+    set_sglang_capability,
 };
 
 use anyhow::{bail, Result};

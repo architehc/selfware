@@ -3585,12 +3585,21 @@ max_recovery_attempts = 3
 
                 crate::config::Config::validate_generated_toml(&toml_str)?;
                 let save_path = std::path::Path::new("selfware.toml");
+                if std::fs::symlink_metadata(save_path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    anyhow::bail!("Refusing to overwrite symlink at {}", save_path.display());
+                }
                 crate::session::checkpoint::write_bytes_atomically(
                     save_path,
                     toml_str.as_bytes(),
                     0o600,
                 )?;
-                let _ = crate::config::trust::add_trusted_config(save_path);
+                if let Err(err) = crate::config::trust::add_trusted_config(save_path) {
+                    tracing::warn!(
+                        "Wrote {}, but failed to record repo trust automatically: {}. Run `selfware trust` before using this config.",
+                        save_path.display(),
+                        err
+                    );
+                }
                 println!("{} Configuration saved to selfware.toml", "✓".green());
             }
 
@@ -3733,12 +3742,17 @@ max_recovery_attempts = 3
                         Some(RunStatus::Running) | Some(RunStatus::Paused) => "Running",
                         None => "Failed",
                     };
-                    let _ = registry.update_status(
+                    if let Err(e) = registry.update_status(
                         &composite,
                         status_str,
                         chrono::Utc::now().timestamp(),
-                    );
+                    ) {
+                        tracing::warn!("Failed to update status for run {}: {}", composite, e);
+                    }
                     println!("{} final status: {}", composite, status_str);
+                    if status_str != "Completed" {
+                        anyhow::bail!("{} ended with status: {}", composite, status_str);
+                    }
                 }
 
                 RunsCommand::List => {
@@ -3798,17 +3812,20 @@ max_recovery_attempts = 3
                              host other runs).",
                             pid, id
                         ),
-                        AbortOutcome::SignalUnsupported(pid) => println!(
+                        AbortOutcome::SignalUnsupported(pid) => anyhow::bail!(
                             "Cannot abort run '{}' on this platform: signalling the \
                              owning process (pid {}) requires Unix. The run is still \
                              running and was left unchanged.",
-                            id, pid
+                            id,
+                            pid
                         ),
-                        AbortOutcome::SignalFailed(pid, err) => println!(
+                        AbortOutcome::SignalFailed(pid, err) => anyhow::bail!(
                             "Could not abort run '{}': signalling the owning process \
                              (pid {}) failed ({}). The run is still running and was \
                              left unchanged.",
-                            id, pid, err
+                            id,
+                            pid,
+                            err
                         ),
                     }
                 }
@@ -4918,9 +4935,13 @@ fn local_test_command(pattern: &str) -> Result<Vec<String>> {
 }
 
 async fn run_local_tests(pattern: &str, format: &str) -> Result<()> {
+    if !matches!(format, "json" | "text" | "pretty") {
+        anyhow::bail!("Unsupported test output format: {}", format);
+    }
     let args = local_test_command(pattern)?;
     let mut cmd = tokio::process::Command::new("cargo");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     let output = cmd
         .args(&args)
         .stdout(std::process::Stdio::piped())

@@ -7,5 +7,8 @@
 pub mod client;
 pub mod server;
 
-pub use client::LspClient;
-pub use server::run_lsp_server;
+pub use client::{
+    Diagnostic, Language, Location, LspClient, LspQueryOutcome, LspTransportError, SymbolInfo,
+    DEFAULT_INDEXING_WAIT,
+};
+pub use server::{run_lsp_server, SelfwareLspServer};

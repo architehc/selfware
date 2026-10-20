@@ -277,12 +277,16 @@ async fn try_start_ollama() -> bool {
 
     let mut cmd = tokio::process::Command::new("ollama");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
-    let _ = cmd
+    if cmd
         .arg("serve")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .is_err()
+    {
+        return false;
+    }
 
     // Wait up to 10s for Ollama to come online
     for _ in 0..20 {
@@ -653,18 +657,37 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
 
         let top = coding_models.first().unwrap();
         config.model = top.model.name.clone();
+        config
+            .sources
+            .set("model", super::provenance::ConfigSource::AutoConfig);
         config.context_length = top.model.context_length as usize;
+        config.sources.set(
+            "context_length",
+            super::provenance::ConfigSource::AutoConfig,
+        );
         let (clamped_max_tokens, fallback_budget) = clamp_hardware_fallback_budgets(
             config.context_length,
             config.max_tokens,
             provenance_is_user_set(config, "max_tokens"),
         );
+        if clamped_max_tokens != config.max_tokens {
+            config
+                .sources
+                .set("max_tokens", super::provenance::ConfigSource::AutoConfig);
+        }
         config.max_tokens = clamped_max_tokens;
         if !provenance_is_user_set(config, "agent.token_budget") {
             config.agent.token_budget = fallback_budget;
+            config.sources.set(
+                "agent.token_budget",
+                super::provenance::ConfigSource::AutoConfig,
+            );
         }
         if config.endpoint == super::default_endpoint() {
             config.endpoint = "http://127.0.0.1:1234/v1".to_string();
+            config
+                .sources
+                .set("endpoint", super::provenance::ConfigSource::AutoConfig);
         }
 
         let caps = Capability::infer(&top.model);
@@ -829,7 +852,13 @@ step_timeout_secs = {}
     Config::validate_generated_toml(&content)?;
 
     crate::session::checkpoint::write_bytes_atomically(&path, content.as_bytes(), 0o600)?;
-    let _ = super::trust::add_trusted_config(&path);
+    if let Err(e) = super::trust::add_trusted_config(&path) {
+        tracing::warn!(
+            "Failed to record {} in trusted configs: {}",
+            path.display(),
+            e
+        );
+    }
     Ok(path)
 }
 

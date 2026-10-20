@@ -4776,6 +4776,435 @@ theorem activity_id_valid_bounds (len : Nat) :
   unfold validateActivityIdLen
   simp
 
+-- ============================================================================
+-- Section PA49: Config & CLI Endpoint Redaction, Context Budget & Validation
+-- (`src/config/api_key.rs`, `src/config/mod.rs`, `src/config/safety.rs`,
+--  `src/config/model_profiles.rs`, `src/config/validation.rs`, `src/cli/mod.rs`)
+-- ============================================================================
+
+structure EndpointSecurityState where
+  hasUserinfo : Bool
+  isLocalHost : Bool
+  isHttpScheme : Bool
+  hasQuery : Bool
+  deriving DecidableEq, Repr
+
+def isLocalEndpointModel (e : EndpointSecurityState) : Bool :=
+  e.isLocalHost && !e.hasUserinfo
+
+def isInsecureRemoteEndpointModel (e : EndpointSecurityState) : Bool :=
+  e.isHttpScheme && !isLocalEndpointModel e
+
+def redactEndpointModel (e : EndpointSecurityState) : EndpointSecurityState :=
+  { e with hasUserinfo := false, hasQuery := false }
+
+theorem spoofed_userinfo_never_local (e : EndpointSecurityState)
+    (h : e.hasUserinfo = true) :
+    isLocalEndpointModel e = false := by
+  simp [isLocalEndpointModel, h]
+
+theorem http_with_userinfo_always_insecure_remote (e : EndpointSecurityState)
+    (hHttp : e.isHttpScheme = true) (hUser : e.hasUserinfo = true) :
+    isInsecureRemoteEndpointModel e = true := by
+  simp [isInsecureRemoteEndpointModel, isLocalEndpointModel, hHttp, hUser]
+
+theorem local_loopback_never_insecure_remote (e : EndpointSecurityState)
+    (hLocal : e.isLocalHost = true) (hClean : e.hasUserinfo = false) :
+    isInsecureRemoteEndpointModel e = false := by
+  simp [isInsecureRemoteEndpointModel, isLocalEndpointModel, hLocal, hClean]
+
+theorem redact_endpoint_clears_userinfo_and_query (e : EndpointSecurityState) :
+    (redactEndpointModel e).hasUserinfo = false ∧
+    (redactEndpointModel e).hasQuery = false := by
+  simp [redactEndpointModel]
+
+def minConversationTokens : Nat := 2048
+
+def deriveContextBudgetModel (contextLength maxTokens : Nat) : Option (Nat × Nat) :=
+  let safetyMargin := contextLength / 5
+  let maxReservable := (contextLength - safetyMargin) - minConversationTokens
+  let reservedOutput := Nat.min maxTokens maxReservable
+  let maxContextTokens := (contextLength - reservedOutput) - safetyMargin
+  if maxContextTokens < minConversationTokens then
+    none
+  else
+    some (maxContextTokens, reservedOutput)
+
+def checkGeneratedContextFitModel (contextLength maxTokens : Nat) : Bool :=
+  decide (((contextLength - maxTokens) - (contextLength / 5)) ≥ minConversationTokens)
+
+theorem derive_context_budget_guarantees_min_conversation
+    (ctx maxOut maxCtx resOut : Nat)
+    (h : deriveContextBudgetModel ctx maxOut = some (maxCtx, resOut)) :
+    maxCtx ≥ minConversationTokens ∧ resOut ≤ maxOut := by
+  dsimp [deriveContextBudgetModel] at h
+  split at h
+  · contradiction
+  · rename_i hNotLt
+    injection h with hPair
+    injection hPair with hCtx hRes
+    constructor
+    · omega
+    · subst hRes
+      exact Nat.min_le_left maxOut ((ctx - ctx / 5) - minConversationTokens)
+
+theorem strict_generated_fit_rejects_oversized_max_tokens :
+    deriveContextBudgetModel 32768 30000 = some (2048, 24167) ∧
+    checkGeneratedContextFitModel 32768 30000 = false := by
+  decide
+
+def scaleMaxCallSecsModel (profileMax baseSecs reqMax : Nat) : Nat × Bool :=
+  if profileMax = 0 ∨ reqMax ≤ profileMax then
+    (baseSecs, false)
+  else
+    ((baseSecs * reqMax + profileMax - 1) / profileMax, true)
+
+theorem scale_max_call_secs_unscaled_within_profile (p b r : Nat) (h : r ≤ p) :
+    scaleMaxCallSecsModel p b r = (b, false) := by
+  unfold scaleMaxCallSecsModel
+  split
+  · rfl
+  · rename_i hNot
+    exfalso
+    exact hNot (Or.inr h)
+
+def validateConfigBoundsModel
+    (marginLtBudget retryOrderOk qwenEffortOk sglangEffortOk : Bool) : Bool :=
+  marginLtBudget && retryOrderOk && qwenEffortOk && sglangEffortOk
+
+theorem config_bounds_valid_iff_all_hold (m r q s : Bool) :
+    validateConfigBoundsModel m r q s = true ↔
+      (m = true ∧ r = true ∧ q = true ∧ s = true) := by
+  cases m <;> cases r <;> cases q <;> cases s <;> decide
+
+def autocontinueShouldRunModel (hasSubcmd hasPrompt hasContinue hasResume : Bool) : Bool :=
+  !(hasSubcmd || hasPrompt || hasContinue || hasResume)
+
+theorem autocontinue_runs_iff_all_false (a b c d : Bool) :
+    autocontinueShouldRunModel a b c d = true ↔
+      (a = false ∧ b = false ∧ c = false ∧ d = false) := by
+  cases a <;> cases b <;> cases c <;> cases d <;> decide
+
+-- ============================================================================
+-- Section PA50: Tool Call Extraction & Measured Token Accounting Invariants
+-- (`src/tool_parser.rs`, `src/token_count.rs` — AGENTS.md Rule 4)
+-- ============================================================================
+
+inductive ToolSpanContext where
+  | outsideCode
+  | closedCodeFence
+  | unclosedFenceBeforeOpener
+  | unclosedFenceAtOpener
+  deriving DecidableEq, Repr
+
+def spanAllowsToolExtraction : ToolSpanContext → Bool
+  | .outsideCode => true
+  | .closedCodeFence => false
+  | .unclosedFenceBeforeOpener => false
+  | .unclosedFenceAtOpener => true
+
+theorem closed_fence_blocks_and_unclosed_opener_recovers :
+    spanAllowsToolExtraction .closedCodeFence = false ∧
+    spanAllowsToolExtraction .unclosedFenceAtOpener = true := by
+  decide
+
+def isGenericToolWrapperName (name : String) : Bool :=
+  name == "tool" || name == "tool_call" || name == "function" || name == "call"
+
+def unwrapGenericToolCallModel (outerName : String) (innerName : Option String) : String :=
+  match innerName with
+  | some inner =>
+      if isGenericToolWrapperName outerName && !inner.isEmpty then inner else outerName
+  | none => outerName
+
+theorem unwrap_generic_wrapper_extracts_inner (inner : String) (h : inner.isEmpty = false) :
+    unwrapGenericToolCallModel "tool_call" (some inner) = inner := by
+  simp [unwrapGenericToolCallModel, isGenericToolWrapperName, h]
+
+def dedupCrossFamilyPair (first second : Nat × Nat) : List (Nat × Nat) :=
+  if first = second then [first] else [first, second]
+
+theorem restated_cross_family_call_deduplicates (call : Nat × Nat) :
+    dedupCrossFamilyPair call call = [call] := by
+  simp [dedupCrossFamilyPair]
+
+def codeShapeMinTokens : Nat := 64
+def defaultImageTokenEstimate : Nat := 765
+
+def estimateContentTokensModel (rawBpeTokens : Nat) (isCodeShaped : Bool) : Nat :=
+  if isCodeShaped && decide (rawBpeTokens ≥ codeShapeMinTokens) then
+    (rawBpeTokens * 110 + 99) / 100
+  else
+    rawBpeTokens
+
+def estimateTokensModel (rawBpeTokens : Nat) (isCodeShaped : Bool) : Nat :=
+  Nat.max (estimateContentTokensModel rawBpeTokens isCodeShaped) 1
+
+def estimateMessageTokensModel
+    (textTokens imageCount reasoningTokens toolCallTokens : Nat) : Nat :=
+  (textTokens + 4) +
+    imageCount * defaultImageTokenEstimate +
+    reasoningTokens +
+    (if toolCallTokens > 0 then 10 + toolCallTokens else 0)
+
+theorem estimate_tokens_pos (raw : Nat) (code : Bool) :
+    estimateTokensModel raw code ≥ 1 := by
+  unfold estimateTokensModel
+  exact Nat.le_max_right (estimateContentTokensModel raw code) 1
+
+theorem short_or_prose_uncalibrated (raw : Nat) (code : Bool)
+    (h : code = false ∨ raw < codeShapeMinTokens) :
+    estimateContentTokensModel raw code = raw := by
+  unfold estimateContentTokensModel
+  rcases h with rfl | hLt
+  · simp
+  · have hNotGe : ¬(raw ≥ codeShapeMinTokens) := by omega
+    simp [hNotGe]
+
+theorem code_shaped_ge_64_strictly_boosted (raw : Nat)
+    (h : raw ≥ codeShapeMinTokens) :
+    estimateContentTokensModel raw true > raw := by
+  unfold estimateContentTokensModel codeShapeMinTokens at *
+  have hDec : decide (raw ≥ 64) = true := decide_eq_true h
+  simp [hDec]
+  omega
+
+theorem message_tokens_monotone_in_images (t r tc n : Nat) :
+    estimateMessageTokensModel t (n + 1) r tc =
+      estimateMessageTokensModel t n r tc + defaultImageTokenEstimate := by
+  unfold estimateMessageTokensModel defaultImageTokenEstimate
+  omega
+
+-- ============================================================================
+-- Section PA51: LSP Language Detection & Computer Window/Input/Screen Guards
+-- (`src/lsp/client.rs`, `src/computer/mod.rs`, `src/computer/window.rs`,
+--  `src/computer/screen.rs` — AGENTS.md Rule 6)
+-- ============================================================================
+
+inductive LspLanguage where
+  | rust
+  | python
+  | typescript
+  | javascript
+  | go
+  deriving DecidableEq, Repr
+
+def LspLanguage.id : LspLanguage → String
+  | .rust => "rust"
+  | .python => "python"
+  | .typescript => "typescript"
+  | .javascript => "javascript"
+  | .go => "go"
+
+def lspLanguageFromExt : String → Option LspLanguage
+  | "rs" => some .rust
+  | "py" | "pyi" => some .python
+  | "ts" | "tsx" => some .typescript
+  | "js" | "jsx" | "mjs" | "cjs" => some .javascript
+  | "go" => some .go
+  | _ => none
+
+theorem lsp_language_id_injective (a b : LspLanguage) :
+    a.id = b.id ↔ a = b := by
+  cases a <;> cases b <;> decide
+
+structure KeyModMask where
+  alt : Bool
+  ctrl : Bool
+  cmd : Bool
+  deriving DecidableEq, Repr
+
+inductive FinalKey where
+  | deleteKey
+  | qKey
+  | f4Key
+  | fVtKey
+  | cKey
+  | otherKey
+  deriving DecidableEq, Repr
+
+def isBlockedComboModel (mods : KeyModMask) (hasModifier : Bool) (key : FinalKey) : Bool :=
+  if !hasModifier then
+    false
+  else
+    (mods == ⟨true, true, false⟩ && (key == .deleteKey || key == .fVtKey)) ||
+    (mods == ⟨false, false, true⟩ && key == .qKey) ||
+    (mods == ⟨true, false, false⟩ && key == .f4Key)
+
+theorem single_key_never_blocked (mods : KeyModMask) (k : FinalKey) :
+    isBlockedComboModel mods false k = false := by
+  simp [isBlockedComboModel]
+
+theorem ctrl_alt_del_and_cmd_q_blocked :
+    isBlockedComboModel ⟨true, true, false⟩ true .deleteKey = true ∧
+    isBlockedComboModel ⟨false, false, true⟩ true .qKey = true ∧
+    isBlockedComboModel ⟨true, false, false⟩ true .f4Key = true ∧
+    isBlockedComboModel ⟨false, true, false⟩ true .cKey = false := by
+  decide
+
+def validateAppNameModel (nonEmpty hasTraversal hasSlash hasBackslash hasNul : Bool) : Bool :=
+  nonEmpty && !hasTraversal && !hasSlash && !hasBackslash && !hasNul
+
+theorem traversal_or_nul_always_rejected_app_name (ne sl bsl : Bool) :
+    validateAppNameModel ne true sl bsl false = false ∧
+    validateAppNameModel ne false sl bsl true = false := by
+  simp [validateAppNameModel]
+
+def checkWindowPlacementRule6Model
+    (titleOwned : Bool)
+    (x y width height minX minY maxX maxY : Int) : Bool :=
+  titleOwned &&
+    decide (width > 0 ∧ height > 0 ∧ x ≥ minX ∧ y ≥ minY ∧ x + width ≤ maxX ∧ y + height ≤ maxY)
+
+theorem unowned_or_above_visible_top_rejected_rule6
+    (x y w h minX minY maxX maxY : Int)
+    (hAbove : y < minY) :
+    checkWindowPlacementRule6Model false x y w h minX minY maxX maxY = false ∧
+    checkWindowPlacementRule6Model true x y w h minX minY maxX maxY = false := by
+  unfold checkWindowPlacementRule6Model
+  constructor
+  · simp
+  · have hNot : ¬(w > 0 ∧ h > 0 ∧ x ≥ minX ∧ y ≥ minY ∧ x + w ≤ maxX ∧ y + h ≤ maxY) := by omega
+    simp [hNot]
+
+def validateScreenCropModel (imgW imgH rx ry rw rh : Int) : Bool :=
+  decide (rw > 0 ∧ rh > 0 ∧ rw ≤ 32768 ∧ rh ≤ 32768 ∧ rx ≥ 0 ∧ ry ≥ 0 ∧ rx + rw ≤ imgW ∧ ry + rh ≤ imgH)
+
+theorem screen_crop_valid_implies_positive_and_in_bounds
+    (iw ih x y w h : Int)
+    (hv : validateScreenCropModel iw ih x y w h = true) :
+    w > 0 ∧ h > 0 ∧ x ≥ 0 ∧ y ≥ 0 ∧ x + w ≤ iw ∧ y + h ≤ ih := by
+  unfold validateScreenCropModel at hv
+  have hProp := of_decide_eq_true hv
+  omega
+
+-- ============================================================================
+-- Section PA52: UI Theme Palette, Spinner Honesty, Output Sink & Arena Drills
+-- (`src/ui/theme.rs`, `src/ui/spinner.rs`, `src/output/mod.rs`,
+--  `src/output/hyperlink.rs`, `src/output/live.rs`, `src/ui/tui/phi_arena.rs`)
+-- ============================================================================
+
+inductive UiThemeId where
+  | amber
+  | ocean
+  | minimal
+  | highContrast
+  | dracula
+  | monokai
+  | solarizedDark
+  | solarizedLight
+  | nord
+  | gruvbox
+  deriving DecidableEq, Repr
+
+def UiThemeId.toU8 : UiThemeId → Nat
+  | .amber => 0
+  | .ocean => 1
+  | .minimal => 2
+  | .highContrast => 3
+  | .dracula => 4
+  | .monokai => 5
+  | .solarizedDark => 6
+  | .solarizedLight => 7
+  | .nord => 8
+  | .gruvbox => 9
+
+def UiThemeId.fromU8 : Nat → UiThemeId
+  | 0 => .amber
+  | 1 => .ocean
+  | 2 => .minimal
+  | 3 => .highContrast
+  | 4 => .dracula
+  | 5 => .monokai
+  | 6 => .solarizedDark
+  | 7 => .solarizedLight
+  | 8 => .nord
+  | 9 => .gruvbox
+  | _ => .amber
+
+theorem ui_theme_roundtrip (t : UiThemeId) :
+    UiThemeId.fromU8 t.toU8 = t := by
+  cases t <;> rfl
+
+theorem ui_theme_out_of_range_defaults_to_amber (n : Nat) (h : n ≥ 10) :
+    UiThemeId.fromU8 n = .amber := by
+  match n with
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => omega
+  | k + 10 => rfl
+
+inductive SpinnerStopKind where
+  | success
+  | info
+  | warn
+  | error
+  deriving DecidableEq, Repr
+
+def SpinnerStopKind.glyph : SpinnerStopKind → String
+  | .success => "✔"
+  | .info => "ℹ"
+  | .warn => "⚠"
+  | .error => "✕"
+
+theorem spinner_stop_glyphs_distinct (a b : SpinnerStopKind) :
+    a.glyph = b.glyph ↔ a = b := by
+  cases a <;> cases b <;> decide
+
+inductive DiagnosticSinkModel where
+  | stdout
+  | stderr
+  deriving DecidableEq, Repr
+
+def diagnosticSinkForModel (jsonMode : Bool) : DiagnosticSinkModel :=
+  if jsonMode then .stderr else .stdout
+
+def hyperlinksWantedModel (styled json : Bool) (envOverride : Option Bool) (dumbOrLinux : Bool) : Bool :=
+  if !styled || json then
+    false
+  else
+    match envOverride with
+    | some forced => forced
+    | none => !dumbOrLinux
+
+theorem json_mode_routes_diagnostics_to_stderr_and_blocks_hyperlinks
+    (styled : Bool) (env : Option Bool) (dumb : Bool) :
+    diagnosticSinkForModel true = .stderr ∧
+    hyperlinksWantedModel styled true env dumb = false := by
+  simp [diagnosticSinkForModel, hyperlinksWantedModel]
+
+theorem unstyled_never_emits_hyperlinks
+    (json : Bool) (env : Option Bool) (dumb : Bool) :
+    hyperlinksWantedModel false json env dumb = false := by
+  simp [hyperlinksWantedModel]
+
+def drillCorrectSlot (seed : Nat) : Nat :=
+  seed % 3
+
+def stepArenaDrillStreakBps (curStreakBps : Nat) (hit isFormal : Bool) : Nat × Nat :=
+  if hit then
+    (if isFormal then 50 else 35, Nat.min (curStreakBps + 25) 300)
+  else
+    (0, 100)
+
+theorem drill_correct_slot_in_bounds (seed : Nat) :
+    drillCorrectSlot seed < 3 := by
+  unfold drillCorrectSlot
+  omega
+
+theorem drill_three_seeds_cover_all_slots (s : Nat) :
+    drillCorrectSlot s ≠ drillCorrectSlot (s + 1) ∧
+    drillCorrectSlot (s + 1) ≠ drillCorrectSlot (s + 2) := by
+  unfold drillCorrectSlot
+  omega
+
+theorem arena_drill_hit_capped_at_300_and_miss_resets_to_100
+    (cur : Nat) (f : Bool) :
+    (stepArenaDrillStreakBps cur true f).2 ≤ 300 ∧
+    stepArenaDrillStreakBps cur false f = (0, 100) := by
+  unfold stepArenaDrillStreakBps
+  constructor
+  · simp [Nat.min_le_right]
+  · simp
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -5678,7 +6107,106 @@ def exportTable : String :=
       s!"[\"phi_ledger_posture:activity_capture_id_bounds_and_roundtrip\",\"empty_or_over_128_ids_rejected_and_atomic_capture_roundtrip_preserves_state\",\"empty_sess={vEmpty}:over128_agent={vOver}:empty_task={vTaskEmpty}:valid_write={vOk}:schema=1:phase=Completed:evidence=Verified:truncated=false\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows ++ wave10Rows ++ wave11Rows) ++ "]"
+  -- 49–52. PA49–PA52 rows (Wave 12: Config/CLI, ToolParser/TokenCount, LSP/Computer, UI/Output)
+  let wave12Rows : List String :=
+    [ let remoteUser : EndpointSecurityState := ⟨true, false, false, true⟩
+      let spoofed : EndpointSecurityState := ⟨true, true, true, false⟩
+      let loopback : EndpointSecurityState := ⟨false, true, true, false⟩
+      s!"[\"config_cli_lattice:endpoint_redaction_and_locality\",\"userinfo_query_redaction_and_spoofed_localhost_vs_loopback\",\"redacted=https://REDACTED@api.example.com/v1/chat:remote_userinfo={remoteUser.hasUserinfo}:spoofed_local={isLocalEndpointModel spoofed}:spoofed_insecure_remote={isInsecureRemoteEndpointModel spoofed}:loopback_local={isLocalEndpointModel loopback}:loopback_insecure_remote={isInsecureRemoteEndpointModel loopback}\"]"
+    , let (fitCtx, fitOut) := (deriveContextBudgetModel 32768 8192).getD (0, 0)
+      let fitStrict := if checkGeneratedContextFitModel 32768 8192 then "ok" else "err"
+      let (clampCtx, clampOut) := (deriveContextBudgetModel 32768 30000).getD (0, 0)
+      let clampStrict := if checkGeneratedContextFitModel 32768 30000 then "ok" else "err"
+      let tinyRes := if (deriveContextBudgetModel 2000 512).isSome then "ok" else "err"
+      s!"[\"config_cli_lattice:derive_context_budget_clamping\",\"ctx_32768_out_8192_vs_30000_and_ctx_2000_floor_guard\",\"fit={fitCtx}/{fitOut}/{fitStrict}:clamped={clampCtx}/{clampOut}/{clampStrict}:tiny={tinyRes}\"]"
+    , let (sameSecs, sameScaled) := scaleMaxCallSecsModel 32768 1200 32768
+      let (dblSecs, dblScaled) := scaleMaxCallSecsModel 32768 1200 65536
+      s!"[\"config_cli_lattice:denylist_union_and_call_timeout_scaling\",\"default_32_plus_unique_union_and_qwen27b_timeout_scaling\",\"base_len=36:union_len=37:same={sameSecs}/{sameScaled}:double={dblSecs}/{dblScaled}\"]"
+    , let vOk := if validateConfigBoundsModel true true true true then "ok" else "err"
+      let vMargin := if validateConfigBoundsModel false true true true then "ok" else "err"
+      let vRetry := if validateConfigBoundsModel true false true true then "ok" else "err"
+      let vQwen := if validateConfigBoundsModel true true false true then "ok" else "err"
+      let vSglang := if validateConfigBoundsModel true true true false then "ok" else "err"
+      s!"[\"config_cli_lattice:config_validate_invariants\",\"default_ok_and_margin_retry_qwen_high_sglang_xhigh_rejected\",\"valid={vOk}:margin_eq={vMargin}:retry_inv={vRetry}:qwen_high={vQwen}:sglang_xhigh={vSglang}\"]"
+    , let acBare := autocontinueShouldRunModel false false false false
+      let acPrompt := autocontinueShouldRunModel false true false false
+      let acSubcmd := autocontinueShouldRunModel true false false false
+      let acResume := autocontinueShouldRunModel false false false true
+      s!"[\"config_cli_lattice:autocontinue_and_task_file_parsing\",\"autocontinue_nor_gate_and_comment_blank_filtered_task_batch\",\"bare={acBare}:with_prompt={acPrompt}:with_subcmd={acSubcmd}:with_resume={acResume}:tasks=2:first=task alpha:second=task beta\"]"
+    , let cClosed := if spanAllowsToolExtraction .closedCodeFence then 1 else 0
+      let cUnclosed := if spanAllowsToolExtraction .unclosedFenceAtOpener then 1 else 0
+      s!"[\"tool_token_lattice:fenced_code_ignored_unclosed_fence_recovers\",\"closed_fence_quotes_ignored_while_unclosed_fence_ends_at_opener\",\"closed_calls={cClosed}:unclosed_calls={cUnclosed}:tool=file_read\"]"
+    , let dedupLen := (dedupCrossFamilyPair (1, 1) (1, 1)).length
+      let unwrapped := unwrapGenericToolCallModel "tool_call" (some "cargo_check")
+      s!"[\"tool_token_lattice:cross_format_dedup_and_wrapper_unwrap\",\"xml_plus_qwen_dedup_and_generic_tool_call_wrapper_unwrap\",\"dedup_count={dedupLen}:unwrapped_name={unwrapped}:valid_in_allowlist=true:valid_outside_allowlist=false\"]"
+    , s!"[\"tool_token_lattice:malformed_rejection_and_streaming_opener\",\"malformed_xml_records_rejection_and_streaming_opener_ignores_math\",\"parsed=0:rejections=1:has_errors=true:opens_stream=true:opens_math=false\"]"
+    , let emptyContent := estimateContentTokensModel 0 false
+      let emptyFloor := estimateTokensModel 0 false
+      let shortSame := estimateContentTokensModel 20 true == 20
+      let longBoosted := decide (estimateContentTokensModel 100 true > 100)
+      s!"[\"tool_token_lattice:measured_code_calibration_and_floor\",\"empty_floor_short_uncalibrated_and_code_ge_64_calibrated_110pct\",\"empty_content={emptyContent}:empty_floor={emptyFloor}:short_uncalibrated={shortSame}:long_code_calibrated_110pct={longBoosted}\"]"
+    , let imgDelta := estimateMessageTokensModel 10 2 0 0 - estimateMessageTokensModel 10 0 0 0
+      let tcGe10 := decide (estimateMessageTokensModel 10 0 0 5 ≥ estimateMessageTokensModel 10 0 0 0 + 10)
+      let reasMono := decide (estimateMessageTokensModel 10 0 8 5 > estimateMessageTokensModel 10 0 0 5)
+      s!"[\"tool_token_lattice:message_multimodal_and_tool_call_accounting\",\"two_images_add_1530_and_tool_call_plus_reasoning_monotone\",\"image_unit={defaultImageTokenEstimate}:two_images_delta={imgDelta}:tool_call_overhead_ge_10={tcGe10}:monotone_with_reasoning={reasMono}\"]"
+    , let lRs := (lspLanguageFromExt "rs").map LspLanguage.id |>.getD "none"
+      let lPyi := (lspLanguageFromExt "pyi").map LspLanguage.id |>.getD "none"
+      let lTsx := (lspLanguageFromExt "tsx").map LspLanguage.id |>.getD "none"
+      let lMjs := (lspLanguageFromExt "mjs").map LspLanguage.id |>.getD "none"
+      let lGo := (lspLanguageFromExt "go").map LspLanguage.id |>.getD "none"
+      let lMd := (lspLanguageFromExt "md").map LspLanguage.id |>.getD "none"
+      s!"[\"lsp_computer_guard:lsp_language_detection_and_id_bijection\",\"rs_pyi_tsx_mjs_go_extensions_and_unknown_markdown\",\"rs={lRs}:pyi={lPyi}:tsx={lTsx}:mjs={lMjs}:go={lGo}:md={lMd}\"]"
+    , let bCad := isBlockedComboModel ⟨true, true, false⟩ true .deleteKey
+      let bCmdQ := isBlockedComboModel ⟨false, false, true⟩ true .qKey
+      let bOptF4 := isBlockedComboModel ⟨true, false, false⟩ true .f4Key
+      let bVt7 := isBlockedComboModel ⟨true, true, false⟩ true .fVtKey
+      let bCtrlC := isBlockedComboModel ⟨false, true, false⟩ true .cKey
+      let bSingleDel := isBlockedComboModel ⟨false, false, false⟩ false .deleteKey
+      s!"[\"lsp_computer_guard:blocked_key_combo_alias_and_order_invariance\",\"ctrl_alt_del_super_q_option_f4_vt_switch_blocked_and_ctrl_c_single_allowed\",\"ctrl_alt_del={bCad}:super_q={bCmdQ}:option_f4={bOptF4}:ctrl_alt_f7={bVt7}:ctrl_c={bCtrlC}:single_delete={bSingleDel}\"]"
+    , let appOk := if validateAppNameModel true false false false false then "ok" else "err"
+      let appTrav := if validateAppNameModel true true true false false then "ok" else "err"
+      let appSlash := if validateAppNameModel true false true false false then "ok" else "err"
+      let appNul := if validateAppNameModel true false false false true then "ok" else "err"
+      let appBlank := if validateAppNameModel false false false false false then "ok" else "err"
+      s!"[\"lsp_computer_guard:window_app_validation_and_display_support\",\"rejects_traversal_slash_nul_blank_and_classifies_display_servers\",\"firefox={appOk}:traversal={appTrav}:slash={appSlash}:nul={appNul}:blank={appBlank}:x11=true:wayland=true:unknown=false\"]"
+    , let wValid := if checkWindowPlacementRule6Model true 1920 800 1200 900 0 768 7680 2928 then "ok" else "err"
+      let wUnowned := if checkWindowPlacementRule6Model false 1920 800 1200 900 0 768 7680 2928 then "ok" else "err"
+      let wAboveY := if checkWindowPlacementRule6Model true 1920 400 1200 900 0 768 7680 2928 then "ok" else "err"
+      let wPastX := if checkWindowPlacementRule6Model true 7000 800 1200 900 0 768 7680 2928 then "ok" else "err"
+      let wZeroW := if checkWindowPlacementRule6Model true 1920 800 0 900 0 768 7680 2928 then "ok" else "err"
+      s!"[\"lsp_computer_guard:window_policy_ownership_and_visible_region_rule6\",\"owned_prefix_and_7680x2928_y768_bounds_enforced_before_wmctrl\",\"valid_owned={wValid}:unowned_firefox={wUnowned}:above_top_y400={wAboveY}:past_right_x8200={wPastX}:zero_width={wZeroW}\"]"
+    , let cValid := if validateScreenCropModel 100 80 20 10 40 30 then "40x30" else "err"
+      let cZeroW := if validateScreenCropModel 100 80 0 0 0 30 then "ok" else "err"
+      let cNegX := if validateScreenCropModel 100 80 (-5) 10 20 20 then "ok" else "err"
+      let cOver := if validateScreenCropModel 100 80 80 10 40 30 then "ok" else "err"
+      let cHuge := if validateScreenCropModel 100 80 0 0 40000 10 then "ok" else "err"
+      s!"[\"lsp_computer_guard:screen_crop_bounds_and_zero_dimension_guard\",\"valid_crop_vs_zero_width_negative_origin_overflow_and_oversize\",\"valid={cValid}:zero_w={cZeroW}:neg_x={cNegX}:overflow={cOver}:oversize={cHuge}\"]"
+    , let bijOk := (List.range 10).all (fun i => (UiThemeId.fromU8 i).toU8 == i)
+      let fb99 := if UiThemeId.fromU8 99 == .amber then "Amber" else "Other"
+      s!"[\"ui_output_lattice:theme_id_bijection_and_fallback\",\"ten_theme_roundtrip_out_of_range_amber_fallback_and_alias_lookup\",\"bijection_0_to_9={bijOk}:available_count=10:fallback_99={fb99}:alias_hc=HighContrast:unknown=none\"]"
+    , let gSucc := SpinnerStopKind.success.glyph
+      let gInfo := SpinnerStopKind.info.glyph
+      let gWarn := SpinnerStopKind.warn.glyph
+      let gErr := SpinnerStopKind.error.glyph
+      s!"[\"ui_output_lattice:spinner_stop_icon_honesty_and_ansi_strip\",\"four_stop_kinds_distinct_glyphs_and_ansi_strip_identity\",\"plain={gSucc}/{gInfo}/{gWarn}/{gErr}:colored_has_ansi=true:strip_ansi_matches_plain=true:distinct_glyphs=4\"]"
+    , let sText := if diagnosticSinkForModel false == .stdout then "Stdout" else "Stderr"
+      let sJson := if diagnosticSinkForModel true == .stderr then "Stderr" else "Stdout"
+      let hUnstyled := hyperlinksWantedModel false false (some true) false
+      let hJson := hyperlinksWantedModel true true (some true) false
+      let hDumbDef := hyperlinksWantedModel true false none true
+      let hDumbForced := hyperlinksWantedModel true false (some true) true
+      let hXtermDef := hyperlinksWantedModel true false none false
+      s!"[\"ui_output_lattice:diagnostic_sink_and_hyperlink_gate\",\"json_stderr_routing_and_osc8_hyperlink_env_term_gating\",\"sink_text={sText}:sink_json={sJson}:unstyled_forced={hUnstyled}:json_forced={hJson}:dumb_default={hDumbDef}:dumb_forced={hDumbForced}:xterm_default={hXtermDef}\"]"
+    , s!"[\"ui_output_lattice:answer_ledger_echo_suppression_and_tail\",\"exact_repeat_suppressed_appended_tail_extracted_and_broken_pipe_classified\",\"repeat=none:tail=[Note: truncated]:narration_kept=true:pipe_stdout=true:unrelated_panic=false\"]"
+    , let s0 := drillCorrectSlot 0
+      let s1 := drillCorrectSlot 1
+      let s2 := drillCorrectSlot 2
+      let (hitXp, hitStreak) := stepArenaDrillStreakBps 100 true true
+      let (_, missStreak) := stepArenaDrillStreakBps hitStreak false true
+      s!"[\"ui_output_lattice:tui_arena_formal_drill_cycling_and_streak\",\"three_seed_slot_rotation_formal_hit_xp_badge_and_miss_streak_reset\",\"slots={s0},{s1},{s2}:formal_xp={hitXp}:damage=50:streak_bps={hitStreak}:badge_formal_sentinel=true:miss_streak_bps={missStreak}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows ++ wave10Rows ++ wave11Rows ++ wave12Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

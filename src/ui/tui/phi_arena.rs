@@ -507,7 +507,7 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "PA1–PA48 · PT1–PT5 [TABLE_CONFORMANCE]",
+                "PA1–PA52 · PT1–PT5 [TABLE_CONFORMANCE]",
                 Style::default().fg(Color::Rgb(56, 189, 248)),
             ),
         ]),

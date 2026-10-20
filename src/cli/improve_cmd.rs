@@ -172,6 +172,7 @@ pub(crate) async fn run_gate_command(
     } else {
         let mut cmd = tokio::process::Command::new(program);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         cmd
     };
     cmd.args(args)

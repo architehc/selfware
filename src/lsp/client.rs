@@ -1367,11 +1367,11 @@ impl LspClient {
         let conn = self.connection_for(lang).await?;
 
         let content = crate::tools::file::read_to_string_capped_async(
-            Path::new(file),
+            Path::new(file.strip_prefix("file://").unwrap_or(file)),
             crate::tools::file::MAX_SOURCE_READ_SIZE,
         )
         .await
-        .unwrap_or_default();
+        .with_context(|| format!("Failed to read '{}' for LSP goto_definition", file))?;
         self.did_open(file, &content).await?;
 
         let outcome = self
@@ -1574,11 +1574,11 @@ impl LspClient {
         let conn = self.connection_for(lang).await?;
 
         let content = crate::tools::file::read_to_string_capped_async(
-            Path::new(file),
+            Path::new(file.strip_prefix("file://").unwrap_or(file)),
             crate::tools::file::MAX_SOURCE_READ_SIZE,
         )
         .await
-        .unwrap_or_default();
+        .with_context(|| format!("Failed to read '{}' for LSP goto_definition", file))?;
         self.did_open(file, &content).await?;
 
         let outcome = self
