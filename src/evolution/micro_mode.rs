@@ -49,6 +49,9 @@ pub fn is_micro_model(model_name: &str) -> bool {
 /// ~4K tokens ≈ 16K chars for code
 pub const MICRO_MAX_CONTEXT_CHARS: usize = 12_000;
 
+/// Maximum measured token budget for micro mode (`AGENTS.md` Rule 4).
+pub const MICRO_MAX_CONTEXT_TOKENS: usize = 3_000;
+
 /// Maximum files to include in micro mode context
 pub const MICRO_MAX_FILES: usize = 3;
 
@@ -111,15 +114,20 @@ pub fn select_micro_targets(all_targets: &[PathBuf], repo_root: &Path) -> Vec<(P
     let mut files_sorted = files_with_content;
     files_sorted.sort_by_key(|(_, size, _)| *size);
 
-    // Take top N smallest files that fit in budget
+    // Take top N smallest files that fit in measured token + char budget (AGENTS.md Rule 4)
     let mut selected = Vec::new();
     let mut total_chars = 0usize;
+    let mut total_tokens = 0usize;
 
     for (path, _size, content) in files_sorted.into_iter().take(MICRO_MAX_FILES) {
-        if total_chars + content.len() > MICRO_MAX_CONTEXT_CHARS {
+        let tokens = crate::token_count::estimate_content_tokens(&content);
+        if total_chars + content.len() > MICRO_MAX_CONTEXT_CHARS
+            || total_tokens + tokens > MICRO_MAX_CONTEXT_TOKENS
+        {
             break;
         }
         total_chars += content.len();
+        total_tokens += tokens;
         selected.push((path, content));
     }
 
@@ -148,11 +156,52 @@ pub fn build_micro_context(targets: &[(PathBuf, String)]) -> String {
 /// - No more than MICRO_MAX_EDITS
 /// - Each edit is reasonably sized
 pub fn validate_micro_hypothesis(hypothesis: &Hypothesis) -> Result<(), String> {
+    if hypothesis.target_files.len() > MICRO_MAX_FILES {
+        return Err(format!(
+            "Micro mode: hypothesis targets {} files, max is {}",
+            hypothesis.target_files.len(),
+            MICRO_MAX_FILES
+        ));
+    }
+    for target in &hypothesis.target_files {
+        if crate::evolution::is_protected(target) {
+            return Err(format!(
+                "Micro mode: target file {} is protected",
+                target.display()
+            ));
+        }
+    }
+
     // Parse the edits from the patch JSON
     let edits: Vec<serde_json::Value> = match serde_json::from_str(&hypothesis.patch) {
         Ok(v) => v,
         Err(_) => {
-            // Legacy patch format - allow but warn
+            // Unified diff / legacy patch format — still enforce protected paths,
+            // file count, and edit-hunk ceiling (AGENTS.md Rule 5).
+            let touched = super::investigate::extract_touched_files(&hypothesis.patch);
+            if touched.len() > MICRO_MAX_FILES {
+                return Err(format!(
+                    "Micro mode: diff touches {} files, max is {}",
+                    touched.len(),
+                    MICRO_MAX_FILES
+                ));
+            }
+            for file in &touched {
+                if crate::evolution::is_protected(Path::new(file)) {
+                    return Err(format!("Micro mode: diff touches protected path {file}"));
+                }
+            }
+            let hunk_count = hypothesis
+                .patch
+                .lines()
+                .filter(|line| line.starts_with("@@"))
+                .count();
+            if hunk_count > MICRO_MAX_EDITS {
+                return Err(format!(
+                    "Micro mode: diff has {} hunks, max is {}",
+                    hunk_count, MICRO_MAX_EDITS
+                ));
+            }
             return Ok(());
         }
     };
@@ -166,6 +215,18 @@ pub fn validate_micro_hypothesis(hypothesis: &Hypothesis) -> Result<(), String> 
     }
 
     for (i, edit) in edits.iter().enumerate() {
+        if let Some(file) = edit
+            .get("file")
+            .or_else(|| edit.get("path"))
+            .and_then(|v| v.as_str())
+        {
+            if crate::evolution::is_protected(Path::new(file)) {
+                return Err(format!(
+                    "Micro mode: edit {} targets protected path {}",
+                    i, file
+                ));
+            }
+        }
         let search = edit["search"].as_str().unwrap_or("");
         let replace = edit["replace"].as_str().unwrap_or("");
 

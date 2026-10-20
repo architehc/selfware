@@ -326,11 +326,17 @@ impl ErrorLearner {
     /// Get recommended recovery for error
     pub fn recommend_recovery(&self, error_type: &str, context: &str) -> Option<RecoveryStrategy> {
         let key = format!("{}:{}", error_type, context);
-        self.stats
-            .recoveries_suggested
-            .fetch_add(1, Ordering::Relaxed);
-
-        self.patterns.read().get(&key)?.recommended_recovery.clone()
+        let recovery = self
+            .patterns
+            .read()
+            .get(&key)
+            .and_then(|p| p.recommended_recovery.clone());
+        if recovery.is_some() {
+            self.stats
+                .recoveries_suggested
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        recovery
     }
 
     /// Get summary
@@ -595,18 +601,20 @@ impl StateManager {
 
     /// Restore from checkpoint
     pub fn restore(&self, checkpoint_id: Option<&str>) -> Option<StateCheckpoint> {
-        self.stats
-            .restores_performed
-            .fetch_add(1, Ordering::Relaxed);
-
         let checkpoints = self.checkpoints.read();
 
-        if let Some(id) = checkpoint_id {
+        let restored = if let Some(id) = checkpoint_id {
             checkpoints.iter().find(|c| c.id == id).cloned()
         } else {
             // Get latest checkpoint
             checkpoints.back().cloned()
+        };
+        if restored.is_some() {
+            self.stats
+                .restores_performed
+                .fetch_add(1, Ordering::Relaxed);
         }
+        restored
     }
 
     /// Get latest checkpoint
@@ -904,13 +912,16 @@ impl HealthPredictor {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&state)?;
-        std::fs::write(path, json)?;
+        crate::session::checkpoint::write_bytes_atomically(path, json.as_bytes(), 0o600)?;
         Ok(())
     }
 
     /// Load history and stats from a JSON file.
     pub fn load_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let data = std::fs::read_to_string(path)?;
+        let data = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let state: HealthPredictorState = serde_json::from_str(&data)?;
         *self.history.write() = state.history;
         self.stats.restore(&state.stats);
@@ -938,13 +949,16 @@ impl ErrorLearner {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&state)?;
-        std::fs::write(path, json)?;
+        crate::session::checkpoint::write_bytes_atomically(path, json.as_bytes(), 0o600)?;
         Ok(())
     }
 
     /// Load patterns and recovery history from a JSON file.
     pub fn load_patterns(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let data = std::fs::read_to_string(path)?;
+        let data = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let state: ErrorLearnerState = serde_json::from_str(&data)?;
         *self.patterns.write() = state.patterns;
         *self.recovery_history.write() = state.recovery_history;

@@ -118,24 +118,37 @@ impl FnDedupAnalyzer {
         for (i, f) in fns.iter().enumerate() {
             by_bucket.entry(f.loc.lines / 5).or_default().push(i);
         }
+        let mut seen_pairs = exact_pairs;
         for (&bucket, members) in &by_bucket {
             let mut candidates = members.clone();
             if let Some(adjacent) = by_bucket.get(&(bucket + 1)) {
                 candidates.extend(adjacent);
             }
             for &a in members {
-                for &b in candidates.iter().filter(|&&c| c > a) {
-                    let key = (a.min(b), a.max(b));
-                    if exact_pairs.contains(&key) {
+                for &b in &candidates {
+                    if a == b {
                         continue;
                     }
-                    let sim = jaccard(&fns[a].lines, &fns[b].lines);
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    if !seen_pairs.insert((lo, hi)) {
+                        continue;
+                    }
+                    // Cardinality pre-filter: Jaccard(A, B) <= min(|A|, |B|) / max(|A|, |B|).
+                    let len_a = fns[lo].lines.len();
+                    let len_b = fns[hi].lines.len();
+                    let max_len = len_a.max(len_b);
+                    if max_len > 0
+                        && (len_a.min(len_b) as f64 / max_len as f64) < SIMILARITY_THRESHOLD
+                    {
+                        continue;
+                    }
+                    let sim = jaccard(&fns[lo].lines, &fns[hi].lines);
                     if sim >= SIMILARITY_THRESHOLD {
                         pairs.push(DuplicateFnPair {
                             kind: "near".to_string(),
                             similarity: (sim * 100.0).round() / 100.0,
-                            first: fns[a].loc.clone(),
-                            second: fns[b].loc.clone(),
+                            first: fns[lo].loc.clone(),
+                            second: fns[hi].loc.clone(),
                         });
                     }
                 }

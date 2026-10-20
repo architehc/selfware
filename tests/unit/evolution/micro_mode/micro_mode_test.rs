@@ -32,6 +32,27 @@ fn test_build_micro_system_prompt() {
 
 #[test]
 fn test_validate_micro_hypothesis_too_many_edits() {
-    // This would need a real Hypothesis with JSON patch
-    // Skipping for now - would need mock data
+    let hyp_too_many = Hypothesis {
+        id: "hyp-1".to_string(),
+        description: "too many edits".to_string(),
+        patch: r#"[
+            {"file": "src/a.rs", "search": "a", "replace": "b"},
+            {"file": "src/b.rs", "search": "c", "replace": "d"},
+            {"file": "src/c.rs", "search": "e", "replace": "f"}
+        ]"#
+        .to_string(),
+        target_files: vec![PathBuf::from("src/a.rs")],
+        property_test: None,
+    };
+    assert!(validate_micro_hypothesis(&hyp_too_many).is_err());
+
+    let hyp_protected_diff = Hypothesis {
+        id: "hyp-2".to_string(),
+        description: "protected unified diff".to_string(),
+        patch: "--- a/src/safety/killswitch.rs\n+++ b/src/safety/killswitch.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+            .to_string(),
+        target_files: vec![],
+        property_test: None,
+    };
+    assert!(validate_micro_hypothesis(&hyp_protected_diff).is_err());
 }

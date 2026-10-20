@@ -196,7 +196,7 @@ pub struct ReviewerPerspective {
     pub assessment: String,
 }
 
-/// Synthesized consensus across 10,000 independent synthetic reviewers.
+/// Synthesized consensus across the 4 deterministic static and empirical governance checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewerConsensus {
     pub total_reviewers: usize,
@@ -385,7 +385,19 @@ pub fn read_file_content_at_revision(
             }
         }
     }
-    std::fs::read_to_string(repo_root.join(file_path)).ok()
+    let rel = Path::new(file_path);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    crate::tools::file::read_to_string_capped(
+        &repo_root.join(rel),
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .ok()
 }
 
 /// Searches the resolved target file content (from explicit revision or working tree)
@@ -1624,11 +1636,19 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         None => false,
     };
 
+    let has_killswitch_bypass = files_touched
+        .iter()
+        .any(|f| f.to_ascii_lowercase().contains("killswitch"))
+        || (patch_str.to_ascii_lowercase().contains("killswitch")
+            && (patch_str.contains("remove_file")
+                || patch_str.contains("SELFWARE_KILLSWITCH")
+                || patch_str.contains(".killswitch")));
+
     let safety = Degree5Safety {
         protected_paths_clean: protected_clean,
         rule1_verified,
         merkle_tree_equality,
-        has_killswitch_bypass: false,
+        has_killswitch_bypass,
     };
 
     let primary_symbols = extract_symbols_from_patch(patch_str);
@@ -1883,7 +1903,10 @@ pub fn investigate_attempts_file(
     attempts_file: &Path,
     repo_root: &Path,
 ) -> Result<Vec<InvestigativeDossier>> {
-    let content = std::fs::read_to_string(attempts_file)?;
+    let content = crate::tools::file::read_to_string_capped(
+        attempts_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )?;
     let mut dossiers = Vec::new();
     let mut unparsable_count = 0;
     for (line_no, line) in content.lines().enumerate() {

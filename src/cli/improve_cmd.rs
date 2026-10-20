@@ -1513,7 +1513,7 @@ pub(crate) async fn handle_evolve_command(
                     .unwrap_or(0.0)
             );
             println!(
-                "Consensus:   {} ({:.1}% approval [simulated 10,000-reviewer heuristic projection model])",
+                "Consensus:   {} ({:.1}% approval [4-check static governance model (compile, safety, complexity, provenance)])",
                 dossier.consensus.decision,
                 dossier.consensus.consensus_score * 100.0
             );

@@ -124,17 +124,21 @@ impl ReadinessEngine {
     pub async fn evaluate(&self, graph: &ValidationReport) -> Result<ReadinessReport> {
         let git = self.git.status()?;
 
-        // Run the three cargo analyses concurrently instead of sequentially so
-        // the total wall-clock time is ~max(check, clippy, tests) instead of
-        // check + clippy + tests. Each command is individually bounded by a
-        // timeout so a stuck build cannot block the HTTP request indefinitely.
+        // Run the three cargo analyses sequentially rather than via tokio::join!
+        // because concurrent `cargo` invocations contend on `target/.cargo-lock`,
+        // causing the waiting processes to burn their per-command timeout while
+        // blocked on the build lock rather than executing analysis work.
         const ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-        let (check, clippy, tests) = tokio::join!(
-            self.run_with_timeout(AnalysisKind::Check, ANALYSIS_TIMEOUT),
-            self.run_with_timeout(AnalysisKind::Clippy, ANALYSIS_TIMEOUT),
-            self.run_with_timeout(AnalysisKind::EvolveTests, ANALYSIS_TIMEOUT),
-        );
+        let check = self
+            .run_with_timeout(AnalysisKind::Check, ANALYSIS_TIMEOUT)
+            .await;
+        let clippy = self
+            .run_with_timeout(AnalysisKind::Clippy, ANALYSIS_TIMEOUT)
+            .await;
+        let tests = self
+            .run_with_timeout(AnalysisKind::EvolveTests, ANALYSIS_TIMEOUT)
+            .await;
 
         let analyses = vec![check, clippy, tests];
 

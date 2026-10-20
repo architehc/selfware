@@ -50,7 +50,7 @@ pub enum CycleOutcome {
 pub struct RSIOrchestrator {
     edit_orchestrator: SelfEditOrchestrator,
     meta_learner: MetaLearner,
-    _metrics: MetricsStore,
+    metrics: MetricsStore,
     project_root: PathBuf,
     is_running: bool,
     /// Hard upper bound on the number of improvement iterations before the loop terminates.
@@ -95,10 +95,11 @@ fn parse_max_iterations_per_run(value: Option<&str>) -> usize {
 impl RSIOrchestrator {
     pub fn new(project_root: PathBuf) -> Self {
         let state_path = Self::default_state_path(&project_root);
+        let metrics_path = project_root.join(".selfware").join("metrics.jsonl");
         let mut orch = Self {
             edit_orchestrator: SelfEditOrchestrator::new(project_root.clone()),
             meta_learner: MetaLearner::new(),
-            _metrics: MetricsStore::new(),
+            metrics: MetricsStore::with_path(metrics_path),
             project_root,
             is_running: false,
             max_iterations: 100,
@@ -171,9 +172,18 @@ impl RSIOrchestrator {
         Ok(())
     }
 
+    /// Access the RSI performance metrics store.
+    pub fn metrics_store(&self) -> &MetricsStore {
+        &self.metrics
+    }
+
     /// Load previously persisted state.
     fn load_state(&self) -> std::result::Result<RSIState, std::io::Error> {
-        let data = std::fs::read_to_string(&self.state_path)?;
+        let data = crate::tools::file::read_to_string_capped(
+            &self.state_path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         serde_json::from_str(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -608,8 +618,11 @@ impl RSIOrchestrator {
             )));
         }
 
-        let tsv_content = std::fs::read_to_string(&results_tsv)
-            .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
+        let tsv_content = crate::tools::file::read_to_string_capped(
+            &results_tsv,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
 
         parse_benchmark_report(&tsv_content).map_err(|e| {
             SelfwareError::Internal(format!("Failed to parse benchmark report: {}", e))
@@ -741,11 +754,12 @@ impl RSIOrchestrator {
         status: crate::cognitive::self_edit::ProposalStatus,
     ) -> Result<()> {
         let effectiveness_score = new_score.map_or(0.0, |score| score - baseline_score);
+        let before_metrics = self.metrics.running_average(5).ok().flatten();
         let record = ImprovementRecord {
             target_id: target.id.clone(),
             category: target.category.clone(),
             description: target.description.clone(),
-            before_metrics: None,
+            before_metrics,
             after_metrics: None,
             git_commits: Vec::new(),
             verified,
@@ -773,7 +787,7 @@ impl RSIOrchestrator {
                 history_path,
             ),
             meta_learner: MetaLearner::new(),
-            _metrics: MetricsStore::with_path(project_root.join(".selfware/test-metrics.jsonl")),
+            metrics: MetricsStore::with_path(project_root.join(".selfware/test-metrics.jsonl")),
             project_root,
             is_running: false,
             max_iterations: 100,

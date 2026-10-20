@@ -209,6 +209,16 @@ impl PromptTournamentResult {
     pub fn extends_baseline(&self, baseline: &str) -> bool {
         self.winner_prompt.len() >= baseline.len() && self.winner_prompt.starts_with(baseline)
     }
+
+    /// Pattern ID registered in [`PromptOptimizer`] for this tournament winner.
+    pub fn winner_pattern_id(&self) -> String {
+        let variant_id = self
+            .variants
+            .first()
+            .map(|v| v.variant_id.as_str())
+            .unwrap_or("baseline");
+        format!("evo-{}-{variant_id}", self.task_type)
+    }
 }
 
 impl PromptOptimizer {
@@ -261,6 +271,21 @@ impl PromptOptimizer {
     /// Register a prompt pattern
     pub fn register_pattern(&mut self, pattern: PromptPattern) {
         self.patterns.insert(pattern.id.clone(), pattern);
+    }
+
+    /// Record an observed execution outcome for a registered prompt pattern.
+    pub fn record_pattern_outcome(
+        &mut self,
+        pattern_id: &str,
+        outcome: Outcome,
+        quality: f32,
+    ) -> bool {
+        if let Some(pattern) = self.patterns.get_mut(pattern_id) {
+            pattern.update(outcome, quality);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get best patterns for a task type
@@ -1679,7 +1704,8 @@ impl SelfImprovementEngine {
         }
     }
 
-    /// Evolve a prompt via an automated A/B tournament and return the winning variant.
+    /// Rank mutated prompt variants by structural priors plus recorded history
+    /// and return the top candidate (prior-ranked, not an executed A/B run).
     pub fn evolve_prompt(&self, prompt: &str, task_type: &str) -> Option<PromptTournamentResult> {
         if !self.learning_enabled {
             return None;

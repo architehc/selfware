@@ -733,7 +733,11 @@ impl SelfEditOrchestrator {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(&self.history)?;
-        std::fs::write(&self.history_path, content)?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &self.history_path,
+            content.as_bytes(),
+            0o600,
+        )?;
         Ok(())
     }
 

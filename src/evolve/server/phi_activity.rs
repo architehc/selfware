@@ -934,7 +934,7 @@ fn synthesize_local_bot_turn(
                 });
             }
             format!(
-                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA24 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21 ConfirmView 8-tier RiskTag lattice (`src/safety/confirm_view.rs:642`), PA22 ResourcePressure & AdaptiveQuotas (`src/resources/hardware.rs:189`), PA23 AgentLoop productive streak & budget bounds (`src/agent/loop_control.rs:340`), and PA24 AgentMemory FIFO eviction & TemporalRecord decay (`src/memory/mod.rs:82`)."
+                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA28 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21–PA24 ConfirmView/ResourcePressure/AgentLoop/AgentMemory bounds, PA25 RSI DarwinX & circuit-breaker decay (`src/cognitive/rsi_orchestrator.rs:810`), PA26 Evolution sabotage & replicated token gate (`src/evolution/daemon.rs:730`), PA27 MultiArm consensus & DiagnosticRepairEngine (`src/evolve/multi_arm_runner.rs:350`), and PA28 SelfHealing escalation & HealthPredictor monotonicity (`src/self_healing/mod.rs:1272`)."
             )
         }
         "explain_selection" => {
@@ -1002,7 +1002,7 @@ fn synthesize_local_bot_turn(
                 let formal = crate::phi::arena::verify_phi_formal_invariants();
                 let total_rows = formal["total_rows"].as_u64().unwrap_or(0);
                 parts.push(format!(
-                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA16, PT1–PT5)."
+                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA28, PT1–PT5)."
                 ));
             }
             if let Some(path) = doc_path {
@@ -1459,7 +1459,7 @@ async fn chat(
 
 use crate::phi::arena::{
     generate_formal_drill, generate_formal_drill_json, generate_graph_drill, load_arena_profile,
-    save_arena_profile, verify_phi_formal_invariants,
+    read_rsi_umbrella_summary, save_arena_profile, verify_phi_formal_invariants,
 };
 
 async fn arena_status(
@@ -1469,11 +1469,12 @@ async fn arena_status(
     require_session(&headers, &server)?;
     let root = server.project_root.clone();
     let now = now_ms();
-    let (profile, activity_body) = tokio::task::spawn_blocking(move || {
+    let (profile, activity_body, rsi_umbrella) = tokio::task::spawn_blocking(move || {
         let mut p = load_arena_profile(&root);
         let _ = p.refresh_badges();
         let act = read_activity(&root, now);
-        (p, act)
+        let rsi = read_rsi_umbrella_summary(&root);
+        (p, act, rsi)
     })
     .await
     .map_err(internal_error)?;
@@ -1487,6 +1488,7 @@ async fn arena_status(
         "profile": profile.to_public_json(),
         "drill": drill,
         "formal": verify_phi_formal_invariants(),
+        "rsi_umbrella": rsi_umbrella,
         "signals": {
             "activity_status": signals.activity_status,
             "agent_count": signals.agent_count,
@@ -2226,6 +2228,10 @@ mod tests {
             "table_conformance_verified"
         );
         assert_eq!(arena_json["formal"]["all_passed"], true);
+        assert_eq!(
+            arena_json["rsi_umbrella"]["trust_state"],
+            "observed_signals"
+        );
 
         // 5. POST /api/phi/chat with check_formal intent -> returns table_conformance_verified
         let formal_chat_post = server

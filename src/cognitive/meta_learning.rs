@@ -203,7 +203,11 @@ impl MetaLearner {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(&self.scores)?;
-        std::fs::write(&self.persist_path, content)?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &self.persist_path,
+            content.as_bytes(),
+            0o600,
+        )?;
         Ok(())
     }
 
@@ -211,7 +215,10 @@ impl MetaLearner {
         if !path.exists() {
             return Ok(HashMap::new());
         }
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let scores = serde_json::from_str(&content)?;
         Ok(scores)
     }

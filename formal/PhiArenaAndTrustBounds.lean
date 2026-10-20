@@ -1770,6 +1770,431 @@ theorem importance_decay_strictly_monotone :
     halfLifeDecayPct .high < halfLifeDecayPct .critical := by
   decide
 
+/-! ## Part XXV — PA25: RSI Safety, DarwinX Non-Regression, Circuit-Breaker & Prompt Extension (`src/cognitive/rsi_orchestrator.rs`, `src/cognitive/self_improvement.rs`) -/
+
+/-- Scenario evaluation outcome in `cognitive::rsi_orchestrator::BenchmarkReport`. -/
+structure ScenarioPair where
+  sameName       : Bool
+  baselinePassed : Bool
+  candPassed     : Bool
+  deriving DecidableEq, Repr
+
+/-- Whether a single aligned scenario pair passes DarwinX non-regression. -/
+def scenarioNonRegressing (p : ScenarioPair) : Bool :=
+  p.sameName && (!p.baselinePassed || p.candPassed)
+
+/-- DarwinX suite non-regression gate (`BenchmarkReport::check_darwinx_non_regression`):
+    requires identical scenario cardinality and every scenario pair to have matching name
+    and preserve `Passed(baseline) ⊆ Passed(candidate)`. -/
+def checkDarwinxSuite (sameCount : Bool) (pairs : List ScenarioPair) : Bool :=
+  sameCount && pairs.all scenarioNonRegressing
+
+/-- Outcome of a single RSI loop cycle (`cognitive::rsi_orchestrator::CycleOutcome`). -/
+inductive RsiCycleOutcome where
+  | improved
+  | notImproved
+  | noEligibleMutation
+  deriving DecidableEq, Repr
+
+/-- State transition of `(consecutive_failures, circuit_breaker_tripped)` after an RSI cycle. -/
+def stepRsiBreaker (failures maxFailures : Nat) (tripped : Bool) (outcome : RsiCycleOutcome) : Nat × Bool :=
+  match outcome with
+  | .improved => (0, tripped)
+  | .noEligibleMutation => (failures, tripped)
+  | .notImproved =>
+    let f' := failures + 1
+    (f', tripped || decide (f' ≥ maxFailures))
+
+/-- Restart decay of persisted `consecutive_failures` in `RSIOrchestrator::new`:
+    halves the persisted failure count (`loaded / 2`) and clears `circuit_breaker_tripped`. -/
+def decayRsiFailuresOnRestart (loadedFailures : Nat) : Nat × Bool :=
+  (loadedFailures / 2, false)
+
+/-- Prompt tournament baseline-extension check (`PromptTournamentResult::extends_baseline`)
+    and `PromptOptimizer::best_patterns_for` minimum usage gate (`usage_count >= 5`). -/
+def promptPatternEligible (winnerLen baseLen : Nat) (isPrefix : Bool) (usageCount : Nat) : Bool × Bool :=
+  let extendsBaseline := decide (winnerLen ≥ baseLen) && isPrefix
+  let eligibleInBest := decide (usageCount ≥ 5)
+  (extendsBaseline, eligibleInBest)
+
+theorem darwinx_rejects_passed_to_failed (sameCount : Bool) (rest : List ScenarioPair) :
+    checkDarwinxSuite sameCount ({ sameName := true, baselinePassed := true, candPassed := false } :: rest) = false := by
+  cases sameCount <;> rfl
+
+theorem darwinx_rejects_suite_mismatch (pairs : List ScenarioPair) :
+    checkDarwinxSuite false pairs = false := by
+  rfl
+
+theorem rsi_no_eligible_mutation_preserves_breaker (failures maxFailures : Nat) (tripped : Bool) :
+    stepRsiBreaker failures maxFailures tripped .noEligibleMutation = (failures, tripped) := by
+  rfl
+
+theorem rsi_improved_resets_consecutive_failures (failures maxFailures : Nat) (tripped : Bool) :
+    (stepRsiBreaker failures maxFailures tripped .improved).1 = 0 := by
+  rfl
+
+theorem rsi_not_improved_trips_at_threshold (failures maxFailures : Nat) (tripped : Bool)
+    (h : failures + 1 ≥ maxFailures) :
+    (stepRsiBreaker failures maxFailures tripped .notImproved).2 = true := by
+  simp [stepRsiBreaker, h]
+
+theorem rsi_restart_decay_bounds_and_clears (loaded : Nat) :
+    (decayRsiFailuresOnRestart loaded).1 ≤ loaded ∧ (decayRsiFailuresOnRestart loaded).2 = false := by
+  simp [decayRsiFailuresOnRestart]
+  omega
+
+theorem prompt_fresh_winner_not_immediately_best (winnerLen baseLen : Nat) (isPrefix : Bool) :
+    (promptPatternEligible winnerLen baseLen isPrefix 0).2 = false := by
+  rfl
+
+/-! ## Part XXVI — PA26: Evolution Fitness, Sabotage Guard & Promotion Lattice (`src/evolution/daemon.rs`, `src/evolution/fitness.rs`) -/
+
+/-- Tri-state outcome of the multi-arm token-reduction gate (`daemon::evaluate_token_term`). -/
+inductive TokenGateOutcome where
+  | pass
+  | fail
+  | inconclusive
+  deriving DecidableEq, Repr
+
+def TokenGateOutcome.label : TokenGateOutcome → String
+  | .pass => "some_true"
+  | .fail => "some_false"
+  | .inconclusive => "none"
+
+/-- Whether a single measured arm achieves the strict >5% token reduction (`(base - arm) * 20 > base`). -/
+def armReducesTokens5Pct (baseTokens armTokens : Nat) : Bool :=
+  decide (baseTokens > armTokens) && decide ((baseTokens - armTokens) * 20 > baseTokens)
+
+/-- Multi-arm token gate (`daemon::evaluate_token_term`) for two measured arms:
+    requires `measuredArms >= 2` and `baseTokens > 0`; returns `.pass` iff all arms pass,
+    `.fail` iff all arms fail, and `.inconclusive` on disagreement or insufficient data. -/
+def evaluateTwoArmTokenTerm (baseTokens : Nat) (measuredArms : Nat) (arm1Tokens arm2Tokens : Nat) : TokenGateOutcome :=
+  if baseTokens = 0 || measuredArms < 2 then
+    .inconclusive
+  else
+    let p1 := armReducesTokens5Pct baseTokens arm1Tokens
+    let p2 := armReducesTokens5Pct baseTokens arm2Tokens
+    if p1 && p2 then .pass
+    else if !p1 && !p2 then .fail
+    else .inconclusive
+
+/-- Promotion decision outcome (`daemon::PromotionDecision`). -/
+inductive PromotionOutcome where
+  | promote
+  | rejectSabDrop
+  | rejectDarwinx
+  | rejectSabotageTestsDeleted
+  | rejectWithinNoise
+  deriving DecidableEq, Repr
+
+def PromotionOutcome.isPromote : PromotionOutcome → Bool
+  | .promote => true
+  | _ => false
+
+def PromotionOutcome.label : PromotionOutcome → String
+  | .promote => "promote"
+  | .rejectSabDrop => "reject:sab_drop"
+  | .rejectDarwinx => "reject:darwinx"
+  | .rejectSabotageTestsDeleted => "reject:tests_deleted"
+  | .rejectWithinNoise => "reject:within_noise"
+
+/-- Candidate promotion lattice (`daemon::evaluate_candidate_promotion`) with integer-scaled
+    tenths for SAB score (`sab_x10`) and noise margin (`noise_x10`, default 5 for 0.5). -/
+def evaluateCandidatePromotion
+    (baseSabX10 candSabX10 noiseX10 : Nat)
+    (darwinxOk : Bool)
+    (baseTests candTests : Nat)
+    (compositeImproved : Bool)
+    (tokenGate : TokenGateOutcome) : PromotionOutcome :=
+  if candSabX10 + noiseX10 < baseSabX10 then
+    .rejectSabDrop
+  else if !darwinxOk then
+    .rejectDarwinx
+  else if candTests < baseTests then
+    .rejectSabotageTestsDeleted
+  else if candSabX10 > baseSabX10 + noiseX10 then
+    .promote
+  else if compositeImproved && tokenGate == .pass then
+    .promote
+  else
+    .rejectWithinNoise
+
+theorem sabotage_test_deletion_never_promotes
+    (baseSab candSab noise : Nat) (darwinxOk : Bool)
+    (baseTests candTests : Nat) (comp : Bool) (tok : TokenGateOutcome)
+    (hDel : candTests < baseTests) :
+    (evaluateCandidatePromotion baseSab candSab noise darwinxOk baseTests candTests comp tok).isPromote = false := by
+  simp only [evaluateCandidatePromotion, hDel, ↓reduceIte]
+  split
+  · rfl
+  · split <;> rfl
+
+theorem darwinx_failure_never_promotes
+    (baseSab candSab noise : Nat) (baseTests candTests : Nat) (comp : Bool) (tok : TokenGateOutcome) :
+    (evaluateCandidatePromotion baseSab candSab noise false baseTests candTests comp tok).isPromote = false := by
+  unfold evaluateCandidatePromotion
+  split <;> rfl
+
+theorem within_noise_requires_composite_and_token_pass
+    (baseSab candSab noise : Nat) (baseTests candTests : Nat)
+    (comp : Bool) (tok : TokenGateOutcome)
+    (hNoDrop : ¬(candSab + noise < baseSab))
+    (hNotAbove : ¬(candSab > baseSab + noise))
+    (hTests : ¬(candTests < baseTests)) :
+    (evaluateCandidatePromotion baseSab candSab noise true baseTests candTests comp tok).isPromote =
+      (comp && tok == .pass) := by
+  unfold evaluateCandidatePromotion
+  simp [hNoDrop, hNotAbove, hTests]
+  cases comp <;> cases tok <;> rfl
+
+theorem token_term_disagreement_is_inconclusive (base a1 a2 : Nat)
+    (hBase : base > 0)
+    (hDisagree : armReducesTokens5Pct base a1 ≠ armReducesTokens5Pct base a2) :
+    evaluateTwoArmTokenTerm base 2 a1 a2 = .inconclusive := by
+  unfold evaluateTwoArmTokenTerm
+  have hNe : base ≠ 0 := by omega
+  simp [hNe]
+  cases h1 : armReducesTokens5Pct base a1 <;> cases h2 : armReducesTokens5Pct base a2 <;> simp_all
+
+/-! ## Part XXVII — PA27: Multi-Arm Winner Selection, Compiler Repair & Readiness Lattice (`src/evolve/multi_arm_runner.rs`, `src/evolve/compiler_repair.rs`) -/
+
+/-- Evaluation parameters for a single optimization arm in `evolve::multi_arm_runner`. -/
+structure ArmCandidate where
+  armId           : Nat
+  protectedTouch  : Bool
+  syntaxValid     : Bool
+  compiled        : Bool
+  testRegressions : Nat
+  fitnessDeltaPos : Bool
+  fitnessDeltaMag : Nat
+  armMaxRuntime   : Nat
+  baseMinRuntime  : Nat
+  deriving DecidableEq, Repr
+
+/-- Whether an arm passes all safety, compilation, regression, fitness, and runtime separation gates. -/
+def armPassesAllGates (c : ArmCandidate) : Bool :=
+  !c.protectedTouch &&
+  c.syntaxValid &&
+  c.compiled &&
+  decide (c.testRegressions = 0) &&
+  c.fitnessDeltaPos &&
+  decide (c.armMaxRuntime < c.baseMinRuntime)
+
+/-- Select the passing arm with maximum `fitnessDeltaMag` (first-seen tie-breaking). -/
+def selectBestPassingArm : List ArmCandidate → Option (Nat × Nat)
+  | [] => none
+  | c :: rest =>
+    let tailBest := selectBestPassingArm rest
+    if armPassesAllGates c then
+      match tailBest with
+      | none => some (c.armId, c.fitnessDeltaMag)
+      | some (bestId, bestMag) =>
+        if c.fitnessDeltaMag ≥ bestMag then some (c.armId, c.fitnessDeltaMag)
+        else some (bestId, bestMag)
+    else
+      tailBest
+
+/-- Consensus check (`threshold > 0 && passingArms >= threshold`). -/
+def checkMultiArmConsensus (threshold : Nat) (arms : List ArmCandidate) : Bool :=
+  decide (threshold > 0) && decide ((arms.filter armPassesAllGates).length ≥ threshold)
+
+/-- Disposition of a candidate compiler suggestion in `DiagnosticRepairEngine::apply_machine_fixes`. -/
+inductive RepairEditDisposition where
+  | applied
+  | duplicate
+  | skipped
+  deriving DecidableEq, Repr
+
+/-- Classify a single compiler fix suggestion (`evolve::compiler_repair::DiagnosticRepairEngine::apply_machine_fixes`). -/
+def classifyRepairCandidate (insideRoot validRange isDuplicate overlapsAccepted : Bool) : RepairEditDisposition :=
+  if !insideRoot || !validRange then
+    .skipped
+  else if isDuplicate then
+    .duplicate
+  else if overlapsAccepted then
+    .skipped
+  else
+    .applied
+
+/-- Count `(applied, duplicates, skipped)` across a batch of candidate fixes. -/
+def summarizeRepairBatch (candidates : List (Bool × Bool × Bool × Bool)) : Nat × Nat × Nat :=
+  candidates.foldl (fun (app, dup, skp) (inRoot, validR, isDup, ovl) =>
+    match classifyRepairCandidate inRoot validR isDup ovl with
+    | .applied => (app + 1, dup, skp)
+    | .duplicate => (app, dup + 1, skp)
+    | .skipped => (app, dup, skp + 1)) (0, 0, 0)
+
+/-- Stop reason of `DiagnosticRepairEngine::run_repair_loop` (`evolve::compiler_repair::RepairStop`). -/
+inductive RepairStopModel where
+  | compiles
+  | noApplicableFix
+  | fuelExhausted
+  deriving DecidableEq, Repr
+
+def RepairStopModel.label : RepairStopModel → String
+  | .compiles => "compiles"
+  | .noApplicableFix => "no_applicable_fix"
+  | .fuelExhausted => "fuel_exhausted"
+
+/-- Bounded compiler repair loop (`DiagnosticRepairEngine::run_repair_loop`):
+    given `maxRounds`, current `(rounds, checksRun, fixesApplied)`, and a trace of
+    `(checkSuccess, appliedInRound)` per check, returns `(stop, rounds, checksRun, fixesApplied)`. -/
+def simulateRepairLoop (maxRounds rounds checksRun fixesApplied : Nat) :
+    List (Bool × Nat) → RepairStopModel × Nat × Nat × Nat
+  | [] => (.noApplicableFix, rounds, checksRun, fixesApplied)
+  | (compiles, appliedNow) :: rest =>
+    if compiles then
+      (.compiles, rounds, checksRun, fixesApplied)
+    else if rounds ≥ maxRounds then
+      (.fuelExhausted, rounds, checksRun, fixesApplied)
+    else if appliedNow = 0 then
+      (.noApplicableFix, rounds, checksRun, fixesApplied)
+    else
+      simulateRepairLoop maxRounds (rounds + 1) (checksRun + 1) (fixesApplied + appliedNow) rest
+
+theorem protected_or_regression_arm_never_passes (c : ArmCandidate)
+    (h : c.protectedTouch = true ∨ c.testRegressions > 0) :
+    armPassesAllGates c = false := by
+  unfold armPassesAllGates
+  rcases h with hProt | hReg
+  · simp [hProt]
+  · have hNe : c.testRegressions ≠ 0 := by omega
+    simp [hNe]
+
+theorem zero_threshold_never_meets_consensus (arms : List ArmCandidate) :
+    checkMultiArmConsensus 0 arms = false := by
+  rfl
+
+theorem repair_escape_or_overlap_never_applied (inRoot validR isDup ovl : Bool)
+    (h : inRoot = false ∨ (isDup = false ∧ ovl = true)) :
+    classifyRepairCandidate inRoot validR isDup ovl ≠ .applied := by
+  unfold classifyRepairCandidate
+  rcases h with hOut | ⟨hNotDup, hOvl⟩
+  · simp [hOut]
+  · cases inRoot <;> cases validR <;> simp [hNotDup, hOvl]
+
+theorem repair_loop_stops_at_fuel_ceiling (maxRounds rounds checks fixes appliedNow : Nat)
+    (rest : List (Bool × Nat)) (hExhaust : rounds ≥ maxRounds) :
+    simulateRepairLoop maxRounds rounds checks fixes ((false, appliedNow) :: rest) =
+      (.fuelExhausted, rounds, checks, fixes) := by
+  simp [simulateRepairLoop, hExhaust]
+
+/-! ## Part XXVIII — PA28: Self-Healing Recovery, Escalation & Health Prediction State Machine (`src/self_healing/mod.rs`) -/
+
+/-- Error taxonomy (`self_healing::ErrorClass`). -/
+inductive HealingErrorClass where
+  | network
+  | timeout
+  | rateLimit
+  | resourceExhaustion
+  | parseError
+  | authError
+  | unknown
+  deriving DecidableEq, Repr
+
+/-- Whether the default strategy for an error class uses a `Retry` action
+    (which preserves `retry_attempt_count` across primary success so retries can exhaust). -/
+def defaultStrategyHasRetry : HealingErrorClass → Bool
+  | .network => true
+  | .timeout => true
+  | .rateLimit => true
+  | .resourceExhaustion => true
+  | .parseError => false
+  | .authError => false
+  | .unknown => true
+
+/-- Outcome of `SelfHealingEngine::handle_error`: returns `(resolved, escalated, nextRetryAttempts)`. -/
+def stepSelfHealingError
+    (enabled : Bool)
+    (errClass : HealingErrorClass)
+    (prevAttempts : Nat)
+    (primarySucceeded : Bool)
+    (escalationSucceeded : Bool) : Option (Bool × Bool × Nat) :=
+  if !enabled then
+    none
+  else
+    let attempts := prevAttempts + 1
+    if primarySucceeded then
+      let nextAttempts := if defaultStrategyHasRetry errClass then attempts else 0
+      some (true, false, nextAttempts)
+    else if escalationSucceeded then
+      some (true, true, 0)
+    else
+      some (false, true, attempts)
+
+/-- Predicted component health (`self_healing::PredictedHealth`). -/
+inductive PredictedHealthModel where
+  | healthy
+  | atRisk
+  | degrading
+  | failureImminent
+  deriving DecidableEq, Repr
+
+def PredictedHealthModel.severity : PredictedHealthModel → Nat
+  | .healthy => 0
+  | .atRisk => 1
+  | .degrading => 2
+  | .failureImminent => 3
+
+def PredictedHealthModel.label : PredictedHealthModel → String
+  | .healthy => "Healthy"
+  | .atRisk => "AtRisk"
+  | .degrading => "Degrading"
+  | .failureImminent => "FailureImminent"
+
+/-- Classify component health when `windowLen >= 5`. -/
+def classifyComponentHealth (unhealthyCount errorTrend avgResponseMs : Nat) : PredictedHealthModel :=
+  if unhealthyCount ≥ 7 then
+    .failureImminent
+  else if unhealthyCount ≥ 4 ∨ errorTrend > 10 then
+    .degrading
+  else if unhealthyCount ≥ 2 ∨ avgResponseMs > 3000 then
+    .atRisk
+  else
+    .healthy
+
+/-- Predict component health from the recent window (`HealthPredictor::predict`):
+    returns `none` if `windowLen < 5`, otherwise delegates to `classifyComponentHealth`. -/
+def predictComponentHealth
+    (windowLen unhealthyCount errorTrend avgResponseMs : Nat) : Option PredictedHealthModel :=
+  if windowLen < 5 then
+    none
+  else
+    some (classifyComponentHealth unhealthyCount errorTrend avgResponseMs)
+
+theorem disabled_engine_returns_none
+    (c : HealingErrorClass) (prev : Nat) (pOk eOk : Bool) :
+    stepSelfHealingError false c prev pOk eOk = none := by
+  rfl
+
+theorem retry_primary_success_accumulates_attempts
+    (prev : Nat) :
+    stepSelfHealingError true .network prev true false = some (true, false, prev + 1) := by
+  rfl
+
+theorem escalation_success_resets_retry_attempts
+    (c : HealingErrorClass) (prev : Nat) :
+    stepSelfHealingError true c prev false true = some (true, true, 0) := by
+  rfl
+
+theorem health_prediction_requires_five_samples
+    (len u err rt : Nat) (h : len < 5) :
+    predictComponentHealth len u err rt = none := by
+  unfold predictComponentHealth
+  simp [h]
+
+theorem health_prediction_monotone_in_unhealthy
+    (u1 u2 err rt : Nat) (h : u1 ≤ u2) :
+    (classifyComponentHealth u1 err rt).severity ≤ (classifyComponentHealth u2 err rt).severity := by
+  unfold classifyComponentHealth
+  all_goals try split
+  all_goals try split
+  all_goals try split
+  all_goals try split
+  all_goals try split
+  all_goals try split
+  all_goals (simp [PredictedHealthModel.severity]; try omega)
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -2068,7 +2493,91 @@ def exportTable : String :=
     , s!"[\"memory_retention:temporal_half_life_importance_ladder\",\"half_life_1x\",\"low={halfLifeDecayPct .low}:normal={halfLifeDecayPct .normal}:high={halfLifeDecayPct .high}:critical={halfLifeDecayPct .critical}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows) ++ "]"
+  -- 25–28. PA25–PA28 rows
+  let wave6Rows : List String :=
+    [ let d1 := checkDarwinxSuite true [
+        { sameName := true, baselinePassed := true, candPassed := true },
+        { sameName := true, baselinePassed := false, candPassed := true }
+      ]
+      s!"[\"rsi_safety:darwinx_pass_non_regressing\",\"same_suite=true,s1=T->T,s2=F->T\",\"pass={d1}\"]"
+    , let d2 := checkDarwinxSuite true [
+        { sameName := true, baselinePassed := true, candPassed := true },
+        { sameName := true, baselinePassed := true, candPassed := false }
+      ]
+      s!"[\"rsi_safety:darwinx_rejects_regressed_scenario\",\"same_suite=true,s1=T->T,s2=T->F\",\"pass={d2}\"]"
+    , let d3 := checkDarwinxSuite false [
+        { sameName := false, baselinePassed := true, candPassed := true }
+      ]
+      s!"[\"rsi_safety:darwinx_rejects_suite_mismatch\",\"same_suite=false,extra_or_missing\",\"pass={d3}\"]"
+    , let (decayed, tripped0) := decayRsiFailuresOnRestart 5
+      let (afterNoMut, tripped1) := stepRsiBreaker decayed 5 tripped0 .noEligibleMutation
+      s!"[\"rsi_safety:breaker_no_mutation_vs_failure_and_decay\",\"loaded=5,max=5:restart->no_eligible_mutation\",\"decayed={decayed}:after_no_mut={afterNoMut}:tripped={tripped1}\"]"
+    , let pFresh := promptPatternEligible 42 15 true 0
+      let pMature := promptPatternEligible 42 15 true 5
+      s!"[\"rsi_safety:prompt_tournament_extends_and_usage_gate\",\"base_len=15,win_len=42,prefix=true,u=0_vs_5\",\"ext={pFresh.1}:u0_best={pFresh.2}:u5_best={pMature.2}\"]"
+    , let g1 := evaluateCandidatePromotion 850 840 5 true 100 100 true .pass
+      s!"[\"evolution_gate:sab_score_drop_rejected\",\"base_sab=85.0,cand_sab=84.0,noise=0.5\",\"{g1.label}:promote={g1.isPromote}\"]"
+    , let g2 := evaluateCandidatePromotion 850 900 5 false 100 100 true .pass
+      s!"[\"evolution_gate:darwinx_regression_rejected\",\"base_sab=85.0,cand_sab=90.0,darwinx=false\",\"{g2.label}:promote={g2.isPromote}\"]"
+    , let g3 := evaluateCandidatePromotion 850 900 5 true 100 99 true .pass
+      s!"[\"evolution_gate:sabotage_test_deletion_rejected\",\"base_tests=100,cand_tests=99,cand_sab=90.0\",\"{g3.label}:promote={g3.isPromote}\"]"
+    , let tok4 := evaluateTwoArmTokenTerm 1000 2 940 960
+      let g4 := evaluateCandidatePromotion 850 853 5 true 100 100 true tok4
+      s!"[\"evolution_gate:within_noise_token_disagreement_rejected\",\"base_sab=85.0,cand_sab=85.3,arms=940_960/1000\",\"tok={tok4.label}:{g4.label}:promote={g4.isPromote}\"]"
+    , let tok5 := evaluateTwoArmTokenTerm 1000 2 940 930
+      let g5 := evaluateCandidatePromotion 850 853 5 true 100 100 true tok5
+      s!"[\"evolution_gate:within_noise_composite_and_tokens_promote\",\"base_sab=85.0,cand_sab=85.3,arms=940_930/1000\",\"tok={tok5.label}:{g5.label}:promote={g5.isPromote}\"]"
+    , let arms1 : List ArmCandidate :=
+        [ { armId := 1, protectedTouch := true, syntaxValid := true, compiled := true, testRegressions := 0, fitnessDeltaPos := true, fitnessDeltaMag := 50, armMaxRuntime := 80, baseMinRuntime := 100 }
+        , { armId := 2, protectedTouch := false, syntaxValid := true, compiled := true, testRegressions := 1, fitnessDeltaPos := true, fitnessDeltaMag := 40, armMaxRuntime := 80, baseMinRuntime := 100 }
+        , { armId := 3, protectedTouch := false, syntaxValid := true, compiled := true, testRegressions := 0, fitnessDeltaPos := true, fitnessDeltaMag := 15, armMaxRuntime := 85, baseMinRuntime := 100 }
+        , { armId := 4, protectedTouch := false, syntaxValid := true, compiled := true, testRegressions := 0, fitnessDeltaPos := true, fitnessDeltaMag := 30, armMaxRuntime := 80, baseMinRuntime := 100 }
+        ]
+      let passCount1 := (arms1.filter armPassesAllGates).length
+      let cons1 := checkMultiArmConsensus 2 arms1
+      let win1 := match selectBestPassingArm arms1 with | some (id, _) => s!"arm-{id}" | none => "none"
+      s!"[\"multi_arm_readiness:protected_and_regression_rejected_winner_selected\",\"arms=4,thresh=2\",\"pass={passCount1}:cons={cons1}:win={win1}\"]"
+    , let arms2 : List ArmCandidate :=
+        [ { armId := 1, protectedTouch := false, syntaxValid := true, compiled := true, testRegressions := 0, fitnessDeltaPos := true, fitnessDeltaMag := 25, armMaxRuntime := 105, baseMinRuntime := 100 } ]
+      let passCount2 := (arms2.filter armPassesAllGates).length
+      let consZero := checkMultiArmConsensus 0 arms2
+      let win2 := match selectBestPassingArm arms2 with | some (id, _) => s!"arm-{id}" | none => "none"
+      s!"[\"multi_arm_readiness:unseparated_runtime_and_zero_threshold\",\"arm_max=105>=base_min=100,thresh=0\",\"pass={passCount2}:cons0={consZero}:win={win2}\"]"
+    , let (app3, dup3, skp3) := summarizeRepairBatch [
+        (true, true, false, false),
+        (true, true, true, false),
+        (true, true, false, true),
+        (false, true, false, false)
+      ]
+      s!"[\"multi_arm_readiness:repair_dedup_overlap_and_path_escape\",\"valid+dup+overlap+escape\",\"applied={app3}:dup={dup3}:skip={skp3}\"]"
+    , let (stComp, rComp, cComp, _) := simulateRepairLoop 3 0 1 0 [(false, 1), (true, 0)]
+      let (stNoFix, rNoFix, cNoFix, _) := simulateRepairLoop 3 0 1 0 [(false, 0)]
+      s!"[\"multi_arm_readiness:repair_loop_compiles_vs_no_fix\",\"max=3:one_fix_then_ok_vs_no_fix\",\"{stComp.label}:{rComp}:{cComp}:{stNoFix.label}:{rNoFix}:{cNoFix}\"]"
+    , let (stFuel, rFuel, cFuel, fFuel) := simulateRepairLoop 2 0 1 0 [(false, 1), (false, 1), (false, 1)]
+      s!"[\"multi_arm_readiness:repair_loop_fuel_exhausted\",\"max=2:three_failing_rounds\",\"stop={stFuel.label}:rounds={rFuel}:checks={cFuel}:fixes={fFuel}\"]"
+    , let hDis := stepSelfHealingError false .network 0 true false
+      let hNet1 := stepSelfHealingError true .network 0 true false
+      let hNet2 := stepSelfHealingError true .network 1 true false
+      let sDis := match hDis with | none => "none" | some _ => "some"
+      let sNet1 := match hNet1 with | some (res, esc, att) => s!"{res}:{esc}:{att}" | none => "none"
+      let sNet2 := match hNet2 with | some (res, esc, att) => s!"{res}:{esc}:{att}" | none => "none"
+      s!"[\"self_healing:disabled_and_retry_accumulation\",\"disabled_vs_network_retry_1_2\",\"dis={sDis}:n1={sNet1}:n2={sNet2}\"]"
+    , let hParse := stepSelfHealingError true .parseError 2 false true
+      let sParse := match hParse with | some (res, esc, att) => s!"{res}:{esc}:{att}" | none => "none"
+      s!"[\"self_healing:parse_error_escalates_and_resets_attempts\",\"parse_error:primary=false,esc=true,prev=2\",\"{sParse}\"]"
+    , let hp4 := match predictComponentHealth 4 4 20 5000 with | none => "none" | some p => p.label
+      let hpHealthy := match predictComponentHealth 10 1 5 200 with | none => "none" | some p => p.label
+      let hpRiskUnhealthy := match predictComponentHealth 10 2 5 200 with | none => "none" | some p => p.label
+      let hpRiskLatency := match predictComponentHealth 10 0 0 3500 with | none => "none" | some p => p.label
+      s!"[\"self_healing:health_predictor_insufficient_vs_healthy_and_at_risk\",\"len=4_vs_10,u=1/2/0,rt=200/3500\",\"w4={hp4}:ok={hpHealthy}:u2={hpRiskUnhealthy}:rt={hpRiskLatency}\"]"
+    , let hpDegU := match predictComponentHealth 10 4 0 200 with | none => "none" | some p => p.label
+      let hpDegTrend := match predictComponentHealth 10 0 11 200 with | none => "none" | some p => p.label
+      s!"[\"self_healing:health_predictor_degrading_unhealthy_or_error_trend\",\"len=10,u=4_or_trend=11\",\"u4={hpDegU}:trend11={hpDegTrend}\"]"
+    , let hpFail := match predictComponentHealth 10 7 0 100 with | none => "none" | some p => p.label
+      s!"[\"self_healing:health_predictor_failure_imminent\",\"len=10,u=7,trend=0,rt=100\",\"{hpFail}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

@@ -171,6 +171,47 @@ pub fn parse(content: &str, language: Language) -> ParsedFile {
     }
 }
 
+use std::sync::LazyLock;
+
+static RUST_DOC_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*//!\s*(.+)$").expect("valid rust doc regex"));
+static RUST_USE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*use\s+(.+);$").expect("valid rust use regex"));
+static RUST_FN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:async\s+)?(?:fn|const\s+fn)\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^\{;]+))?",
+    )
+    .expect("valid rust fn regex")
+});
+static RUST_STRUCT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)")
+        .expect("valid rust struct regex")
+});
+static RUST_TRAIT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)trait\s+(\w+)")
+        .expect("valid rust trait regex")
+});
+static PY_IMPORT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))$")
+        .expect("valid python import regex")
+});
+static PY_CLASS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*class\s+(\w+)(?:\(([^)]*)\))?:").expect("valid python class regex")
+});
+static PY_FN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?:")
+        .expect("valid python fn regex")
+});
+static TS_FN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function|const)\s+(\w+)\s*(?:=\s*)?(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+))?",
+    )
+    .expect("valid ts fn regex")
+});
+static TS_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*(?:export\s+)?(?:interface|type)\s+(\w+)").expect("valid ts type regex")
+});
+
 /// Parse Rust code using regex-based extraction
 pub fn parse_rust(content: &str) -> ParsedFile {
     let mut symbols = Vec::new();
@@ -178,11 +219,8 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     let mut module_doc = None;
 
     // Extract module-level doc comment
-    let doc_regex = Regex::new(r"^\s* //!\s*(.+)$")
-        .map_err(|e| format!("Invalid doc regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines().take(20) {
-        if let Some(cap) = doc_regex.captures(line) {
+        if let Some(cap) = RUST_DOC_REGEX.captures(line) {
             let doc = cap.get(1).map(|m| m.as_str().to_string());
             let doc_str = doc.unwrap_or_default();
             module_doc = Some(format!("{}{}\n", module_doc.unwrap_or_default(), doc_str));
@@ -190,11 +228,8 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract imports (use statements)
-    let use_regex = Regex::new(r"^\s*use\s+(.+);$")
-        .map_err(|e| format!("Invalid use regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines() {
-        if let Some(cap) = use_regex.captures(line) {
+        if let Some(cap) = RUST_USE_REGEX.captures(line) {
             let path = cap.get(1).map(|m| m.as_str().to_string());
             if let Some(path) = path {
                 imports.push(Import {
@@ -207,13 +242,7 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract function signatures
-    let fn_regex = Regex::new(
-        r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:async\s+)?(?:fn|const\s+fn)\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^\{;]+))?"
-    )
-    .map_err(|e| format!("Invalid fn regex: {}", e))
-    .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-
-    for cap in fn_regex.captures_iter(content) {
+    for cap in RUST_FN_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_brace_span_end_line(content, start_byte);
@@ -254,10 +283,7 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract structs
-    let struct_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)")
-        .map_err(|e| format!("Invalid struct regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-    for cap in struct_regex.captures_iter(content) {
+    for cap in RUST_STRUCT_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_brace_span_end_line(content, start_byte);
@@ -282,10 +308,7 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract traits
-    let trait_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)trait\s+(\w+)")
-        .map_err(|e| format!("Invalid trait regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-    for cap in trait_regex.captures_iter(content) {
+    for cap in RUST_TRAIT_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_brace_span_end_line(content, start_byte);
@@ -393,11 +416,8 @@ fn parse_python(content: &str) -> ParsedFile {
     let mut imports = Vec::new();
 
     // Extract imports
-    let import_regex = Regex::new(r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))$")
-        .map_err(|e| format!("Invalid import regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines() {
-        if let Some(cap) = import_regex.captures(line) {
+        if let Some(cap) = PY_IMPORT_REGEX.captures(line) {
             let path = cap
                 .get(1)
                 .or_else(|| cap.get(3))
@@ -413,10 +433,7 @@ fn parse_python(content: &str) -> ParsedFile {
     }
 
     // Extract class definitions
-    let class_regex = Regex::new(r"(?m)^\s*class\s+(\w+)(?:\(([^)]*)\))?:")
-        .map_err(|e| format!("Invalid class regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-    for cap in class_regex.captures_iter(content) {
+    for cap in PY_CLASS_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_python_block_end_line(content, line_start);
@@ -446,10 +463,7 @@ fn parse_python(content: &str) -> ParsedFile {
     }
 
     // Extract function definitions
-    let fn_regex = Regex::new(r"(?m)^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?:")
-        .map_err(|e| format!("Invalid fn regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-    for cap in fn_regex.captures_iter(content) {
+    for cap in PY_FN_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_python_block_end_line(content, line_start);
@@ -495,11 +509,7 @@ fn parse_typescript(content: &str) -> ParsedFile {
     let mut symbols = Vec::new();
 
     // Extract functions
-    let fn_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function|const)\s+(\w+)\s*(?:=\s*)?(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+))?")
-        .map_err(|e| format!("Invalid fn regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-
-    for cap in fn_regex.captures_iter(content) {
+    for cap in TS_FN_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_brace_span_end_line(content, start_byte);
@@ -533,10 +543,7 @@ fn parse_typescript(content: &str) -> ParsedFile {
     }
 
     // Extract interfaces and types
-    let type_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:interface|type)\s+(\w+)")
-        .map_err(|e| format!("Invalid type regex: {}", e))
-        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
-    for cap in type_regex.captures_iter(content) {
+    for cap in TS_TYPE_REGEX.captures_iter(content) {
         let start_byte = cap.get(0).map(|m| m.start()).unwrap_or(0);
         let line_start = line_number_at(content, start_byte);
         let line_end = find_brace_span_end_line(content, start_byte);

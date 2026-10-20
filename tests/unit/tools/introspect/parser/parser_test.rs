@@ -46,3 +46,12 @@ pub struct PublicStruct;
         .iter()
         .all(|s| matches!(s.visibility, Visibility::Public)));
 }
+
+#[test]
+fn test_parse_rust_extracts_module_doc_without_leading_space() {
+    let code = "//! Top-level module documentation\n//! Second line\npub fn f() {}\n";
+    let parsed = parse_rust(code);
+    let doc = parsed.module_doc.expect("module_doc should be extracted");
+    assert!(doc.contains("Top-level module documentation"));
+    assert!(doc.contains("Second line"));
+}

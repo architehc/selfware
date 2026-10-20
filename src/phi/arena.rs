@@ -779,7 +779,7 @@ pub fn generate_graph_drill(graph: &crate::evolve::Graph, seed: usize) -> Value 
     })
 }
 
-/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA24 and PT1–PT5.
+/// Return the live Lean 4 formal verification table-conformance summary for PA1–PA28 and PT1–PT5.
 ///
 /// Honest status (`AGENTS.md` Rule 3): `trust_state` is `"table_conformance_verified"` because
 /// Lean 4 kernel elaboration runs in `scripts/check_formal.sh` while the live binary verifies
@@ -953,12 +953,110 @@ pub fn verify_phi_formal_invariants() -> Value {
                 "rust_citation": "src/memory/mod.rs:82",
             },
             {
+                "id": "PA25",
+                "title": "RSI Safety, DarwinX Non-Regression, Circuit-Breaker & Prompt Extension",
+                "theorems": ["darwinx_rejects_passed_to_failed", "rsi_no_eligible_mutation_preserves_breaker", "prompt_fresh_winner_not_immediately_best"],
+                "rust_citation": "src/cognitive/rsi_orchestrator.rs:810",
+            },
+            {
+                "id": "PA26",
+                "title": "Evolution Fitness, Sabotage Guard & Promotion Lattice",
+                "theorems": ["sabotage_test_deletion_never_promotes", "within_noise_requires_composite_and_token_pass", "token_term_disagreement_is_inconclusive"],
+                "rust_citation": "src/evolution/daemon.rs:730",
+            },
+            {
+                "id": "PA27",
+                "title": "Multi-Arm Winner Selection, Compiler Repair & Readiness Lattice",
+                "theorems": ["protected_or_regression_arm_never_passes", "zero_threshold_never_meets_consensus", "repair_loop_stops_at_fuel_ceiling"],
+                "rust_citation": "src/evolve/multi_arm_runner.rs:350",
+            },
+            {
+                "id": "PA28",
+                "title": "Self-Healing Recovery, Escalation & Health Prediction State Machine",
+                "theorems": ["disabled_engine_returns_none", "escalation_success_resets_retry_attempts", "health_prediction_monotone_in_unhealthy"],
+                "rust_citation": "src/self_healing/mod.rs:1272",
+            },
+            {
                 "id": "PT1-PT5",
                 "title": "Revision-Keyed Ledger, Mediator, FoxPosture & Steward Priority",
                 "theorems": ["tests_never_discharge_review", "high_debt_always_unimpressed", "repair_dominates_steward"],
                 "rust_citation": "src/phi/policy.rs:774",
             },
         ],
+    })
+}
+
+/// Safely read grounded RSI umbrella telemetry from `.selfware/` (`rsi_state.json`,
+/// `active_policy.json`, `replay_validation_latest.json`) using `O_NOFOLLOW` and size caps.
+///
+/// Honest status (`AGENTS.md` Rule 3): always reports `trust_state: "observed_signals"`
+/// and explicitly marks whether each artifact is present on disk.
+pub fn read_rsi_umbrella_summary(workspace_root: &Path) -> Value {
+    #[cfg(unix)]
+    let read_selfware_json = |file_name: &str| -> Option<Value> {
+        use std::os::unix::fs::MetadataExt;
+        let canon = workspace_root.canonicalize().ok()?;
+        let root_dir = File::open(&canon).ok()?;
+        let selfware_dir = open_child_nofollow(&root_dir, ".selfware".as_ref(), true).ok()?;
+        let file = open_child_nofollow(&selfware_dir, file_name.as_ref(), false).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_PROFILE_BYTES {
+            return None;
+        }
+        let mut buf = Vec::new();
+        if file
+            .take(MAX_PROFILE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || (buf.len() as u64) > MAX_PROFILE_BYTES
+        {
+            return None;
+        }
+        serde_json::from_slice::<Value>(&buf).ok()
+    };
+    #[cfg(not(unix))]
+    let read_selfware_json = |_file_name: &str| -> Option<Value> { None };
+
+    let rsi_state = read_selfware_json("rsi_state.json");
+    let active_policy = read_selfware_json("active_policy.json");
+    let replay_validation = read_selfware_json("replay_validation_latest.json");
+
+    let rsi_state_present = rsi_state.is_some();
+    let total_iterations = rsi_state
+        .as_ref()
+        .and_then(|v| v["total_iterations"].as_u64())
+        .unwrap_or(0);
+    let consecutive_failures = rsi_state
+        .as_ref()
+        .and_then(|v| v["consecutive_failures"].as_u64())
+        .unwrap_or(0);
+    let max_consecutive_failures = rsi_state
+        .as_ref()
+        .and_then(|v| v["max_consecutive_failures"].as_u64())
+        .unwrap_or(5);
+    let circuit_breaker_open =
+        rsi_state_present && consecutive_failures >= max_consecutive_failures;
+
+    let active_policy_name = active_policy
+        .as_ref()
+        .and_then(|v| v["policy_name"].as_str().or_else(|| v["policy"].as_str()))
+        .map(str::to_string);
+    let kendall_w = replay_validation
+        .as_ref()
+        .and_then(|v| v["kendall_w"].as_f64())
+        .or_else(|| active_policy.as_ref().and_then(|v| v["kendall_w"].as_f64()));
+
+    json!({
+        "trust_state": "observed_signals",
+        "rsi_state_present": rsi_state_present,
+        "total_iterations": total_iterations,
+        "consecutive_failures": consecutive_failures,
+        "max_consecutive_failures": max_consecutive_failures,
+        "circuit_breaker_open": circuit_breaker_open,
+        "active_policy_present": active_policy.is_some(),
+        "active_policy_name": active_policy_name,
+        "replay_validation_present": replay_validation.is_some(),
+        "kendall_w": kendall_w,
     })
 }
 
@@ -1171,6 +1269,42 @@ pub fn generate_formal_drill(seed: usize) -> BossBattleDrill {
             correct: "Evicts oldest entries FIFO until `total_tokens + new_tokens <= max_memory_tokens` before appending",
             wrong_a: "Rejects the new entry when memory is full",
             wrong_b: "Clears all memory entries whenever `is_near_limit()` is true",
+        },
+        ProofQuestion {
+            id: "PA25:rsi_no_eligible_mutation_preserves_breaker",
+            question: "PROOF DRILL [PA25]: Under `rsi_no_eligible_mutation_preserves_breaker`, how does `RSIOrchestrator` treat `CycleOutcome::NoEligibleMutation`?",
+            citation: "src/cognitive/rsi_orchestrator.rs:286",
+            snippet: "theorem rsi_no_eligible_mutation_preserves_breaker : stepRsiBreaker failures maxFailures tripped .noEligibleMutation = (failures, tripped)",
+            correct: "Stops the loop cleanly without incrementing `consecutive_failures` or tripping the circuit breaker",
+            wrong_a: "Counts `NoEligibleMutation` as a failure toward the circuit breaker",
+            wrong_b: "Resets `consecutive_failures` to 0 as if an improvement occurred",
+        },
+        ProofQuestion {
+            id: "PA26:sabotage_test_deletion_never_promotes",
+            question: "PROOF DRILL [PA26]: Under `sabotage_test_deletion_never_promotes`, what does `evaluate_candidate_promotion` return if `cand_tests < base_tests`?",
+            citation: "src/evolution/daemon.rs:751",
+            snippet: "theorem sabotage_test_deletion_never_promotes (hDel : candTests < baseTests) : (evaluateCandidatePromotion ...).isPromote = false",
+            correct: "Always rejects the candidate (`PromotionDecision::Reject`) even if SAB and composite scores improved",
+            wrong_a: "Promotes if `cand_sab > base_sab + noise_margin`",
+            wrong_b: "Promotes if the remaining tests pass 100%",
+        },
+        ProofQuestion {
+            id: "PA27:zero_threshold_never_meets_consensus",
+            question: "PROOF DRILL [PA27]: Under `zero_threshold_never_meets_consensus`, when can `MultiArmEvolutionRunner` report `consensus_met = true`?",
+            citation: "src/evolve/multi_arm_runner.rs:385",
+            snippet: "theorem zero_threshold_never_meets_consensus : checkMultiArmConsensus 0 arms = false",
+            correct: "Only when `consensus_threshold > 0` and `passing_arms >= consensus_threshold`",
+            wrong_a: "Whenever `passing_arms >= consensus_threshold` even if `consensus_threshold == 0`",
+            wrong_b: "Whenever at least 1 arm compiles",
+        },
+        ProofQuestion {
+            id: "PA28:escalation_success_resets_retry_attempts",
+            question: "PROOF DRILL [PA28]: Under `escalation_success_resets_retry_attempts`, what happens to `retry_attempt_count` when an escalated recovery succeeds?",
+            citation: "src/self_healing/mod.rs:1339",
+            snippet: "theorem escalation_success_resets_retry_attempts : stepSelfHealingError true c prev false true = some (true, true, 0)",
+            correct: "Resets `retry_attempt_count` to 0 for both the primary and escalated pattern keys",
+            wrong_a: "Keeps the accumulated retry count so the next error immediately fails",
+            wrong_b: "Increments the retry counter by 2",
         },
         ProofQuestion {
             id: "PT1:tests_never_discharge_review",

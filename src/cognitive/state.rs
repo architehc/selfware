@@ -50,14 +50,23 @@ impl CognitiveState {
 
     /// Load from a file
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let content = fs::read_to_string(path)?;
+        let content = crate::tools::file::read_to_string_capped(
+            path.as_ref(),
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         Ok(serde_json::from_str(&content)?)
     }
 
     /// Save to a file
     pub fn save(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let path_ref = path.as_ref();
+        if let Some(parent) = path_ref.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        crate::session::checkpoint::write_bytes_atomically(path_ref, content.as_bytes(), 0o600)?;
         Ok(())
     }
 

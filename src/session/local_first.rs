@@ -109,6 +109,9 @@ impl LocalCache<String> {
 
     /// Insert an entry
     pub fn put(&mut self, entry: LocalCacheEntry<String>) {
+        if self.max_entries == 0 {
+            return;
+        }
         if self.entries.len() >= self.max_entries && !self.entries.contains_key(&entry.key) {
             // Simple eviction: remove first entry
             if let Some(first_key) = self.entries.keys().next().cloned() {

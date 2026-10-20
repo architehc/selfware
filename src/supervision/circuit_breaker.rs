@@ -225,16 +225,15 @@ impl CircuitBreaker {
 
     /// Handle successful operation
     pub async fn on_success(&self) {
-        if let Ok(mut guard) = self.last_failure_reason.write() {
-            *guard = None;
-        }
-
         match self.current_state() {
             CircuitState::HalfOpen => {
                 let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
                 debug!(success_count = success_count, "Operation succeeded");
                 if success_count >= self.config.success_threshold {
                     info!("Circuit breaker closing after successful recovery");
+                    if let Ok(mut guard) = self.last_failure_reason.write() {
+                        *guard = None;
+                    }
                     self.transition_to(CircuitState::Closed).await;
                 } else {
                     let _ = self.half_open_requests.fetch_update(
@@ -245,6 +244,9 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::Closed => {
+                if let Ok(mut guard) = self.last_failure_reason.write() {
+                    *guard = None;
+                }
                 let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
                 debug!(success_count = success_count, "Operation succeeded");
                 // Reset failure count in closed state
@@ -252,7 +254,8 @@ impl CircuitBreaker {
             }
             CircuitState::Open => {
                 // Ignore late completions from before the circuit opened so
-                // they do not pre-populate `success_count` for HalfOpen.
+                // they do not pre-populate `success_count` for HalfOpen or
+                // wipe `last_failure_reason` while still Open (AGENTS.md Rule 3).
             }
         }
     }

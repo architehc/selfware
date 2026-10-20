@@ -132,8 +132,11 @@ impl ToolCache {
             workspace_root,
         };
 
+        if self.max_entries == 0 {
+            return;
+        }
         let mut entries = self.entries.write().await;
-        if entries.len() >= self.max_entries {
+        if entries.len() >= self.max_entries && !entries.contains_key(&key) {
             self.evict_expired(&mut entries);
         }
         entries.insert(key, entry);
@@ -150,7 +153,7 @@ impl ToolCache {
                 .collect();
             items.sort_by_key(|a| a.1);
 
-            let to_remove = self.max_entries / 10;
+            let to_remove = (self.max_entries / 10).max(1);
             for (key, _) in items.iter().take(to_remove) {
                 entries.remove(key);
             }

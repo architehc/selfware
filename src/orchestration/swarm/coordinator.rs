@@ -548,14 +548,21 @@ impl Swarm {
             return;
         }
 
-        // Check if all agents have submitted results — done atomically
+        // Check if all assigned agents have submitted results — done atomically
         // within the same mutable borrow to avoid inconsistent state
-        let all_done = task.results.len() >= task.assigned_agents.len();
+        let all_done = task
+            .assigned_agents
+            .iter()
+            .all(|id| task.results.contains_key(id));
         if all_done {
-            let successes = task.result_success.values().filter(|s| **s).count();
+            let successes = task
+                .assigned_agents
+                .iter()
+                .filter(|id| task.result_success.get(*id).copied().unwrap_or(false))
+                .count();
             task.status = match successes {
                 0 => TaskStatus::Failed,
-                n if n == task.result_success.len() => TaskStatus::Completed,
+                n if n == task.assigned_agents.len() => TaskStatus::Completed,
                 _ => TaskStatus::Partial,
             };
         }

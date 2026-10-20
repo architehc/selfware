@@ -114,6 +114,7 @@ impl Default for QualityAnalyzer {
 pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
     let output = match Command::new(cmd)
         .sanitized_env()
+        .env("CARGO_TERM_COLOR", "never")
         .args(["check", "--message-format=json"])
         .output()
     {
@@ -144,7 +145,8 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
         for span in spans {
             if span.get("is_primary").and_then(|p| p.as_bool()) == Some(true) {
                 if let Some(file) = span.get("file_name").and_then(|f| f.as_str()) {
-                    *counts.entry(file.to_string()).or_insert(0) += 1;
+                    let normalized = file.replace('\\', "/");
+                    *counts.entry(normalized).or_insert(0) += 1;
                 }
             }
         }

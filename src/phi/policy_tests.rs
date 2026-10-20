@@ -1515,6 +1515,756 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
                 "Lean PA24 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(rsi_op) = domain.strip_prefix("rsi_safety:") {
+            use crate::cognitive::rsi_orchestrator::{
+                BenchmarkReport, RSIOrchestrator, RSIState, ScenarioOutcome,
+            };
+            use crate::cognitive::self_improvement::{Outcome, PromptOptimizer};
+            use std::collections::HashMap;
+            let mk_report = |items: &[(&str, f64, bool)]| -> BenchmarkReport {
+                let mut scenarios = HashMap::new();
+                let mut sum = 0.0;
+                for (name, score, passed) in items {
+                    sum += *score;
+                    scenarios.insert(
+                        (*name).to_string(),
+                        ScenarioOutcome {
+                            name: (*name).to_string(),
+                            score: *score,
+                            passed: *passed,
+                        },
+                    );
+                }
+                BenchmarkReport {
+                    average_score: if items.is_empty() {
+                        0.0
+                    } else {
+                        sum / items.len() as f64
+                    },
+                    scenarios,
+                }
+            };
+            let actual = match rsi_op {
+                "darwinx_pass_non_regressing" => {
+                    let base = mk_report(&[("s1", 90.0, true), ("s2", 40.0, false)]);
+                    let cand = mk_report(&[("s1", 90.0, true), ("s2", 85.0, true)]);
+                    format!("pass={}", base.check_darwinx_non_regression(&cand).is_ok())
+                }
+                "darwinx_rejects_regressed_scenario" => {
+                    let base = mk_report(&[("s1", 90.0, true), ("s2", 80.0, true)]);
+                    let cand = mk_report(&[("s1", 95.0, true), ("s2", 60.0, false)]);
+                    format!("pass={}", base.check_darwinx_non_regression(&cand).is_ok())
+                }
+                "darwinx_rejects_suite_mismatch" => {
+                    let base = mk_report(&[("s1", 90.0, true)]);
+                    let cand = mk_report(&[("s1", 90.0, true), ("s_extra", 95.0, true)]);
+                    format!("pass={}", base.check_darwinx_non_regression(&cand).is_ok())
+                }
+                "breaker_no_mutation_vs_failure_and_decay" => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let state_dir = dir.path().join(".selfware");
+                    std::fs::create_dir_all(&state_dir).unwrap();
+                    let initial = RSIState {
+                        total_iterations: 3,
+                        consecutive_failures: 5,
+                        max_iterations: 100,
+                        max_consecutive_failures: 5,
+                    };
+                    std::fs::write(
+                        state_dir.join("rsi_state.json"),
+                        serde_json::to_string(&initial).unwrap(),
+                    )
+                    .unwrap();
+                    let mut orch = RSIOrchestrator::new(dir.path().to_path_buf());
+                    orch.save_state().unwrap();
+                    let after_restart: RSIState = serde_json::from_str(
+                        &std::fs::read_to_string(state_dir.join("rsi_state.json")).unwrap(),
+                    )
+                    .unwrap();
+                    let decayed = after_restart.consecutive_failures;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let tripped = rt.block_on(orch.run_loop()).is_err();
+                    let after_loop: RSIState = serde_json::from_str(
+                        &std::fs::read_to_string(state_dir.join("rsi_state.json")).unwrap(),
+                    )
+                    .unwrap();
+                    format!(
+                        "decayed={decayed}:after_no_mut={}:tripped={tripped}",
+                        after_loop.consecutive_failures
+                    )
+                }
+                "prompt_tournament_extends_and_usage_gate" => {
+                    let mut opt = PromptOptimizer::new();
+                    let baseline = "Write clean code.";
+                    let res = opt.evolve_prompt("code_gen", baseline);
+                    let ext = res.extends_baseline(baseline);
+                    let winner_id = res.winner_pattern_id();
+                    let u0_best = opt
+                        .best_patterns_for("code_gen")
+                        .iter()
+                        .any(|p| p.id == winner_id);
+                    for _ in 0..5 {
+                        opt.record_pattern_outcome(&winner_id, Outcome::Success, 0.95);
+                    }
+                    let u5_best = opt
+                        .best_patterns_for("code_gen")
+                        .iter()
+                        .any(|p| p.id == winner_id);
+                    format!("ext={ext}:u0_best={u0_best}:u5_best={u5_best}")
+                }
+                other => panic!("unknown rsi_safety op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA25 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(evo_op) = domain.strip_prefix("evolution_gate:") {
+            use crate::evolution::daemon::{
+                evaluate_candidate_promotion, evaluate_token_term, PromotionDecision,
+            };
+            use crate::evolution::fitness::{Difficulty, SabResult, ScenarioScore};
+            use crate::evolution::{FitnessMetrics, GenerationRating};
+            use std::time::Duration;
+            let mk_metrics = |sab_score: f64, tests_total: usize| FitnessMetrics {
+                sab_score,
+                tokens_used: Some(1000),
+                token_budget: 500_000,
+                wall_clock_secs: 1.0,
+                timeout_secs: 3600.0,
+                full_evaluation_secs: Some(1.0),
+                test_pass_pct: 100.0,
+                binary_size_mb: 10.0,
+                max_binary_size_mb: 50.0,
+                tests_passed: tests_total,
+                tests_total,
+                visual_score: 0.0,
+            };
+            let classify_decision = |d: &PromotionDecision| -> (&'static str, bool) {
+                match d {
+                    PromotionDecision::Promote => ("promote", true),
+                    PromotionDecision::Reject(reason) => {
+                        let label = if reason.contains("regressed below baseline") {
+                            "reject:sab_drop"
+                        } else if reason.contains("DarwinX") {
+                            "reject:darwinx"
+                        } else if reason.contains("test count regressed") {
+                            "reject:tests_deleted"
+                        } else {
+                            "reject:within_noise"
+                        };
+                        (label, false)
+                    }
+                }
+            };
+            let actual = match evo_op {
+                "sab_score_drop_rejected" => {
+                    let base_m = mk_metrics(85.0, 100);
+                    let cand_m = mk_metrics(84.0, 100);
+                    let dec = evaluate_candidate_promotion(
+                        0.80,
+                        0.90,
+                        None,
+                        None,
+                        &base_m,
+                        &cand_m,
+                        &[Some(900), Some(900)],
+                    );
+                    let (lbl, prom) = classify_decision(&dec);
+                    format!("{lbl}:promote={prom}")
+                }
+                "darwinx_regression_rejected" => {
+                    let base_m = mk_metrics(85.0, 100);
+                    let cand_m = mk_metrics(90.0, 100);
+                    let base_sab = SabResult {
+                        aggregate_score: 85.0,
+                        scenario_scores: vec![ScenarioScore {
+                            name: "Scenario 1".into(),
+                            difficulty: Difficulty::Medium,
+                            score: 85.0,
+                            tests_passed: true,
+                            broken_tests_fixed: true,
+                            clean_exit: true,
+                            tokens_used: Some(100),
+                            duration: Duration::from_secs(1),
+                        }],
+                        total_tokens_used: Some(100),
+                        wall_clock: Duration::from_secs(1),
+                        rating: GenerationRating::Bloom,
+                        binary_sha256: "00".into(),
+                        model: Some("test-model".into()),
+                        endpoint: Some("http://localhost:8000/v1".into()),
+                        run_id: "r1".into(),
+                        report_path: PathBuf::new(),
+                    };
+                    let cand_sab = SabResult {
+                        aggregate_score: 90.0,
+                        scenario_scores: vec![ScenarioScore {
+                            name: "Scenario 1".into(),
+                            difficulty: Difficulty::Medium,
+                            score: 50.0,
+                            tests_passed: false,
+                            broken_tests_fixed: false,
+                            clean_exit: true,
+                            tokens_used: Some(100),
+                            duration: Duration::from_secs(1),
+                        }],
+                        total_tokens_used: Some(100),
+                        wall_clock: Duration::from_secs(1),
+                        rating: GenerationRating::Bloom,
+                        binary_sha256: "00".into(),
+                        model: Some("test-model".into()),
+                        endpoint: Some("http://localhost:8000/v1".into()),
+                        run_id: "r2".into(),
+                        report_path: PathBuf::new(),
+                    };
+                    let dec = evaluate_candidate_promotion(
+                        0.80,
+                        0.90,
+                        Some(&base_sab),
+                        Some(&cand_sab),
+                        &base_m,
+                        &cand_m,
+                        &[Some(900), Some(900)],
+                    );
+                    let (lbl, prom) = classify_decision(&dec);
+                    format!("{lbl}:promote={prom}")
+                }
+                "sabotage_test_deletion_rejected" => {
+                    let base_m = mk_metrics(85.0, 100);
+                    let cand_m = mk_metrics(90.0, 99);
+                    let dec = evaluate_candidate_promotion(
+                        0.80,
+                        0.90,
+                        None,
+                        None,
+                        &base_m,
+                        &cand_m,
+                        &[Some(900), Some(900)],
+                    );
+                    let (lbl, prom) = classify_decision(&dec);
+                    format!("{lbl}:promote={prom}")
+                }
+                "within_noise_token_disagreement_rejected" => {
+                    let base_m = mk_metrics(85.0, 100);
+                    let cand_m = mk_metrics(85.3, 100);
+                    let arms = [Some(940), Some(960)];
+                    let tok = match evaluate_token_term(Some(1000), &arms) {
+                        Some(true) => "some_true",
+                        Some(false) => "some_false",
+                        None => "none",
+                    };
+                    let dec = evaluate_candidate_promotion(
+                        0.80, 0.85, None, None, &base_m, &cand_m, &arms,
+                    );
+                    let (lbl, prom) = classify_decision(&dec);
+                    format!("tok={tok}:{lbl}:promote={prom}")
+                }
+                "within_noise_composite_and_tokens_promote" => {
+                    let base_m = mk_metrics(85.0, 100);
+                    let cand_m = mk_metrics(85.3, 100);
+                    let arms = [Some(940), Some(930)];
+                    let tok = match evaluate_token_term(Some(1000), &arms) {
+                        Some(true) => "some_true",
+                        Some(false) => "some_false",
+                        None => "none",
+                    };
+                    let dec = evaluate_candidate_promotion(
+                        0.80, 0.85, None, None, &base_m, &cand_m, &arms,
+                    );
+                    let (lbl, prom) = classify_decision(&dec);
+                    format!("tok={tok}:{lbl}:promote={prom}")
+                }
+                other => panic!("unknown evolution_gate op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA26 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(ma_op) = domain.strip_prefix("multi_arm_readiness:") {
+            use crate::evolve::compiler_repair::{
+                DiagnosticRepairEngine, MachineApplicableFix, RepairStop,
+            };
+            use crate::evolve::diagnostics::{
+                AnalysisKind, AnalysisReport, CompilerDiagnostic, DiagnosticSpan,
+            };
+            use crate::evolve::multi_arm_runner::{
+                ArmMeasurement, MultiArmEvolutionRunner, OptimizationArm,
+            };
+            let actual = match ma_op {
+                "protected_and_regression_rejected_winner_selected" => {
+                    let runner = MultiArmEvolutionRunner::new(2, "/tmp");
+                    let baseline = ArmMeasurement {
+                        compiled: true,
+                        tests_passed: 50,
+                        tests_failed: 0,
+                        bench_samples_ns: vec![100, 105],
+                        ..Default::default()
+                    };
+                    let arms = vec![
+                        OptimizationArm {
+                            arm_id: "arm-1".into(),
+                            name: "protected edit".into(),
+                            description: "protected edit".into(),
+                            target_file: "src/evolution/daemon.rs".into(),
+                            proposed_source: "pub fn x() {}\n".into(),
+                        },
+                        OptimizationArm {
+                            arm_id: "arm-2".into(),
+                            name: "regressing edit".into(),
+                            description: "regressing edit".into(),
+                            target_file: "src/foo.rs".into(),
+                            proposed_source: "pub fn a() {}\n".into(),
+                        },
+                        OptimizationArm {
+                            arm_id: "arm-3".into(),
+                            name: "modest winner".into(),
+                            description: "modest winner".into(),
+                            target_file: "src/foo.rs".into(),
+                            proposed_source: "pub fn b() {}\n".into(),
+                        },
+                        OptimizationArm {
+                            arm_id: "arm-4".into(),
+                            name: "strong winner".into(),
+                            description: "strong winner".into(),
+                            target_file: "src/foo.rs".into(),
+                            proposed_source: "pub fn c() {}\n".into(),
+                        },
+                    ];
+                    let report =
+                        runner.evaluate_arms(&baseline, &arms, |arm| match arm.arm_id.as_str() {
+                            "arm-2" => Ok(ArmMeasurement {
+                                compiled: true,
+                                tests_passed: 49,
+                                tests_failed: 0,
+                                bench_samples_ns: vec![80],
+                                ..Default::default()
+                            }),
+                            "arm-3" => Ok(ArmMeasurement {
+                                compiled: true,
+                                tests_passed: 50,
+                                tests_failed: 0,
+                                bench_samples_ns: vec![85],
+                                ..Default::default()
+                            }),
+                            "arm-4" => Ok(ArmMeasurement {
+                                compiled: true,
+                                tests_passed: 50,
+                                tests_failed: 0,
+                                bench_samples_ns: vec![70],
+                                ..Default::default()
+                            }),
+                            _ => unreachable!(),
+                        });
+                    format!(
+                        "pass={}:cons={}:win={}",
+                        report.passing_arms,
+                        report.consensus_met,
+                        report
+                            .winning_arm
+                            .as_ref()
+                            .map(|w| w.arm_id.as_str())
+                            .unwrap_or("none")
+                    )
+                }
+                "unseparated_runtime_and_zero_threshold" => {
+                    let runner = MultiArmEvolutionRunner::new(0, "/tmp");
+                    let baseline = ArmMeasurement {
+                        compiled: true,
+                        tests_passed: 50,
+                        tests_failed: 0,
+                        bench_samples_ns: vec![100, 110],
+                        ..Default::default()
+                    };
+                    let arms = vec![OptimizationArm {
+                        arm_id: "arm-1".into(),
+                        name: "overlapping runtime".into(),
+                        description: "overlapping runtime".into(),
+                        target_file: "src/foo.rs".into(),
+                        proposed_source: "pub fn ok() {}\n".into(),
+                    }];
+                    let report = runner.evaluate_arms(&baseline, &arms, |_| {
+                        Ok(ArmMeasurement {
+                            compiled: true,
+                            tests_passed: 50,
+                            tests_failed: 0,
+                            bench_samples_ns: vec![95, 105],
+                            ..Default::default()
+                        })
+                    });
+                    format!(
+                        "pass={}:cons0={}:win={}",
+                        report.passing_arms,
+                        report.consensus_met,
+                        report
+                            .winning_arm
+                            .as_ref()
+                            .map(|w| w.arm_id.as_str())
+                            .unwrap_or("none")
+                    )
+                }
+                "repair_dedup_overlap_and_path_escape" => {
+                    let dir = tempfile::tempdir().unwrap();
+                    std::fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
+                    let engine = DiagnosticRepairEngine::new();
+                    let fixes = vec![
+                        MachineApplicableFix {
+                            file: "lib.rs".into(),
+                            line_start: 1,
+                            line_end: 1,
+                            column_start: 4,
+                            column_end: 9,
+                            byte_start: Some(3),
+                            byte_end: Some(8),
+                            replacement: "beta".into(),
+                            diagnostic_message: "rename".into(),
+                            suggestion_id: 1,
+                        },
+                        MachineApplicableFix {
+                            file: "lib.rs".into(),
+                            line_start: 1,
+                            line_end: 1,
+                            column_start: 4,
+                            column_end: 9,
+                            byte_start: Some(3),
+                            byte_end: Some(8),
+                            replacement: "beta".into(),
+                            diagnostic_message: "rename duplicate".into(),
+                            suggestion_id: 2,
+                        },
+                        MachineApplicableFix {
+                            file: "lib.rs".into(),
+                            line_start: 1,
+                            line_end: 1,
+                            column_start: 6,
+                            column_end: 10,
+                            byte_start: Some(5),
+                            byte_end: Some(9),
+                            replacement: "gamma".into(),
+                            diagnostic_message: "overlapping".into(),
+                            suggestion_id: 3,
+                        },
+                        MachineApplicableFix {
+                            file: "../escape.rs".into(),
+                            line_start: 1,
+                            line_end: 1,
+                            column_start: 1,
+                            column_end: 2,
+                            byte_start: Some(0),
+                            byte_end: Some(1),
+                            replacement: "x".into(),
+                            diagnostic_message: "escape".into(),
+                            suggestion_id: 4,
+                        },
+                    ];
+                    let app = engine.apply_machine_fixes(dir.path(), &fixes).unwrap();
+                    format!(
+                        "applied={}:dup={}:skip={}",
+                        app.applied,
+                        app.duplicates,
+                        app.skipped.len()
+                    )
+                }
+                "repair_loop_compiles_vs_no_fix" => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let file_path = dir.path().join("lib.rs");
+                    std::fs::write(&file_path, "fn a() {}\n").unwrap();
+                    let engine = DiagnosticRepairEngine::new();
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let mut call_count = 0usize;
+                    let out_comp = rt
+                        .block_on(engine.run_repair_loop(dir.path(), 3, || {
+                            call_count += 1;
+                            let c = call_count;
+                            async move {
+                                if c == 1 {
+                                    Ok(AnalysisReport {
+                                        kind: AnalysisKind::Check,
+                                        label: "Check".into(),
+                                        command: vec!["cargo".into(), "check".into()],
+                                        success: false,
+                                        exit_code: Some(101),
+                                        duration_ms: 1,
+                                        errors: 1,
+                                        warnings: 0,
+                                        diagnostics: vec![CompilerDiagnostic {
+                                            level: "error".into(),
+                                            message: "err".into(),
+                                            children: vec![CompilerDiagnostic {
+                                                level: "help".into(),
+                                                message: "fix".into(),
+                                                spans: vec![DiagnosticSpan {
+                                                    file: "lib.rs".into(),
+                                                    line_start: 1,
+                                                    line_end: 1,
+                                                    column_start: 4,
+                                                    column_end: 5,
+                                                    byte_start: Some(3),
+                                                    byte_end: Some(4),
+                                                    suggested_replacement: Some("b".into()),
+                                                    suggestion_applicability: Some(
+                                                        "MachineApplicable".into(),
+                                                    ),
+                                                    ..Default::default()
+                                                }],
+                                                ..Default::default()
+                                            }],
+                                            ..Default::default()
+                                        }],
+                                        stdout_tail: String::new(),
+                                        stderr_tail: String::new(),
+                                        evidence_complete: true,
+                                    })
+                                } else {
+                                    Ok(AnalysisReport {
+                                        kind: AnalysisKind::Check,
+                                        label: "Check".into(),
+                                        command: vec!["cargo".into(), "check".into()],
+                                        success: true,
+                                        exit_code: Some(0),
+                                        duration_ms: 1,
+                                        errors: 0,
+                                        warnings: 0,
+                                        diagnostics: vec![],
+                                        stdout_tail: String::new(),
+                                        stderr_tail: String::new(),
+                                        evidence_complete: true,
+                                    })
+                                }
+                            }
+                        }))
+                        .unwrap();
+                    let out_nofix = rt
+                        .block_on(engine.run_repair_loop(dir.path(), 3, || async {
+                            Ok(AnalysisReport {
+                                kind: AnalysisKind::Check,
+                                label: "Check".into(),
+                                command: vec!["cargo".into(), "check".into()],
+                                success: false,
+                                exit_code: Some(101),
+                                duration_ms: 1,
+                                errors: 1,
+                                warnings: 0,
+                                diagnostics: vec![],
+                                stdout_tail: String::new(),
+                                stderr_tail: String::new(),
+                                evidence_complete: true,
+                            })
+                        }))
+                        .unwrap();
+                    let stop_str = |s: &RepairStop| match s {
+                        RepairStop::Compiles => "compiles",
+                        RepairStop::NoApplicableFix => "no_applicable_fix",
+                        RepairStop::FuelExhausted => "fuel_exhausted",
+                    };
+                    format!(
+                        "{}:{}:{}:{}:{}:{}",
+                        stop_str(&out_comp.stop),
+                        out_comp.rounds,
+                        out_comp.checks_run,
+                        stop_str(&out_nofix.stop),
+                        out_nofix.rounds,
+                        out_nofix.checks_run
+                    )
+                }
+                "repair_loop_fuel_exhausted" => {
+                    let dir = tempfile::tempdir().unwrap();
+                    std::fs::write(dir.path().join("lib.rs"), "fn a() {}\n").unwrap();
+                    let engine = DiagnosticRepairEngine::new();
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let out = rt
+                        .block_on(engine.run_repair_loop(dir.path(), 2, || async {
+                            Ok(AnalysisReport {
+                                kind: AnalysisKind::Check,
+                                label: "Check".into(),
+                                command: vec!["cargo".into(), "check".into()],
+                                success: false,
+                                exit_code: Some(101),
+                                duration_ms: 1,
+                                errors: 1,
+                                warnings: 0,
+                                diagnostics: vec![CompilerDiagnostic {
+                                    level: "error".into(),
+                                    message: "err".into(),
+                                    children: vec![CompilerDiagnostic {
+                                        level: "help".into(),
+                                        message: "fix".into(),
+                                        spans: vec![DiagnosticSpan {
+                                            file: "lib.rs".into(),
+                                            line_start: 1,
+                                            line_end: 1,
+                                            column_start: 4,
+                                            column_end: 5,
+                                            byte_start: Some(3),
+                                            byte_end: Some(4),
+                                            suggested_replacement: Some("b".into()),
+                                            suggestion_applicability: Some(
+                                                "MachineApplicable".into(),
+                                            ),
+                                            ..Default::default()
+                                        }],
+                                        ..Default::default()
+                                    }],
+                                    ..Default::default()
+                                }],
+                                stdout_tail: String::new(),
+                                stderr_tail: String::new(),
+                                evidence_complete: true,
+                            })
+                        }))
+                        .unwrap();
+                    let stop = match out.stop {
+                        RepairStop::Compiles => "compiles",
+                        RepairStop::NoApplicableFix => "no_applicable_fix",
+                        RepairStop::FuelExhausted => "fuel_exhausted",
+                    };
+                    format!(
+                        "stop={stop}:rounds={}:checks={}:fixes={}",
+                        out.rounds, out.checks_run, out.fixes_applied
+                    )
+                }
+                other => panic!("unknown multi_arm_readiness op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA27 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(sh_op) = domain.strip_prefix("self_healing:") {
+            use crate::self_healing::{
+                ErrorOccurrence, HealthPredictor, PredictedHealth, SelfHealingConfig,
+                SelfHealingEngine,
+            };
+            let health_label = |p: Option<PredictedHealth>| -> &'static str {
+                match p {
+                    None => "none",
+                    Some(PredictedHealth::Healthy) => "Healthy",
+                    Some(PredictedHealth::AtRisk) => "AtRisk",
+                    Some(PredictedHealth::Degrading) => "Degrading",
+                    Some(PredictedHealth::FailureImminent) => "FailureImminent",
+                }
+            };
+            let run_window =
+                |len: usize, unhealthy: usize, total_errors: u32, rt_ms: u64| -> &'static str {
+                    let pred = HealthPredictor::new();
+                    for i in 0..len {
+                        let is_healthy = i >= unhealthy;
+                        let errs = if i == 0 { total_errors } else { 0 };
+                        pred.record("svc", is_healthy, Some(rt_ms), errs);
+                    }
+                    health_label(pred.predict("svc").map(|p| p.predicted_status))
+                };
+            let actual = match sh_op {
+                "disabled_and_retry_accumulation" => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .start_paused(true)
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        let dis_engine = SelfHealingEngine::new(SelfHealingConfig {
+                            enabled: false,
+                            ..Default::default()
+                        });
+                        let net_err =
+                            ErrorOccurrence::new("network_error", "connection reset", "http");
+                        let dis = if dis_engine.handle_error(net_err.clone()).await.is_none() {
+                            "none"
+                        } else {
+                            "some"
+                        };
+                        let engine = SelfHealingEngine::new(SelfHealingConfig::default());
+                        let r1 = engine.handle_error(net_err.clone()).await.unwrap();
+                        let c1 = engine.executor().retry_attempt_count("network_error:http");
+                        let r2 = engine.handle_error(net_err).await.unwrap();
+                        let c2 = engine.executor().retry_attempt_count("network_error:http");
+                        format!(
+                            "dis={dis}:n1={}:{}:{c1}:n2={}:{}:{c2}",
+                            r1.success,
+                            r1.strategy.starts_with("escalate_"),
+                            r2.success,
+                            r2.strategy.starts_with("escalate_")
+                        )
+                    })
+                }
+                "parse_error_escalates_and_resets_attempts" => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .start_paused(true)
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        let engine = SelfHealingEngine::new(SelfHealingConfig::default());
+                        // Seed two retry attempts under pattern key "serde_json::Error:parser"
+                        let retry_strat = crate::self_healing::RecoveryStrategy::retry();
+                        let _ = engine
+                            .executor()
+                            .execute_for_pattern(
+                                &retry_strat,
+                                engine.state_manager(),
+                                "serde_json::Error:parser",
+                            )
+                            .await;
+                        let _ = engine
+                            .executor()
+                            .execute_for_pattern(
+                                &retry_strat,
+                                engine.state_manager(),
+                                "serde_json::Error:parser",
+                            )
+                            .await;
+                        assert_eq!(
+                            engine
+                                .executor()
+                                .retry_attempt_count("serde_json::Error:parser"),
+                            2
+                        );
+                        // Now handle a ParseError with no checkpoint in StateManager:
+                        // primary RestoreCheckpoint fails -> escalates to escalate_compress (succeeds)
+                        // -> resets retry_attempt_count to 0!
+                        let parse_err =
+                            ErrorOccurrence::new("serde_json::Error", "invalid json", "parser");
+                        let rp = engine.handle_error(parse_err).await.unwrap();
+                        format!(
+                            "{}:{}:{}",
+                            rp.success,
+                            rp.strategy.starts_with("escalate_"),
+                            engine
+                                .executor()
+                                .retry_attempt_count("serde_json::Error:parser")
+                        )
+                    })
+                }
+                "health_predictor_insufficient_vs_healthy_and_at_risk" => {
+                    let w4 = run_window(4, 4, 20, 5000);
+                    let ok = run_window(10, 1, 5, 200);
+                    let u2 = run_window(10, 2, 5, 200);
+                    let rt = run_window(10, 0, 0, 3500);
+                    format!("w4={w4}:ok={ok}:u2={u2}:rt={rt}")
+                }
+                "health_predictor_degrading_unhealthy_or_error_trend" => {
+                    let u4 = run_window(10, 4, 0, 200);
+                    let trend11 = run_window(10, 0, 11, 200);
+                    format!("u4={u4}:trend11={trend11}")
+                }
+                "health_predictor_failure_imminent" => run_window(10, 7, 0, 100).to_string(),
+                other => panic!("unknown self_healing op: {other}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA28 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -1524,5 +2274,176 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 127, "all 127 PA1–PA24 rows must be checked");
+    assert_eq!(checked, 147, "all 147 PA1–PA28 rows must be checked");
+}
+
+#[test]
+fn pa25_rsi_darwinx_and_prompt_extension_invariants() {
+    use crate::cognitive::rsi_orchestrator::{BenchmarkReport, ScenarioOutcome};
+    use crate::cognitive::self_improvement::{Outcome, PromptOptimizer};
+    use std::collections::HashMap;
+
+    let mut base_map = HashMap::new();
+    base_map.insert(
+        "s1".to_string(),
+        ScenarioOutcome {
+            name: "s1".to_string(),
+            score: 80.0,
+            passed: true,
+        },
+    );
+    let mut cand_map = HashMap::new();
+    cand_map.insert(
+        "s1".to_string(),
+        ScenarioOutcome {
+            name: "s1".to_string(),
+            score: 65.0,
+            passed: false,
+        },
+    );
+    let base = BenchmarkReport {
+        average_score: 80.0,
+        scenarios: base_map,
+    };
+    let cand = BenchmarkReport {
+        average_score: 65.0,
+        scenarios: cand_map,
+    };
+    assert!(
+        base.check_darwinx_non_regression(&cand).is_err(),
+        "Lean theorem darwinx_rejects_passed_to_failed: passed -> failed must be rejected"
+    );
+
+    let mut opt = PromptOptimizer::new();
+    let res = opt.evolve_prompt("code_gen", "Write clean Rust.");
+    assert!(res.extends_baseline("Write clean Rust."));
+    let winner_id = res.winner_pattern_id();
+    assert!(
+        opt.best_patterns_for("code_gen")
+            .iter()
+            .all(|p| p.id != winner_id),
+        "Lean theorem prompt_fresh_winner_not_immediately_best: usage_count=0 excluded from best_patterns_for"
+    );
+    for _ in 0..5 {
+        opt.record_pattern_outcome(&winner_id, Outcome::Success, 0.9);
+    }
+    assert!(opt
+        .best_patterns_for("code_gen")
+        .iter()
+        .any(|p| p.id == winner_id));
+}
+
+#[test]
+fn pa26_evolution_sabotage_and_token_gate_invariants() {
+    use crate::evolution::daemon::{
+        evaluate_candidate_promotion, evaluate_token_term, PromotionDecision,
+    };
+    use crate::evolution::FitnessMetrics;
+
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(940), Some(960)]),
+        None,
+        "Lean theorem token_term_disagreement_is_inconclusive"
+    );
+
+    let base_m = FitnessMetrics {
+        sab_score: 80.0,
+        tokens_used: Some(1000),
+        token_budget: 500_000,
+        wall_clock_secs: 1.0,
+        timeout_secs: 3600.0,
+        full_evaluation_secs: Some(1.0),
+        test_pass_pct: 100.0,
+        binary_size_mb: 10.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 50,
+        tests_total: 50,
+        visual_score: 0.0,
+    };
+    let cand_m = FitnessMetrics {
+        sab_score: 95.0,
+        tokens_used: Some(800),
+        tests_passed: 49,
+        tests_total: 49,
+        ..base_m.clone()
+    };
+    assert!(
+        matches!(
+            evaluate_candidate_promotion(
+                0.70,
+                0.95,
+                None,
+                None,
+                &base_m,
+                &cand_m,
+                &[Some(800), Some(800)]
+            ),
+            PromotionDecision::Reject(_)
+        ),
+        "Lean theorem sabotage_test_deletion_never_promotes"
+    );
+}
+
+#[test]
+fn pa27_multi_arm_and_compiler_repair_invariants() {
+    use crate::evolve::multi_arm_runner::{
+        ArmMeasurement, MultiArmEvolutionRunner, OptimizationArm,
+    };
+
+    let runner = MultiArmEvolutionRunner::new(0, "/tmp");
+    let baseline = ArmMeasurement {
+        compiled: true,
+        tests_passed: 10,
+        tests_failed: 0,
+        bench_samples_ns: vec![100],
+        ..Default::default()
+    };
+    let arms = vec![OptimizationArm {
+        arm_id: "arm-1".into(),
+        name: "valid arm".into(),
+        description: "valid arm".into(),
+        target_file: "src/lib.rs".into(),
+        proposed_source: "pub fn f() {}\n".into(),
+    }];
+    let report = runner.evaluate_arms(&baseline, &arms, |_| {
+        Ok(ArmMeasurement {
+            compiled: true,
+            tests_passed: 10,
+            tests_failed: 0,
+            bench_samples_ns: vec![80],
+            ..Default::default()
+        })
+    });
+    assert!(
+        !report.consensus_met,
+        "Lean theorem zero_threshold_never_meets_consensus"
+    );
+}
+
+#[test]
+fn pa28_self_healing_escalation_and_health_monotone_invariants() {
+    use crate::self_healing::{HealthPredictor, PredictedHealth};
+
+    let rank = |p: PredictedHealth| -> u8 {
+        match p {
+            PredictedHealth::Healthy => 0,
+            PredictedHealth::AtRisk => 1,
+            PredictedHealth::Degrading => 2,
+            PredictedHealth::FailureImminent => 3,
+        }
+    };
+    let mut prev_rank = 0u8;
+    for unhealthy in 0..=10 {
+        let pred = HealthPredictor::new();
+        for i in 0..10 {
+            pred.record("comp", i >= unhealthy, Some(200), 0);
+        }
+        let status = pred.predict("comp").unwrap().predicted_status;
+        let r = rank(status);
+        assert!(
+            r >= prev_rank,
+            "Lean theorem health_prediction_monotone_in_unhealthy violated at unhealthy={unhealthy}"
+        );
+        prev_rank = r;
+    }
 }
