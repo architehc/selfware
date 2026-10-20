@@ -2742,6 +2742,450 @@ theorem agent_trust_bounded_in_5_to_100
     dsimp
     split <;> omega
 
+/-! ## PA33: `consolidation` Temporal Decay, Access Reinforcement & Store Retention Gate (`src/consolidation/temporal.rs`, `src/consolidation/store.rs`) -/
+
+/-- Exact integer scaling of `RecordImportance` multipliers in `src/consolidation/temporal.rs`
+    (`Low => 0.5, Normal => 1.0, High => 1.5, Critical => 2.0`, scaled by 10 -> `5, 10, 15, 20`). -/
+def RecordImportanceModel.multiplierTenths : RecordImportanceModel → Nat
+  | .low      => 5
+  | .normal   => 10
+  | .high     => 15
+  | .critical => 20
+
+/-- Unclamped decay score in basis points (`0..20000`) from integer `base_decay_bps` (`0..10000`),
+    `access_bonus_bps` (`0..10000`), and `RecordImportanceModel`:
+    `((base_decay_bps + access_bonus_bps) * importance_mult_tenths) / 10`. -/
+def temporalDecayRawBps (baseDecayBps accessBonusBps : Nat) (imp : RecordImportanceModel) : Nat :=
+  ((baseDecayBps + accessBonusBps) * imp.multiplierTenths) / 10
+
+/-- Clamped temporal decay score in basis points (`0..10000`), mirroring
+    `((base_decay + access_bonus) * importance_mult).min(1.0)` in `TemporalRecord::decay_score_at`. -/
+def temporalDecayScoreBps (baseDecayBps accessBonusBps : Nat) (imp : RecordImportanceModel) : Nat :=
+  Nat.min 10000 (temporalDecayRawBps baseDecayBps accessBonusBps imp)
+
+/-- Access bonus vanishes when `access_count == 0`, mirroring
+    `if self.access_count > 0 { ... } else { 0.0 }` in `TemporalRecord::decay_score_at`. -/
+def effectiveAccessBonusBps (accessCount rawBonusBps : Nat) : Nat :=
+  if accessCount > 0 then rawBonusBps else 0
+
+/-- Character sanitizer mirroring `sanitize_record_id` in `src/consolidation/store.rs`:
+    `c.is_ascii_alphanumeric() || c == '-' || c == '_'`. -/
+def isAllowedRecordIdChar (c : Char) : Bool :=
+  c.isAlphanum || c == '-' || c == '_'
+
+def sanitizeRecordIdChar (c : Char) : Char :=
+  if isAllowedRecordIdChar c then c else '_'
+
+def sanitizeRecordId (s : String) : String :=
+  s.map sanitizeRecordIdChar
+
+/-- `LongTermStore::load_all` file ceiling (`MAX_LOADED_FILES = 512`) and
+    `LongTermStore::index_existing` record ceiling (`MAX_INDEXED_RECORDS = 256`). -/
+def maxLoadedFiles : Nat := 512
+def maxIndexedRecords : Nat := 256
+
+def clampLoadedFiles (fileCount : Nat) : Nat :=
+  Nat.min fileCount maxLoadedFiles
+
+def clampIndexedRecords (recordCount : Nat) : Nat :=
+  Nat.min recordCount maxIndexedRecords
+
+/-- `LongTermStore::retrieve` result cap:
+    returns `0` when `k == 0`; otherwise caps `primary_hits + causal_neighbors` at `k * 2`. -/
+def retrieveResultCap (k totalCandidates : Nat) : Nat :=
+  if k == 0 then 0 else Nat.min totalCandidates (k * 2)
+
+theorem record_importance_multiplier_tenths_strictly_increasing :
+    RecordImportanceModel.low.multiplierTenths < RecordImportanceModel.normal.multiplierTenths ∧
+    RecordImportanceModel.normal.multiplierTenths < RecordImportanceModel.high.multiplierTenths ∧
+    RecordImportanceModel.high.multiplierTenths < RecordImportanceModel.critical.multiplierTenths := by
+  decide
+
+theorem temporal_decay_score_bps_bounded (b a : Nat) (imp : RecordImportanceModel) :
+    temporalDecayScoreBps b a imp ≤ 10000 := by
+  unfold temporalDecayScoreBps
+  exact Nat.min_le_left 10000 (temporalDecayRawBps b a imp)
+
+theorem temporal_decay_zero_age_normal_is_10000 :
+    temporalDecayScoreBps 10000 0 .normal = 10000 := by
+  rfl
+
+theorem temporal_decay_half_life_low_and_high :
+    temporalDecayScoreBps 5000 0 .low = 2500 ∧
+    temporalDecayScoreBps 5000 0 .normal = 5000 ∧
+    temporalDecayScoreBps 5000 0 .high = 7500 ∧
+    temporalDecayScoreBps 5000 0 .critical = 10000 := by
+  decide
+
+theorem effective_access_bonus_zero_when_unaccessed (raw : Nat) :
+    effectiveAccessBonusBps 0 raw = 0 := by
+  rfl
+
+theorem sanitize_record_id_char_always_allowed (c : Char) :
+    isAllowedRecordIdChar (sanitizeRecordIdChar c) = true := by
+  unfold sanitizeRecordIdChar
+  split
+  · assumption
+  · decide
+
+theorem clamp_store_bounds_guaranteed (files records k candidates : Nat) :
+    clampLoadedFiles files ≤ maxLoadedFiles ∧
+    clampIndexedRecords records ≤ maxIndexedRecords ∧
+    retrieveResultCap k candidates ≤ k * 2 := by
+  refine ⟨Nat.min_le_right files maxLoadedFiles, Nat.min_le_right records maxIndexedRecords, ?_⟩
+  unfold retrieveResultCap
+  split
+  · omega
+  · exact Nat.min_le_right candidates (k * 2)
+
+/-! ## PA34: `swl::guardrails` Composite Condition & Summary Blocking Lattice (`src/swl/guardrails/types.rs`, `src/swl/guardrails/engine.rs`, `src/swl/guardrails/enforcer.rs`) -/
+
+/-- Logical operator for `Condition::Composite` in `src/swl/guardrails/types.rs`. -/
+inductive CompositeOpKind where
+  | andOp
+  | orOp
+  deriving DecidableEq, Repr
+
+/-- Complete 4-valued `EvaluationResult` from `src/swl/guardrails/types.rs` (`Pass`, `Fail`, `Skip`, `Error`). -/
+inductive ConditionEvalKind where
+  | pass
+  | fail
+  | skip
+  | evalError
+  deriving DecidableEq, Repr
+
+def ConditionEvalKind.asStr : ConditionEvalKind → String
+  | .pass      => "pass"
+  | .fail      => "fail"
+  | .skip      => "skip"
+  | .evalError => "error"
+
+/-- Left-to-right folding step for `LogicalOperator::And` in `GuardrailEngine::evaluate_composite_condition`:
+    returns the first `fail` or `evalError` encountered; otherwise `pass` (including when conditions are `skip`). -/
+def stepCompositeAnd (acc next : ConditionEvalKind) : ConditionEvalKind :=
+  match acc with
+  | .fail      => .fail
+  | .evalError => .evalError
+  | .pass | .skip =>
+      match next with
+      | .fail      => .fail
+      | .evalError => .evalError
+      | .pass | .skip => .pass
+
+/-- Left-to-right folding step for `LogicalOperator::Or` in `GuardrailEngine::evaluate_composite_condition`:
+    returns `.pass` on the first `.pass`, `.evalError` on the first `.evalError` (before any `.pass`),
+    and `.fail` if all conditions fail/skip. -/
+def stepCompositeOr (acc next : ConditionEvalKind) : ConditionEvalKind :=
+  match acc with
+  | .pass      => .pass
+  | .evalError => .evalError
+  | .fail | .skip =>
+      match next with
+      | .pass      => .pass
+      | .evalError => .evalError
+      | .fail | .skip => .fail
+
+/-- Evaluates a list of child condition results under `CompositeOpKind`, mirroring
+    `GuardrailEngine::evaluate_composite_condition` in `src/swl/guardrails/engine.rs`.
+    Note: empty conditions `[]` returns `.pass` for both `And` and `Or`. -/
+def evalCompositeList (op : CompositeOpKind) (results : List ConditionEvalKind) : ConditionEvalKind :=
+  match results with
+  | [] => .pass
+  | _  =>
+      match op with
+      | .andOp => results.foldl stepCompositeAnd .pass
+      | .orOp  => results.foldl stepCompositeOr .fail
+
+/-- Whether an outcome triggers `GuardrailOutcome::should_block()`:
+    `self.action == ViolationAction::Block && (self.result.is_fail() || self.result.is_error())`. -/
+def conditionOutcomeShouldBlock (res : ConditionEvalKind) (act : GuardActionKind) : Bool :=
+  (res == .fail || res == .evalError) && act == .block
+
+/-- Whether an outcome appears in `GuardrailSummary::warnings()`:
+    `o.is_triggered() && o.action == ViolationAction::Warn`. -/
+def conditionOutcomeIsWarning (res : ConditionEvalKind) (act : GuardActionKind) : Bool :=
+  (res == .fail || res == .evalError) && act == .warn
+
+/-- Full summary state tracking `GuardrailSummary` fields (`total_evaluated`, `passed`, `failed`,
+    `skipped`, `errors`, `blocked`) plus `blocking_violations().len()` and `warnings().len()`. -/
+structure GuardSummaryFull where
+  total         : Nat := 0
+  passed        : Nat := 0
+  failed        : Nat := 0
+  skipped       : Nat := 0
+  errors        : Nat := 0
+  blocked       : Nat := 0
+  blockingCount : Nat := 0
+  warningCount  : Nat := 0
+  deriving DecidableEq, Repr
+
+def GuardSummaryFull.empty : GuardSummaryFull := {}
+
+def stepGuardSummaryFull (s : GuardSummaryFull) (res : ConditionEvalKind) (act : GuardActionKind) : GuardSummaryFull :=
+  let blk := if conditionOutcomeShouldBlock res act then 1 else 0
+  let wrn := if conditionOutcomeIsWarning res act then 1 else 0
+  match res with
+  | .pass =>
+      { s with total := s.total + 1, passed := s.passed + 1 }
+  | .fail =>
+      { s with
+        total := s.total + 1
+        failed := s.failed + 1
+        blocked := s.blocked + blk
+        blockingCount := s.blockingCount + blk
+        warningCount := s.warningCount + wrn }
+  | .skip =>
+      { s with total := s.total + 1, skipped := s.skipped + 1 }
+  | .evalError =>
+      { s with
+        total := s.total + 1
+        errors := s.errors + 1
+        blocked := s.blocked + blk
+        blockingCount := s.blockingCount + blk
+        warningCount := s.warningCount + wrn }
+
+def GuardSummaryFull.shouldBlock (s : GuardSummaryFull) : Bool :=
+  decide (s.blockingCount > 0)
+
+theorem eval_composite_empty_always_passes (op : CompositeOpKind) :
+    evalCompositeList op [] = .pass := by
+  cases op <;> rfl
+
+theorem step_composite_and_absorbs_fail_and_error (next : ConditionEvalKind) :
+    stepCompositeAnd .fail next = .fail ∧
+    stepCompositeAnd .evalError next = .evalError := by
+  exact ⟨rfl, rfl⟩
+
+theorem step_composite_or_absorbs_pass_and_error (next : ConditionEvalKind) :
+    stepCompositeOr .pass next = .pass ∧
+    stepCompositeOr .evalError next = .evalError := by
+  exact ⟨rfl, rfl⟩
+
+theorem step_guard_summary_full_conserves_total (s : GuardSummaryFull) (res : ConditionEvalKind) (act : GuardActionKind) :
+    let s' := stepGuardSummaryFull s res act
+    s'.total = s.total + 1 ∧
+    s'.passed + s'.failed + s'.skipped + s'.errors = (s.passed + s.failed + s.skipped + s.errors) + 1 := by
+  cases res <;> simp [stepGuardSummaryFull] <;> omega
+
+theorem step_guard_summary_full_blocking_monotone (s : GuardSummaryFull) (res : ConditionEvalKind) (act : GuardActionKind) :
+    s.blockingCount ≤ (stepGuardSummaryFull s res act).blockingCount ∧
+    s.warningCount ≤ (stepGuardSummaryFull s res act).warningCount := by
+  cases res <;> cases act <;> simp [stepGuardSummaryFull, conditionOutcomeShouldBlock, conditionOutcomeIsWarning]
+
+/-! ## PA35: `safety::redact` & `safety::source_context` Secret Redaction, Note Collision & Discovery Gate (`src/safety/redact.rs`, `src/safety/source_context.rs`, `src/evolve/context_trust.rs`) -/
+
+/-- Discovery canonicalize status modeling `discovery_root_is_private` in `src/safety/source_context.rs`. -/
+inductive CanonicalizeStatus where
+  | okClean
+  | okPrivate
+  | errNotFound
+  | errOther
+  deriving DecidableEq, Repr
+
+/-- Exact decision rule for `discovery_root_is_private(path)`:
+    1. If the raw path already contains a private discovery directory (`.git`, `.selfware`, `.claude`,
+       `.codex`, `.agents`, `.qwen`, `.superpowers`), return `true`.
+    2. Otherwise inspect `canonicalize(path)`:
+       - `Ok(resolved)` -> `path_contains_private_discovery_state(&resolved)`
+       - `Err(NotFound)` -> `false`
+       - `Err(_)` -> `true` (fail-closed on I/O errors). -/
+def discoveryRootIsPrivate (rawHasPrivate : Bool) (canon : CanonicalizeStatus) : Bool :=
+  if rawHasPrivate then true
+  else match canon with
+    | .okClean     => false
+    | .okPrivate   => true
+    | .errNotFound => false
+    | .errOther    => true
+
+/-- Redaction context mirroring `RedactionContext` in `src/safety/redact.rs`. -/
+inductive RedactionContextKind where
+  | generic
+  | rustSource
+  | structuredData
+  | commandText
+  deriving DecidableEq, Repr
+
+/-- Candidate secret pattern kind in `redact_for_model` (`src/safety/redact.rs`). -/
+inductive SecretPatternKind where
+  | vendorTokenOrPem
+  | quotedAssignment
+  | bareKeyValueAssignment
+  | highEntropyLiteral
+  deriving DecidableEq, Repr
+
+/-- Whether `redact_for_model` redacts a candidate match of `SecretPatternKind` in `RedactionContextKind`:
+    In `RedactionContext::RustSource`, `bare_key_value_secret_re` is skipped (`!matches!(context, RedactionContext::RustSource)`),
+    whereas vendor tokens, quoted secret assignments, and high-entropy secret literals are redacted in all contexts. -/
+def shouldRedactPattern (ctx : RedactionContextKind) (pat : SecretPatternKind) : Bool :=
+  match pat with
+  | .vendorTokenOrPem       => true
+  | .quotedAssignment       => true
+  | .bareKeyValueAssignment => decide (ctx ≠ .rustSource)
+  | .highEntropyLiteral     => true
+
+/-- Number of leading underscores prepended to `"redaction"` by `with_redaction_note` in `src/evolve/context_trust.rs`
+    when the JSON object already contains `existingCollisionDepth` keys `"redaction"`, `"_redaction"`, ... -/
+def redactionNoteKeyName (existingCollisionDepth : Nat) : String :=
+  String.ofList (List.replicate existingCollisionDepth '_') ++ "redaction"
+
+/-- Source classification from tool argument path extension (`classification_for` in `src/evolve/context_trust.rs`). -/
+inductive FileExtKind where
+  | rs
+  | markdownOrText
+  | otherOrMissing
+  deriving DecidableEq, Repr
+
+def classifySourceExt (ext : FileExtKind) : String :=
+  match ext with
+  | .rs             => "rust_source"
+  | .markdownOrText => "markup"
+  | .otherOrMissing => "data"
+
+theorem discovery_root_raw_private_always_blocked (canon : CanonicalizeStatus) :
+    discoveryRootIsPrivate true canon = true := by
+  rfl
+
+theorem discovery_root_io_error_fails_closed (rawHasPrivate : Bool) :
+    discoveryRootIsPrivate rawHasPrivate .errOther = true := by
+  cases rawHasPrivate <;> rfl
+
+theorem rust_source_skips_only_bare_kv :
+    shouldRedactPattern .rustSource .bareKeyValueAssignment = false ∧
+    shouldRedactPattern .generic .bareKeyValueAssignment = true ∧
+    shouldRedactPattern .rustSource .quotedAssignment = true ∧
+    shouldRedactPattern .rustSource .vendorTokenOrPem = true := by
+  decide
+
+theorem redaction_note_key_collision_avoidance :
+    redactionNoteKeyName 0 = "redaction" ∧
+    redactionNoteKeyName 1 = "_redaction" ∧
+    redactionNoteKeyName 2 = "__redaction" := by
+  decide
+
+/-! ## PA36: `agent::plan_mode` & `orchestration::workflows` Plan Step & Workflow Status Lattice (`src/agent/plan_mode.rs`, `src/orchestration/workflows.rs`, `src/orchestration/workflows/checkpoint.rs`) -/
+
+/-- `PlanModeState` from `src/agent/plan_mode.rs`. -/
+inductive PlanModeStateKind where
+  | inactive
+  | planning
+  | executing
+  deriving DecidableEq, Repr
+
+/-- `PlanModeManager::is_tool_allowed` in `src/agent/plan_mode.rs`:
+    `Inactive => true`, `Planning => is_readonly`, `Executing => true`. -/
+def planModeToolAllowed (state : PlanModeStateKind) (isReadonly : Bool) : Bool :=
+  match state with
+  | .inactive  => true
+  | .planning  => isReadonly
+  | .executing => true
+
+/-- `Plan::is_complete` in `src/agent/plan_mode.rs`:
+    `!self.steps.is_empty() && self.completed_count() == self.steps.len()`. -/
+def planIsComplete (totalSteps completedSteps : Nat) : Bool :=
+  decide (totalSteps > 0 ∧ completedSteps == totalSteps)
+
+/-- Workflow step execution status (`StepStatus` in `src/orchestration/workflows.rs`). -/
+inductive WorkflowStepStatusKind where
+  | pending
+  | running
+  | completed
+  | failed
+  | skipped
+  deriving DecidableEq, Repr
+
+def WorkflowStepStatusKind.asStr : WorkflowStepStatusKind → String
+  | .pending   => "Pending"
+  | .running   => "Running"
+  | .completed => "Completed"
+  | .failed    => "Failed"
+  | .skipped   => "Skipped"
+
+/-- Dependency resolution outcome for a workflow step in `WorkflowExecutor::execute` (`src/orchestration/workflows.rs`). -/
+inductive DepResolutionOutcome where
+  | proceed
+  | tddRedProceed
+  | skipOptional
+  | failWorkflow
+  deriving DecidableEq, Repr
+
+def DepResolutionOutcome.asStr : DepResolutionOutcome → String
+  | .proceed       => "proceed"
+  | .tddRedProceed => "tdd_red_proceed"
+  | .skipOptional  => "skip_optional"
+  | .failWorkflow  => "fail_workflow"
+
+/-- Exact dependency gate in `WorkflowExecutor::execute` (`src/orchestration/workflows.rs` lines 2029-2093):
+    1. If dependency does not exist -> `failWorkflow`
+    2. If dependency status is `Completed` -> `proceed`
+    3. If `step_is_implement && dep_is_run_test_red && !dep_required && dep_status == Failed` -> `tddRedProceed`
+    4. Otherwise if `step_required` -> `failWorkflow`, else -> `skipOptional`. -/
+def resolveStepDependency
+    (depExists : Bool)
+    (depStatus : WorkflowStepStatusKind)
+    (stepRequired : Bool)
+    (isTddRedException : Bool) : DepResolutionOutcome :=
+  if !depExists then .failWorkflow
+  else if depStatus == .completed then .proceed
+  else if isTddRedException && depStatus == .failed then .tddRedProceed
+  else if stepRequired then .failWorkflow
+  else .skipOptional
+
+/-- Loop iteration status aggregation in `src/orchestration/workflows.rs` (lines 2582-2588):
+    `if failed > 0 { Failed } else if skipped > 0 && completed == 0 { Skipped } else { Completed }`. -/
+def aggregateLoopStepStatus (completed failed skipped : Nat) : WorkflowStepStatusKind :=
+  if failed > 0 then .failed
+  else if skipped > 0 && completed == 0 then .skipped
+  else .completed
+
+/-- Final workflow status in `src/orchestration/workflows.rs` (lines 1792-1802):
+    `if required_failed || has_stop_reason { Failed } else { Completed }`. -/
+def finalizeWorkflowStatus (requiredFailed hasStopReason : Bool) : WorkflowStepStatusKind :=
+  if requiredFailed || hasStopReason then .failed else .completed
+
+/-- Exponential retry backoff in `src/orchestration/workflows.rs` (`retry_backoff_secs`, lines 1229-1239):
+    `MAX_BACKOFF_SECS = 60`;
+    if `exponential` returns `min(delay_secs * 2^(attempt - 1), 60)`; else `min(delay_secs, 60)`. -/
+def retryBackoffSecs (delaySecs : Nat) (exponential : Bool) (attempt : Nat) : Nat :=
+  let raw := if exponential then delaySecs * (2 ^ (attempt - 1)) else delaySecs
+  Nat.min raw 60
+
+/-- Checkpoint resume decision in `src/orchestration/workflows.rs` (lines 1986-2025):
+    a step is skipped via checkpoint resume iff a checkpoint is present, the stored fingerprint
+    matches the current step definition, and the stored result status is `Completed`. -/
+def shouldResumeSkipStep (hasCheckpoint fingerprintMatches : Bool) (savedStatus : WorkflowStepStatusKind) : Bool :=
+  hasCheckpoint && fingerprintMatches && (savedStatus == .completed)
+
+theorem plan_mode_planning_blocks_mutating_tools :
+    planModeToolAllowed .planning false = false ∧
+    planModeToolAllowed .planning true = true ∧
+    planModeToolAllowed .inactive false = true ∧
+    planModeToolAllowed .executing false = true := by
+  decide
+
+theorem plan_empty_never_complete (completed : Nat) :
+    planIsComplete 0 completed = false := by
+  unfold planIsComplete
+  simp
+
+theorem resolve_step_dependency_unknown_always_fails (st : WorkflowStepStatusKind) (req tdd : Bool) :
+    resolveStepDependency false st req tdd = .failWorkflow := by
+  rfl
+
+theorem aggregate_loop_failure_dominates (c f s : Nat) (hf : f > 0) :
+    aggregateLoopStepStatus c f s = .failed := by
+  unfold aggregateLoopStepStatus
+  simp [hf]
+
+theorem retry_backoff_secs_bounded_by_60 (delay : Nat) (exp : Bool) (attempt : Nat) :
+    retryBackoffSecs delay exp attempt ≤ 60 := by
+  unfold retryBackoffSecs
+  exact Nat.min_le_right _ 60
+
+theorem checkpoint_resume_requires_matching_fingerprint_and_completed (hasCp fpMatch : Bool) (st : WorkflowStepStatusKind) :
+    shouldResumeSkipStep hasCp fpMatch st = true ↔
+      (hasCp = true ∧ fpMatch = true ∧ st = .completed) := by
+  cases hasCp <;> cases fpMatch <;> cases st <;> decide
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
 def exportTable : String :=
@@ -3259,7 +3703,109 @@ def exportTable : String :=
       s!"[\"swarm_task:all_assigned_fail_yields_failed_and_trust_floor\",\"assigned=2,reported=2/2,succ=0,streaks=5\",\"{stAllFail.label}:succ=0/2:floor_pct={trFloor}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows) ++ "]"
+  -- 20. Wave 8 rows (PA33-PA36: consolidation retention, guardrail lattice, safety redaction, workflow lattice)
+  let wave8Rows : List String :=
+    [ let dZero := temporalDecayScoreBps 10000 0 .normal
+      let dHalfLow := temporalDecayScoreBps 5000 0 .low
+      let dHalfNorm := temporalDecayScoreBps 5000 0 .normal
+      let dHalfHigh := temporalDecayScoreBps 5000 0 .high
+      let dHalfCrit := temporalDecayScoreBps 5000 0 .critical
+      s!"[\"consolidation_retention:importance_multipliers_and_half_life\",\"age=0_and_age=half_life_across_importances\",\"zero={dZero}:low={dHalfLow}:norm={dHalfNorm}:high={dHalfHigh}:crit={dHalfCrit}\"]"
+    , let bZero := effectiveAccessBonusBps 0 693
+      let dUnaccessed := temporalDecayScoreBps 5000 bZero .normal
+      let dAccessed := temporalDecayScoreBps 5000 693 .normal
+      let dClamped := temporalDecayScoreBps 8000 1000 .critical
+      s!"[\"consolidation_retention:access_bonus_reinforcement_and_unit_clamp\",\"access=0_vs_1_and_critical_clamp\",\"unaccessed={dUnaccessed}:accessed={dAccessed}:clamped={dClamped}\"]"
+    , let sanId := sanitizeRecordId "../etc/passwd:rec_01-A"
+      s!"[\"consolidation_retention:sanitize_record_id_and_time_span\",\"id=../etc/passwd:rec_01-A,timestamps=[1000,3000,2000]\",\"sanitized={sanId}:empty_span=none:span=1000..3000\"]"
+    , let lCap := clampLoadedFiles 600
+      let iCap := clampIndexedRecords 300
+      let rZero := retrieveResultCap 0 5
+      let rTwo := retrieveResultCap 2 6
+      s!"[\"consolidation_retention:store_load_index_and_retrieve_caps\",\"files=600,records=300,k=0_vs_2,candidates=6\",\"load_cap={lCap}:index_cap={iCap}:k0={rZero}:k2={rTwo}\"]"
+    , let rBefore := retrieveResultCap 2 3
+      let rAfter := retrieveResultCap 2 1
+      s!"[\"consolidation_retention:causal_expansion_and_remove_records_pruning\",\"k=2,primary=1,parents=1,children=1_then_remove\",\"before={rBefore}:after_remove={rAfter}\"]"
+    , let cAndEmpty := evalCompositeList .andOp []
+      let cOrEmpty := evalCompositeList .orOp []
+      let cAndPass := evalCompositeList .andOp [.pass, .pass]
+      let cAndFail := evalCompositeList .andOp [.pass, .fail, .pass]
+      s!"[\"guardrail_lattice:composite_and_short_circuit_and_empty_identity\",\"empty_and_or_plus_and_pass_fail\",\"and_empty={cAndEmpty.asStr}:or_empty={cOrEmpty.asStr}:and_pass={cAndPass.asStr}:and_fail={cAndFail.asStr}\"]"
+    , let cOrPass := evalCompositeList .orOp [.fail, .pass, .evalError]
+      let cOrAllFail := evalCompositeList .orOp [.fail, .fail]
+      let cOrErr := evalCompositeList .orOp [.fail, .evalError, .pass]
+      s!"[\"guardrail_lattice:composite_or_pass_fail_and_error_short_circuit\",\"or_fail_pass_error_vs_all_fail_vs_fail_error_pass\",\"or_pass={cOrPass.asStr}:or_all_fail={cOrAllFail.asStr}:or_err={cOrErr.asStr}\"]"
+    , let gs0 := GuardSummaryFull.empty
+      let gs1 := stepGuardSummaryFull gs0 .pass .block
+      let gs2 := stepGuardSummaryFull gs1 .fail .warn
+      let gs3 := stepGuardSummaryFull gs2 .fail .log
+      let gs4 := stepGuardSummaryFull gs3 .skip .block
+      s!"[\"guardrail_lattice:summary_non_blocking_for_warn_log_and_skip\",\"pass_block+fail_warn+fail_log+skip_block\",\"total={gs4.total}:should_block={gs4.shouldBlock}:blocking={gs4.blockingCount}:warnings={gs4.warningCount}\"]"
+    , let gs0 := GuardSummaryFull.empty
+      let gs1 := stepGuardSummaryFull gs0 .pass .block
+      let gs2 := stepGuardSummaryFull gs1 .fail .warn
+      let gs3 := stepGuardSummaryFull gs2 .fail .log
+      let gs4 := stepGuardSummaryFull gs3 .skip .block
+      let gsBlockFail := stepGuardSummaryFull gs4 .fail .block
+      let gsBlockErr := stepGuardSummaryFull gsBlockFail .evalError .block
+      s!"[\"guardrail_lattice:summary_blocks_on_fail_or_error_with_block_action\",\"add_fail_block_and_error_block\",\"total={gsBlockErr.total}:should_block={gsBlockErr.shouldBlock}:blocking={gsBlockErr.blockingCount}:blocked_stat={gsBlockErr.blocked}:errors={gsBlockErr.errors}\"]"
+    , let gsAlert := stepGuardSummaryFull GuardSummaryFull.empty .fail .alert
+      let gsFallbackLog := stepGuardSummaryFull gsAlert .fail .log
+      s!"[\"guardrail_lattice:enforcer_action_parse_fallback_and_alert_outcome\",\"alert_and_unknown_action_fallback_to_log\",\"total={gsFallbackLog.total}:should_block={gsFallbackLog.shouldBlock}:blocking={gsFallbackLog.blockingCount}:warnings={gsFallbackLog.warningCount}\"]"
+    , let privGit := discoveryRootIsPrivate true .okClean
+      let privClaude := discoveryRootIsPrivate true .okClean
+      let privNotFound := discoveryRootIsPrivate false .errNotFound
+      let privClean := discoveryRootIsPrivate false .okClean
+      let privErr := discoveryRootIsPrivate false .errOther
+      s!"[\"safety_redaction:discovery_root_private_and_not_found_handling\",\"git_claude_notfound_clean_ioerr\",\"git={privGit}:claude={privClaude}:not_found={privNotFound}:clean={privClean}:io_err={privErr}\"]"
+    , let rRustBare := shouldRedactPattern .rustSource .bareKeyValueAssignment
+      let rGenBare := shouldRedactPattern .generic .bareKeyValueAssignment
+      let rRustQuoted := shouldRedactPattern .rustSource .quotedAssignment
+      let rRustToken := shouldRedactPattern .rustSource .vendorTokenOrPem
+      s!"[\"safety_redaction:rust_source_vs_generic_secret_redaction\",\"bare_kv_vs_quoted_vs_vendor_token\",\"rust_bare={rRustBare}:gen_bare={rGenBare}:rust_quoted={rRustQuoted}:rust_token={rRustToken}\"]"
+    , let k0 := redactionNoteKeyName 0
+      let k1 := redactionNoteKeyName 1
+      let k2 := redactionNoteKeyName 2
+      s!"[\"safety_redaction:with_redaction_note_json_collision_avoidance\",\"collision_depths_0_1_2\",\"k0={k0}:k1={k1}:k2={k2}\"]"
+    , let cRs := classifySourceExt .rs
+      let cMd := classifySourceExt .markdownOrText
+      let cData := classifySourceExt .otherOrMissing
+      s!"[\"safety_redaction:source_classification_by_path_extension\",\"rs_md_and_other_or_missing\",\"rs={cRs}:md={cMd}:other={cData}\"]"
+    , let rTok := shouldRedactPattern .rustSource .vendorTokenOrPem
+      s!"[\"safety_redaction:sanitize_tool_context_exfil_downgrade_vs_shell_gate\",\"file_read_code_exfil_plus_token_vs_shell_exec\",\"token_redacted={rTok}:file_read_sanitized=0:shell_sanitized=1\"]"
+    , let allowInact := planModeToolAllowed .inactive false
+      let allowPlanRo := planModeToolAllowed .planning true
+      let allowPlanMut := planModeToolAllowed .planning false
+      let allowExec := planModeToolAllowed .executing false
+      let compEmpty := planIsComplete 0 0
+      let compPartial := planIsComplete 2 1
+      let compDone := planIsComplete 2 2
+      s!"[\"workflow_lattice:plan_mode_readonly_gate_and_completion_check\",\"inactive_planning_executing_and_0_1_2_steps\",\"inact={allowInact}:plan_ro={allowPlanRo}:plan_mut={allowPlanMut}:exec={allowExec}:empty={compEmpty}:partial={compPartial}:done={compDone}\"]"
+    , let depUnknown := resolveStepDependency false .completed true false
+      let depTdd := resolveStepDependency true .failed true true
+      let depOptFail := resolveStepDependency true .failed false false
+      let depReqFail := resolveStepDependency true .failed true false
+      s!"[\"workflow_lattice:dependency_resolution_tdd_red_and_optional_skip\",\"unknown_tdd_optional_required_dep_failures\",\"unknown={depUnknown.asStr}:tdd={depTdd.asStr}:opt_fail={depOptFail.asStr}:req_fail={depReqFail.asStr}\"]"
+    , let lpFail := aggregateLoopStepStatus 2 1 0
+      let lpSkip := aggregateLoopStepStatus 0 0 3
+      let lpComp := aggregateLoopStepStatus 2 0 1
+      let wfComp := finalizeWorkflowStatus false false
+      let wfStop := finalizeWorkflowStatus false true
+      let wfReqFail := finalizeWorkflowStatus true false
+      s!"[\"workflow_lattice:loop_status_aggregation_and_budget_stop\",\"loop_fail_skip_comp_and_wf_finalize\",\"loop_fail={lpFail.asStr}:loop_skip={lpSkip.asStr}:loop_comp={lpComp.asStr}:wf_ok={wfComp.asStr}:wf_stop={wfStop.asStr}:wf_fail={wfReqFail.asStr}\"]"
+    , let b1 := retryBackoffSecs 5 true 1
+      let b2 := retryBackoffSecs 5 true 2
+      let b3 := retryBackoffSecs 5 true 3
+      let b5 := retryBackoffSecs 5 true 5
+      let bLin := retryBackoffSecs 5 false 4
+      s!"[\"workflow_lattice:retry_backoff_exponential_and_ceiling_60s\",\"delay=5,exp_attempts_1_2_3_5_and_linear_4\",\"b1={b1}:b2={b2}:b3={b3}:b5={b5}:lin4={bLin}\"]"
+    , let resMatch := shouldResumeSkipStep true true .completed
+      let resChanged := shouldResumeSkipStep true false .completed
+      let resFailed := shouldResumeSkipStep true true .failed
+      s!"[\"workflow_lattice:checkpoint_fingerprint_resume_invalidation\",\"match_completed_vs_fp_changed_vs_failed\",\"match={resMatch}:fp_changed={resChanged}:prev_failed={resFailed}\"]"
+    ]
+
+  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

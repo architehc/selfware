@@ -839,7 +839,10 @@ pub(crate) fn run_swebench_diagnose(output_dir: &str) -> Result<()> {
 
         // Write per-run diagnosis next to the trace file.
         let diagnosis_path = path.with_file_name("diagnosis.json");
-        if let Err(e) = std::fs::write(&diagnosis_path, serde_json::to_vec_pretty(&diag)?) {
+        let diag_bytes = serde_json::to_vec_pretty(&diag)?;
+        if let Err(e) =
+            crate::session::checkpoint::write_bytes_atomically(&diagnosis_path, &diag_bytes, 0o600)
+        {
             eprintln!("  ⚠ failed to write {}: {}", diagnosis_path.display(), e);
         }
 
@@ -849,7 +852,8 @@ pub(crate) fn run_swebench_diagnose(output_dir: &str) -> Result<()> {
     // Compute sweep-level summary.
     let summary = DiagnosisSummary::from_diagnoses(&diagnoses);
     let summary_path = output_path.join("diagnosis_summary.json");
-    std::fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
+    let summary_bytes = serde_json::to_vec_pretty(&summary)?;
+    crate::session::checkpoint::write_bytes_atomically(&summary_path, &summary_bytes, 0o600)?;
 
     eprintln!("Wrote diagnosis_summary.json to {}", summary_path.display());
     eprintln!(

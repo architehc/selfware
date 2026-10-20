@@ -934,7 +934,7 @@ fn synthesize_local_bot_turn(
                 });
             }
             format!(
-                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA32 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21–PA24 ConfirmView/ResourcePressure/AgentLoop/AgentMemory bounds, PA25–PA28 RSI DarwinX/Evolution Sabotage/MultiArm Repair/SelfHealing bounds, and PA29–PA32 Investigative Governance (`src/evolution/investigate.rs:1388`), MicroMode Hypothesis Gate (`src/evolution/micro_mode.rs:158`), MetaLearning PDVR (`src/cognitive/meta_learning.rs:58`), and Swarm Task Completion (`src/orchestration/swarm/coordinator.rs:551`)."
+                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA36 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21–PA24 ConfirmView/ResourcePressure/AgentLoop/AgentMemory bounds, PA25–PA28 RSI DarwinX/Evolution Sabotage/MultiArm Repair/SelfHealing bounds, PA29–PA32 Investigative Governance/MicroMode/MetaLearning/Swarm Task Completion, and PA33–PA36 Consolidation Retention (`src/consolidation/temporal.rs:141`), SWL Guardrail Lattice (`src/swl/guardrails/engine.rs:37`), Safety Redaction & Discovery Privacy (`src/safety/source_context.rs:98`), and Workflow Checkpoint/Status Lattice (`src/orchestration/workflows.rs:1670`)."
             )
         }
         "explain_selection" => {
@@ -986,6 +986,26 @@ fn synthesize_local_bot_turn(
                 "pa14",
                 "pa15",
                 "pa16",
+                "pa17",
+                "pa18",
+                "pa19",
+                "pa20",
+                "pa21",
+                "pa22",
+                "pa23",
+                "pa24",
+                "pa25",
+                "pa26",
+                "pa27",
+                "pa28",
+                "pa29",
+                "pa30",
+                "pa31",
+                "pa32",
+                "pa33",
+                "pa34",
+                "pa35",
+                "pa36",
                 "pt1",
                 "pt2",
                 "pt3",
@@ -1002,7 +1022,7 @@ fn synthesize_local_bot_turn(
                 let formal = crate::phi::arena::verify_phi_formal_invariants();
                 let total_rows = formal["total_rows"].as_u64().unwrap_or(0);
                 parts.push(format!(
-                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA28, PT1–PT5)."
+                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA36, PT1–PT5)."
                 ));
             }
             if let Some(path) = doc_path {

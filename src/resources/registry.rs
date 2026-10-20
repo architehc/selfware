@@ -471,7 +471,7 @@ fn prune(file: &mut RegistryFile, current: &str) {
 }
 
 fn read_file(path: &Path) -> RegistryFile {
-    match std::fs::read_to_string(path) {
+    match crate::tools::file::read_to_string_capped(path, 16 * 1024 * 1024) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
             tracing::warn!(
                 "resource registry: ignoring unreadable {}: {e}",

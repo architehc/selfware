@@ -552,7 +552,7 @@ fn write_config_file_in_dir(
     // (no HTTP, no async runtime), so this is safe in the sync wizard.
     let endpoint_reachable = probe_endpoint_tcp(endpoint, std::time::Duration::from_secs(2));
 
-    std::fs::write(&config_path, &content)?;
+    crate::session::checkpoint::write_bytes_atomically(&config_path, content.as_bytes(), 0o600)?;
     wizard_print!(
         "  {} Configuration saved to {}",
         Glyphs::bloom(),

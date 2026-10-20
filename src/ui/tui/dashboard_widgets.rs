@@ -102,6 +102,8 @@ pub struct DashboardState {
     pub garden_health_measured: bool,
     /// Active tools currently running
     pub active_tools: Vec<ActiveTool>,
+    /// Cumulative completed tool calls in this session
+    pub tool_calls: usize,
     /// Recent log entries
     pub logs: Vec<LogEntry>,
     /// Whether the agent is connected
@@ -121,6 +123,7 @@ impl Default for DashboardState {
             garden_health: 1.0,
             garden_health_measured: false,
             active_tools: Vec::new(),
+            tool_calls: 0,
             logs: Vec::new(),
             // Not connected until the model actually responds — set true on the
             // first response bytes/completion, false on an agent error.
@@ -215,6 +218,7 @@ impl DashboardState {
                 duration_ms,
             } => {
                 self.tool_complete(&name);
+                self.tool_calls = self.tool_calls.saturating_add(1);
                 if success {
                     self.log(
                         LogLevel::Success,

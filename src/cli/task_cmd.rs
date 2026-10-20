@@ -214,7 +214,7 @@ pub(crate) fn edit_in_editor(original: &str) -> anyhow::Result<String> {
     );
     let status = cmd.args(&parts[1..]).arg(file.path()).status()?;
     anyhow::ensure!(status.success(), "editor `{editor}` exited with {status}");
-    let text = std::fs::read_to_string(file.path())?;
+    let text = crate::tools::file::read_to_string_capped(file.path(), 10 * 1024 * 1024)?;
     Ok(above_cut_line(&text))
 }
 

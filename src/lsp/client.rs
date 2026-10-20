@@ -1632,12 +1632,14 @@ impl LspClient {
                         h.abort();
                     }
                 }
-                if let Ok(mut child) = conn.child.try_lock() {
+                let reaped = if let Ok(mut child) = conn.child.try_lock() {
                     kill_lsp_process_group(&child, conn.process_group);
                     let _ = child.start_kill();
-                    let _ = child.try_wait();
-                }
-                if let Some(id) = &conn.resource_id {
+                    matches!(child.try_wait(), Ok(Some(_)))
+                } else {
+                    false
+                };
+                if let (Some(id), true) = (&conn.resource_id, reaped) {
                     crate::resources::ResourceRegistry::global()
                         .release(id, "LSP server shut down");
                 }

@@ -175,7 +175,9 @@ impl AutoConfigurator {
         };
         println!(
             "         Thinking: {}",
-            if thinking_supported {
+            if !chat_works {
+                "skipped (chat probe failed)"
+            } else if thinking_supported {
                 if thinking_eats_tokens {
                     "supported (consumes all tokens at low max_tokens)"
                 } else {
@@ -194,7 +196,13 @@ impl AutoConfigurator {
         };
         println!(
             "         Streaming: {}",
-            if streaming { "OK" } else { "not detected" }
+            if !chat_works {
+                "skipped (chat probe failed)"
+            } else if streaming {
+                "OK"
+            } else {
+                "not detected"
+            }
         );
 
         println!("   [4/4] Testing function calling...");
@@ -205,7 +213,9 @@ impl AutoConfigurator {
         };
         println!(
             "         Function calling: {}",
-            if function_calling {
+            if !chat_works {
+                "skipped (chat probe failed)"
+            } else if function_calling {
                 "native (returns tool_calls)"
             } else {
                 "text-based (tools in system prompt)"
@@ -229,10 +239,19 @@ impl AutoConfigurator {
     /// persist it directly — a config selfware would reject is an error here,
     /// not a file on disk.
     pub async fn generate_config(&self, model: &str) -> Result<Config> {
+        let results = self.run_tests(model).await?;
+        self.generate_config_with_results(model, &results).await
+    }
+
+    /// Generate a Config using already-collected [`DetectionResults`] so callers
+    /// that already ran [`Self::run_tests`] do not repeat the network probes.
+    pub async fn generate_config_with_results(
+        &self,
+        model: &str,
+        results: &DetectionResults,
+    ) -> Result<Config> {
         let models = self.fetch_models().await?;
         let model_info = models.iter().find(|m| m.id == model);
-        // Re-run tests to get results (cached in practice by the CLI handler)
-        let results = self.run_tests(model).await?;
 
         // A model missing from /models — or listed WITHOUT a max_model_len
         // (common on hosted gateways like OpenRouter) — yields 0, which the

@@ -726,7 +726,7 @@ pub(crate) fn write_selfware_artifact_checked(
             );
         }
     }
-    std::fs::write(&target, contents)?;
+    crate::session::checkpoint::write_bytes_atomically(&target, contents.as_ref(), 0o600)?;
     Ok(target)
 }
 
@@ -773,7 +773,7 @@ pub(crate) async fn run_evolve_arms(a: EvolveArmsArgs) -> Result<()> {
         );
     }
     let arms: Vec<OptimizationArm> = serde_json::from_str(
-        &std::fs::read_to_string(&arms_file)
+        &crate::tools::file::read_to_string_capped(&arms_file, MAX_ARMS_FILE_BYTES)
             .with_context(|| format!("reading {}", arms_file.display()))?,
     )
     .with_context(|| format!("parsing {}", arms_file.display()))?;
@@ -917,6 +917,28 @@ pub(crate) async fn handle_improve_command(
             return Err(anyhow::anyhow!("Killswitch active: {e}"));
         }
         let targets = orchestrator.analyze_self();
+        // Protected-path gate, shared with the evolution daemon
+        // (evolution::is_protected): filter out protected targets BEFORE
+        // calling select_target so a high-priority protected target does not
+        // cause an infinite skip loop across cycles.
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|t| {
+                let is_protected = t
+                    .file
+                    .as_deref()
+                    .is_some_and(|f| crate::evolution::is_protected(std::path::Path::new(f)));
+                if is_protected {
+                    println!(
+                        "   {} Skipping target: '{}' is a protected path (self-modification \
+                         safety policy) — the improvement agent must not edit it.",
+                        Glyphs::frost(),
+                        t.file.as_deref().unwrap_or("(no file)")
+                    );
+                }
+                !is_protected
+            })
+            .collect();
         let Some(target) = orchestrator.select_target(&targets) else {
             println!(
                 "\n   {} No more improvement targets. Done!",
@@ -924,25 +946,6 @@ pub(crate) async fn handle_improve_command(
             );
             break;
         };
-
-        // Protected-path gate, shared with the evolution daemon
-        // (evolution::is_protected): never run the improvement agent
-        // against a repository instruction file or any other
-        // protected path. The target file is checked BEFORE the run;
-        // the post-run gate re-sweeps the whole working tree.
-        if target
-            .file
-            .as_deref()
-            .is_some_and(|f| crate::evolution::is_protected(std::path::Path::new(f)))
-        {
-            println!(
-                "   {} Skipping target: '{}' is a protected path (self-modification \
-                 safety policy) — the improvement agent must not edit it.",
-                Glyphs::frost(),
-                target.file.as_deref().unwrap_or("(no file)")
-            );
-            continue;
-        }
 
         println!(
             "\n   {} Cycle {}/{}: applying '{}'",
@@ -1306,19 +1309,19 @@ pub(crate) async fn handle_evolve_command(
                 let mut tree_digests = Vec::new();
                 let mut tree_files = Vec::new();
                 for (p, _) in &loaded_trees {
-                    match std::fs::read(p) {
-                        Ok(bytes) => {
-                            tree_digests.push(crate::evolution::tree_log::compute_sha256(&bytes));
+                    match crate::tools::file::read_to_string_capped(p, 16 * 1024 * 1024) {
+                        Ok(content) => {
+                            tree_digests.push(crate::evolution::tree_log::compute_sha256(
+                                content.as_bytes(),
+                            ));
                             tree_files.push(p.to_string_lossy().to_string());
                         }
                         Err(e) => {
-                            eprintln!(
-                                "   {} Promotion aborted: cannot read tree file {}: {}",
-                                Glyphs::frost(),
+                            anyhow::bail!(
+                                "Promotion aborted: cannot read tree file {}: {}",
                                 p.display(),
                                 e
                             );
-                            return Ok(());
                         }
                     }
                 }
@@ -1363,7 +1366,7 @@ pub(crate) async fn handle_evolve_command(
                             );
                         }
                         Err(e) => {
-                            eprintln!("   Warning: failed to persist active policy: {}", e);
+                            anyhow::bail!("Failed to persist promoted active policy: {}", e);
                         }
                     }
                 }

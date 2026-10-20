@@ -163,9 +163,11 @@ impl LongTermStore {
         })
     }
 
+    pub(crate) const MAX_LOADED_FILES: usize = 512;
+    pub(crate) const MAX_INDEXED_RECORDS: usize = 256;
+
     /// Load all stored records from disk (bounded to the 512 most recently modified files).
     pub fn load_all(&self) -> Result<Vec<TemporalRecord>> {
-        const MAX_LOADED_FILES: usize = 512;
         let mut records = Vec::new();
 
         if !self.storage_dir.exists() {
@@ -182,13 +184,13 @@ impl LongTermStore {
             })
             .collect();
 
-        if json_paths.len() > MAX_LOADED_FILES {
+        if json_paths.len() > Self::MAX_LOADED_FILES {
             json_paths.sort_by_key(|p| {
                 std::fs::metadata(p)
                     .and_then(|m| m.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
             });
-            let drop_count = json_paths.len() - MAX_LOADED_FILES;
+            let drop_count = json_paths.len() - Self::MAX_LOADED_FILES;
             json_paths.drain(..drop_count);
         }
 
@@ -258,9 +260,8 @@ impl LongTermStore {
     ///
     /// Returns the number of records indexed.
     pub async fn index_existing(&self) -> Result<usize> {
-        const MAX_INDEXED_RECORDS: usize = 256;
         let records = self.load_all()?;
-        let start = records.len().saturating_sub(MAX_INDEXED_RECORDS);
+        let start = records.len().saturating_sub(Self::MAX_INDEXED_RECORDS);
         let slice = &records[start..];
         let mut indexed = 0usize;
 

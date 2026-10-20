@@ -1581,7 +1581,11 @@ pub(crate) fn write_bytes_atomically(
         drop(file);
         replace_atomically(&temporary, destination)?;
         #[cfg(unix)]
-        if let Some(parent) = destination.parent() {
+        {
+            let parent = destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
             fs::File::open(parent)?.sync_all()?;
         }
         Ok(())

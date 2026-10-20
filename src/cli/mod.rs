@@ -3471,7 +3471,10 @@ async fn handle_command(
                 }
             };
 
-            let detected_config = match configurator.generate_config(&model_to_test).await {
+            let detected_config = match configurator
+                .generate_config_with_results(&model_to_test, &results)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     println!("\n{} Config generation failed: {}", "✗".red().bold(), e);
@@ -3518,6 +3521,11 @@ async fn handle_command(
             }
 
             if save {
+                if !results.chat_works {
+                    anyhow::bail!(
+                        "Refusing to save configuration to selfware.toml: basic chat completion probe failed"
+                    );
+                }
                 let redacted_endpoint = crate::config::redact_endpoint(&detected_config.endpoint);
                 let mut toml_str = format!(
                     r#"# Auto-configured by selfware auto-config
@@ -3577,13 +3585,11 @@ max_recovery_attempts = 3
 
                 crate::config::Config::validate_generated_toml(&toml_str)?;
                 let save_path = std::path::Path::new("selfware.toml");
-                if std::fs::symlink_metadata(save_path).is_ok_and(|m| m.file_type().is_symlink()) {
-                    anyhow::bail!(
-                        "Refusing to write configuration through symlink {}",
-                        save_path.display()
-                    );
-                }
-                std::fs::write(save_path, &toml_str)?;
+                crate::session::checkpoint::write_bytes_atomically(
+                    save_path,
+                    toml_str.as_bytes(),
+                    0o600,
+                )?;
                 let _ = crate::config::trust::add_trusted_config(save_path);
                 println!("{} Configuration saved to selfware.toml", "✓".green());
             }
@@ -4089,7 +4095,7 @@ pub(crate) fn expand_attachments(input: &str) -> Vec<Attachment> {
         if !path.is_file() {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(content) = crate::tools::file::read_to_string_capped(path, 10 * 1024 * 1024) else {
             continue;
         };
         let truncated = content.chars().count() > ATTACHMENT_MAX_CHARS;
@@ -4239,7 +4245,12 @@ fn edit_mcp_servers(
     path: &std::path::Path,
     edit: impl FnOnce(&mut Vec<toml::Value>) -> Result<String>,
 ) -> Result<String> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let content = if path.exists() {
+        crate::tools::file::read_to_string_capped(path, 1024 * 1024)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?
+    } else {
+        String::new()
+    };
     let mut doc: toml::Value = if content.trim().is_empty() {
         toml::Value::Table(Default::default())
     } else {
@@ -4267,18 +4278,8 @@ fn edit_mcp_servers(
     // next run would treat the edited file as an untrusted checkout.
     let was_trusted = crate::config::trust::is_config_trusted(path);
     let rendered = toml::to_string_pretty(&doc)?;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    use std::io::Write;
-    tmp.write_all(rendered.as_bytes())?;
-    tmp.flush()?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path)
-        .map_err(|e| anyhow::anyhow!("failed to persist {}: {}", path.display(), e.error))?;
+    crate::session::checkpoint::write_bytes_atomically(path, rendered.as_bytes(), 0o600)
+        .map_err(|e| anyhow::anyhow!("failed to persist {}: {}", path.display(), e))?;
     if was_trusted {
         crate::config::trust::add_trusted_config(path)?;
     }

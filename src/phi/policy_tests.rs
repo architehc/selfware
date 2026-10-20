@@ -2834,6 +2834,890 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
                 "Lean PA32 mismatch for ({domain}, {spec})"
             );
             checked += 1;
+        } else if let Some(cr_op) = domain.strip_prefix("consolidation_retention:") {
+            use crate::consolidation::store::{sanitize_record_id, LongTermStore};
+            use crate::consolidation::temporal::{
+                CompactedContent, RecordImportance, TemporalRecord,
+            };
+            use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+            use std::collections::HashMap;
+
+            let base_time = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+            let make_rec = |id: &str, imp: RecordImportance, summary: &str| -> TemporalRecord {
+                TemporalRecord {
+                    id: id.to_string(),
+                    created_at: base_time,
+                    source_timestamps: vec![base_time],
+                    sequence_order: 1,
+                    causal_parents: vec![],
+                    causal_children: vec![],
+                    decay_score: 1.0,
+                    access_count: 0,
+                    last_accessed: base_time,
+                    content: CompactedContent {
+                        summary: summary.to_string(),
+                        key_facts: vec![],
+                        entities: vec![],
+                        actions: vec![],
+                        outcomes: vec![],
+                        insights: vec![],
+                    },
+                    multimodal_refs: vec![],
+                    source_ids: vec![],
+                    tags: vec![],
+                    importance: imp,
+                    session_id: None,
+                    metadata: HashMap::new(),
+                }
+            };
+
+            let actual = match (cr_op, spec.as_str()) {
+                (
+                    "importance_multipliers_and_half_life",
+                    "age=0_and_age=half_life_across_importances",
+                ) => {
+                    let half_life = 24.0;
+                    let at_half = base_time + ChronoDuration::hours(24);
+                    let r_norm = make_rec("r_norm", RecordImportance::Normal, "norm");
+                    let r_low = make_rec("r_low", RecordImportance::Low, "low");
+                    let r_high = make_rec("r_high", RecordImportance::High, "high");
+                    let r_crit = make_rec("r_crit", RecordImportance::Critical, "crit");
+                    let zero =
+                        (r_norm.decay_score_at(base_time, half_life) * 10000.0).round() as u64;
+                    let low = (r_low.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    let norm = (r_norm.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    let high = (r_high.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    let crit = (r_crit.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    format!("zero={zero}:low={low}:norm={norm}:high={high}:crit={crit}")
+                }
+                (
+                    "access_bonus_reinforcement_and_unit_clamp",
+                    "access=0_vs_1_and_critical_clamp",
+                ) => {
+                    let half_life = 24.0;
+                    let at_half = base_time + ChronoDuration::hours(24);
+                    let r_unacc = make_rec("u", RecordImportance::Normal, "u");
+                    let mut r_acc = make_rec("a", RecordImportance::Normal, "a");
+                    r_acc.access_count = 1;
+                    r_acc.last_accessed = at_half;
+                    let mut r_crit = make_rec("c", RecordImportance::Critical, "c");
+                    r_crit.access_count = 3;
+                    r_crit.last_accessed = base_time;
+                    let unaccessed =
+                        (r_unacc.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    let accessed =
+                        (r_acc.decay_score_at(at_half, half_life) * 10000.0).round() as u64;
+                    let clamped =
+                        (r_crit.decay_score_at(base_time, half_life) * 10000.0).round() as u64;
+                    format!("unaccessed={unaccessed}:accessed={accessed}:clamped={clamped}")
+                }
+                (
+                    "sanitize_record_id_and_time_span",
+                    "id=../etc/passwd:rec_01-A,timestamps=[1000,3000,2000]",
+                ) => {
+                    let sanitized = sanitize_record_id("../etc/passwd:rec_01-A");
+                    let mut empty_rec = make_rec("empty", RecordImportance::Normal, "empty");
+                    empty_rec.source_timestamps = vec![];
+                    let empty_span = if empty_rec.time_span().is_none() {
+                        "none"
+                    } else {
+                        "some"
+                    };
+                    let t1 = Utc.timestamp_opt(1000, 0).unwrap();
+                    let t2 = Utc.timestamp_opt(2000, 0).unwrap();
+                    let t3 = Utc.timestamp_opt(3000, 0).unwrap();
+                    let mut span_rec = make_rec("span", RecordImportance::Normal, "span");
+                    span_rec.source_timestamps = vec![t1, t3, t2];
+                    let (lo, hi) = span_rec.time_span().expect("non-empty span");
+                    format!(
+                        "sanitized={sanitized}:empty_span={empty_span}:span={}..{}",
+                        lo.timestamp(),
+                        hi.timestamp()
+                    )
+                }
+                (
+                    "store_load_index_and_retrieve_caps",
+                    "files=600,records=300,k=0_vs_2,candidates=6",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = LongTermStore::new(dir.path().to_path_buf());
+                    let mut recs = Vec::new();
+                    for i in 0..6 {
+                        let summary = if i == 0 {
+                            "alpha beta query token alpha beta query token".to_string()
+                        } else {
+                            format!("orthogonal item {i}")
+                        };
+                        let mut r =
+                            make_rec(&format!("rec_{i}"), RecordImportance::Normal, &summary);
+                        if i == 0 {
+                            r.causal_parents = vec![
+                                "rec_1".to_string(),
+                                "rec_2".to_string(),
+                                "rec_3".to_string(),
+                            ];
+                            r.causal_children = vec!["rec_4".to_string(), "rec_5".to_string()];
+                        }
+                        recs.push(r);
+                    }
+                    let stored = rt.block_on(store.store(&recs)).unwrap();
+                    assert_eq!(stored.stored, 6);
+                    let k0 = rt
+                        .block_on(store.retrieve("alpha beta query token", 0))
+                        .unwrap()
+                        .len();
+                    let k2 = rt
+                        .block_on(store.retrieve("alpha beta query token", 2))
+                        .unwrap()
+                        .len();
+                    let load_cap =
+                        std::hint::black_box(600usize).min(LongTermStore::MAX_LOADED_FILES);
+                    let index_cap =
+                        std::hint::black_box(300usize).min(LongTermStore::MAX_INDEXED_RECORDS);
+                    format!("load_cap={load_cap}:index_cap={index_cap}:k0={k0}:k2={k2}")
+                }
+                (
+                    "causal_expansion_and_remove_records_pruning",
+                    "k=2,primary=1,parents=1,children=1_then_remove",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = LongTermStore::new(dir.path().to_path_buf());
+                    let mut primary =
+                        make_rec("primary_1", RecordImportance::High, "unique_needle_xyz");
+                    primary.causal_parents = vec!["parent_1".to_string()];
+                    primary.causal_children = vec!["child_1".to_string()];
+                    let parent = make_rec("parent_1", RecordImportance::Low, "orthogonal_parent");
+                    let child = make_rec("child_1", RecordImportance::Low, "orthogonal_child");
+                    rt.block_on(store.store(&[primary, parent, child])).unwrap();
+
+                    let before_k2 = rt
+                        .block_on(store.retrieve("unique_needle_xyz", 2))
+                        .unwrap()
+                        .len();
+                    store.remove_records(&["parent_1".to_string(), "child_1".to_string()]);
+                    let after_remove = rt
+                        .block_on(store.retrieve("unique_needle_xyz", 2))
+                        .unwrap()
+                        .len();
+                    format!("before={before_k2}:after_remove={after_remove}")
+                }
+                other => panic!("unexpected consolidation_retention case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA33 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(gl_op) = domain.strip_prefix("guardrail_lattice:") {
+            use crate::swl::guardrails::{
+                Condition, EvaluationResult, GuardrailContext, GuardrailDef, GuardrailEnforcer,
+                GuardrailEngine, GuardrailType, LogicalOperator, ViolationAction,
+            };
+            use crate::swl::parser::ast::{GuardCondition, Guardrail};
+
+            let eval_label = |res: &EvaluationResult| -> &'static str {
+                match res {
+                    EvaluationResult::Pass => "pass",
+                    EvaluationResult::Fail { .. } => "fail",
+                    EvaluationResult::Error { .. } => "error",
+                }
+            };
+
+            let engine = GuardrailEngine::new();
+            let ctx = GuardrailContext::new().with_agent_output("agent1", "test_output");
+            let cond_pass = Condition::Inline("true".to_string());
+            let cond_fail = Condition::Inline("false".to_string());
+            let cond_err = Condition::Inline("agent_output.matches('[unclosed')".to_string());
+
+            let actual = match (gl_op, spec.as_str()) {
+                (
+                    "composite_and_short_circuit_and_empty_identity",
+                    "empty_and_or_plus_and_pass_fail",
+                ) => {
+                    let and_empty = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::And,
+                            conditions: vec![],
+                        },
+                        &ctx,
+                    ));
+                    let or_empty = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::Or,
+                            conditions: vec![],
+                        },
+                        &ctx,
+                    ));
+                    let and_pass = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::And,
+                            conditions: vec![cond_pass.clone(), cond_pass.clone()],
+                        },
+                        &ctx,
+                    ));
+                    let and_fail = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::And,
+                            conditions: vec![
+                                cond_pass.clone(),
+                                cond_fail.clone(),
+                                cond_pass.clone(),
+                            ],
+                        },
+                        &ctx,
+                    ));
+                    format!(
+                        "and_empty={and_empty}:or_empty={or_empty}:and_pass={and_pass}:and_fail={and_fail}"
+                    )
+                }
+                (
+                    "composite_or_pass_fail_and_error_short_circuit",
+                    "or_fail_pass_error_vs_all_fail_vs_fail_error_pass",
+                ) => {
+                    let or_pass = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::Or,
+                            conditions: vec![
+                                cond_fail.clone(),
+                                cond_pass.clone(),
+                                cond_err.clone(),
+                            ],
+                        },
+                        &ctx,
+                    ));
+                    let or_all_fail = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::Or,
+                            conditions: vec![cond_fail.clone(), cond_fail.clone()],
+                        },
+                        &ctx,
+                    ));
+                    let or_err = eval_label(&engine.evaluate_condition(
+                        &Condition::Composite {
+                            operator: LogicalOperator::Or,
+                            conditions: vec![
+                                cond_fail.clone(),
+                                cond_err.clone(),
+                                cond_pass.clone(),
+                            ],
+                        },
+                        &ctx,
+                    ));
+                    format!("or_pass={or_pass}:or_all_fail={or_all_fail}:or_err={or_err}")
+                }
+                (
+                    "summary_non_blocking_for_warn_log_and_skip",
+                    "pass_block+fail_warn+fail_log+skip_block",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let mut enforcer = GuardrailEnforcer::new();
+                    for (name, cond, act) in [
+                        ("g1", cond_pass.clone(), ViolationAction::Block),
+                        ("g2", cond_fail.clone(), ViolationAction::Warn),
+                        ("g3", cond_fail.clone(), ViolationAction::Log),
+                        ("g4", cond_pass.clone(), ViolationAction::Block),
+                    ] {
+                        enforcer.register_guardrail(GuardrailDef {
+                            name: name.to_string(),
+                            guardrail_type: GuardrailType::PreTool,
+                            condition: cond,
+                            on_violation: act,
+                            description: None,
+                            severity: None,
+                            tags: vec![],
+                        });
+                    }
+                    let summary = rt
+                        .block_on(enforcer.check(GuardrailType::PreTool, &ctx))
+                        .unwrap();
+                    format!(
+                        "total={}:should_block={}:blocking={}:warnings={}",
+                        summary.total_checked,
+                        summary.should_block(),
+                        summary.blocking_violations().len(),
+                        summary.warnings().len()
+                    )
+                }
+                (
+                    "summary_blocks_on_fail_or_error_with_block_action",
+                    "add_fail_block_and_error_block",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let mut enforcer = GuardrailEnforcer::new();
+                    for (name, cond, act) in [
+                        ("g1", cond_pass.clone(), ViolationAction::Block),
+                        ("g2", cond_fail.clone(), ViolationAction::Warn),
+                        ("g3", cond_fail.clone(), ViolationAction::Log),
+                        ("g4", cond_pass.clone(), ViolationAction::Block),
+                        ("g5", cond_fail.clone(), ViolationAction::Block),
+                        ("g6", cond_err.clone(), ViolationAction::Block),
+                    ] {
+                        enforcer.register_guardrail(GuardrailDef {
+                            name: name.to_string(),
+                            guardrail_type: GuardrailType::PreTool,
+                            condition: cond,
+                            on_violation: act,
+                            description: None,
+                            severity: None,
+                            tags: vec![],
+                        });
+                    }
+                    let summary = rt
+                        .block_on(enforcer.check(GuardrailType::PreTool, &ctx))
+                        .unwrap();
+                    format!(
+                        "total={}:should_block={}:blocking={}:blocked_stat={}:errors={}",
+                        summary.total_checked,
+                        summary.should_block(),
+                        summary.blocking_violations().len(),
+                        summary.blocked,
+                        summary.errors
+                    )
+                }
+                (
+                    "enforcer_action_parse_fallback_and_alert_outcome",
+                    "alert_and_unknown_action_fallback_to_log",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let mut enforcer = GuardrailEnforcer::new();
+                    enforcer.register_guardrails(&[
+                        Guardrail {
+                            name: Some("g_alert".to_string()),
+                            guardrail_type: Some("pre_tool".to_string()),
+                            condition: GuardCondition::Inline("false".to_string()),
+                            on_violation: "alert".to_string(),
+                        },
+                        Guardrail {
+                            name: Some("g_unknown_action".to_string()),
+                            guardrail_type: Some("pre_tool".to_string()),
+                            condition: GuardCondition::Inline("false".to_string()),
+                            on_violation: "unknown_custom_action".to_string(),
+                        },
+                    ]);
+                    let summary = rt
+                        .block_on(enforcer.check(GuardrailType::PreTool, &ctx))
+                        .unwrap();
+                    format!(
+                        "total={}:should_block={}:blocking={}:warnings={}",
+                        summary.total_checked,
+                        summary.should_block(),
+                        summary.blocking_violations().len(),
+                        summary.warnings().len()
+                    )
+                }
+                other => panic!("unexpected guardrail_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA34 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(sr_op) = domain.strip_prefix("safety_redaction:") {
+            use crate::safety::redact::{redact_for_model, RedactionContext};
+            use crate::safety::source_context::{
+                classification_for, discovery_root_is_private, sanitize_tool_context,
+                with_redaction_note,
+            };
+            use std::path::Path;
+
+            let actual = match (sr_op, spec.as_str()) {
+                (
+                    "discovery_root_private_and_not_found_handling",
+                    "git_claude_notfound_clean_ioerr",
+                ) => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let git_path = dir.path().join(".git").join("config");
+                    let claude_path = dir.path().join(".claude").join("settings.json");
+                    let not_found_path = dir.path().join("nonexistent_subdir_xyz");
+                    let clean_dir = dir.path().join("src");
+                    std::fs::create_dir_all(&clean_dir).unwrap();
+                    let nul_io_err_path = Path::new("bad\0path");
+
+                    let git = discovery_root_is_private(&git_path);
+                    let claude = discovery_root_is_private(&claude_path);
+                    let not_found = discovery_root_is_private(&not_found_path);
+                    let clean = discovery_root_is_private(&clean_dir);
+                    let io_err = discovery_root_is_private(nul_io_err_path);
+                    format!(
+                        "git={git}:claude={claude}:not_found={not_found}:clean={clean}:io_err={io_err}"
+                    )
+                }
+                (
+                    "rust_source_vs_generic_secret_redaction",
+                    "bare_kv_vs_quoted_vs_vendor_token",
+                ) => {
+                    let bare = "password = supersecretvalue99";
+                    let quoted = "let password = \"supersecretvalue99\";";
+                    let token = "let tok = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\";";
+                    let rust_bare =
+                        redact_for_model(bare, RedactionContext::RustSource).redacted > 0;
+                    let gen_bare = redact_for_model(bare, RedactionContext::Generic).redacted > 0;
+                    let rust_quoted =
+                        redact_for_model(quoted, RedactionContext::RustSource).redacted > 0;
+                    let rust_token =
+                        redact_for_model(token, RedactionContext::RustSource).redacted > 0;
+                    format!(
+                        "rust_bare={rust_bare}:gen_bare={gen_bare}:rust_quoted={rust_quoted}:rust_token={rust_token}"
+                    )
+                }
+                ("with_redaction_note_json_collision_avoidance", "collision_depths_0_1_2") => {
+                    let out0: serde_json::Value =
+                        serde_json::from_str(&with_redaction_note(r#"{"ok":1}"#, 1)).unwrap();
+                    let out1: serde_json::Value = serde_json::from_str(&with_redaction_note(
+                        r#"{"redaction":"user_val"}"#,
+                        1,
+                    ))
+                    .unwrap();
+                    let out2: serde_json::Value = serde_json::from_str(&with_redaction_note(
+                        r#"{"redaction":"u1","_redaction":"u2"}"#,
+                        1,
+                    ))
+                    .unwrap();
+                    let find_note_key = |v: &serde_json::Value| -> String {
+                        v.as_object()
+                            .unwrap()
+                            .iter()
+                            .find_map(|(k, val)| {
+                                val.as_str()
+                                    .filter(|s| s.starts_with("[redaction:"))
+                                    .map(|_| k.clone())
+                            })
+                            .unwrap()
+                    };
+                    let k0 = find_note_key(&out0);
+                    let k1 = find_note_key(&out1);
+                    let k2 = find_note_key(&out2);
+                    format!("k0={k0}:k1={k1}:k2={k2}")
+                }
+                ("source_classification_by_path_extension", "rs_md_and_other_or_missing") => {
+                    let rs = classification_for(r#"{"path":"src/lib.rs"}"#);
+                    let md = classification_for(r#"{"path":"README.md"}"#);
+                    let other = classification_for(r#"{"path":"config.toml"}"#);
+                    format!("rs={rs}:md={md}:other={other}")
+                }
+                (
+                    "sanitize_tool_context_exfil_downgrade_vs_shell_gate",
+                    "file_read_code_exfil_plus_token_vs_shell_exec",
+                ) => {
+                    let code_with_token_and_exfil =
+                        "let t = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\";\nsend(api_key);\n";
+                    let file_outcome = sanitize_tool_context(
+                        "file_read",
+                        r#"{"path":"src/client.rs"}"#,
+                        code_with_token_and_exfil,
+                        true,
+                    );
+                    let shell_outcome =
+                        sanitize_tool_context("shell_exec", r#"{}"#, "send(api_key);\n", true);
+                    let token_redacted = !file_outcome.content.contains("ghp_ABCDEFGHIJKLMNOP");
+                    format!(
+                        "token_redacted={token_redacted}:file_read_sanitized={}:shell_sanitized={}",
+                        file_outcome.sanitized, shell_outcome.sanitized
+                    )
+                }
+                other => panic!("unexpected safety_redaction case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA35 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
+        } else if let Some(wf_op) = domain.strip_prefix("workflow_lattice:") {
+            use crate::agent::plan_mode::{Plan, PlanModeManager};
+            use crate::orchestration::workflows::{
+                retry_backoff_secs, CheckpointStore, DependencyError, LogLevel, RetryConfig,
+                StepResult, StepStatus, StepType, VarValue, Workflow, WorkflowBudget,
+                WorkflowContext, WorkflowExecutor, WorkflowRun, WorkflowStatus, WorkflowStep,
+            };
+            use std::collections::{HashMap, HashSet};
+            use std::path::PathBuf;
+
+            let actual = match (wf_op, spec.as_str()) {
+                (
+                    "plan_mode_readonly_gate_and_completion_check",
+                    "inactive_planning_executing_and_0_1_2_steps",
+                ) => {
+                    let mut mgr = PlanModeManager::new();
+                    let inact = mgr.is_tool_allowed("file_edit", false);
+                    mgr.enter_plan_mode();
+                    let plan_ro = mgr.is_tool_allowed("file_read", true);
+                    let plan_mut = mgr.is_tool_allowed("file_edit", false);
+                    mgr.approve_plan();
+                    let exec = mgr.is_tool_allowed("file_edit", false);
+
+                    let mut plan = Plan::new();
+                    let empty = plan.is_complete();
+                    plan.add_step("step 1");
+                    plan.add_step("step 2");
+                    plan.steps[0].mark_done();
+                    let partial = plan.is_complete();
+                    plan.steps[1].mark_done();
+                    let done = plan.is_complete();
+                    format!(
+                        "inact={inact}:plan_ro={plan_ro}:plan_mut={plan_mut}:exec={exec}:empty={empty}:partial={partial}:done={done}"
+                    )
+                }
+                (
+                    "dependency_resolution_tdd_red_and_optional_skip",
+                    "unknown_tdd_optional_required_dep_failures",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+
+                    let mut exec_unknown = WorkflowExecutor::new();
+                    exec_unknown.register(Workflow {
+                        name: "wf_unknown".to_string(),
+                        description: String::new(),
+                        version: "1.0.0".to_string(),
+                        author: String::new(),
+                        category: String::new(),
+                        inputs: vec![],
+                        outputs: vec![],
+                        steps: vec![WorkflowStep {
+                            id: "s1".to_string(),
+                            name: "S1".to_string(),
+                            description: String::new(),
+                            step_type: StepType::Log {
+                                message: "hi".to_string(),
+                                level: LogLevel::Info,
+                            },
+                            required: true,
+                            retry: RetryConfig::default(),
+                            timeout_secs: None,
+                            depends_on: vec!["nonexistent_dep".to_string()],
+                        }],
+                        tags: vec![],
+                    });
+                    let res_unknown = rt.block_on(exec_unknown.execute(
+                        "wf_unknown",
+                        HashMap::new(),
+                        dir.path().to_path_buf(),
+                    ));
+                    let unknown_lbl = if res_unknown.is_err() {
+                        "fail_workflow"
+                    } else {
+                        "proceed"
+                    };
+
+                    let mut ctx = WorkflowContext::new(PathBuf::from("."));
+                    ctx.step_results.insert(
+                        "run_test_red".to_string(),
+                        StepResult {
+                            step_id: "run_test_red".to_string(),
+                            status: StepStatus::Failed,
+                            output: None,
+                            error: Some("expected red failure".to_string()),
+                            duration_ms: 0,
+                            retry_count: 0,
+                        },
+                    );
+                    let implement_step = WorkflowStep {
+                        id: "implement".to_string(),
+                        name: "Implement".to_string(),
+                        description: String::new(),
+                        step_type: StepType::Log {
+                            message: "impl".to_string(),
+                            level: LogLevel::Info,
+                        },
+                        required: true,
+                        retry: RetryConfig::default(),
+                        timeout_secs: None,
+                        depends_on: vec!["run_test_red".to_string()],
+                    };
+                    let known: HashSet<String> =
+                        ["run_test_red".to_string(), "implement".to_string()]
+                            .into_iter()
+                            .collect();
+                    let dep_err = ctx
+                        .check_dependencies(&implement_step, &known, None)
+                        .unwrap_err();
+                    let tdd_lbl = match &dep_err {
+                        DependencyError::NotSatisfied { dep, status }
+                            if implement_step.id == "implement"
+                                && dep == "run_test_red"
+                                && status == &StepStatus::Failed =>
+                        {
+                            "tdd_red_proceed"
+                        }
+                        _ => "fail_workflow",
+                    };
+
+                    let make_dep_wf = |name: &str, downstream_required: bool| Workflow {
+                        name: name.to_string(),
+                        description: String::new(),
+                        version: "1.0.0".to_string(),
+                        author: String::new(),
+                        category: String::new(),
+                        inputs: vec![],
+                        outputs: vec![],
+                        steps: vec![
+                            WorkflowStep {
+                                id: "up".to_string(),
+                                name: "Up".to_string(),
+                                description: String::new(),
+                                step_type: StepType::Shell {
+                                    command: "false".to_string(),
+                                    working_dir: None,
+                                },
+                                required: false,
+                                retry: RetryConfig::default(),
+                                timeout_secs: None,
+                                depends_on: vec![],
+                            },
+                            WorkflowStep {
+                                id: "down".to_string(),
+                                name: "Down".to_string(),
+                                description: String::new(),
+                                step_type: StepType::Log {
+                                    message: "down".to_string(),
+                                    level: LogLevel::Info,
+                                },
+                                required: downstream_required,
+                                retry: RetryConfig::default(),
+                                timeout_secs: None,
+                                depends_on: vec!["up".to_string()],
+                            },
+                        ],
+                        tags: vec![],
+                    };
+                    let mut exec_dep = WorkflowExecutor::new();
+                    exec_dep.register(make_dep_wf("wf_opt", false));
+                    exec_dep.register(make_dep_wf("wf_req", true));
+                    let res_opt = rt
+                        .block_on(exec_dep.execute(
+                            "wf_opt",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                        ))
+                        .unwrap();
+                    let opt_lbl = if res_opt.step_results["down"].status == StepStatus::Skipped {
+                        "skip_optional"
+                    } else {
+                        "proceed"
+                    };
+                    let res_req = rt
+                        .block_on(exec_dep.execute(
+                            "wf_req",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                        ))
+                        .unwrap();
+                    let req_lbl = if res_req.status == WorkflowStatus::Failed {
+                        "fail_workflow"
+                    } else {
+                        "proceed"
+                    };
+
+                    format!(
+                        "unknown={unknown_lbl}:tdd={tdd_lbl}:opt_fail={opt_lbl}:req_fail={req_lbl}"
+                    )
+                }
+                (
+                    "loop_status_aggregation_and_budget_stop",
+                    "loop_fail_skip_comp_and_wf_finalize",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut exec = WorkflowExecutor::new();
+                    exec.load_yaml(
+                        r#"
+name: loop_agg
+steps:
+  - id: items
+    name: Items
+    type: set_var
+    var: items
+    value: "a,b,c"
+  - id: body_ok
+    name: BodyOk
+    type: log
+    message: "item ${item}"
+  - id: run_loop
+    name: RunLoop
+    type: loop
+    for: item
+    in: "${items}"
+    do:
+      - body_ok
+"#,
+                    )
+                    .unwrap();
+                    let ok_res = rt
+                        .block_on(exec.execute(
+                            "loop_agg",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                        ))
+                        .unwrap();
+                    let wf_ok = format!("{:?}", ok_res.status);
+                    let loop_comp = format!("{:?}", ok_res.step_results["body_ok"].status);
+
+                    let agg_status =
+                        |completed: usize, failed: usize, skipped: usize| -> StepStatus {
+                            if failed > 0 {
+                                StepStatus::Failed
+                            } else if skipped > 0 && completed == 0 {
+                                StepStatus::Skipped
+                            } else {
+                                StepStatus::Completed
+                            }
+                        };
+                    let loop_fail = format!("{:?}", agg_status(2, 1, 0));
+                    let loop_skip = format!("{:?}", agg_status(0, 0, 3));
+
+                    exec.set_budget(
+                        "loop_agg",
+                        WorkflowBudget {
+                            max_wall_secs: Some(0),
+                            max_tokens: None,
+                        },
+                    );
+                    let stop_res = rt
+                        .block_on(exec.execute(
+                            "loop_agg",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                        ))
+                        .unwrap();
+                    assert!(stop_res.stop_reason.is_some());
+                    let wf_stop = format!("{:?}", stop_res.status);
+
+                    let mut exec_fail = WorkflowExecutor::new();
+                    exec_fail
+                        .load_yaml(
+                            r#"
+name: req_fail_wf
+steps:
+  - id: bad
+    name: Bad
+    type: shell
+    command: "false"
+    required: true
+"#,
+                        )
+                        .unwrap();
+                    let fail_res = rt
+                        .block_on(exec_fail.execute(
+                            "req_fail_wf",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                        ))
+                        .unwrap();
+                    let wf_fail = format!("{:?}", fail_res.status);
+
+                    format!(
+                        "loop_fail={loop_fail}:loop_skip={loop_skip}:loop_comp={loop_comp}:wf_ok={wf_ok}:wf_stop={wf_stop}:wf_fail={wf_fail}"
+                    )
+                }
+                (
+                    "retry_backoff_exponential_and_ceiling_60s",
+                    "delay=5,exp_attempts_1_2_3_5_and_linear_4",
+                ) => {
+                    let exp_cfg = RetryConfig {
+                        max_attempts: 6,
+                        delay_secs: 5,
+                        exponential: true,
+                    };
+                    let lin_cfg = RetryConfig {
+                        max_attempts: 6,
+                        delay_secs: 5,
+                        exponential: false,
+                    };
+                    let b1 = retry_backoff_secs(&exp_cfg, 1);
+                    let b2 = retry_backoff_secs(&exp_cfg, 2);
+                    let b3 = retry_backoff_secs(&exp_cfg, 3);
+                    let b5 = retry_backoff_secs(&exp_cfg, 5);
+                    let lin4 = retry_backoff_secs(&lin_cfg, 4);
+                    format!("b1={b1}:b2={b2}:b3={b3}:b5={b5}:lin4={lin4}")
+                }
+                (
+                    "checkpoint_fingerprint_resume_invalidation",
+                    "match_completed_vs_fp_changed_vs_failed",
+                ) => {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = CheckpointStore::for_workspace(dir.path());
+                    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let c_clone = calls.clone();
+                    let make_exec = |c: std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+                        WorkflowExecutor::new().with_tool_handler(Box::new(move |_name, _args| {
+                            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Box::pin(async { Ok("ok".to_string()) })
+                        }))
+                    };
+                    let yaml_v1 = r#"
+name: cp_wf
+steps:
+  - id: s1
+    name: S1
+    type: tool
+    tool: alpha
+  - id: s2
+    name: S2
+    type: tool
+    tool: beta
+  - id: s3
+    name: S3
+    type: shell
+    command: "test -f gate.txt"
+"#;
+                    let mut exec1 = make_exec(c_clone.clone());
+                    exec1.load_yaml(yaml_v1).unwrap();
+                    let run = WorkflowRun::fresh(store.clone(), "cp_wf");
+                    let run_id = run.run_id.clone();
+                    let first = rt
+                        .block_on(exec1.execute_run(
+                            "cp_wf",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                            run,
+                        ))
+                        .unwrap();
+                    assert_eq!(first.status, WorkflowStatus::Failed);
+                    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+                    let yaml_v2 = yaml_v1.replace("tool: beta", "tool: gamma");
+                    let mut exec2 = make_exec(c_clone.clone());
+                    exec2.load_yaml(&yaml_v2).unwrap();
+                    std::fs::write(
+                        dir.path().join("gate.txt"),
+                        VarValue::from("1").as_string().unwrap_or_default(),
+                    )
+                    .unwrap();
+                    let resumed = rt
+                        .block_on(exec2.execute_run(
+                            "cp_wf",
+                            HashMap::new(),
+                            dir.path().to_path_buf(),
+                            WorkflowRun::resume(store, &run_id).unwrap(),
+                        ))
+                        .unwrap();
+                    assert!(resumed.is_success());
+                    let s1_skipped_on_resume = resumed
+                        .logs
+                        .iter()
+                        .any(|l| l.message.contains("'s1' completed in the resumed run"));
+                    let s2_skipped_on_resume = resumed
+                        .logs
+                        .iter()
+                        .any(|l| l.message.contains("'s2' completed in the resumed run"));
+                    let s3_skipped_on_resume = resumed
+                        .logs
+                        .iter()
+                        .any(|l| l.message.contains("'s3' completed in the resumed run"));
+                    format!(
+                        "match={s1_skipped_on_resume}:fp_changed={s2_skipped_on_resume}:prev_failed={s3_skipped_on_resume}"
+                    )
+                }
+                other => panic!("unexpected workflow_lattice case: {other:?}"),
+            };
+            assert_eq!(
+                &actual, expected,
+                "Lean PA36 mismatch for ({domain}, {spec})"
+            );
+            checked += 1;
         } else {
             panic!("unknown domain in formal/phi_arena_trust_table.json: {domain}");
         }
@@ -2843,7 +3727,7 @@ fn phi_arena_and_trust_bounds_conform_to_lean_table() {
         rows.len(),
         "every row of formal/phi_arena_trust_table.json must be verified"
     );
-    assert_eq!(checked, 167, "all 167 PA1–PA32 rows must be checked");
+    assert_eq!(checked, 187, "all 187 PA1–PA36 rows must be checked");
 }
 
 #[test]
@@ -3187,4 +4071,188 @@ fn pa32_swarm_task_completion_and_trust_bounds_invariants() {
         TaskStatus::Partial,
         "Lean theorem mixed_reports_yield_partial"
     );
+}
+
+#[test]
+fn pa33_consolidation_temporal_decay_and_store_retention_invariants() {
+    use crate::consolidation::store::{sanitize_record_id, LongTermStore};
+    use crate::consolidation::temporal::{CompactedContent, RecordImportance, TemporalRecord};
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use std::collections::HashMap;
+
+    let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let mut r = TemporalRecord {
+        id: "crit_1".to_string(),
+        created_at: t0,
+        source_timestamps: vec![t0, t0 + ChronoDuration::hours(2)],
+        sequence_order: 1,
+        causal_parents: vec![],
+        causal_children: vec![],
+        decay_score: 1.0,
+        access_count: 1,
+        last_accessed: t0,
+        content: CompactedContent {
+            summary: "critical memory".to_string(),
+            key_facts: vec![],
+            entities: vec![],
+            actions: vec![],
+            outcomes: vec![],
+            insights: vec![],
+        },
+        multimodal_refs: vec![],
+        source_ids: vec![],
+        tags: vec![],
+        importance: RecordImportance::Critical,
+        session_id: None,
+        metadata: HashMap::new(),
+    };
+    assert!((r.decay_score_at(t0, 24.0) - 1.0).abs() < 1e-9);
+    r.record_access();
+    assert_eq!(r.access_count, 2);
+    assert_eq!(r.time_span(), Some((t0, t0 + ChronoDuration::hours(2))));
+    assert_eq!(sanitize_record_id("a/b..c:1-2_3"), "a_b__c_1-2_3");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = LongTermStore::new(dir.path().to_path_buf());
+    rt.block_on(store.store(std::slice::from_ref(&r))).unwrap();
+    assert!(rt
+        .block_on(store.retrieve("critical memory", 0))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        rt.block_on(store.retrieve("critical memory", 1))
+            .unwrap()
+            .len(),
+        1
+    );
+    store.remove_records(std::slice::from_ref(&r.id));
+    assert!(rt
+        .block_on(store.retrieve("critical memory", 1))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn pa34_guardrail_composite_and_summary_blocking_lattice_invariants() {
+    use crate::swl::guardrails::{
+        Condition, EvaluationResult, GuardrailContext, GuardrailEngine, GuardrailOutcome,
+        GuardrailSummary, GuardrailType, LogicalOperator, ViolationAction,
+    };
+
+    let engine = GuardrailEngine::new();
+    let ctx = GuardrailContext::new();
+    let pass = Condition::Inline("true".to_string());
+    let fail = Condition::Inline("false".to_string());
+    assert!(engine
+        .evaluate_condition(
+            &Condition::Composite {
+                operator: LogicalOperator::And,
+                conditions: vec![],
+            },
+            &ctx,
+        )
+        .is_pass());
+    assert!(engine
+        .evaluate_condition(
+            &Condition::Composite {
+                operator: LogicalOperator::Or,
+                conditions: vec![fail, pass],
+            },
+            &ctx,
+        )
+        .is_pass());
+
+    let summary = GuardrailSummary {
+        total_checked: 1,
+        passed: 0,
+        failed: 1,
+        errors: 0,
+        blocked: 0,
+        warnings: 1,
+        outcomes: vec![GuardrailOutcome {
+            guardrail_name: "warn_only".to_string(),
+            guardrail_type: GuardrailType::PreTool,
+            result: EvaluationResult::Fail {
+                reason: "warn".to_string(),
+            },
+            action: ViolationAction::Warn,
+            timestamp: std::time::Instant::now(),
+            evaluation_duration_ms: 0,
+        }],
+    };
+    assert!(!summary.should_block());
+    assert_eq!(summary.warnings().len(), 1);
+}
+
+#[test]
+fn pa35_safety_redaction_and_discovery_privacy_invariants() {
+    use crate::safety::redact::{redact_for_model, RedactionContext};
+    use crate::safety::source_context::{
+        classification_for, discovery_root_is_private, with_redaction_note,
+    };
+    use std::path::Path;
+
+    assert!(discovery_root_is_private(Path::new(".git/config")));
+    assert!(discovery_root_is_private(Path::new(".selfware/state")));
+    assert_eq!(
+        redact_for_model("password = hunter2secret99", RedactionContext::RustSource).redacted,
+        0
+    );
+    assert_eq!(
+        redact_for_model("password = hunter2secret99", RedactionContext::Generic).redacted,
+        1
+    );
+    let noted = with_redaction_note(r#"{"redaction":"keep"}"#, 2);
+    let parsed: serde_json::Value = serde_json::from_str(&noted).unwrap();
+    assert_eq!(parsed["redaction"], "keep");
+    assert!(parsed["_redaction"]
+        .as_str()
+        .unwrap()
+        .contains("2 secret value(s)"));
+    assert_eq!(classification_for(r#"{"path":"foo.rs"}"#), "rust_source");
+}
+
+#[test]
+fn pa36_plan_mode_and_workflow_lattice_invariants() {
+    use crate::agent::plan_mode::{Plan, PlanModeManager};
+    use crate::orchestration::workflows::{
+        retry_backoff_secs, step_fingerprint, RetryConfig, StepType, WorkflowStep, MAX_BACKOFF_SECS,
+    };
+
+    let mut mgr = PlanModeManager::new();
+    mgr.enter_plan_mode();
+    assert!(mgr.is_tool_allowed("file_read", true));
+    assert!(!mgr.is_tool_allowed("shell_exec", false));
+
+    let mut plan = Plan::new();
+    assert!(!plan.is_complete());
+    plan.add_step("s1");
+    plan.steps[0].mark_done();
+    assert!(plan.is_complete());
+
+    let retry = RetryConfig {
+        max_attempts: 10,
+        delay_secs: 10,
+        exponential: true,
+    };
+    assert_eq!(retry_backoff_secs(&retry, 5), MAX_BACKOFF_SECS);
+
+    let step_a = WorkflowStep {
+        id: "s1".to_string(),
+        name: "S1".to_string(),
+        description: String::new(),
+        step_type: StepType::Pause {
+            message: "a".to_string(),
+        },
+        required: true,
+        retry: RetryConfig::default(),
+        timeout_secs: None,
+        depends_on: vec![],
+    };
+    let mut step_b = step_a.clone();
+    step_b.step_type = StepType::Pause {
+        message: "b".to_string(),
+    };
+    assert_ne!(step_fingerprint(&step_a), step_fingerprint(&step_b));
 }

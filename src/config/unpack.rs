@@ -828,7 +828,7 @@ step_timeout_secs = {}
     // garbage (e.g. a zero context_length / token_budget).
     Config::validate_generated_toml(&content)?;
 
-    std::fs::write(&path, content)?;
+    crate::session::checkpoint::write_bytes_atomically(&path, content.as_bytes(), 0o600)?;
     let _ = super::trust::add_trusted_config(&path);
     Ok(path)
 }

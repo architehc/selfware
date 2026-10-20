@@ -846,7 +846,7 @@ impl WorkflowContext {
     /// When `current_iteration` is Some(idx), performs iteration-aware lookup:
     /// first tries `dep@idx` (same-iteration result), then falls back to plain `dep`
     /// (aggregate or pre-loop result).
-    fn check_dependencies(
+    pub(crate) fn check_dependencies(
         &self,
         step: &WorkflowStep,
         all_step_ids: &std::collections::HashSet<String>,

@@ -1176,14 +1176,7 @@ pub fn run_tui_dashboard_with_events(
                                         let elapsed = state.elapsed_formatted();
                                         let tokens = state.tokens_used;
                                         let msg_count = app.messages.len();
-                                        let tool_count = state
-                                            .logs
-                                            .iter()
-                                            .filter(|l| {
-                                                l.message.contains("completed")
-                                                    || l.message.contains("started")
-                                            })
-                                            .count();
+                                        let tool_count = state.tool_calls;
                                         format!(
                                             "Session statistics:\n  \
                                                  Elapsed time:  {}\n  \
@@ -1277,15 +1270,25 @@ pub fn run_tui_dashboard_with_events(
                                                     String::from_utf8_lossy(&result.stdout);
                                                 let stderr =
                                                     String::from_utf8_lossy(&result.stderr);
-                                                if stdout.is_empty() && stderr.is_empty() {
+                                                if !result.status.success() {
+                                                    if !stderr.is_empty() {
+                                                        format!(
+                                                            "git diff error: {}",
+                                                            stderr.trim_end()
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "git diff failed with {}",
+                                                            result.status
+                                                        )
+                                                    }
+                                                } else if stdout.is_empty() {
                                                     "No changes (working tree clean).".to_string()
-                                                } else if !stdout.is_empty() {
+                                                } else {
                                                     format!(
                                                         "git diff --stat:\n{}",
                                                         stdout.trim_end()
                                                     )
-                                                } else {
-                                                    format!("git diff error: {}", stderr.trim_end())
                                                 }
                                             }
                                             Err(e) => format!("Failed to run git diff: {}", e),
@@ -1310,10 +1313,17 @@ pub fn run_tui_dashboard_with_events(
                                                     String::from_utf8_lossy(&result.stdout);
                                                 let stderr =
                                                     String::from_utf8_lossy(&result.stderr);
-                                                if !stdout.is_empty() {
+                                                if !result.status.success() {
+                                                    if !stderr.is_empty() {
+                                                        format!("git error: {}", stderr.trim_end())
+                                                    } else {
+                                                        format!(
+                                                            "git status failed with {}",
+                                                            result.status
+                                                        )
+                                                    }
+                                                } else if !stdout.is_empty() {
                                                     format!("git status:\n{}", stdout.trim_end())
-                                                } else if !stderr.is_empty() {
-                                                    format!("git error: {}", stderr.trim_end())
                                                 } else {
                                                     "git status returned no output.".to_string()
                                                 }

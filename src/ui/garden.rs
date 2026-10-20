@@ -566,15 +566,18 @@ impl DigitalGarden {
 
 /// Quick garden status for the status bar
 pub fn garden_status_short(garden: &DigitalGarden) -> String {
-    let health =
-        garden.beds.values().map(|b| b.health_score).sum::<f32>() / garden.beds.len().max(1) as f32;
-
-    let health_glyph = if health > 0.8 {
-        Glyphs::bloom()
-    } else if health > 0.5 {
-        Glyphs::sprout()
+    let health_glyph = if garden.beds.is_empty() {
+        Glyphs::seedling()
     } else {
-        Glyphs::wilt()
+        let health =
+            garden.beds.values().map(|b| b.health_score).sum::<f32>() / garden.beds.len() as f32;
+        if health > 0.8 {
+            Glyphs::bloom()
+        } else if health > 0.5 {
+            Glyphs::sprout()
+        } else {
+            Glyphs::wilt()
+        }
     };
 
     format!("{} {} plants", health_glyph, garden.total_plants)

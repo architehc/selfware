@@ -799,6 +799,33 @@ pub(crate) async fn handle_workflow_command(
                         let result = executor
                             .execute(&workflow_name, inputs, working_dir)
                             .await?;
+                        if result.status == crate::orchestration::workflows::WorkflowStatus::Failed
+                        {
+                            let failed: Vec<String> = result
+                                .step_results
+                                .iter()
+                                .filter(|(_, s)| {
+                                    s.status == crate::orchestration::workflows::StepStatus::Failed
+                                })
+                                .map(|(name, s)| {
+                                    format!(
+                                        "{}: {}",
+                                        name,
+                                        s.error.as_deref().unwrap_or("step failed")
+                                    )
+                                })
+                                .collect();
+                            anyhow::bail!(
+                                "SWL workflow '{}' failed (dry-run) after {}ms ({})",
+                                workflow_name,
+                                result.duration_ms,
+                                if failed.is_empty() {
+                                    "no step details".to_string()
+                                } else {
+                                    failed.join("; ")
+                                }
+                            );
+                        }
                         println!(
                             "   {} Workflow completed (dry-run) in {}ms",
                             Glyphs::bloom(),

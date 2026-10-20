@@ -30,7 +30,7 @@ pub(crate) fn read_bounded_cli_file(
             max_bytes
         );
     }
-    std::fs::read_to_string(path)
+    crate::tools::file::read_to_string_capped(path, max_bytes)
         .with_context(|| format!("Failed to read {label} '{}'", path.display()))
 }
 
@@ -53,7 +53,8 @@ pub(crate) fn write_cli_file_no_symlink(
             anyhow::bail!("Refusing to overwrite symlinked file '{}'", path.display());
         }
     }
-    std::fs::write(path, contents).with_context(|| format!("Failed to write '{}'", path.display()))
+    crate::session::checkpoint::write_bytes_atomically(path, contents.as_ref(), 0o600)
+        .with_context(|| format!("Failed to write '{}'", path.display()))
 }
 
 /// Parse task-file contents into a list of tasks.
