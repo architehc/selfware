@@ -4553,7 +4553,7 @@ dependencies = [
  "llmfit-core",
  "metrics",
  "metrics-exporter-prometheus",
- "nix 0.29.0",
+ "nix 0.31.3",
  "nu-ansi-term",
  "nvml-wrapper",
  "once_cell",
