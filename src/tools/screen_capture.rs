@@ -168,13 +168,8 @@ fn write_to_session_dir(dir: &Path, tool: &str, png: &[u8]) -> Result<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3f");
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = dir.join(format!("{tool}-{stamp}-{n}.png"));
-    std::fs::write(&path, png)
+    crate::session::checkpoint::write_bytes_atomically(&path, png, 0o600)
         .with_context(|| format!("Failed to write screenshot to {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
     Ok(path)
 }
 
@@ -204,13 +199,8 @@ fn write_to_output_path(tool: &str, path: &str, png: &[u8]) -> Result<String> {
         })?;
     }
 
-    let tmp_path = target.with_extension(format!("png.tmp.{}", std::process::id()));
-    std::fs::write(&tmp_path, png)
+    crate::session::checkpoint::write_bytes_atomically(target, png, 0o644)
         .with_context(|| format!("Failed to write screenshot to {}", anchored))?;
-    if let Err(err) = std::fs::rename(&tmp_path, target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err).with_context(|| format!("Failed to write screenshot to {}", anchored));
-    }
     Ok(anchored)
 }
 

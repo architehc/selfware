@@ -69,6 +69,11 @@ impl Agent {
                 &compressor.path_keys(),
             )?
         };
+        // Measure the wire prompt size BEFORE appending the assistant reply, so
+        // the usage fallback (used when the backend omits `usage`, e.g. on
+        // fast-path SSE chat replies) attributes input tokens without
+        // double-counting the response.
+        let prompt_token_estimate = crate::token_count::estimate_messages_tokens(&request_messages);
         // Capture per-call metadata so the planning step also gets a
         // turn_NNNN.json artifact under <workdir>/.selfware/turns/.
         let mut plan_meta = crate::api::types::ChatMetadata::default();
@@ -341,8 +346,8 @@ impl Agent {
         // When plan mode is active, try to parse a structured plan from the
         // model's response and store it for UI review / execution tracking.
         if self.plan_mode {
-            let plan_text = content.text();
-            if let Some(plan) = super::plan_mode::parse_plan_from_llm(plan_text) {
+            let plan_text = content.text_all();
+            if let Some(plan) = super::plan_mode::parse_plan_from_llm(&plan_text) {
                 info!("Parsed structured plan with {} step(s)", plan.steps.len());
                 self.store_plan(plan);
                 self.plan_mode_manager.store_plan_text(plan_text);
@@ -573,7 +578,14 @@ impl Agent {
         // total = input + output): after a resume, `total` carries the
         // restored prior-run budget whose input/output split was not
         // persisted, so a from-parts recompute would silently erase it.
-        self.sync_api_usage();
+        // Also reconcile measured prompt/completion tokens when the backend
+        // omits `usage` (e.g. Colibri fast-path SSE responses on `chat_turn`).
+        self.reconcile_step_token_usage(
+            Some(&plan_meta),
+            prompt_token_estimate,
+            content.text(),
+            reasoning_for_artifact.as_deref(),
+        );
 
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)

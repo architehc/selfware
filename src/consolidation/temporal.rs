@@ -139,13 +139,18 @@ impl TemporalRecord {
     /// Uses exponential decay with a configurable half-life, boosted by access count.
     /// Each access partially resets the decay — more accessed memories persist longer.
     pub fn decay_score_at(&self, now: DateTime<Utc>, half_life_hours: f64) -> f64 {
-        let age_hours = (now - self.created_at).num_seconds() as f64 / 3600.0;
-        let base_decay = (-age_hours * (2.0_f64.ln()) / half_life_hours).exp();
+        let safe_half_life = if half_life_hours.is_finite() && half_life_hours > 0.0 {
+            half_life_hours
+        } else {
+            24.0
+        };
+        let age_hours = ((now - self.created_at).num_seconds() as f64 / 3600.0).max(0.0);
+        let base_decay = (-age_hours * (2.0_f64.ln()) / safe_half_life).exp();
 
         // Access reinforcement: each access adds a bonus that also decays
         let access_bonus = if self.access_count > 0 {
-            let since_access = (now - self.last_accessed).num_seconds() as f64 / 3600.0;
-            let access_decay = (-since_access * (2.0_f64.ln()) / half_life_hours).exp();
+            let since_access = ((now - self.last_accessed).num_seconds() as f64 / 3600.0).max(0.0);
+            let access_decay = (-since_access * (2.0_f64.ln()) / safe_half_life).exp();
             // Diminishing returns on access count
             let access_factor = (self.access_count as f64).ln_1p() * 0.1;
             access_factor * access_decay

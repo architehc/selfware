@@ -21,4 +21,6 @@ pub use chat::MultiAgentChat;
 pub use config::{MultiAgentConfig, MultiAgentFailurePolicy};
 pub use interactive::{print_agent_summary, run_multiagent_task};
 pub use types::{AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS};
-pub use view::{MultiChatView, ViewTab};
+pub use view::{
+    agent_color_index, agent_tag, summary_table_rows, AgentLineBuffer, MultiChatView, ViewTab,
+};

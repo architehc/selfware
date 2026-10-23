@@ -199,7 +199,7 @@ impl HotReloadManager {
 
         self.tool_paths
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(name.clone(), path.as_ref().to_path_buf());
         self.tools
             .write()
@@ -211,7 +211,7 @@ impl HotReloadManager {
 
     pub async fn reload(&mut self, name: &str) -> Result<Arc<DynamicTool>> {
         let path = {
-            let paths = self.tool_paths.lock().unwrap();
+            let paths = self.tool_paths.lock().unwrap_or_else(|e| e.into_inner());
             paths.get(name).cloned()
         };
         if let Some(path) = path {

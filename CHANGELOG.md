@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-10-23
+
+0.9.9 expands the Lean 4 ↔ Rust formal bisimulation suite to 1,056 proved decision-table
+rows (`670` theorems across 11 `.lean` files, including 395 rows in `PA1–PA78` and
+56 rows in `BH1–BH5` / `PT1–PT5`), hardens live-endpoint execution, grounded code
+review citations, and 4-gate recursive self-improvement (`evolve`), and adds
+the canonical redesign specification for `selfware.design`.
+
+### Added
+- **Lean 4 formal verification Waves 1–20 (`PA1–PA78` & `PT1–PT5`, 1,056 total JSON rows).**
+  `formal/PhiArenaAndTrustBounds.lean` (`432` theorems) exports 395 bisimulation rows in
+  `formal/phi_arena_trust_table.json` alongside the 9 sibling decision tables
+  (`1,056` rows and `670` theorems across the 11 `.lean` specs in `formal/`), verified against
+  `src/phi/policy_tests.rs` on every commit via `scripts/check_formal.sh`.
+  Covers `WorkLedger` state transitions, `PhiMediator` cooldowns, `Arena` winner
+  selection, `GroundedAssistant` trust states, conjoined multi-citation fenced
+  quotes, multimodal fast-fail, and 4-gate RSI promotion.
+- **Default `done_check = true` completion gate.** `AgentConfig::default()` now
+  enables the verified completion check by default, preventing premature exits on
+  multi-step coding tasks and cutting `live_eval` `c24` runtime by 19.8× (`21.2s`
+  vs `420s`, `-88.2%` tokens).
+- **`selfware.design` redesign guidelines.** Added
+  `docs/SELFWARE_DESIGN_WEBSITE_GUIDELINES.md` with an anti-slop engineering
+  audit and 8-section specification anchored to `AGENTS.md` Rules 1, 3, 4, and 5.
+
+### Changed
+- **Conjoined multi-citation and numbered fenced-block grounding.**
+  `src/agent/citation_check.rs` now extracts shared trailing quotes across
+  conjoined citations on the same line (`is_conjoined_citation_on_line`),
+  recovers fenced quotes after introductory prose (`fenced_quote_after`), and
+  strips line-number prefixes (`12 |`, `12:`) from fenced code blocks before
+  workspace substring verification.
+- **`GroundedAssistant` thinking-budget & streaming JSON hardening.**
+  `src/evolve/assistant.rs` disables `chat_template_kwargs.enable_thinking` on
+  bounded review calls so reasoning tokens cannot starve the JSON verdict, and
+  falls back to `serde_json::Deserializer::from_str` when a model appends extra
+  closing braces after a valid `ModelReview` JSON object.
+- **4-gate `SelfEditOrchestrator` prompt contract.**
+  `src/evolve/orchestrator.rs` explicitly instructs evolution candidates on all
+  four promotion gates (`git diff` protected-path audit, `cargo check`,
+  `cargo test --lib`, and grounded line-cited review).
+- **Streamed `multi-chat` fallback & step token reconciliation.**
+  `MultiAgentChat::run_single_agent` falls back to `chat_stream` when a reverse
+  proxy times out on non-streaming `side_chat`, and `Agent::reconcile_step_token_usage`
+  reconciles estimated vs provider-reported tokens across all execution paths.
+- **Multimodal `image_url` fast-fail & `llm-doctor` vision surfacing.**
+  `ApiClient` fails fast without retry loops when an endpoint returns HTTP
+  400/422/500 on `image_url` payloads, and `llm-doctor` requires exact model ID
+  matching (or single-model server) while surfacing `VisionProbeOutcome::HttpError(u16)`
+  explicitly.
+
+### Fixed
+- **Packed-refs and worktree Git SHA tracking in `build.rs`.** `build.rs` now
+  watches `commondir` and `packed-refs` so `selfware --version` stays accurate
+  after `git pack-refs` or inside Git worktrees.
+- **Typed error cause-chain unwrapping.** `SelfwareError::as_api_error` and
+  `as_agent_error` walk nested `anyhow` cause chains instead of only top-level
+  downcasts.
+- **Multi-block `MessageContent` and dynamic `ActiveTokenizer` refresh.**
+  `MessageContent` preserves all text blocks alongside images, `token_count.rs`
+  refreshes the active tokenizer when switching models at runtime, and
+  `Agent::set_plan_mode` synchronizes `state.plan_mode_active` with the tool
+  registry.
+- **Red-Team Boundary Lab `E6` runtime build & `--tmpfs` export.**
+  `scripts/boundary_lab/runtime_build.py` includes `formal/` in container build
+  roots with a 128 MiB limit, and `tool_runtime.py` falls back to `docker exec
+  ... tar -cf -` when `docker cp` fails on `--tmpfs`-mounted paths.
+
 ## [0.9.8] - 2026-10-14
 
 0.9.8 ships the read-only artifact harness and closes the security, isolation,
@@ -2018,7 +2086,8 @@ notes are folded in below.
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/architehc/selfware/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/architehc/selfware/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/architehc/selfware/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/architehc/selfware/compare/v0.9.5...v0.9.6

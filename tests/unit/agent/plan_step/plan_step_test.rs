@@ -1181,3 +1181,60 @@ async fn test_plan_request_system_message_matches_execution_request() {
 
     server.stop().await;
 }
+
+/// When a streaming backend omits the `usage` SSE chunk (observed on Colibri's
+/// fast-path SSE response for conversational greetings like `"hi"`), `plan()`
+/// must still reconcile `cumulative_token_usage` using measured token counts
+/// (`estimate_messages_tokens` + `estimate_content_tokens`) rather than
+/// leaving `usage: {input: 0, output: 0, total: 0}`.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_streaming_omitted_usage_reconciles_measured_tokens() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = socket.read(&mut buf).await;
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-fast\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi! What would you like to work on?\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-fast\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{sse_body}"
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let config = mock_agent_config(format!("http://{addr}/v1"), true);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_is_chat = true;
+    agent.messages.push(Message::user("hi"));
+
+    let has_tools = agent.plan().await.expect("streamed chat plan must succeed");
+    server.await.unwrap();
+
+    assert!(!has_tools);
+    assert!(
+        agent.cumulative_token_usage.input > 0,
+        "input tokens must be reconciled from measured prompt tokens when SSE omits usage, got {:?}",
+        agent.cumulative_token_usage
+    );
+    assert!(
+        agent.cumulative_token_usage.output > 0,
+        "output tokens must be reconciled from measured content tokens when SSE omits usage, got {:?}",
+        agent.cumulative_token_usage
+    );
+    assert_eq!(
+        agent.cumulative_token_usage.total,
+        agent.cumulative_token_usage.input + agent.cumulative_token_usage.output,
+        "total tokens must equal input + output when reconciled from measured fallback"
+    );
+}

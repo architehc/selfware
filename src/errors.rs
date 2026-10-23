@@ -533,75 +533,75 @@ pub fn is_provider_context_overflow(status: u16, body: &str) -> bool {
     }
 }
 
+/// Extract an [`ApiError`] from a cause, whether stored directly or wrapped in
+/// [`SelfwareError::Api`].
+pub fn as_api_error<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<&'a ApiError> {
+    cause
+        .downcast_ref::<ApiError>()
+        .or_else(|| match cause.downcast_ref::<SelfwareError>() {
+            Some(SelfwareError::Api(api_err)) => Some(api_err),
+            _ => None,
+        })
+}
+
+/// Extract an [`AgentError`] from a cause, whether stored directly or wrapped
+/// in [`SelfwareError::Agent`].
+pub fn as_agent_error<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<&'a AgentError> {
+    cause
+        .downcast_ref::<AgentError>()
+        .or_else(|| match cause.downcast_ref::<SelfwareError>() {
+            Some(SelfwareError::Agent(agent_err)) => Some(agent_err),
+            _ => None,
+        })
+}
+
 /// True when the error chain carries a context-window overflow: the typed
 /// [`ApiError::ContextOverflow`] (client pre-flight or classified provider
 /// response), or an un-reclassified `HttpStatus` whose body names one.
 pub fn is_context_overflow_error(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|cause| match cause.downcast_ref::<ApiError>() {
-            Some(ApiError::ContextOverflow(_)) => true,
-            Some(ApiError::HttpStatus { status, message }) => {
-                is_provider_context_overflow(*status, message)
-            }
-            _ => false,
-        })
+    e.chain().any(|cause| match as_api_error(cause) {
+        Some(ApiError::ContextOverflow(_)) => true,
+        Some(ApiError::HttpStatus { status, message }) => {
+            is_provider_context_overflow(*status, message)
+        }
+        _ => false,
+    })
 }
 
 /// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
 pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
     // Walk the whole cause chain: anyhow::Context-wrapped errors hide the
     // ConfirmationRequired underneath, and only the outermost layer downcasts.
-    for cause in e.chain() {
-        // Check if wrapped as SelfwareError::Agent(AgentError::ConfirmationRequired)
-        if let Some(SelfwareError::Agent(AgentError::ConfirmationRequired { .. })) =
-            cause.downcast_ref::<SelfwareError>()
-        {
-            return true;
-        }
-
-        // Also check if AgentError was returned directly into anyhow (e.g. from execution.rs)
-        if let Some(AgentError::ConfirmationRequired { .. }) = cause.downcast_ref::<AgentError>() {
-            return true;
-        }
-    }
-
-    false
+    e.chain().any(|cause| {
+        matches!(
+            as_agent_error(cause),
+            Some(AgentError::ConfirmationRequired { .. })
+        )
+    })
 }
 
 /// The tool named by a [`AgentError::ConfirmationRequired`] anywhere in
 /// `e`'s cause chain.
 pub fn confirmation_required_tool(e: &anyhow::Error) -> Option<String> {
-    e.chain().find_map(|cause| {
-        let agent_err = cause.downcast_ref::<AgentError>().or_else(|| {
-            match cause.downcast_ref::<SelfwareError>() {
-                Some(SelfwareError::Agent(a)) => Some(a),
-                _ => None,
-            }
-        });
-        match agent_err {
-            Some(AgentError::ConfirmationRequired { tool_name }) => Some(tool_name.clone()),
-            _ => None,
-        }
+    e.chain().find_map(|cause| match as_agent_error(cause) {
+        Some(AgentError::ConfirmationRequired { tool_name }) => Some(tool_name.clone()),
+        _ => None,
     })
 }
 
 /// Check if an anyhow error is a "no action" error (agent failed to take action after multiple prompts)
 /// These are fatal errors - the agent is stuck in a loop describing intent without executing.
 pub fn is_no_action_error(e: &anyhow::Error) -> bool {
-    // Check if wrapped as SelfwareError::Agent(AgentError::TaskFailed)
-    if let Some(SelfwareError::Agent(AgentError::TaskFailed { message })) =
-        e.downcast_ref::<SelfwareError>()
-    {
-        return message.contains("failed to take action after");
+    for cause in e.chain() {
+        if let Some(AgentError::TaskFailed { message }) = as_agent_error(cause) {
+            if message.contains("failed to take action after") {
+                return true;
+            }
+        }
     }
 
-    // Also check if AgentError was returned directly into anyhow
-    if let Some(AgentError::TaskFailed { message }) = e.downcast_ref::<AgentError>() {
-        return message.contains("failed to take action after");
-    }
-
-    // Check the error message directly
-    let error_string = e.to_string();
+    // Check the error message chain directly
+    let error_string = format!("{e:#}");
     error_string.contains("failed to take action after")
         || error_string.contains("Agent failed to take action")
 }
@@ -641,14 +641,13 @@ fn reasoning_retry_note(retry: &Option<String>) -> String {
 /// [`ApiError::ReasoningBudgetExhausted`], return its `reasoning_chars` and
 /// `retry` note.
 pub fn reasoning_budget_exhaustion(e: &anyhow::Error) -> Option<(usize, Option<String>)> {
-    e.chain()
-        .find_map(|cause| match cause.downcast_ref::<ApiError>() {
-            Some(ApiError::ReasoningBudgetExhausted {
-                reasoning_chars,
-                retry,
-            }) => Some((*reasoning_chars, retry.clone())),
-            _ => None,
-        })
+    e.chain().find_map(|cause| match as_api_error(cause) {
+        Some(ApiError::ReasoningBudgetExhausted {
+            reasoning_chars,
+            retry,
+        }) => Some((*reasoning_chars, retry.clone())),
+        _ => None,
+    })
 }
 
 pub const EXIT_SUCCESS: u8 = 0;
@@ -665,13 +664,7 @@ pub const EXIT_TERMINATED: u8 = 143;
 /// Whether `cause` is an [`ApiError::ShutdownRequested`], bare or wrapped in
 /// `SelfwareError::Api`.
 fn is_shutdown_api_error(cause: &(dyn std::error::Error + 'static)) -> bool {
-    matches!(
-        cause.downcast_ref::<ApiError>(),
-        Some(ApiError::ShutdownRequested(_))
-    ) || matches!(
-        cause.downcast_ref::<SelfwareError>(),
-        Some(SelfwareError::Api(ApiError::ShutdownRequested(_)))
-    )
+    matches!(as_api_error(cause), Some(ApiError::ShutdownRequested(_)))
 }
 
 /// The process exit code for a finished run: the error mapping of
@@ -745,8 +738,8 @@ fn get_exit_code_with_shutdown(e: &anyhow::Error, shutdown: Option<crate::Shutdo
         }
     }
 
-    // Fallback string matching only for cases where specific types aren't available
-    let msg = e.to_string().to_lowercase();
+    // Fallback string matching across the full error chain where specific types aren't available
+    let msg = format!("{e:#}").to_lowercase();
     if msg.contains("config") {
         return EXIT_CONFIG_ERROR;
     } else if msg.contains("api error") || msg.contains("network") {
@@ -806,13 +799,7 @@ impl RunEnd {
         shutdown: Option<crate::ShutdownReason>,
     ) -> Self {
         for cause in e.chain() {
-            let agent_err = cause.downcast_ref::<AgentError>().or_else(|| {
-                match cause.downcast_ref::<SelfwareError>() {
-                    Some(SelfwareError::Agent(a)) => Some(a),
-                    _ => None,
-                }
-            });
-            match agent_err {
+            match as_agent_error(cause) {
                 Some(AgentError::Cancelled) => return RunEnd::Interrupted,
                 Some(AgentError::Terminated(_)) => return RunEnd::Terminated,
                 _ => {}

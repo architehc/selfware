@@ -793,7 +793,8 @@ impl AttemptTree {
         if !path.exists() {
             return Err(TreeLogError::LogFileNotFound(path.display().to_string()));
         }
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::tools::file::read_to_string_capped(path, 64 * 1024 * 1024)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut updated_lines = Vec::new();
         let mut modified = false;
 

@@ -9,6 +9,9 @@ mod highlighter;
 mod prompt;
 mod submit_menu;
 
+pub use command_registry::{
+    command_description, command_names, CommandCategory, CommandEntry, COMMANDS,
+};
 pub use completer::SelfwareCompleter;
 pub use highlighter::SelfwareHighlighter;
 pub use prompt::SelfwarePrompt;

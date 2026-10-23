@@ -14,7 +14,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -51,10 +50,9 @@ fn indexable_files(watcher: &FileWatcher) -> Vec<PathBuf> {
 }
 
 fn read_indexable_text(path: &Path) -> std::io::Result<String> {
-    let mut file = crate::safety::source_context::open_broad_discovery_regular(path)?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    Ok(content)
+    let file = crate::safety::source_context::open_broad_discovery_regular(path)?;
+    crate::tools::file::read_handle_to_string_capped(file, crate::tools::file::MAX_SOURCE_READ_SIZE)
+        .map_err(std::io::Error::other)
 }
 
 fn is_excluded_path(path: &Path, config: &RagConfig) -> bool {

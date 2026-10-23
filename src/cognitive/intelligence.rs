@@ -14,7 +14,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -1191,11 +1190,11 @@ impl ProjectIntelligence {
 
         // Parse Cargo.toml
         let cargo_path = self.root.join("Cargo.toml");
-        if let Ok(mut file) =
-            crate::safety::source_context::open_broad_discovery_regular(&cargo_path)
-        {
-            let mut content = String::new();
-            if file.read_to_string(&mut content).is_ok() {
+        if let Ok(file) = crate::safety::source_context::open_broad_discovery_regular(&cargo_path) {
+            if let Ok(content) = crate::tools::file::read_handle_to_string_capped(
+                file,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            ) {
                 if let Ok(deps) = DependencyGraph::parse(&content) {
                     if let Ok(mut graph) = self.dependencies.write() {
                         *graph = deps;
@@ -1245,8 +1244,7 @@ impl ProjectIntelligence {
         {
             if entry.file_type().is_file() {
                 let path = entry.path().to_path_buf();
-                let Ok(mut file) =
-                    crate::safety::source_context::open_broad_discovery_regular(&path)
+                let Ok(file) = crate::safety::source_context::open_broad_discovery_regular(&path)
                 else {
                     continue;
                 };
@@ -1270,8 +1268,10 @@ impl ProjectIntelligence {
                 // Index Rust files for symbols and patterns from the same
                 // descriptor whose link count was checked above.
                 if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                    let mut content = String::new();
-                    if file.read_to_string(&mut content).is_ok() {
+                    if let Ok(content) = crate::tools::file::read_handle_to_string_capped(
+                        file,
+                        crate::tools::file::MAX_SOURCE_READ_SIZE,
+                    ) {
                         self.index_rust_symbols(&mut symbol_index, &path, &content);
                         pattern_detector.analyze(&path, &content);
                     }

@@ -31,23 +31,29 @@ pub enum Rating {
 
 impl std::fmt::Display for Rating {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bloom => write!(f, "BLOOM"),
-            Self::Grow => write!(f, "GROW"),
-            Self::Wilt => write!(f, "WILT"),
-            Self::Frost => write!(f, "FROST"),
-        }
+        write!(f, "{}", self.label())
     }
 }
 
 impl Rating {
+    /// Return the uppercase badge label for this rating (`BLOOM`, `GROW`, `WILT`, `FROST`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bloom => "BLOOM",
+            Self::Grow => "GROW",
+            Self::Wilt => "WILT",
+            Self::Frost => "FROST",
+        }
+    }
+
     /// Derive a rating from accuracy and the level's pass threshold.
     pub fn from_accuracy(accuracy: f64, pass_threshold: f64) -> Self {
-        if accuracy >= pass_threshold {
+        const EPS: f64 = 1e-12;
+        if accuracy + EPS >= pass_threshold {
             Self::Bloom
-        } else if accuracy >= pass_threshold * 0.75 {
+        } else if accuracy + EPS >= pass_threshold * 0.75 {
             Self::Grow
-        } else if accuracy >= pass_threshold * 0.5 {
+        } else if accuracy + EPS >= pass_threshold * 0.5 {
             Self::Wilt
         } else {
             Self::Frost

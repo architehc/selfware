@@ -197,6 +197,30 @@ impl ContextModality {
             },
         }
     }
+
+    /// Canonical modality tag name (`Merge`, `Refactor`, `Review`, `Debug`, `Greenfield`, `Implement`).
+    pub const fn name(&self) -> &'static str {
+        match self {
+            ContextModality::Merge { .. } => "Merge",
+            ContextModality::Refactor { .. } => "Refactor",
+            ContextModality::Review => "Review",
+            ContextModality::Debug { .. } => "Debug",
+            ContextModality::Greenfield { .. } => "Greenfield",
+            ContextModality::Implement { .. } => "Implement",
+        }
+    }
+
+    /// Modality-specific `(content_ratio, compression_ratio, thinking_ratio)` split summing to `1.0`.
+    pub const fn allocation_ratios(&self) -> (f32, f32, f32) {
+        match self {
+            ContextModality::Merge { .. } => (0.55, 0.30, 0.15),
+            ContextModality::Refactor { .. } => (0.50, 0.35, 0.15),
+            ContextModality::Review => (0.65, 0.20, 0.15),
+            ContextModality::Debug { .. } => (0.50, 0.20, 0.30),
+            ContextModality::Greenfield { .. } => (0.40, 0.30, 0.30),
+            ContextModality::Implement { .. } => (0.60, 0.25, 0.15),
+        }
+    }
 }
 
 /// Plan for which files to load at which level.
@@ -357,6 +381,24 @@ impl ContextMap {
         self.modality = Some(modality);
     }
 
+    /// Allocate `(content_budget, compression_headroom, thinking_reserve)` from `token_budget`
+    /// using the task's inferred [`ContextModality::allocation_ratios`].
+    pub fn allocate_budget(&mut self, task: &str, token_budget: usize) -> (usize, usize, usize) {
+        let modality = ContextModality::from_task(task);
+        let (c, comp, th) = modality.allocation_ratios();
+        self.modality = Some(modality);
+        self.budget = (token_budget as f32 * c).round() as usize;
+        self.compression_headroom = (token_budget as f32 * comp).round() as usize;
+        self.thinking_reserve = (token_budget as f32 * th).round() as usize;
+        update_total_budget(token_budget);
+        self.sync_budget();
+        (
+            self.budget,
+            self.compression_headroom,
+            self.thinking_reserve,
+        )
+    }
+
     /// Get the current modality.
     pub fn modality(&self) -> Option<&ContextModality> {
         self.modality.as_ref()
@@ -421,7 +463,13 @@ impl ContextMap {
         {
             return match level {
                 ContextMode::Map => 10,
-                ContextMode::Lite => extract_rust_skeleton(path, &content).token_count.max(1),
+                ContextMode::Lite => {
+                    if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        extract_rust_skeleton(path, &content).token_count.max(1)
+                    } else {
+                        estimate_content_tokens(&content).max(1)
+                    }
+                }
                 _ => estimate_content_tokens(&content).max(1),
             };
         }

@@ -656,6 +656,7 @@ impl ProcessManager {
         // spawn_child_process (the restart path already does this); the
         // initial spawn must be consistent.
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
@@ -1426,6 +1427,7 @@ async fn spawn_child_process(
     // Clear inherited environment to prevent secret leakage, then re-add the
     // shared non-sensitive allowlist (see safety::process_env).
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     for (key, value) in &config.env {
         cmd.env(key, value);
     }

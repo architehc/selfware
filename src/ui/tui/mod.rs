@@ -26,11 +26,17 @@ pub use dashboard_widgets::{
 pub use garden_view::{render_garden_view, GardenFocus, GardenItem, GardenView};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
+pub use multichat::{handle_key as handle_multichat_key, MultiChatKeyAction, MultiChatTuiState};
 pub use palette::CommandPalette;
 pub use phi_arena::{
     render_phi_arena, render_phi_arena_modal, PhiArenaAction, PhiArenaPane, PhiArenaProfile,
 };
 pub use status_line::{StatusLine, StatusMode};
+pub use tasks_view::{
+    agents_from, build_view as build_tasks_view, compact_timeline, fmt_duration,
+    render as render_tasks_view, resource_rows_from_registry, AgentRow, EditTarget, Item, Level,
+    Nav, NavFrame, PaneAction, ResourceRow, TaskEditor, TasksInputs, TasksPane, TasksView,
+};
 pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
 
 // Re-export animation components for convenience

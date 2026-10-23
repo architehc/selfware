@@ -371,28 +371,8 @@ impl SwlRuntime {
         let workflow_start = std::time::Instant::now();
         record_state_transition("idle", "executing_workflow");
 
-        // Initialize context with inputs
-        {
-            let mut ctx = self.context.lock().await;
-            for (k, v) in inputs {
-                let value = v.as_string().unwrap_or_else(|| format!("{v:?}"));
-                ctx.set(k, value);
-            }
-        }
-
-        // Apply schema defaults if a state schema is defined
-        if let Some(ref schema) = doc.state {
-            let mut ctx = self.context.lock().await;
-            for field in &schema.fields {
-                if !ctx.has(&field.name) {
-                    if let Some(ref default) = field.default {
-                        if let Ok(json_value) = serde_json::to_value(default) {
-                            ctx.set_json(field.name.clone(), json_value);
-                        }
-                    }
-                }
-            }
-        }
+        // Initialize context with inputs and state schema defaults
+        self.initialize_workflow_context(doc, &inputs).await;
 
         // Find the workflow
         let workflow = doc.workflows.get(workflow_name).ok_or_else(|| {
@@ -434,6 +414,34 @@ impl SwlRuntime {
         result
     }
 
+    /// Initialize context with workflow inputs and state schema defaults
+    pub(crate) async fn initialize_workflow_context(
+        &self,
+        doc: &SwlDocument,
+        inputs: &HashMap<String, VarValue>,
+    ) {
+        {
+            let mut ctx = self.context.lock().await;
+            for (k, v) in inputs {
+                let value = v.as_string().unwrap_or_else(|| format!("{v:?}"));
+                ctx.set(k.clone(), value);
+            }
+        }
+
+        if let Some(ref schema) = doc.state {
+            let mut ctx = self.context.lock().await;
+            for field in &schema.fields {
+                if !ctx.has(&field.name) {
+                    if let Some(ref default) = field.default {
+                        if let Ok(json_value) = serde_json::to_value(default) {
+                            ctx.set_json(field.name.clone(), json_value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Persist the current execution context state
     pub async fn persist_state(&self) -> Result<()> {
         let mut ctx = self.context.lock().await;
@@ -461,32 +469,7 @@ impl SwlRuntime {
         // the runtime ignored `steps` and iterated the agents map in BTreeMap
         // key order — deterministic, but the wrong execution contract). With
         // no declared steps, keep the legacy all-agents order for back-compat.
-        let declared: Vec<(String, crate::swl::parser::ast::AgentDefinition)> = if workflow
-            .steps
-            .is_empty()
-        {
-            doc.agents
-                .iter()
-                .map(|(name, agent)| (name.clone(), agent.clone()))
-                .collect()
-        } else {
-            let mut resolved = Vec::with_capacity(workflow.steps.len());
-            for (idx, step) in workflow.steps.iter().enumerate() {
-                let name = step.agent.as_ref().or(step.delegate.as_ref());
-                let Some(name) = name else {
-                    return Err(crate::errors::SelfwareError::Internal(format!(
-                            "workflow step {idx} declares neither `agent` nor `delegate` — unsupported step form"
-                        )));
-                };
-                let Some(agent) = doc.agents.get(name) else {
-                    return Err(crate::errors::SelfwareError::Internal(format!(
-                        "workflow step {idx} references unknown agent '{name}'"
-                    )));
-                };
-                resolved.push((name.clone(), agent.clone()));
-            }
-            resolved
-        };
+        let declared = guarded::resolve_declared_agents(doc, workflow)?;
 
         for (agent_name, agent) in &declared {
             if self.dry_run {
@@ -604,28 +587,27 @@ impl SwlRuntime {
         // reducer agent. For ReduceStage::Aggregate the agent name is
         // explicit. For ReduceStage::Code (inline code) there is no named
         // agent, so fall back to the last agent as before.
-        if let Some(reduce_agent_name) = workflow.reduce.as_ref().and_then(|reduce| match reduce {
-            ReduceStage::Aggregate(agg) => Some(agg.agent.clone()),
-            ReduceStage::Code(_) => {
-                // No named agent in a code-only reduce stage; fall back to
-                // the last agent as the reducer.
-                doc.agents.keys().last().map(|s| s.to_string())
-            }
-        }) {
+        if let Some(reduce_agent_name) = guarded::select_reduce_agent(workflow, doc) {
             if let Some(agent) = doc.agents.get(&reduce_agent_name) {
                 if !self.dry_run {
-                    // The reducer's output IS the workflow result (review
-                    // finding: it was bound to `_reduce_output` and dropped,
-                    // returning only the map outputs).
-                    let reduce_output = self.execute_agent(&reduce_agent_name, agent).await?;
-                    let mut outputs = map_result.outputs;
-                    outputs.insert(reduce_agent_name, reduce_output);
-                    let duration_ms = workflow_start.elapsed().as_millis() as u64;
-                    return Ok(ExecutionResult {
-                        status: map_result.status,
-                        outputs,
-                        duration_ms,
-                    });
+                    if map_result.status == ExecutionStatus::Completed {
+                        // The reducer's output IS the workflow result (review
+                        // finding: it was bound to `_reduce_output` and dropped,
+                        // returning only the map outputs).
+                        let reduce_output = self.execute_agent(&reduce_agent_name, agent).await?;
+                        let mut outputs = map_result.outputs;
+                        outputs.insert(reduce_agent_name.clone(), reduce_output.clone());
+                        {
+                            let mut ctx = self.context.lock().await;
+                            ctx.set(reduce_agent_name, reduce_output);
+                        }
+                        let duration_ms = workflow_start.elapsed().as_millis() as u64;
+                        return Ok(ExecutionResult {
+                            status: map_result.status,
+                            outputs,
+                            duration_ms,
+                        });
+                    }
                 } else {
                     println!(
                         "   [DRY-RUN] Would execute reduce agent: {}",
@@ -671,16 +653,7 @@ impl SwlRuntime {
             // Evaluate the condition robustly: parse as a boolean rather than
             // naively checking for a substring "true" (which would match
             // "untrue", "true_value", etc.).
-            let condition_is_true = {
-                let trimmed = condition_result.trim();
-                // Exact match on common truthy strings
-                trimmed.eq_ignore_ascii_case("true")
-                    || trimmed.eq_ignore_ascii_case("yes")
-                    || trimmed == "1"
-                    || trimmed.eq_ignore_ascii_case("t")
-                    || trimmed.eq_ignore_ascii_case("y")
-            };
-            if condition_is_true {
+            if guarded::condition_result_is_true(&condition_result) {
                 // Execute remaining agents
                 let mut outputs = HashMap::new();
                 for (agent_name, agent) in doc.agents.iter().skip(1) {
@@ -688,7 +661,9 @@ impl SwlRuntime {
                         println!("   [DRY-RUN] Would execute agent: {}", agent_name);
                     } else {
                         let output = self.execute_agent(agent_name, agent).await?;
-                        outputs.insert(agent_name.clone(), output);
+                        outputs.insert(agent_name.clone(), output.clone());
+                        let mut ctx = self.context.lock().await;
+                        ctx.set(agent_name.clone(), output);
                     }
                 }
                 let duration_ms = workflow_start.elapsed().as_millis() as u64;
@@ -787,9 +762,22 @@ impl SwlRuntime {
             // Calculate inference latency
             let duration_ms = inference_start.elapsed().as_millis() as u64;
 
-            // Record telemetry
-            let tokens_in = response.usage.prompt_tokens as u32;
-            let tokens_out = response.usage.completion_tokens as u32;
+            // Record telemetry (fall back to measured token accounting when
+            // provider usage is zero — AGENTS.md Rule 4).
+            let tokens_in = if response.usage.prompt_tokens > 0 {
+                response.usage.prompt_tokens as u32
+            } else {
+                messages
+                    .iter()
+                    .map(|m| crate::token_count::estimate_content_tokens(m.content.text()))
+                    .sum::<usize>() as u32
+            };
+            let tokens_out = if response.usage.completion_tokens > 0 {
+                response.usage.completion_tokens as u32
+            } else {
+                crate::token_count::estimate_content_tokens(&choice.message.content.text_all())
+                    as u32
+            };
             let total_tokens = (tokens_in + tokens_out) as u64;
 
             // Update span with telemetry data

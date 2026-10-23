@@ -110,6 +110,7 @@ where
 {
     let mut cmd = Command::new(program);
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     cmd.envs(env.iter().copied());
     cmd.kill_on_drop(true);
     cmd.args(args).current_dir(cwd);
@@ -2243,7 +2244,11 @@ impl VerificationGate {
         let node_ok = self.command_exists("node").await;
         for p in paths {
             let label = file_label(p);
-            let src = std::fs::read_to_string(p).unwrap_or_default();
+            let src = crate::tools::file::read_to_string_capped(
+                p,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .unwrap_or_default();
             let cwd = dir_of(p).unwrap_or_else(|| self.project_root.clone());
             let mode = tc::js_mode(p, &self.project_root, &src);
             if mode == JsMode::Jsx {
@@ -2381,7 +2386,11 @@ impl VerificationGate {
                     std::process::id(),
                     WRAPPER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 ));
-                match std::fs::write(&wrapper, tc::ts_wrapper_config_json(cfg, &group)) {
+                match crate::session::checkpoint::write_bytes_atomically(
+                    &wrapper,
+                    tc::ts_wrapper_config_json(cfg, &group).as_bytes(),
+                    0o644,
+                ) {
                     Ok(()) => {
                         let _cleanup = RemoveOnDrop(wrapper.clone());
                         tally.notes.push(format!(
@@ -2470,7 +2479,11 @@ impl VerificationGate {
             ];
             let mut roots: Vec<PathBuf> = Vec::new();
             for p in &group {
-                let src = std::fs::read_to_string(p).unwrap_or_default();
+                let src = crate::tools::file::read_to_string_capped(
+                    p,
+                    crate::tools::file::MAX_SOURCE_READ_SIZE,
+                )
+                .unwrap_or_default();
                 if let Some(r) = tc::java_source_root(p, &src) {
                     if !roots.contains(&r) {
                         roots.push(r);
@@ -2795,7 +2808,10 @@ impl VerificationGate {
         if !path.exists() {
             return false;
         }
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = crate::tools::file::read_to_string_capped(
+            &path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             content.contains("[tool.pytest") || content.contains("[tool:pytest")
         } else {
             false

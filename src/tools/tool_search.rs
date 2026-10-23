@@ -161,7 +161,7 @@ impl Tool for ToolSearchTool {
             .unwrap_or(5)
             .clamp(1, 20);
 
-        let index = self.index.read().expect("tool_search index poisoned");
+        let index = self.index.read().unwrap_or_else(|e| e.into_inner());
         let results = index.search(query, limit);
         drop(index);
 

@@ -107,28 +107,13 @@ impl VlmBenchLevel for MegaEvolution {
             ExpectedAnswer::VisualScores(ground_truth) => {
                 evaluate_visual_scores(response, ground_truth)
             }
-            ExpectedAnswer::Keywords(keywords) => {
-                let acc = scoring::keyword_accuracy(response, keywords);
-                let details = keywords
-                    .iter()
-                    .map(|kw| {
-                        let found = response.to_lowercase().contains(&kw.to_lowercase());
-                        (kw.clone(), if found { 1.0 } else { 0.0 })
-                    })
-                    .collect();
-                let rating = Rating::from_accuracy(acc, PASS_THRESHOLD);
-                LevelScore {
-                    accuracy: acc,
-                    detail_scores: details,
-                    response_tokens: 0,
-                    latency_ms: 0,
-                    rating,
-                }
+            ExpectedAnswer::Keywords(_) => {
+                crate::vlm_bench::score_response(scenario, response, PASS_THRESHOLD)
             }
             _ => LevelScore {
                 accuracy: 0.0,
                 detail_scores: vec![],
-                response_tokens: 0,
+                response_tokens: crate::token_count::estimate_content_tokens(response) as u64,
                 latency_ms: 0,
                 rating: Rating::Frost,
             },
@@ -180,7 +165,7 @@ fn evaluate_visual_scores(response: &str, ground_truth: &[f64]) -> LevelScore {
     LevelScore {
         accuracy,
         detail_scores: details,
-        response_tokens: 0,
+        response_tokens: crate::token_count::estimate_content_tokens(response) as u64,
         latency_ms: 0,
         rating,
     }

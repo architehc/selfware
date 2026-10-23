@@ -7,7 +7,7 @@
 //! `diagnosis_summary.json`.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -94,26 +94,26 @@ impl RunTrace {
 
     /// Write events as newline-delimited JSON.
     pub fn write_jsonl(&self, path: &Path) -> Result<()> {
-        let mut file = std::fs::File::create(path)?;
+        let mut out = String::new();
         for event in &self.events {
             let line = serde_json::to_string(event)?;
-            writeln!(file, "{}", line)?;
+            out.push_str(&line);
+            out.push('\n');
         }
+        crate::session::checkpoint::write_bytes_atomically(path, out.as_bytes(), 0o644)?;
         Ok(())
     }
 
     /// Read events from a newline-delimited JSON file.
     /// Metadata fields are left empty; the caller should patch them.
     pub fn read_jsonl(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
+        let text = crate::tools::file::read_to_string_capped(path, 64 * 1024 * 1024)?;
         let mut events = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
+        for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            let event: TraceEvent = serde_json::from_str(&line)?;
+            let event: TraceEvent = serde_json::from_str(line)?;
             events.push(event);
         }
         Ok(Self {
@@ -157,14 +157,19 @@ impl TraceProgressEmitter {
     }
 
     fn flush_llm_response(&self) {
-        if let Some((step, tokens)) = self.pending_llm_response.lock().unwrap().take() {
+        if let Some((step, tokens)) = self
+            .pending_llm_response
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             let tool_count = self.pending_tool_calls.swap(0, Ordering::SeqCst);
             let ev = TraceEvent::LlmResponse {
                 step: step as u32,
                 content_chars: tokens as usize * 4,
                 tool_calls_count: tool_count,
             };
-            let mut file = self.file.lock().unwrap();
+            let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(line) = serde_json::to_string(&ev) {
                 let _ = writeln!(file, "{}", line);
             }
@@ -175,7 +180,7 @@ impl TraceProgressEmitter {
 impl ProgressEmitter for TraceProgressEmitter {
     fn emit(&self, event: ProgressEvent) {
         let current_step = self.current_step.load(Ordering::SeqCst);
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
 
         match &event {
             ProgressEvent::StepStarted { step, .. } => {
@@ -197,8 +202,10 @@ impl ProgressEmitter for TraceProgressEmitter {
                 completion_tokens, ..
             } => {
                 drop(file);
-                *self.pending_llm_response.lock().unwrap() =
-                    Some((current_step, *completion_tokens));
+                *self
+                    .pending_llm_response
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some((current_step, *completion_tokens));
             }
             ProgressEvent::ToolCallStarted { tool, args_short } => {
                 self.pending_tool_calls.fetch_add(1, Ordering::SeqCst);

@@ -141,6 +141,9 @@ pub trait SanitizedEnvExt {
     fn sanitized_env(&mut self) -> &mut Self;
     /// As [`SanitizedEnvExt::sanitized_env`] plus the named parent vars.
     fn sanitized_env_preserve(&mut self, preserve: &[&str]) -> &mut Self;
+    /// Pin `RUSTUP_TOOLCHAIN` so a workspace `rust-toolchain.toml` (`path = "..."`)
+    /// cannot redirect `rustup` proxy shims (`cargo`, `rustc`, `rustfmt`, `rust-analyzer`).
+    fn pin_rustup_toolchain(&mut self) -> &mut Self;
 }
 
 impl SanitizedEnvExt for std::process::Command {
@@ -152,6 +155,10 @@ impl SanitizedEnvExt for std::process::Command {
         sanitize_std_command_env_preserve(self, preserve);
         self
     }
+    fn pin_rustup_toolchain(&mut self) -> &mut Self {
+        pin_std_rustup_toolchain(self);
+        self
+    }
 }
 
 impl SanitizedEnvExt for tokio::process::Command {
@@ -161,6 +168,10 @@ impl SanitizedEnvExt for tokio::process::Command {
     }
     fn sanitized_env_preserve(&mut self, preserve: &[&str]) -> &mut Self {
         sanitize_command_env_preserve(self, preserve);
+        self
+    }
+    fn pin_rustup_toolchain(&mut self) -> &mut Self {
+        pin_rustup_toolchain(self);
         self
     }
 }
@@ -319,12 +330,20 @@ pub fn protect_process_env() {
 /// `RUSTUP_TOOLCHAIN` it is forwarded; otherwise we resolve the active
 /// toolchain from `$HOME` (outside the workspace) and pin that, falling back
 /// to `"stable"`. Call AFTER [`sanitize_command_env`].
-pub fn pin_rustup_toolchain(cmd: &mut tokio::process::Command) {
-    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+fn resolved_rustup_toolchain() -> std::ffi::OsString {
+    std::env::var_os("RUSTUP_TOOLCHAIN")
         .filter(|v| !v.is_empty())
         .or_else(|| default_rustup_toolchain().map(std::ffi::OsString::from))
-        .unwrap_or_else(|| std::ffi::OsString::from("stable"));
-    cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+        .unwrap_or_else(|| std::ffi::OsString::from("stable"))
+}
+
+pub fn pin_rustup_toolchain(cmd: &mut tokio::process::Command) {
+    cmd.env("RUSTUP_TOOLCHAIN", resolved_rustup_toolchain());
+}
+
+/// Synchronous counterpart of [`pin_rustup_toolchain`] for `std::process::Command`.
+pub fn pin_std_rustup_toolchain(cmd: &mut std::process::Command) {
+    cmd.env("RUSTUP_TOOLCHAIN", resolved_rustup_toolchain());
 }
 
 /// Resolve the operator's default `rustup` toolchain name once, from a safe

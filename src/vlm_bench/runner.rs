@@ -288,7 +288,18 @@ async fn call_vlm(
     } else {
         format!("{}\n{}", reasoning, content)
     };
-    let tokens = json["usage"]["total_tokens"].as_u64().unwrap_or(0);
+    let tokens = json["usage"]["total_tokens"]
+        .as_u64()
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            if full_response.is_empty() {
+                0
+            } else {
+                (crate::token_count::estimate_content_tokens(&scenario.prompt)
+                    + crate::token_count::estimate_content_tokens(&full_response))
+                    as u64
+            }
+        });
 
     Ok((full_response, tokens))
 }

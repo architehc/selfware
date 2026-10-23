@@ -71,11 +71,8 @@ def read_regular_archive(data, expected_name):
         return content
 
 
-def export_file(container, path, timeout=10):
-    # Docker emits a tar stream. Inspect it in memory; never extractall/copy a
-    # caller-selected container path into a host directory.
-    with subprocess.Popen(["docker", "cp", container + ":" + path, "-"],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+def _run_tar_stream(cmd, timeout):
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         timer = threading.Timer(timeout, process.kill)
         timer.daemon = True
         timer.start()
@@ -91,7 +88,22 @@ def export_file(container, path, timeout=10):
             if process.poll() is None:
                 process.kill()
             process.wait()
-    if process.returncode:
+    return process.returncode, stdout, stderr
+
+
+def export_file(container, path, timeout=10):
+    # Docker emits a tar stream. Inspect it in memory; never extractall/copy a
+    # caller-selected container path into a host directory.
+    returncode, stdout, stderr = _run_tar_stream(
+        ["docker", "cp", container + ":" + path, "-"], timeout
+    )
+    if returncode and b"Could not find the file" in stderr:
+        target = Path(path)
+        returncode, stdout, stderr = _run_tar_stream(
+            ["docker", "exec", container, "tar", "-cf", "-", "-C", str(target.parent), target.name],
+            timeout,
+        )
+    if returncode:
         raise DockerError("Artifact export failed: " + stderr.decode("utf-8", errors="replace")[-2000:])
     return read_regular_archive(stdout, Path(path).name)
 

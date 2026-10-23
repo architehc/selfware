@@ -5,10 +5,10 @@
 //! can use tailored prompts without scattering prompt strings across the
 //! codebase.
 
-#[cfg(feature = "bench-harness")]
+#[cfg(any(test, feature = "bench-harness"))]
 use crate::bench_harness::swebench_pro::dataset::{coerce_string_list, Instance};
 
-#[cfg(feature = "bench-harness")]
+#[cfg(any(test, feature = "bench-harness"))]
 pub type SwebenchProInstance = Instance;
 
 /// Named prompt generation strategy.
@@ -50,7 +50,7 @@ impl PromptProfile {
     ///
     /// * `mode` – `"diagnostic"` includes fail-to-pass tests and selected test
     ///   files; `"official"` omits them.
-    #[cfg(feature = "bench-harness")]
+    #[cfg(any(test, feature = "bench-harness"))]
     pub fn task_prompt(&self, inst: &SwebenchProInstance, mode: &str) -> String {
         match self {
             PromptProfile::Default => build_default_prompt(inst, mode),
@@ -59,7 +59,7 @@ impl PromptProfile {
     }
 }
 
-#[cfg(feature = "bench-harness")]
+#[cfg(any(test, feature = "bench-harness"))]
 fn build_default_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
     let trimmed = inst.problem_statement.trim();
     // Unwrap at most ONE balanced surrounding pair of quotes (a wrapping
@@ -111,7 +111,7 @@ fn build_default_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
     }
 }
 
-#[cfg(feature = "bench-harness")]
+#[cfg(any(test, feature = "bench-harness"))]
 fn build_swebench_pro_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
     let trimmed = inst.problem_statement.trim();
     // Unwrap at most ONE balanced surrounding pair of quotes (a wrapping

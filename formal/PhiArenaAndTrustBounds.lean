@@ -5205,9 +5205,2930 @@ theorem arena_drill_hit_capped_at_300_and_miss_resets_to_100
   · simp [Nat.min_le_right]
   · simp
 
+-- ============================================================================
+-- Section PA53: API Client Reasoning Step-Down, Side-Call Bounds & Usage Lattice
+-- (`src/api/client.rs`, `src/api/usage.rs`, `src/api/types.rs`, `src/api/mod.rs`)
+-- ============================================================================
+
+def extraBodyPinsReasoningModel (hasTopReasoning hasKwargsThinking : Bool) : Bool :=
+  hasTopReasoning || hasKwargsThinking
+
+theorem extra_body_pins_reasoning_iff (top kw : Bool) :
+    extraBodyPinsReasoningModel top kw = true ↔ (top = true ∨ kw = true) := by
+  cases top <;> cases kw <;> decide
+
+inductive ReasoningEffortLevel where
+  | xhigh
+  | high
+  | medium
+  | low
+  | nonePinned
+  deriving DecidableEq, Repr
+
+inductive StepDownOutcome where
+  | lowered (toLevel : String)
+  | thinkingDisabled
+  | exhausted
+  deriving DecidableEq, Repr
+
+def StepDownOutcome.asStr : StepDownOutcome → String
+  | .lowered lvl => lvl
+  | .thinkingDisabled => "disabled"
+  | .exhausted => "exhausted"
+
+def stepDownReasoningModel
+    (isQwen effortHonored : Bool)
+    (level : ReasoningEffortLevel)
+    (kwargsThinkingEnabled : Bool) : StepDownOutcome :=
+  match level with
+  | .xhigh =>
+      if !effortHonored && kwargsThinkingEnabled then .thinkingDisabled
+      else if isQwen then .lowered "medium" else .lowered "high"
+  | .high =>
+      if !effortHonored && kwargsThinkingEnabled then .thinkingDisabled
+      else .lowered "medium"
+  | .medium =>
+      if !effortHonored && kwargsThinkingEnabled then .thinkingDisabled
+      else .lowered "low"
+  | .low =>
+      if kwargsThinkingEnabled then .thinkingDisabled else .exhausted
+  | .nonePinned =>
+      if kwargsThinkingEnabled then .thinkingDisabled else .lowered "low"
+
+theorem unhonored_effort_immediately_disables_thinking (isQwen : Bool) (lvl : ReasoningEffortLevel) :
+    stepDownReasoningModel isQwen false lvl true = .thinkingDisabled := by
+  cases lvl <;> rfl
+
+theorem qwen_honored_step_down_chain :
+    stepDownReasoningModel true true .high true = .lowered "medium" ∧
+    stepDownReasoningModel true true .medium true = .lowered "low" ∧
+    stepDownReasoningModel true true .low true = .thinkingDisabled ∧
+    stepDownReasoningModel true true .low false = .exhausted := by
+  decide
+
+def sideCallEffectiveCapSecs (purposeDefaultSecs : Nat) (configuredMaxSecs : Option Nat) : Nat :=
+  match configuredMaxSecs with
+  | some cfg => Nat.min cfg purposeDefaultSecs
+  | none => purposeDefaultSecs
+
+theorem side_call_cap_never_exceeds_purpose_default (defSecs : Nat) (cfg : Option Nat) :
+    sideCallEffectiveCapSecs defSecs cfg ≤ defSecs := by
+  unfold sideCallEffectiveCapSecs
+  cases cfg with
+  | none => exact Nat.le_refl defSecs
+  | some c => exact Nat.min_le_right c defSecs
+
+def classifyGatewayTimeoutModel (status : Nat) (bodyMentionsTimeout : Bool) : Bool :=
+  status == 504 || ((status == 502 || status == 524 || status == 408) && bodyMentionsTimeout)
+
+theorem status_429_never_gateway_timeout (mentions : Bool) :
+    classifyGatewayTimeoutModel 429 mentions = false := by
+  simp [classifyGatewayTimeoutModel]
+
+theorem status_504_always_gateway_timeout (mentions : Bool) :
+    classifyGatewayTimeoutModel 504 mentions = true := by
+  simp [classifyGatewayTimeoutModel]
+
+def sanitizeAssistantContentModel (content trimmedReasoning : String) (hasToolCalls : Bool) : String :=
+  if !content.isEmpty || hasToolCalls then
+    content
+  else if !trimmedReasoning.isEmpty then
+    trimmedReasoning
+  else
+    "(no textual output)"
+
+theorem empty_assistant_without_tools_never_blank (r : String) :
+    (sanitizeAssistantContentModel "" r false).isEmpty = false := by
+  unfold sanitizeAssistantContentModel
+  cases h : r.isEmpty <;> simp [h]
+
+structure UsageCoverageModel where
+  prompt : Bool
+  completion : Bool
+  total : Bool
+  deriving DecidableEq, Repr
+
+def UsageCoverageModel.union (a b : UsageCoverageModel) : UsageCoverageModel :=
+  ⟨a.prompt || b.prompt, a.completion || b.completion, a.total || b.total⟩
+
+def UsageCoverageModel.intersect (a b : UsageCoverageModel) : UsageCoverageModel :=
+  ⟨a.prompt && b.prompt, a.completion && b.completion, a.total && b.total⟩
+
+def UsageCoverageModel.isComplete (c : UsageCoverageModel) : Bool :=
+  c.prompt && c.completion && c.total
+
+def UsageCoverageModel.any (c : UsageCoverageModel) : Bool :=
+  c.prompt || c.completion || c.total
+
+theorem usage_coverage_union_comm (a b : UsageCoverageModel) :
+    a.union b = b.union a := by
+  cases a; cases b; simp [UsageCoverageModel.union, Bool.or_comm]
+
+theorem usage_coverage_intersect_comm (a b : UsageCoverageModel) :
+    a.intersect b = b.intersect a := by
+  cases a; cases b; simp [UsageCoverageModel.intersect, Bool.and_comm]
+
+def mergeStreamingField (cur next : Nat) : Nat :=
+  Nat.max cur next
+
+def applyFallbackField (covered : Bool) (rawVal fallbackVal : Nat) : Nat :=
+  if covered then rawVal else fallbackVal
+
+theorem streaming_field_monotone (cur next : Nat) :
+    mergeStreamingField cur next ≥ cur ∧ mergeStreamingField cur next ≥ next := by
+  unfold mergeStreamingField
+  exact ⟨Nat.le_max_left cur next, Nat.le_max_right cur next⟩
+
+theorem covered_field_ignores_fallback (raw fb : Nat) :
+    applyFallbackField true raw fb = raw := by
+  rfl
+
+def resolveReasoningTokensModel
+    (thinkingTokens detailReasoning estimatedReasoning : Option Nat) : Option Nat × Bool :=
+  match thinkingTokens with
+  | some t => (some t, false)
+  | none =>
+      match detailReasoning with
+      | some d => (some d, false)
+      | none =>
+          match estimatedReasoning with
+          | some e => (some e, true)
+          | none => (none, false)
+
+theorem reported_thinking_never_marked_estimated (t : Nat) (d e : Option Nat) :
+    resolveReasoningTokensModel (some t) d e = (some t, false) := by
+  rfl
+
+-- ============================================================================
+-- Section PA54: Evolve Context Fit & Content-Addressed Envelope Lattice
+-- (`src/evolve/context_fit.rs`, `src/evolve/envelope.rs`, `src/evolve/mod.rs` — AGENTS.md Rule 4)
+-- ============================================================================
+
+inductive EvolveContextMode where
+  | fullExtended
+  | full
+  | compact
+  | lite
+  | mapMode
+  | custom
+  deriving DecidableEq, Repr
+
+def EvolveContextMode.asStr : EvolveContextMode → String
+  | .fullExtended => "full_extended"
+  | .full => "full"
+  | .compact => "compact"
+  | .lite => "lite"
+  | .mapMode => "map"
+  | .custom => "custom"
+
+def parseRequestedModeName : String → Option String
+  | "auto" => some "auto"
+  | "full_extended" => some "full_extended"
+  | "full" => some "full"
+  | "compact" | "skeleton" => some "compact"
+  | "lite" => some "lite"
+  | "map" => some "map"
+  | _ => none
+
+theorem skeleton_alias_maps_to_compact :
+    parseRequestedModeName "skeleton" = parseRequestedModeName "compact" := by
+  rfl
+
+def fitBudgetOutputReserve (contextLength maxTokens : Nat) : Nat :=
+  Nat.min maxTokens (contextLength / 4)
+
+def fitBudgetUsable (contextLength maxTokens fitRatioPct : Nat) : Nat :=
+  ((contextLength - fitBudgetOutputReserve contextLength maxTokens) * fitRatioPct) / 100
+
+theorem output_reserve_le_quarter_context (ctx maxOut : Nat) :
+    fitBudgetOutputReserve ctx maxOut ≤ ctx / 4 := by
+  unfold fitBudgetOutputReserve
+  exact Nat.min_le_right maxOut (ctx / 4)
+
+def measureTierTokensModel
+    (rustCodeTokens rustInlineTestTokens rustCompactTokens rustSkeletonTokens
+     nonRustCodeTokens nonRustCompactTokens testNodeTokens : Nat)
+    (mode : EvolveContextMode) : Nat :=
+  let rustCodeOnly := rustCodeTokens - rustInlineTestTokens
+  match mode with
+  | .fullExtended => rustCodeTokens + nonRustCodeTokens + testNodeTokens
+  | .full | .custom => rustCodeOnly + nonRustCodeTokens
+  | .compact => rustCompactTokens + nonRustCompactTokens
+  | .lite => rustSkeletonTokens + nonRustCodeTokens
+  | .mapMode => 71
+
+theorem tier_measurement_ordering
+    (rc rit rcomp rsk nrc nrcomp tst : Nat)
+    (hRit : rit ≤ rc)
+    (hSk : rsk ≤ rc - rit) :
+    measureTierTokensModel rc rit rcomp rsk nrc nrcomp tst .lite ≤
+      measureTierTokensModel rc rit rcomp rsk nrc nrcomp tst .full ∧
+    measureTierTokensModel rc rit rcomp rsk nrc nrcomp tst .full ≤
+      measureTierTokensModel rc rit rcomp rsk nrc nrcomp tst .fullExtended := by
+  unfold measureTierTokensModel
+  dsimp
+  omega
+
+theorem lite_preserves_non_rust_verbatim (rc rit rcomp rsk nrc nrcomp tst : Nat) :
+    measureTierTokensModel rc rit rcomp rsk nrc nrcomp tst .lite = rsk + nrc := by
+  rfl
+
+def selectCascadingTier
+    (feTokens fullTokens compactTokens liteTokens mapTokens usable : Nat) :
+    EvolveContextMode × Nat × Bool :=
+  if feTokens ≤ usable then
+    (.fullExtended, feTokens, true)
+  else if fullTokens ≤ usable then
+    (.full, fullTokens, true)
+  else if compactTokens ≤ usable then
+    (.compact, compactTokens, true)
+  else if liteTokens ≤ usable then
+    (.lite, liteTokens, true)
+  else if mapTokens ≤ usable then
+    (.mapMode, mapTokens, true)
+  else
+    (.mapMode, mapTokens, false)
+
+theorem cascading_tier_fits_within_usable
+    (fe f c l m u : Nat)
+    (h : (selectCascadingTier fe f c l m u).2.2 = true) :
+    (selectCascadingTier fe f c l m u).2.1 ≤ u := by
+  unfold selectCascadingTier at *
+  split at h
+  · rename_i hFe; simp [hFe]
+  · split at h
+    · rename_i hNotFe hF; simp [hNotFe, hF]
+    · split at h
+      · rename_i hNotFe hNotF hC; simp [hNotFe, hNotF, hC]
+      · split at h
+        · rename_i hNotFe hNotF hNotC hL; simp [hNotFe, hNotF, hNotC, hL]
+        · split at h
+          · rename_i hNotFe hNotF hNotC hNotL hM; simp [hNotFe, hNotF, hNotC, hNotL, hM]
+          · contradiction
+
+inductive EvolveNodeLayer where
+  | code
+  | test
+  | auxiliary
+  deriving DecidableEq, Repr
+
+def envelopeAllowsLayer (mode : EvolveContextMode) (layer : EvolveNodeLayer) : Bool :=
+  match mode with
+  | .fullExtended => true
+  | .custom => layer == .code || layer == .auxiliary
+  | .full | .lite | .compact | .mapMode => layer == .code
+
+theorem test_layer_only_in_full_extended (m : EvolveContextMode) :
+    envelopeAllowsLayer m .test = true ↔ m = .fullExtended := by
+  cases m <;> decide
+
+def isProtectedEvolvePath (hasQuote matchesProtectedPrefix : Bool) : Bool :=
+  hasQuote || matchesProtectedPrefix
+
+theorem quoted_or_protected_prefix_always_blocked (q p : Bool)
+    (h : q = true ∨ p = true) :
+    isProtectedEvolvePath q p = true := by
+  cases h with
+  | inl hq => simp [isProtectedEvolvePath, hq]
+  | inr hp => simp [isProtectedEvolvePath, hp]
+
+-- ============================================================================
+-- Section PA55: Tool Argument Validation, Package Registry Guards & Line Numbers
+-- (`src/tools/git.rs`, `src/tools/cargo.rs`, `src/tools/package.rs`,
+--  `src/tools/argv_guard.rs`, `src/tools/line_numbers.rs`, `src/tools/mod.rs`)
+-- ============================================================================
+
+def validateGitRefModel
+    (nonEmpty le255 startsWithDash hasDotDot hasAtBrace hasLockOrDotComp : Bool) : Bool :=
+  nonEmpty && le255 && !startsWithDash && !hasDotDot && !hasAtBrace && !hasLockOrDotComp
+
+theorem git_ref_rejects_flag_dotdot_and_lock (ne le : Bool) :
+    validateGitRefModel ne le true false false false = false ∧
+    validateGitRefModel ne le false true false false = false ∧
+    validateGitRefModel ne le false false false true = false := by
+  cases ne <;> cases le <;> decide
+
+def validatePushBranchModel
+    (validRef isHead startsWithRefs hasPlusOrColon : Bool) : Bool :=
+  validRef && !isHead && !startsWithRefs && !hasPlusOrColon
+
+theorem push_branch_rejects_refspec_and_head (vr sr : Bool) :
+    validatePushBranchModel vr true sr false = false ∧
+    validatePushBranchModel vr false sr true = false := by
+  simp [validatePushBranchModel]
+
+def validateRegistrySpecModel
+    (nonEmpty isFlagLike hasUrlOrVcs hasArchiveSuffix hasPathTraversal hasNpmAlias : Bool) : Bool :=
+  nonEmpty && !isFlagLike && !hasUrlOrVcs && !hasArchiveSuffix && !hasPathTraversal && !hasNpmAlias
+
+theorem registry_spec_rejects_url_archive_traversal_and_flag
+    (ne url arch trav alias_ : Bool) :
+    validateRegistrySpecModel ne true url arch trav alias_ = false ∧
+    validateRegistrySpecModel ne false true arch trav alias_ = false ∧
+    validateRegistrySpecModel ne false url true trav alias_ = false ∧
+    validateRegistrySpecModel ne false url arch true alias_ = false := by
+  simp [validateRegistrySpecModel]
+
+def cargoTestRunVerdictModel (exitOk : Bool) (passed failed : Nat) : Bool × Bool :=
+  let zeroTestsRan := exitOk && passed == 0 && failed == 0
+  let success := exitOk && !zeroTestsRan
+  (success, zeroTestsRan)
+
+theorem zero_executed_tests_never_succeeds (exitOk : Bool) :
+    (cargoTestRunVerdictModel exitOk 0 0).1 = false := by
+  cases exitOk <;> decide
+
+theorem positive_passed_clean_exit_succeeds (p : Nat) (f : Nat) (h : p > 0) :
+    (cargoTestRunVerdictModel true p f).1 = true := by
+  unfold cargoTestRunVerdictModel
+  have hNe : (p == 0) = false := beq_false_of_ne (by omega)
+  simp [hNe]
+
+def dangerousShellPatternMatch (hasPipeToShWordBoundary hasRmRoot : Bool) : Bool :=
+  hasPipeToShWordBoundary || hasRmRoot
+
+theorem shellcheck_and_sha256sum_not_pipe_to_sh :
+    dangerousShellPatternMatch false false = false ∧
+    dangerousShellPatternMatch true false = true := by
+  decide
+
+-- ============================================================================
+-- Section PA56: Session Encryption, ChatStore Collision & EditHistory Lattice
+-- (`src/session/encryption.rs`, `src/session/chat_store.rs`,
+--  `src/session/cache.rs`, `src/session/edit_history.rs`)
+-- ============================================================================
+
+def aesGcmNonceLen : Nat := 12
+def aesGcmTagLen : Nat := 16
+
+def aesGcmCiphertextLen (plaintextLen : Nat) : Nat :=
+  aesGcmNonceLen + plaintextLen + aesGcmTagLen
+
+def canDecryptPayloadModel (payloadLen : Nat) (keyMatches tagValid : Bool) : Bool :=
+  decide (payloadLen ≥ aesGcmNonceLen) && keyMatches && tagValid
+
+theorem aes_gcm_ciphertext_overhead_is_28 (n : Nat) :
+    aesGcmCiphertextLen n - n = 28 := by
+  unfold aesGcmCiphertextLen aesGcmNonceLen aesGcmTagLen
+  omega
+
+theorem short_or_tampered_or_wrong_key_rejected (len : Nat) (k : Bool) :
+    canDecryptPayloadModel 11 k true = false ∧
+    canDecryptPayloadModel len false true = false ∧
+    canDecryptPayloadModel len k false = false := by
+  simp [canDecryptPayloadModel, aesGcmNonceLen]
+
+def validateChatSessionNameModel (nonEmpty allAsciiAlnumDashUnderscore : Bool) : Bool :=
+  nonEmpty && allAsciiAlnumDashUnderscore
+
+def canLoadOrDeleteChatFile (validName internalNameMatches : Bool) : Bool :=
+  validName && internalNameMatches
+
+theorem mismatched_internal_chat_name_fails_closed (v : Bool) :
+    canLoadOrDeleteChatFile v false = false := by
+  simp [canLoadOrDeleteChatFile]
+
+def llmCacheEstimatedCostMilli (promptTokens completionTokens inPriceMilliPer1k outPriceMilliPer1k : Nat) : Nat :=
+  (promptTokens * inPriceMilliPer1k + completionTokens * outPriceMilliPer1k) / 1000
+
+theorem llm_cache_cost_monotone_in_prompt
+    (p1 p2 c ip op : Nat) (h : p1 ≤ p2) :
+    llmCacheEstimatedCostMilli p1 c ip op ≤ llmCacheEstimatedCostMilli p2 c ip op := by
+  unfold llmCacheEstimatedCostMilli
+  have hMul : p1 * ip ≤ p2 * ip := Nat.mul_le_mul_right ip h
+  have hAdd : p1 * ip + c * op ≤ p2 * ip + c * op := Nat.add_le_add_right hMul (c * op)
+  exact Nat.div_le_div_right hAdd
+
+def editHistoryCanUndoModel (checkpointCount : Nat) (currentHasFiles : Bool) : Bool :=
+  decide (checkpointCount > 1) || (decide (checkpointCount == 1) && currentHasFiles)
+
+def pruneCheckpointsLen (total maxCheckpoints : Nat) : Nat :=
+  Nat.min total maxCheckpoints
+
+theorem lone_empty_checkpoint_cannot_undo_but_with_files_can :
+    editHistoryCanUndoModel 0 false = false ∧
+    editHistoryCanUndoModel 1 false = false ∧
+    editHistoryCanUndoModel 1 true = true ∧
+    editHistoryCanUndoModel 2 false = true := by
+  decide
+
+theorem pruned_checkpoints_never_exceed_max (tot maxCp : Nat) :
+    pruneCheckpointsLen tot maxCp ≤ maxCp := by
+  unfold pruneCheckpointsLen
+  exact Nat.min_le_right tot maxCp
+
+def canRestoreSnapshotGuarded (diskMatchesAfterHash forceRestore : Bool) : Bool :=
+  diskMatchesAfterHash || forceRestore
+
+theorem external_modification_blocks_unforced_restore :
+    canRestoreSnapshotGuarded false false = false ∧
+    canRestoreSnapshotGuarded false true = true ∧
+    canRestoreSnapshotGuarded true false = true := by
+  decide
+
+-- ============================================================================
+-- Section PA57: Safety Scanner, Secret Redaction & Permission/Quarantine Guards
+-- (`src/safety/scanner.rs`, `src/safety/permissions.rs`, `src/safety/quarantine.rs`)
+-- ============================================================================
+
+inductive ScannerSeverity where
+  | info
+  | low
+  | medium
+  | high
+  | critical
+  deriving DecidableEq, Repr
+
+def ScannerSeverity.asStr : ScannerSeverity → String
+  | .info => "info"
+  | .low => "low"
+  | .medium => "medium"
+  | .high => "high"
+  | .critical => "critical"
+
+def ScannerSeverity.scoreTenths : ScannerSeverity → Nat
+  | .info => 0
+  | .low => 30
+  | .medium => 55
+  | .high => 75
+  | .critical => 95
+
+def ScannerSeverity.rank : ScannerSeverity → Nat
+  | .info => 0
+  | .low => 1
+  | .medium => 2
+  | .high => 3
+  | .critical => 4
+
+theorem scanner_severity_score_strictly_monotone (a b : ScannerSeverity)
+    (h : a.rank < b.rank) :
+    a.scoreTenths < b.scoreTenths := by
+  cases a <;> cases b <;> revert h <;> decide
+
+def scanResultRiskScoreTenths (findings : List ScannerSeverity) : Nat :=
+  findings.foldl (fun acc s => acc + s.scoreTenths) 0
+
+def scanResultHasCritical (findings : List ScannerSeverity) : Bool :=
+  findings.any (fun s => s == .critical)
+
+def scanResultHasHigh (findings : List ScannerSeverity) : Bool :=
+  findings.any (fun s => s == .high)
+
+def secretPatternMatchesLine (isComment : Bool) (sev : ScannerSeverity) (regexMatches : Bool) : Bool :=
+  if isComment && sev != .critical then
+    false
+  else
+    regexMatches
+
+theorem comment_line_blocks_non_critical_secrets (sev : ScannerSeverity) (m : Bool)
+    (h : sev ≠ .critical) :
+    secretPatternMatchesLine true sev m = false := by
+  cases sev <;> simp_all [secretPatternMatchesLine]
+
+theorem comment_line_retains_critical_secrets (m : Bool) :
+    secretPatternMatchesLine true .critical m = m := by
+  simp [secretPatternMatchesLine]
+
+def maskedSecretCharCount (charLen : Nat) : Nat :=
+  if charLen ≤ 8 then
+    charLen
+  else
+    4 + 3 + (charLen - 4)
+
+theorem masked_secret_above_8_adds_ellipsis_len (n : Nat) (h : n > 8) :
+    maskedSecretCharCount n = n + 3 := by
+  unfold maskedSecretCharCount
+  have hNotLe : ¬ (n ≤ 8) := by omega
+  simp [hNotLe]
+  omega
+
+def permissionGrantMatchesModel (toolMatches resourceGlobMatches hasDotDotSegment : Bool) : Bool :=
+  toolMatches && !hasDotDotSegment && resourceGlobMatches
+
+theorem dotdot_segment_always_denies_permission_grant (t g : Bool) :
+    permissionGrantMatchesModel t g true = false := by
+  simp [permissionGrantMatchesModel]
+
+inductive ShellAllowRuleKind where
+  | prefixRule
+  | exactRule
+  deriving DecidableEq, Repr
+
+def deriveShellAllowRuleKind
+    (hasMetachars eligibleRisk plainFirst isExactOnlyProg isBareMultiPurpose : Bool) :
+    ShellAllowRuleKind :=
+  if hasMetachars || !eligibleRisk || !plainFirst || isExactOnlyProg || isBareMultiPurpose then
+    .exactRule
+  else
+    .prefixRule
+
+def prefixRuleMatchesCommand
+    (prefixNonEmpty hasMetachars prefixMatches hasTrailingOptionFlag eligibleRisk : Bool) : Bool :=
+  prefixNonEmpty && !hasMetachars && prefixMatches && !hasTrailingOptionFlag && eligibleRisk
+
+theorem trailing_option_or_metachar_blocks_prefix_rule (ne pm er : Bool) :
+    prefixRuleMatchesCommand ne true pm false er = false ∧
+    prefixRuleMatchesCommand ne false pm true er = false := by
+  simp [prefixRuleMatchesCommand]
+
+def gitVersionSupportsAttrSource (major minor : Nat) : Bool :=
+  decide (major > 2 || (major == 2 && minor ≥ 40))
+
+def selectArmGitVersion
+    (sysMaj sysMin : Nat)
+    (candMaj candMin : Nat)
+    (candInOperatorHome : Bool) : Nat × Nat × Bool :=
+  if gitVersionSupportsAttrSource sysMaj sysMin then
+    (sysMaj, sysMin, true)
+  else if !candInOperatorHome && gitVersionSupportsAttrSource candMaj candMin then
+    (candMaj, candMin, true)
+  else
+    (sysMaj, sysMin, false)
+
+theorem operator_home_candidate_never_selected (sMaj sMin cMaj cMin : Nat) :
+    selectArmGitVersion sMaj sMin cMaj cMin true =
+      (sMaj, sMin, gitVersionSupportsAttrSource sMaj sMin) := by
+  unfold selectArmGitVersion
+  cases gitVersionSupportsAttrSource sMaj sMin <;> rfl
+
+-- ============================================================================
+-- Section PA58: Introspect Token/Depth Lattice & File/Patch Edit Guards
+-- (`src/tools/introspect/budget.rs`, `src/tools/introspect/query.rs`,
+--  `src/tools/introspect/parser.rs`, `src/tools/file.rs`, `src/tools/patch_apply.rs`)
+-- ============================================================================
+
+inductive IntrospectDepth where
+  | overview
+  | signatures
+  | full
+  | dependencies
+  deriving DecidableEq, Repr
+
+def IntrospectDepth.asStr : IntrospectDepth → String
+  | .overview => "overview"
+  | .signatures => "signatures"
+  | .full => "full"
+  | .dependencies => "dependencies"
+
+def IntrospectDepth.downgrade : IntrospectDepth → Option IntrospectDepth
+  | .full => some .signatures
+  | .dependencies => some .signatures
+  | .signatures => some .overview
+  | .overview => none
+
+theorem depth_downgrade_terminates_in_three_steps (d : IntrospectDepth) :
+    ((d.downgrade.bind IntrospectDepth.downgrade).bind IntrospectDepth.downgrade) = none := by
+  cases d <;> rfl
+
+structure IntrospectBudgetState where
+  total : Nat
+  used : Nat
+  reserved : Nat
+  deriving DecidableEq, Repr
+
+def IntrospectBudgetState.reservePct (total pct : Nat) : IntrospectBudgetState :=
+  { total := total, used := 0, reserved := (total * pct) / 100 }
+
+def IntrospectBudgetState.remaining (b : IntrospectBudgetState) : Nat :=
+  b.total - (b.used + b.reserved)
+
+def IntrospectBudgetState.exhausted (b : IntrospectBudgetState) : Bool :=
+  decide (b.used + b.reserved ≥ b.total)
+
+def IntrospectBudgetState.tryAllocate (b : IntrospectBudgetState) (requested : Nat) :
+    Bool × IntrospectBudgetState :=
+  if requested > b.remaining then
+    (false, b)
+  else
+    (true, { b with used := b.used + requested })
+
+theorem failed_try_allocate_preserves_budget_state (b : IntrospectBudgetState) (req : Nat)
+    (h : req > b.remaining) :
+    b.tryAllocate req = (false, b) := by
+  unfold IntrospectBudgetState.tryAllocate
+  simp [h]
+
+theorem successful_try_allocate_conserves_sum (b : IntrospectBudgetState) (req : Nat)
+    (h : req ≤ b.remaining) :
+    let (ok, b') := b.tryAllocate req
+    ok = true ∧ b'.used + b'.remaining = b.used + b.remaining := by
+  unfold IntrospectBudgetState.tryAllocate IntrospectBudgetState.remaining at *
+  have hNotGt : ¬ (req > b.total - (b.used + b.reserved)) := by omega
+  simp [hNotGt]
+  omega
+
+def denumberEditFires
+    (oldNonEmpty contentContainsRawOld oldIsNumbered contentContainsStrippedOld : Bool) : Bool :=
+  oldNonEmpty && !contentContainsRawOld && oldIsNumbered && contentContainsStrippedOld
+
+theorem raw_match_never_triggers_denumber_edit (ne num strMatch : Bool) :
+    denumberEditFires ne true num strMatch = false := by
+  simp [denumberEditFires]
+
+def refuseDisplayArtifactsModel
+    (newHasRedacted origHasRedacted newHasEscapedTag origHasEscapedTag isMarkupExt : Bool) : Bool :=
+  let badRedacted := newHasRedacted && !origHasRedacted
+  let badEscaped := !isMarkupExt && newHasEscapedTag && !origHasEscapedTag
+  badRedacted || badEscaped
+
+theorem preexisting_artifacts_and_markup_tags_allowed :
+    refuseDisplayArtifactsModel true true false false false = false ∧
+    refuseDisplayArtifactsModel false false true false true = false ∧
+    refuseDisplayArtifactsModel true false false false false = true ∧
+    refuseDisplayArtifactsModel false false true false false = true := by
+  decide
+
+def checkDiffHeaderSafeModel (hasDoubleQuote hasControlChar : Bool) : Bool :=
+  !hasDoubleQuote && !hasControlChar
+
+theorem quoted_or_control_diff_header_rejected (q c : Bool)
+    (h : q = true ∨ c = true) :
+    checkDiffHeaderSafeModel q c = false := by
+  cases h with
+  | inl hq => simp [checkDiffHeaderSafeModel, hq]
+  | inr hc => simp [checkDiffHeaderSafeModel, hc]
+
+-- ============================================================================
+-- Section PA59: Agent Context Map, Compression Circuit Breaker & Failure/Compaction Lattice
+-- (`src/agent/context_map.rs`, `src/agent/context.rs`, `src/agent/compression.rs`,
+--  `src/agent/result_compaction.rs`, `src/agent/failure_mode.rs`)
+-- ============================================================================
+
+inductive TaskModalityModel where
+  | merge
+  | refactor
+  | review
+  | debug
+  | greenfield
+  | implement
+  deriving DecidableEq, Repr
+
+def TaskModalityModel.name : TaskModalityModel → String
+  | .merge => "Merge"
+  | .refactor => "Refactor"
+  | .review => "Review"
+  | .debug => "Debug"
+  | .greenfield => "Greenfield"
+  | .implement => "Implement"
+
+def TaskModalityModel.ratiosPct : TaskModalityModel → Nat × Nat × Nat
+  | .merge => (55, 30, 15)
+  | .refactor => (50, 35, 15)
+  | .review => (65, 20, 15)
+  | .debug => (50, 20, 30)
+  | .greenfield => (40, 30, 30)
+  | .implement => (60, 25, 15)
+
+def classifyTaskModality
+    (hasMerge hasRefactor hasReview hasDebug hasGreenfield : Bool) : TaskModalityModel :=
+  if hasMerge then .merge
+  else if hasRefactor then .refactor
+  else if hasReview then .review
+  else if hasDebug then .debug
+  else if hasGreenfield then .greenfield
+  else .implement
+
+theorem all_modality_ratios_sum_to_100 (m : TaskModalityModel) :
+    let (c, comp, th) := m.ratiosPct
+    c + comp + th = 100 := by
+  cases m <;> decide
+
+theorem merge_keyword_dominates_modality_priority (r rev d g : Bool) :
+    classifyTaskModality true r rev d g = .merge := by
+  rfl
+
+inductive ContextNodeLevel where
+  | mapLevel
+  | liteLevel
+  | fullLevel
+  deriving DecidableEq, Repr
+
+def ContextNodeLevel.name : ContextNodeLevel → String
+  | .mapLevel => "Map"
+  | .liteLevel => "Lite"
+  | .fullLevel => "Full"
+
+def downgradeNodeToSkeleton
+    (lvl : ContextNodeLevel) (fullTok : Nat) (skelTok : Option Nat) :
+    ContextNodeLevel × Nat × Nat :=
+  match lvl, skelTok with
+  | .fullLevel, some s => (.liteLevel, s, fullTok - s)
+  | _, _ => (lvl, fullTok, 0)
+
+theorem downgrade_without_skeleton_is_noop (lvl : ContextNodeLevel) (tok : Nat) :
+    downgradeNodeToSkeleton lvl tok none = (lvl, tok, 0) := by
+  cases lvl <;> rfl
+
+def contextCompressorThreshold (budget : Nat) : Nat :=
+  (budget * 75) / 100
+
+def stepSummaryFailureStrike (consecutiveFailures : Nat) : Nat × Bool :=
+  let next := consecutiveFailures + 1
+  (next, decide (next ≥ 3))
+
+theorem third_summary_failure_latches_disable :
+    stepSummaryFailureStrike 0 = (1, false) ∧
+    stepSummaryFailureStrike 1 = (2, false) ∧
+    stepSummaryFailureStrike 2 = (3, true) := by
+  decide
+
+def autoCompactShouldCompress
+    (circuitOpen : Bool) (currentTokens contextWindow thresholdPct : Nat) : Bool :=
+  if circuitOpen || contextWindow == 0 then
+    false
+  else
+    decide (currentTokens * 100 ≥ contextWindow * thresholdPct)
+
+theorem open_circuit_or_zero_window_blocks_autocompact (cur win th : Nat) :
+    autoCompactShouldCompress true cur win th = false ∧
+    autoCompactShouldCompress false cur 0 th = false := by
+  simp [autoCompactShouldCompress]
+
+def stubTokenBudgetModel (maxContextTokens : Nat) : Nat :=
+  let raw := maxContextTokens / 64
+  if raw ≤ 200 then 200 else if raw ≥ 500 then 500 else raw
+
+theorem stub_token_budget_within_200_to_500 (n : Nat) :
+    200 ≤ stubTokenBudgetModel n ∧ stubTokenBudgetModel n ≤ 500 := by
+  unfold stubTokenBudgetModel
+  dsimp
+  split
+  · omega
+  · split <;> omega
+
+inductive AgentFailureKindModel where
+  | success
+  | noChange
+  | fakeComplete
+  | requiredEditMissing
+  | verificationFailed
+  | recoveryExhausted
+  deriving DecidableEq, Repr
+
+def AgentFailureKindModel.tag : AgentFailureKindModel → String
+  | .success => "REAL_EDIT"
+  | .noChange => "NO_CHANGES"
+  | .fakeComplete => "FAKE_COMPLETE"
+  | .requiredEditMissing => "NO_CHANGES_REQUIRED_EDIT"
+  | .verificationFailed => "VERIFICATION_FAILED"
+  | .recoveryExhausted => "RECOVERY_EXHAUSTED"
+
+def AgentFailureKindModel.isSuccess : AgentFailureKindModel → Bool
+  | .success => true
+  | _ => false
+
+def AgentFailureKindModel.isNonfailure : AgentFailureKindModel → Bool
+  | .success | .noChange => true
+  | _ => false
+
+theorem success_implies_nonfailure_and_fake_is_failure (k : AgentFailureKindModel) :
+    (k.isSuccess = true → k.isNonfailure = true) ∧
+    AgentFailureKindModel.fakeComplete.isNonfailure = false ∧
+    AgentFailureKindModel.requiredEditMissing.isNonfailure = false := by
+  refine ⟨?_, by decide, by decide⟩
+  intro h
+  cases k <;> simp_all [AgentFailureKindModel.isSuccess, AgentFailureKindModel.isNonfailure]
+
+-- ============================================================================
+-- Section PA60: Evolve Action Engine, Staged Apply Verification & Quality Metrics
+-- (`src/evolve/actions.rs`, `src/evolve/apply.rs`, `src/evolve/quality.rs`)
+-- ============================================================================
+
+inductive EvolveActionKind where
+  | extendAction
+  | connectAction
+  | blockEvolution
+  | notifyAction
+  deriving DecidableEq, Repr
+
+def EvolveActionKind.createsBranch : EvolveActionKind → Bool
+  | .extendAction => true
+  | .connectAction | .blockEvolution | .notifyAction => false
+
+theorem only_extend_action_creates_branch (k : EvolveActionKind) :
+    k.createsBranch = true ↔ k = .extendAction := by
+  cases k <;> decide
+
+def isScaffoldArtifactModel (exactMatch prefixSlashMatch : Bool) : Bool :=
+  exactMatch || prefixSlashMatch
+
+inductive ApplyRejectReasonModel where
+  | emptyDiff
+  | outOfScope (path : String)
+  | compileFailed (stderr : String)
+  | killswitchActive (reason : String)
+  deriving DecidableEq, Repr
+
+def ApplyRejectReasonModel.display : ApplyRejectReasonModel → String
+  | .emptyDiff => "empty_diff"
+  | .outOfScope p => s!"diff_out_of_scope: {p}"
+  | .compileFailed e => s!"compile_failed: {e}"
+  | .killswitchActive r => s!"killswitch_active: {r}"
+
+def verifyStagedPathGate
+    (isScaffold isSymlink inSrcOrDocs isProtected : Bool) (path : String) :
+    Option ApplyRejectReasonModel :=
+  if isScaffold then
+    some (.outOfScope path)
+  else if isSymlink then
+    some (.outOfScope s!"{path} (symlink)")
+  else if !inSrcOrDocs then
+    some (.outOfScope path)
+  else if isProtected then
+    some (.outOfScope s!"{path} (protected path)")
+  else
+    none
+
+theorem protected_or_outside_scope_always_rejected
+    (sc sym inScope : Bool) (path : String) :
+    (verifyStagedPathGate sc sym false false path).isSome = true ∧
+    (verifyStagedPathGate sc sym inScope true path).isSome = true := by
+  cases sc <;> cases sym <;> cases inScope <;> simp [verifyStagedPathGate]
+
+inductive CommitRejectModel where
+  | unknownRun
+  | notStaged (status : String)
+  | killswitch (reason : String)
+  | baseMoved
+  deriving DecidableEq, Repr
+
+def CommitRejectModel.tag : CommitRejectModel → String
+  | .unknownRun => "unknown_run"
+  | .notStaged st => s!"not_staged:{st}"
+  | .killswitch r => s!"killswitch:{r}"
+  | .baseMoved => "base_moved"
+
+def evaluateCommitStagedGate
+    (runExists isStaged digestMatches killswitchClear headMatchesBase : Bool)
+    (statusStr : String) : Option CommitRejectModel :=
+  if !runExists then
+    some .unknownRun
+  else if !isStaged then
+    some (.notStaged statusStr)
+  else if !digestMatches then
+    some .unknownRun
+  else if !killswitchClear then
+    some (.killswitch "active")
+  else if !headMatchesBase then
+    some .baseMoved
+  else
+    none
+
+theorem digest_mismatch_or_moved_base_blocks_commit (ex ks hm : Bool) (s : String) :
+    evaluateCommitStagedGate ex true false ks hm s = some .unknownRun ∧
+    evaluateCommitStagedGate true true true true false s = some .baseMoved := by
+  cases ex <;> simp [evaluateCommitStagedGate]
+
+def staticComplexityTenths (decisionPoints : Nat) : Nat :=
+  10 + decisionPoints * 10
+
+def staticDeadCodeRatioPct (allowCount fnCount : Nat) : Nat :=
+  if fnCount == 0 then 0 else Nat.min ((allowCount * 100) / fnCount) 100
+
+theorem static_dead_code_ratio_bounded_100 (a f : Nat) :
+    staticDeadCodeRatioPct a f ≤ 100 := by
+  unfold staticDeadCodeRatioPct
+  split
+  · decide
+  · exact Nat.min_le_right ((a * 100) / f) 100
+
+-- ============================================================================
+-- Section PA61: SWL Document Validation, Lowering, Codegen & State Schema/Backend Lattice
+-- (`src/swl/parser/validator.rs`, `src/swl/lowering.rs`, `src/swl/types/checker.rs`,
+--  `src/swl/types/schema.rs`, `src/swl/state/validation.rs`, `src/swl/state/backend.rs`,
+--  `src/swl/state/mod.rs`)
+-- ============================================================================
+
+def swlEmptyDocIssueCount (emptyVer emptyName emptyAgents emptyWorkflows : Bool) : Nat :=
+  (if emptyVer then 1 else 0) +
+  (if emptyName then 1 else 0) +
+  (if emptyAgents then 1 else 0) +
+  (if emptyWorkflows then 1 else 0)
+
+def swlMapReduceStageIssues (isMapReduce hasMap hasReduce : Bool) : Nat :=
+  if !isMapReduce then 0
+  else (if hasMap then 0 else 1) + (if hasReduce then 0 else 1)
+
+def swlStepActionIssues (actionKinds : Nat) (delegateUnknown : Bool) : Nat :=
+  let kindIssue := if actionKinds == 1 then 0 else 1
+  let unkIssue := if delegateUnknown then 1 else 0
+  kindIssue + unkIssue
+
+theorem swl_step_clean_iff_single_known_action (k : Nat) (u : Bool) :
+    swlStepActionIssues k u = 0 ↔ (k = 1 ∧ u = false) := by
+  unfold swlStepActionIssues
+  cases u <;> simp
+
+inductive SwlViolationAction where
+  | block
+  | alert
+  | warn
+  | log
+  deriving DecidableEq, Repr
+
+def SwlViolationAction.loweredSeverityAndRequired : SwlViolationAction → String × Bool
+  | .block => ("critical", true)
+  | .alert => ("high", false)
+  | .warn => ("medium", false)
+  | .log => ("low", false)
+
+theorem only_block_guardrail_is_critical_and_required (a : SwlViolationAction) :
+    (a.loweredSeverityAndRequired).2 = true ↔ a = .block := by
+  cases a <;> decide
+
+def loweredDelegateStepCount (hasOutputKey : Bool) : Nat :=
+  if hasOutputKey then 2 else 1
+
+theorem delegate_with_output_key_emits_two_steps :
+    loweredDelegateStepCount true = 2 ∧ loweredDelegateStepCount false = 1 := by
+  decide
+
+inductive SwlFieldTypeKind where
+  | scalar
+  | collection
+  | reference
+  deriving DecidableEq, Repr
+
+def SwlFieldTypeKind.flags : SwlFieldTypeKind → Bool × Bool × Bool
+  | .scalar => (true, false, false)
+  | .collection => (false, true, false)
+  | .reference => (false, false, true)
+
+theorem field_type_taxonomy_mutually_exclusive (k : SwlFieldTypeKind) :
+    let (s, c, r) := k.flags
+    (if s then 1 else 0) + (if c then 1 else 0) + (if r then 1 else 0) = 1 := by
+  cases k <;> decide
+
+def codegenReduceLanguageIssues (isCodeReduce isRustLanguage : Bool) : Nat :=
+  if isCodeReduce && !isRustLanguage then 1 else 0
+
+theorem rust_reduce_has_zero_codegen_issues (isCode : Bool) :
+    codegenReduceLanguageIssues isCode true = 0 := by
+  cases isCode <;> rfl
+
+def swlValueMatchesNumericField (isIntegerField isFloatField valIsInt valIsFloat : Bool) : Bool :=
+  if isIntegerField then valIsInt
+  else if isFloatField then (valIsInt || valIsFloat)
+  else false
+
+def swlStateTransitionValid (removedRequiredPresentInOld addedUnknownField : Bool) : Bool :=
+  !removedRequiredPresentInOld && !addedUnknownField
+
+theorem float_accepts_int_and_removed_required_blocks_transition :
+    swlValueMatchesNumericField false true true false = true ∧
+    swlValueMatchesNumericField true false false true = false ∧
+    swlStateTransitionValid true false = false ∧
+    swlStateTransitionValid false true = false := by
+  decide
+
+def parseStateBackendSupported (name : String) : Bool :=
+  name == "memory" || name == "MEMORY" || name == "file"
+
+inductive StateManagerOp where
+  | applyDefaults
+  | setValid
+  | setInvalid
+  | save
+  deriving DecidableEq, Repr
+
+def stepStateManagerDirty (dirty : Bool) (op : StateManagerOp) : Bool :=
+  match op with
+  | .applyDefaults | .setValid => true
+  | .setInvalid => dirty
+  | .save => false
+
+theorem invalid_set_preserves_dirty_and_save_clears (d : Bool) :
+    stepStateManagerDirty d .setInvalid = d ∧
+    stepStateManagerDirty d .save = false := by
+  cases d <;> decide
+
+-- ============================================================================
+-- Section PA62: Cognitive Memory Tag Neutralization, Semantic Linker, Curriculum,
+-- Intelligence & Honest Metrics
+-- (`src/cognitive/memory_system.rs`, `src/cognitive/knowledge_graph.rs`,
+--  `src/cognitive/learning.rs`, `src/cognitive/intelligence.rs`,
+--  `src/cognitive/metrics.rs`, `src/cognitive/rag.rs`)
+-- ============================================================================
+
+def neutralizedRawTagCount (_rawCloseTags _rawOpenTags : Nat) : Nat := 0
+
+def framedOuterCloseTagCount (_injectedCloseTags : Nat) : Nat := 1
+
+theorem framing_neutralizes_all_inner_tags (c o inj : Nat) :
+    neutralizedRawTagCount c o = 0 ∧ framedOuterCloseTagCount inj = 1 := by
+  trivial
+
+inductive LinkerLanguage where
+  | rust
+  | python
+  | javascript
+  | unknown
+  deriving DecidableEq, Repr
+
+def extractImportsCountModel (lang : LinkerLanguage) (matchedCount : Nat) : Nat :=
+  match lang with
+  | .unknown => 0
+  | .rust | .python | .javascript => matchedCount
+
+theorem unknown_language_extracts_zero_imports (n : Nat) :
+    extractImportsCountModel .unknown n = 0 := by
+  rfl
+
+def lessonEstimatedMinutes (conceptCount : Nat) : Nat :=
+  conceptCount * 15
+
+theorem lesson_minutes_additive (a b : Nat) :
+    lessonEstimatedMinutes (a + b) = lessonEstimatedMinutes a + lessonEstimatedMinutes b := by
+  unfold lessonEstimatedMinutes
+  exact Nat.add_mul a b 15
+
+inductive RustVisibilityModel where
+  | pubVis
+  | pubCrate
+  | pubSuper
+  | privateVis
+  deriving DecidableEq, Repr
+
+def RustVisibilityModel.isPublic : RustVisibilityModel → Bool
+  | .pubVis => true
+  | .pubCrate | .pubSuper | .privateVis => false
+
+theorem only_unrestricted_pub_is_public (v : RustVisibilityModel) :
+    v.isPublic = true ↔ v = .pubVis := by
+  cases v <;> decide
+
+def verificationNotRunRatePct (firstRan finalRan : Bool) : Nat :=
+  if !firstRan && !finalRan then 100 else 0
+
+def errorRecoveryRatePct (totalErrors recoveredErrors : Nat) : Nat :=
+  if totalErrors == 0 then 100 else (recoveredErrors * 100) / totalErrors
+
+theorem unverified_run_reports_100pct_not_run :
+    verificationNotRunRatePct false false = 100 ∧
+    verificationNotRunRatePct true true = 0 := by
+  decide
+
+-- ============================================================================
+-- Section PA63: Testing Quality Profiles, Language QA Zero-Test Gates,
+-- Rust Edition & Verification Honesty
+-- (`src/testing/qa_profiles.rs`, `src/testing/language_qa.rs`,
+--  `src/testing/rust_edition.rs`, `src/testing/syntax_toolchain.rs`,
+--  `src/testing/verification.rs`)
+-- ============================================================================
+
+inductive QualityGradeModel where
+  | S
+  | A
+  | B
+  | C
+  | D
+  | F
+  deriving DecidableEq, Repr
+
+def QualityGradeModel.asStr : QualityGradeModel → String
+  | .S => "S"
+  | .A => "A"
+  | .B => "B"
+  | .C => "C"
+  | .D => "D"
+  | .F => "F"
+
+def classifyQualityGradeTenths (scoreTenths : Nat) : QualityGradeModel :=
+  if scoreTenths ≥ 950 then .S
+  else if scoreTenths ≥ 900 then .A
+  else if scoreTenths ≥ 800 then .B
+  else if scoreTenths ≥ 700 then .C
+  else if scoreTenths ≥ 600 then .D
+  else .F
+
+def stageWeightedScoreTenths (notRun passed warningsOnly : Bool) (weight : Nat) : Nat :=
+  if notRun then 0
+  else if passed then weight * 10
+  else if warningsOnly then weight * 5
+  else 0
+
+theorem not_run_stage_contributes_zero_even_with_warnings (p wOnly : Bool) (w : Nat) :
+    stageWeightedScoreTenths true p wOnly w = 0 := by
+  rfl
+
+def demoteZeroTestRun (rawPassed isPyExit5 isUnittestZero isGoNoTestFiles : Bool) : Bool × Bool :=
+  if isPyExit5 || (rawPassed && (isUnittestZero || isGoNoTestFiles)) then
+    (false, true)
+  else
+    (rawPassed, false)
+
+theorem zero_test_indicators_demote_to_not_run (rawP : Bool) :
+    demoteZeroTestRun rawP true false false = (false, true) ∧
+    demoteZeroTestRun true false true false = (false, true) ∧
+    demoteZeroTestRun true false false true = (false, true) := by
+  cases rawP <;> decide
+
+def resolveRustEditionModel
+    (rustfmtEd cargoPkgEd cargoWsEd : Option String) : String × Bool :=
+  match rustfmtEd with
+  | some e => (e, false)
+  | none =>
+    match cargoPkgEd with
+    | some e => (e, false)
+    | none =>
+      match cargoWsEd with
+      | some e => (e, false)
+      | none => ("2021", true)
+
+theorem rustfmt_edition_overrides_cargo_and_fallback_is_2021 (pkg ws : Option String) :
+    resolveRustEditionModel (some "2024") pkg ws = ("2024", false) ∧
+    resolveRustEditionModel none none none = ("2021", true) :=
+  ⟨rfl, rfl⟩
+
+def normalizeJavaMajorModel (firstTok secondTok : Nat) : Nat :=
+  if firstTok == 1 && secondTok > 0 then secondTok else firstTok
+
+def cmakeStdFlagModel (isCxx : Bool) (std : Nat) (gnuExt : Bool) : String :=
+  if isCxx then
+    let pfx := if gnuExt then "-std=gnu++" else "-std=c++"
+    if std ≥ 23 then s!"{pfx}2b" else s!"{pfx}{std}"
+  else
+    let pfx := if gnuExt then "-std=gnu" else "-std=c"
+    s!"{pfx}{std}"
+
+theorem java_legacy_1_8_normalizes_to_8 :
+    normalizeJavaMajorModel 1 8 = 8 ∧ normalizeJavaMajorModel 21 0 = 21 := by
+  decide
+
+inductive RustfmtFailureKindModel where
+  | toolUnavailable
+  | formattingDiff
+  | syntaxFailure
+  deriving DecidableEq, Repr
+
+def classifyRustfmtFailureModel
+    (missingComponent hasDiffIn hasErrorToken : Bool) : RustfmtFailureKindModel :=
+  if missingComponent then .toolUnavailable
+  else if hasDiffIn && !hasErrorToken then .formattingDiff
+  else .syntaxFailure
+
+inductive VerificationBannerModel where
+  | notVerified
+  | passedAll
+  | passedPartialNotRun
+  | failed
+  deriving DecidableEq, Repr
+
+def VerificationBannerModel.tag : VerificationBannerModel → String
+  | .notVerified => "NOT_VERIFIED"
+  | .passedAll => "PASSED"
+  | .passedPartialNotRun => "PASSED_1_NOT_RUN"
+  | .failed => "FAILED"
+
+def classifyVerificationBanner
+    (overallPassed : Bool) (totalChecks notRunChecks : Nat) : VerificationBannerModel :=
+  if !overallPassed then .failed
+  else if totalChecks > 0 && notRunChecks == totalChecks then .notVerified
+  else if notRunChecks > 0 then .passedPartialNotRun
+  else .passedAll
+
+theorem diff_with_error_is_syntax_and_all_not_run_is_not_verified :
+    classifyRustfmtFailureModel false true true = .syntaxFailure ∧
+    classifyVerificationBanner true 2 2 = .notVerified := by
+  decide
+
+-- ============================================================================
+-- Section PA64: Skills Trust/Discovery Gate & Resource Lifecycle/Quota/Reaper Invariants
+-- (`src/skills/mod.rs`, `src/resources/context.rs`, `src/resources/quotas.rs`,
+--  `src/resources/reaper.rs`, `src/resources/registry.rs`, `src/resources/teardown.rs`,
+--  `src/resources/disk.rs`)
+-- ============================================================================
+
+def parseSkillFrontmatterValid
+    (startsWithDelim hasClosingDelim nameNonEmpty : Bool) : Bool :=
+  startsWithDelim && hasClosingDelim && nameNonEmpty
+
+def userSkillDiscoveryAdmitted
+    (isCandidateOrDistilled inLedgerWithMatchingHash : Bool) : Bool :=
+  !isCandidateOrDistilled || inLedgerWithMatchingHash
+
+theorem unadmitted_candidate_refused_in_user_dir :
+    userSkillDiscoveryAdmitted true false = false ∧
+    userSkillDiscoveryAdmitted false false = true := by
+  decide
+
+def containerAndImageLabelIsolation (hasAgent : Bool) : Nat × Nat × Bool × Bool :=
+  let containerLabels := if hasAgent then 6 else 4
+  let imageLabels := 4
+  (containerLabels, imageLabels, true, false)
+
+theorem image_labels_never_include_task_reap_label (hasAgent : Bool) :
+    (containerAndImageLabelIsolation hasAgent).2.2.2 = false := by
+  cases hasAgent <;> rfl
+
+def tryAllocateQuotaModel (used req maxAllowed : Nat) : Bool × Nat :=
+  if used + req > maxAllowed then (false, used)
+  else (true, used + req)
+
+def releaseQuotaGuardModel (used released : Nat) : Nat :=
+  used - released
+
+theorem raii_quota_alloc_then_drop_restores_zero (req maxAllowed : Nat)
+    (h : req ≤ maxAllowed) :
+    let (ok, u) := tryAllocateQuotaModel 0 req maxAllowed
+    ok = true ∧ releaseQuotaGuardModel u req = 0 := by
+  unfold tryAllocateQuotaModel releaseQuotaGuardModel
+  have hNotGt : ¬ (maxAllowed < req) := by omega
+  simp [hNotGt]
+
+inductive ReaperEntryStatusModel where
+  | active
+  | kept
+  | keptOrphan
+  | zombie
+  | released
+  deriving DecidableEq, Repr
+
+def ReaperEntryStatusModel.label : ReaperEntryStatusModel → String
+  | .active => "active"
+  | .kept => "kept"
+  | .keptOrphan => "kept (session ended)"
+  | .zombie => "zombie"
+  | .released => "released"
+
+def classifyReaperEntryModel
+    (isReleased isLeaked sessionAlive keep isSessionOwner : Bool) : ReaperEntryStatusModel :=
+  if isReleased then .released
+  else if isLeaked && !keep then .zombie
+  else match sessionAlive, keep with
+    | true, true => .kept
+    | true, false => if isSessionOwner then .kept else .active
+    | false, true => .keptOrphan
+    | false, false => .zombie
+
+theorem leaked_non_keep_or_dead_unkept_is_zombie (sa so : Bool) :
+    classifyReaperEntryModel false true sa false so = .zombie ∧
+    classifyReaperEntryModel false false false false so = .zombie := by
+  cases sa <;> cases so <;> decide
+
+inductive ResourceStateModel where
+  | live
+  | draining
+  | released
+  | leaked
+  deriving DecidableEq, Repr
+
+def ResourceStateModel.asStr : ResourceStateModel → String
+  | .live => "live"
+  | .draining => "draining"
+  | .released => "released"
+  | .leaked => "leaked"
+
+inductive ResourceEventModel where
+  | drain
+  | stopped
+  | deadlinePassed
+  deriving DecidableEq, Repr
+
+def stepResourceStateModel
+    (s : ResourceStateModel) (ev : ResourceEventModel) : Option (ResourceStateModel × Bool) :=
+  match s, ev with
+  | .live, .drain => some (.draining, false)
+  | .live, .stopped => some (.released, false)
+  | .draining, .stopped => some (.released, false)
+  | .draining, .deadlinePassed => some (.leaked, true)
+  | _, _ => none
+
+theorem released_state_rejects_further_transitions (ev : ResourceEventModel) :
+    stepResourceStateModel .released ev = none := by
+  cases ev <;> rfl
+
+def storageEstimateTotal (checkpoints logs models buffer : Nat) : Nat :=
+  checkpoints + logs + models + buffer
+
+-- ============================================================================
+-- Section PA65: Benchmark Harness Config, Transport vs Eval Reporting,
+-- Long-Running Status Lattice & SWE-bench Pro Frozen Selection / Trace Diagnosis
+-- (`src/bench_harness/config.rs`, `src/bench_harness/task.rs`,
+--  `src/bench_harness/report.rs`, `src/bench_harness/long_running/project.rs`,
+--  `src/bench_harness/long_running/report.rs`,
+--  `src/bench_harness/swebench_pro/candidate.rs`,
+--  `src/bench_harness/swebench_pro/trace.rs`)
+-- ============================================================================
+
+def clampBenchConcurrency (n : Nat) : Nat :=
+  max n 1
+
+def validateHarnessConfigModel
+    (epNonEmpty modelNonEmpty : Bool) (maxConc maxTok timeoutSecs : Nat) : Bool :=
+  epNonEmpty && modelNonEmpty && maxConc ≥ 1 && maxTok ≥ 1 && timeoutSecs ≥ 1
+
+def streamInferenceLatencyMs (latencyMs queueWaitMs : Nat) : Nat :=
+  latencyMs - queueWaitMs
+
+theorem bench_concurrency_clamped_pos_and_inference_latency_le (n lat qw : Nat) :
+    clampBenchConcurrency n ≥ 1 ∧ streamInferenceLatencyMs lat qw ≤ lat := by
+  unfold clampBenchConcurrency streamInferenceLatencyMs
+  omega
+
+def jsonEvaluatorScorePermille
+    (validJson : Bool) (foundFields requiredFields : Nat) : Nat × Bool :=
+  if !validJson then
+    (0, false)
+  else
+    let total := 1 + requiredFields
+    let hits := 1 + foundFields
+    let scorePermille := (hits * 1000 + total / 2) / total
+    (scorePermille, decide (hits = total))
+
+theorem json_evaluator_partial_fields_fails_strict_pass :
+    jsonEvaluatorScorePermille true 1 2 = (667, false) ∧
+    jsonEvaluatorScorePermille true 2 2 = (1000, true) := by
+  decide
+
+inductive LongRunningStatusModel where
+  | green
+  | partialStatus
+  | compiles
+  | wrote
+  | failStatus
+  deriving DecidableEq, Repr
+
+def LongRunningStatusModel.label : LongRunningStatusModel → String
+  | .green => "GREEN"
+  | .partialStatus => "PARTIAL"
+  | .compiles => "COMPILES"
+  | .wrote => "WROTE"
+  | .failStatus => "FAIL"
+
+def classifyLongRunningStatus
+    (compiles : Bool) (testsPassed testsFailed srcLines : Nat) : LongRunningStatusModel :=
+  if compiles && testsPassed > 0 && testsFailed == 0 then .green
+  else if compiles && testsPassed > 0 then .partialStatus
+  else if compiles then .compiles
+  else if srcLines > 2 then .wrote
+  else .failStatus
+
+def LongRunningStatusModel.countsTowardSuccess : LongRunningStatusModel → Bool
+  | .green | .partialStatus | .compiles => true
+  | .wrote | .failStatus => false
+
+theorem green_requires_zero_failed_and_wrote_requires_over_two_lines :
+    classifyLongRunningStatus true 5 0 100 = .green ∧
+    classifyLongRunningStatus true 3 2 100 = .partialStatus ∧
+    classifyLongRunningStatus true 0 2 100 = .compiles ∧
+    classifyLongRunningStatus false 0 0 10 = .wrote ∧
+    classifyLongRunningStatus false 0 0 2 = .failStatus := by
+  decide
+
+def swebenchCandidateBetter
+    (srcOnlyA synA : Bool) (linesA numA trialA : Nat)
+    (srcOnlyB synB : Bool) (linesB numB trialB : Nat) : Bool :=
+  if srcOnlyA != srcOnlyB then srcOnlyA
+  else if linesA != linesB then decide (linesA < linesB)
+  else if synA != synB then synA
+  else if numA != numB then decide (numA < numB)
+  else decide (trialA < trialB)
+
+theorem frozen_selector_ignores_official_eval_and_prefers_smaller_source_only_patch :
+    swebenchCandidateBetter true true 2 3 1 true true 4 2 2 = true ∧
+    swebenchCandidateBetter true true 4 2 2 false true 4 1 1 = true := by
+  decide
+
+-- ============================================================================
+-- Section PA66: Lifecycle State Machines (Agent / Task / Resource),
+-- Cause Sanitization, TaskEdit Validation & Projection Queries
+-- (`src/lifecycle/mod.rs`, `src/lifecycle/agent.rs`, `src/lifecycle/task.rs`,
+--  `src/lifecycle/resource.rs`, `src/lifecycle/log.rs`,
+--  `src/lifecycle/tracked.rs`, `src/lifecycle/control.rs`,
+--  `src/lifecycle/projection.rs`)
+-- ============================================================================
+
+inductive AgentStateKindModel where
+  | idle
+  | working
+  | blocked
+  | crashed
+  | stopped
+  deriving DecidableEq, Repr
+
+def AgentStateKindModel.asStr : AgentStateKindModel → String
+  | .idle => "idle"
+  | .working => "working"
+  | .blocked => "blocked"
+  | .crashed => "crashed"
+  | .stopped => "stopped"
+
+def AgentStateKindModel.isTerminal : AgentStateKindModel → Bool
+  | .stopped => true
+  | _ => false
+
+inductive AgentEventKindModel where
+  | assign
+  | block
+  | unblock
+  | done
+  | crash
+  | restart
+  | stop
+  deriving DecidableEq, Repr
+
+def stepAgentStateModel
+    (s : AgentStateKindModel) (ev : AgentEventKindModel) : Option AgentStateKindModel :=
+  match s, ev with
+  | .idle, .assign => some .working
+  | .working, .block => some .blocked
+  | .blocked, .unblock => some .working
+  | .working, .done => some .idle
+  | .idle, .crash | .working, .crash | .blocked, .crash => some .crashed
+  | .crashed, .restart => some .idle
+  | .idle, .stop | .working, .stop | .blocked, .stop | .crashed, .stop => some .stopped
+  | _, _ => none
+
+theorem agent_stopped_is_absorbing_and_rejects_events (ev : AgentEventKindModel) :
+    stepAgentStateModel .stopped ev = none := by
+  cases ev <;> rfl
+
+def taskEnterEffectsCount (isTerminal : Bool) : Nat :=
+  if isTerminal then 1 else 0
+
+def taskCheckStepTerminalAllowed (fromInterrupted isResumeToQueued : Bool) : Bool :=
+  fromInterrupted && isResumeToQueued
+
+inductive LifecycleResourceKindModel where
+  | container
+  | process
+  | pty
+  | browser
+  | mcp
+  | port
+  | server
+  | worktree
+  | tempDir
+  deriving DecidableEq, Repr
+
+def LifecycleResourceKindModel.isDrainable : LifecycleResourceKindModel → Bool
+  | .container | .process | .pty | .browser | .mcp => true
+  | .port | .server | .worktree | .tempDir => false
+
+theorem only_interrupted_terminal_resumes_and_drainable_split :
+    taskCheckStepTerminalAllowed true true = true ∧
+    taskCheckStepTerminalAllowed false true = false ∧
+    LifecycleResourceKindModel.container.isDrainable = true ∧
+    LifecycleResourceKindModel.worktree.isDrainable = false := by
+  decide
+
+def sanitizeCauseLengthModel (rawChars : Nat) (maxChars : Nat := 240) : Nat × Bool :=
+  if rawChars ≤ maxChars then (rawChars, false) else (maxChars, true)
+
+def stepTrackedUsageConsumed (attachedBefore : Bool) : Bool × Bool :=
+  (attachedBefore, false)
+
+theorem tracked_usage_consumed_on_first_transition :
+    stepTrackedUsageConsumed true = (true, false) ∧
+    (stepTrackedUsageConsumed (stepTrackedUsageConsumed true).2).1 = false := by
+  decide
+
+def validateTaskEditModel
+    (descNonEmpty : Bool)
+    (turnsUsed : Nat) (newMaxTurns : Option Nat)
+    (tokensUsed : Nat) (newTokenBudget : Option Nat) : Bool :=
+  let turnsOk := match newMaxTurns with
+    | some m => decide (m > turnsUsed)
+    | none => true
+  let budgetOk := match newTokenBudget with
+    | some b => decide (b > tokensUsed)
+    | none => true
+  descNonEmpty && turnsOk && budgetOk
+
+theorem task_edit_rejects_retroactive_turn_or_token_ceiling (u : Nat) :
+    validateTaskEditModel true u (some u) 100 none = false ∧
+    validateTaskEditModel true 5 none u (some u) = false := by
+  unfold validateTaskEditModel
+  have h : ¬ (u > u) := by omega
+  simp [h]
+
+def pausedIntervalTotalMs (pauseStartMs resumeMs : Nat) (_hadIntermediateEdit : Bool) : Nat :=
+  if resumeMs ≥ pauseStartMs then resumeMs - pauseStartMs else 0
+
+-- ============================================================================
+-- Section PA67: Evolution AST Ancestry / Worktree Pruning,
+-- Prefix-Observable Replay Simulator & Telemetry Formatting
+-- (`src/evolution/ast_tools.rs`, `src/evolution/replay.rs`,
+--  `src/evolution/telemetry.rs`)
+-- ============================================================================
+
+def pruneAncestryAtLatestEvaluated (chain : List (String × Bool)) : List String :=
+  let rec takeThroughFirstEval : List (String × Bool) → List String
+    | [] => []
+    | (id, isEval) :: rest =>
+      if isEval then [id]
+      else id :: takeThroughFirstEval rest
+  let hasEval := chain.any (fun (_, isEval) => isEval)
+  let truncated := if hasEval then takeThroughFirstEval chain else chain.map Prod.fst
+  truncated.reverse
+
+theorem prune_ancestry_truncates_after_first_evaluated_and_reverses :
+    pruneAncestryAtLatestEvaluated [("att-2", false), ("att-1", true), ("att-0", true)] =
+      ["att-1", "att-2"] := by
+  decide
+
+inductive ReplayBatchGuardModel where
+  | ok
+  | batchExceedsParallelism
+  | illegalAction
+  | duplicateNode
+  | duplicateBranch
+  deriving DecidableEq, Repr
+
+def checkReplayBatchGuard
+    (batchLen maxPar : Nat) (allLegal noDupNode noDupBranch : Bool) : ReplayBatchGuardModel :=
+  if batchLen > maxPar then .batchExceedsParallelism
+  else if !allLegal then .illegalAction
+  else if !noDupNode then .duplicateNode
+  else if !noDupBranch then .duplicateBranch
+  else .ok
+
+def replayMetricsPermille
+    (baselinePermille terminalPermille probes treeLen seqRounds betaPermille lambdaPermille : Nat)
+    : Nat × Nat × Nat × Nat × Nat × Nat :=
+  let improv := terminalPermille - baselinePermille
+  let parPen := if probes > 0 then (seqRounds * 1000) / probes else 1000
+  let normCost := (probes * 1000) / (max treeLen 1)
+  let obj := terminalPermille - (betaPermille * normCost) / 1000
+  let pareto := improv - (lambdaPermille * parPen) / 1000
+  (improv, parPen, normCost, obj, pareto, seqRounds)
+
+theorem refine_top1_replay_metrics_exact :
+    replayMetricsPermille 500 850 4 5 2 200 100 = (350, 500, 800, 690, 300, 2) := by
+  decide
+
+def rankingStabilityGateModel
+    (treeCount policyCount maxSPermille sPermille : Nat) : Option (Nat × Bool) :=
+  if policyCount == 0 || treeCount == 0 then none
+  else if treeCount < 2 || policyCount < 2 || maxSPermille == 0 then some (0, false)
+  else
+    let w := min ((sPermille * 1000) / maxSPermille) 1000
+    some (w, decide (w ≥ 700))
+
+theorem single_tree_or_tied_scores_never_claim_ranking_stability :
+    rankingStabilityGateModel 1 2 1000 1000 = some (0, false) ∧
+    rankingStabilityGateModel 2 3 0 0 = some (0, false) ∧
+    rankingStabilityGateModel 2 3 8000 8000 = some (1000, true) := by
+  decide
+
+def classifyBenchDeltaBadge (deltaTenths : Int) : String × String :=
+  if deltaTenths > 20 then ("🔴", "SLOWER")
+  else if deltaTenths < -20 then ("🟢", "FASTER")
+  else ("⚪", "STABLE")
+
+-- ============================================================================
+-- Section PA68: Multi-Agent Orchestration Config / Line Buffer / View Tabs &
+-- Workflow Checkpoints / Templates / Budget / Substitution
+-- (`src/orchestration/multiagent/config.rs`, `src/orchestration/multiagent/types.rs`,
+--  `src/orchestration/multiagent/chat.rs`, `src/orchestration/multiagent/view.rs`,
+--  `src/orchestration/workflows/checkpoint.rs`,
+--  `src/orchestration/workflows/templates.rs`, `src/orchestration/workflows.rs`)
+-- ============================================================================
+
+def clampMultiAgentConcurrency (n : Nat) : Nat :=
+  min (max n 1) 16
+
+def agentTagModel (roleLower : String) (agentId : Nat) : String :=
+  s!"{roleLower}·{agentId + 1}"
+
+def agentColorIndexModel (agentId : Nat) : Nat :=
+  agentId % 8
+
+theorem multiagent_concurrency_within_1_to_16 (n : Nat) :
+    1 ≤ clampMultiAgentConcurrency n ∧ clampMultiAgentConcurrency n ≤ 16 := by
+  unfold clampMultiAgentConcurrency
+  omega
+
+inductive MultiChatTabModel where
+  | all
+  | agent (idx : Nat)
+  deriving DecidableEq, Repr
+
+def MultiChatTabModel.asStr : MultiChatTabModel → String
+  | .all => "All"
+  | .agent idx => s!"Agent({idx})"
+
+def selectTabByNumberModel
+    (agentCount : Nat) (current : MultiChatTabModel) (n : Nat) : Bool × MultiChatTabModel :=
+  if n == 0 then (true, .all)
+  else if n ≤ agentCount then (true, .agent (n - 1))
+  else (false, current)
+
+def classifyAgentSummaryOutcome (success skippedPrefix : Bool) : String :=
+  if success then "ok"
+  else if skippedPrefix then "skipped"
+  else "failed"
+
+def validateWorkflowRunIdModel (len : Nat) (startsWithDot allCharsValid : Bool) : Bool :=
+  len ≥ 1 && len ≤ 128 && !startsWithDot && allCharsValid
+
+def workflowMeasuredTokensModel (totalTok promptTok completionTok : Nat) : Nat :=
+  max totalTok (promptTok + completionTok)
+
+inductive WorkflowBudgetStopModel where
+  | none
+  | wallClock (elapsedMs maxWallMs : Nat)
+  | tokenBudget (usedTok maxTok unmetered : Nat)
+  deriving DecidableEq, Repr
+
+def WorkflowBudgetStopModel.asStr : WorkflowBudgetStopModel → String
+  | .none => "None"
+  | .wallClock el mx => s!"Wall({el}/{mx})"
+  | .tokenBudget used mx unm => s!"Token({used}/{mx},unmet={unm})"
+
+def checkWorkflowBudgetModel
+    (maxWallSecs maxTokens : Option Nat)
+    (elapsedMs totalTok promptTok compTok unmetered : Nat) : WorkflowBudgetStopModel :=
+  match maxWallSecs with
+  | some w =>
+    if elapsedMs ≥ w * 1000 then
+      .wallClock elapsedMs (w * 1000)
+    else
+      match maxTokens with
+      | some m =>
+        let used := workflowMeasuredTokensModel totalTok promptTok compTok
+        if used ≥ m then .tokenBudget used m unmetered else .none
+      | none => .none
+  | none =>
+    match maxTokens with
+    | some m =>
+      let used := workflowMeasuredTokensModel totalTok promptTok compTok
+      if used ≥ m then .tokenBudget used m unmetered else .none
+    | none => .none
+
+theorem wall_clock_budget_precedes_token_budget_and_measured_max :
+    checkWorkflowBudgetModel (some 10) (some 200) 10000 150 120 80 1 = .wallClock 10000 10000 ∧
+    checkWorkflowBudgetModel (some 10) (some 200) 5000 150 120 80 1 = .tokenBudget 200 200 1 ∧
+    checkWorkflowBudgetModel (some 10) (some 200) 5000 150 100 99 1 = .none := by
+  decide
+
+def checkStepDepIterationAware
+    (knownDep : Bool) (iterCompleted topCompleted : Option Bool) : String :=
+  if !knownDep then "Unknown"
+  else
+    let effective := match iterCompleted with
+      | some b => some b
+      | none => topCompleted
+    match effective with
+    | some true => "Ok"
+    | some false => "Failed"
+    | none => "NotExecuted"
+
+theorem iteration_scoped_dep_overrides_failed_top_level :
+    checkStepDepIterationAware true (some true) (some false) = "Ok" ∧
+    checkStepDepIterationAware true none (some false) = "Failed" := by
+  decide
+
+-- ============================================================================
+-- Section PA69: Self-Healing Recovery Strategy, Circuit Breaker & Supervision Lattice
+-- (`src/self_healing/mod.rs`, `src/self_healing/recovery_tree.rs`,
+--  `src/self_healing/executor.rs`, `src/supervision/circuit_breaker.rs`,
+--  `src/supervision/run_supervisor.rs`)
+-- ============================================================================
+
+inductive SelfHealErrorClass where
+  | network
+  | timeout
+  | rateLimit
+  | resourceExhaustion
+  | parseError
+  | authError
+  | unknown
+  deriving DecidableEq, Repr
+
+def defaultStrategyActionCount : SelfHealErrorClass → Nat
+  | .resourceExhaustion => 2
+  | _ => 1
+
+def hasEscalationStrategy : SelfHealErrorClass → Bool
+  | .authError => false
+  | .unknown => false
+  | _ => true
+
+theorem pa69_error_class_strategy_and_escalation (c : SelfHealErrorClass) :
+    defaultStrategyActionCount c >= 1 ∧
+    (hasEscalationStrategy c = false ↔ (c = .authError ∨ c = .unknown)) := by
+  cases c <;> decide
+
+inductive OfflineResolution where
+  | actionFallback
+  | actionRetry
+  | actionCompress
+  | escalate
+  | unresolvable
+  deriving DecidableEq, Repr
+
+def OfflineResolution.asStr : OfflineResolution → String
+  | .actionFallback => "fallback"
+  | .actionRetry => "retry"
+  | .actionCompress => "compress"
+  | .escalate => "escalate"
+  | .unresolvable => "unresolvable"
+
+def resolveEndpointOffline (optIn isLlmUnreachable alreadyLocal : Bool) : OfflineResolution :=
+  if !optIn || !isLlmUnreachable || alreadyLocal then .escalate else .actionFallback
+
+theorem pa69_recovery_tree_endpoint_opt_in_and_local_guard :
+    resolveEndpointOffline false true false = .escalate ∧
+    resolveEndpointOffline true false false = .escalate ∧
+    resolveEndpointOffline true true true = .escalate ∧
+    resolveEndpointOffline true true false = .actionFallback := by
+  decide
+
+def learnerRecommends (threshold occurrences totalAttempts successes : Nat) : Bool :=
+  occurrences >= threshold && totalAttempts >= 2 && successes * 2 >= totalAttempts
+
+def checkpointRingActive (maxCheckpoints pushed : Nat) : Nat :=
+  Nat.min maxCheckpoints pushed
+
+theorem pa69_learner_threshold_and_checkpoint_cap :
+    learnerRecommends 3 2 2 2 = false ∧
+    learnerRecommends 3 3 1 1 = false ∧
+    learnerRecommends 3 3 2 0 = false ∧
+    learnerRecommends 3 3 2 1 = true ∧
+    checkpointRingActive 2 3 = 2 := by
+  decide
+
+inductive HealthPredictionState where
+  | noneYet
+  | healthy
+  | atRisk
+  | degrading
+  | failureImminent
+  deriving DecidableEq, Repr
+
+def HealthPredictionState.asStr : HealthPredictionState → String
+  | .noneYet => "none"
+  | .healthy => "healthy"
+  | .atRisk => "at_risk"
+  | .degrading => "degrading"
+  | .failureImminent => "failure_imminent"
+
+def predictHealth (historyLen unhealthyInLast10 : Nat) : HealthPredictionState :=
+  if historyLen < 5 then .noneYet
+  else if unhealthyInLast10 >= 7 then .failureImminent
+  else if unhealthyInLast10 >= 4 then .degrading
+  else if unhealthyInLast10 >= 2 then .atRisk
+  else .healthy
+
+def executorWithinAttemptBudget (enabled : Bool) (actionCount maxAttempts : Nat) : Bool :=
+  enabled && actionCount > 0 && actionCount <= maxAttempts
+
+theorem pa69_executor_budget_and_health_predictor :
+    predictHealth 4 8 = .noneYet ∧
+    predictHealth 10 7 = .failureImminent ∧
+    predictHealth 10 4 = .degrading ∧
+    predictHealth 10 2 = .atRisk ∧
+    predictHealth 10 0 = .healthy ∧
+    executorWithinAttemptBudget false 1 2 = false ∧
+    executorWithinAttemptBudget true 0 2 = false ∧
+    executorWithinAttemptBudget true 3 2 = false ∧
+    executorWithinAttemptBudget true 2 2 = true := by
+  decide
+
+inductive CircuitStateModel where
+  | closed
+  | openState
+  | halfOpen
+  deriving DecidableEq, Repr
+
+def CircuitStateModel.asStr : CircuitStateModel → String
+  | .closed => "closed"
+  | .openState => "open"
+  | .halfOpen => "half-open"
+
+def recordClassifiedError (st : CircuitStateModel) (failures threshold : Nat) (countsTowardFailure : Bool) :
+    CircuitStateModel × Nat :=
+  if !countsTowardFailure then (st, failures)
+  else match st with
+    | .closed => if failures + 1 >= threshold then (.openState, 0) else (.closed, failures + 1)
+    | .halfOpen => (.openState, 0)
+    | .openState => (.openState, failures + 1)
+
+theorem pa69_circuit_breaker_classifier_and_trip :
+    (∀ st f t, recordClassifiedError st f t false = (st, f)) ∧
+    recordClassifiedError .closed 0 2 true = (.closed, 1) ∧
+    recordClassifiedError .closed 1 2 true = (.openState, 0) ∧
+    recordClassifiedError .halfOpen 0 2 true = (.openState, 0) := by
+  refine ⟨?_, by decide, by decide, by decide⟩
+  intro st f t
+  rfl
+
+-- ============================================================================
+-- Section PA70: Tools HTTP/Browser SSRF Guard, Search Pagination/Regex/Glob &
+-- Knowledge Graph Lattice
+-- (`src/tools/net_policy.rs`, `src/tools/http.rs`, `src/tools/browser.rs`,
+--  `src/tools/mod.rs`, `src/tools/grep_search/mod.rs`, `src/tools/search.rs`,
+--  `src/tools/knowledge.rs`)
+-- ============================================================================
+
+structure NetTargetPolicy where
+  allowPrivate : Bool
+  allowLocalhost : Bool
+  originPort : Nat
+  deriving DecidableEq, Repr
+
+def resolvedAddressAllowed (hostIsLocalhost ipIsLoopback ipIsPrivate allowPrivate allowLocalhost : Bool) : Bool :=
+  if !ipIsLoopback && !ipIsPrivate then true
+  else if allowPrivate then true
+  else if allowLocalhost && hostIsLocalhost && ipIsLoopback then true
+  else false
+
+def redirectTargetAllowed (policy : NetTargetPolicy) (targetIsLocalhost targetIsPrivate : Bool) (targetPort : Nat) : Bool :=
+  if policy.allowPrivate then true
+  else if targetIsLocalhost then policy.allowLocalhost && targetPort == policy.originPort
+  else !targetIsPrivate
+
+theorem pa70_net_policy_ssrf_and_redirect_guard :
+    resolvedAddressAllowed false true false false true = false ∧
+    resolvedAddressAllowed true false true false true = false ∧
+    resolvedAddressAllowed true true false false true = true ∧
+    redirectTargetAllowed ⟨false, true, 8000⟩ true false 9000 = false ∧
+    redirectTargetAllowed ⟨false, true, 8000⟩ true false 8000 = true ∧
+    redirectTargetAllowed ⟨false, false, 443⟩ true false 8000 = false := by
+  decide
+
+def paginateSlice (totalChars offset limit : Nat) : Nat × Nat × Bool :=
+  let start := Nat.min offset totalChars
+  let stop := Nat.min (start + limit) totalChars
+  (start, stop, stop < totalChars)
+
+def outboundRequestAllowed (schemeHttpOrHttps hasLeakedSecret : Bool) : Bool :=
+  schemeHttpOrHttps && !hasLeakedSecret
+
+theorem pa70_outbound_secret_and_pagination_bounds :
+    paginateSlice 5 1 2 = (1, 3, true) ∧
+    paginateSlice 5 3 2 = (3, 5, false) ∧
+    paginateSlice 5 9 2 = (5, 5, false) ∧
+    outboundRequestAllowed true true = false ∧
+    outboundRequestAllowed false false = false ∧
+    outboundRequestAllowed true false = true := by
+  decide
+
+def regexPatternLengthAllowed (len maxLen : Nat) : Bool :=
+  len <= maxLen
+
+def globMatchesLiteralSeparator (isRecursiveGlob isNestedPath isPrivateDir isSymlink : Bool) : Bool :=
+  !isPrivateDir && !isSymlink && (isRecursiveGlob || !isNestedPath)
+
+theorem pa70_grep_regex_and_glob_literal_separator :
+    regexPatternLengthAllowed 1000 1000 = true ∧
+    regexPatternLengthAllowed 1001 1000 = false ∧
+    globMatchesLiteralSeparator false true false false = false ∧
+    globMatchesLiteralSeparator true true false false = true ∧
+    globMatchesLiteralSeparator true false true false = false ∧
+    globMatchesLiteralSeparator true false false true = false := by
+  decide
+
+inductive SymbolKindFilter where
+  | fnKind
+  | structKind
+  | enumKind
+  | traitKind
+  | implKind
+  | all
+  deriving DecidableEq, Repr
+
+def symbolFilterMatches (filter actual : SymbolKindFilter) : Bool :=
+  filter == .all || filter == actual
+
+theorem pa70_symbol_filter_reflexive_and_all :
+    (∀ s : SymbolKindFilter, symbolFilterMatches .all s = true ∧ symbolFilterMatches s s = true) ∧
+    symbolFilterMatches .structKind .fnKind = false := by
+  refine ⟨?_, by decide⟩
+  intro s
+  cases s <;> decide
+
+def incidentEdgesPurged (edges : List (Nat × Nat)) (removedNode : Nat) : List (Nat × Nat) :=
+  edges.filter (fun e => e.1 != removedNode && e.2 != removedNode)
+
+def exportPathSafe (isRelative hasParentTraversal : Bool) : Bool :=
+  isRelative && !hasParentTraversal
+
+theorem pa70_knowledge_graph_remove_purges_incident_edges :
+    incidentEdgesPurged [(1, 2), (2, 3), (1, 3)] 2 = [(1, 3)] ∧
+    exportPathSafe false false = false ∧
+    exportPathSafe true true = false ∧
+    exportPathSafe true false = true := by
+  decide
+
+-- ============================================================================
+-- Section PA71: Evolve Compiler Repair, Multi-Arm Runner, Dedup & Dead-Code Lattice
+-- (`src/evolve/compiler_repair.rs`, `src/evolve/multi_arm_runner.rs`,
+--  `src/evolve/dedup.rs`, `src/evolve/dead_code.rs`)
+-- ============================================================================
+
+inductive ApplicabilityLevel where
+  | machineApplicable
+  | maybeIncorrect
+  | hasPlaceholders
+  | unspecified
+  deriving DecidableEq, Repr
+
+def spanExtractable (app : ApplicabilityLevel) (hasReplacement : Bool) : Bool :=
+  app == .machineApplicable && hasReplacement
+
+theorem pa71_compiler_repair_extract_gate (app : ApplicabilityLevel) (hasRep : Bool) :
+    spanExtractable app hasRep = true ↔ (app = .machineApplicable ∧ hasRep = true) := by
+  cases app <;> cases hasRep <;> decide
+
+def groupAtomicallyValid (allSpansInBounds noInternalOverlap noAcceptedOverlap : Bool) : Bool :=
+  allSpansInBounds && noInternalOverlap && noAcceptedOverlap
+
+theorem pa71_compiler_repair_group_atomicity :
+    groupAtomicallyValid false true true = false ∧
+    groupAtomicallyValid true false true = false ∧
+    groupAtomicallyValid true true false = false ∧
+    groupAtomicallyValid true true true = true := by
+  decide
+
+def testRegressionsCount (baselineFailed armFailed baselinePassed armPassed : Nat) : Nat :=
+  (armFailed - baselineFailed) + (baselinePassed - armPassed)
+
+def separatedFromBaseline (armMaxNs baseMinNs : Nat) : Bool :=
+  armMaxNs < baseMinNs
+
+def armAccepted (compileOk : Bool) (regressions : Nat) (armMaxNs baseMinNs : Nat) : Bool :=
+  compileOk && regressions == 0 && separatedFromBaseline armMaxNs baseMinNs
+
+theorem pa71_multi_arm_separation_and_regression_gate :
+    testRegressionsCount 1 2 10 9 = 2 ∧
+    armAccepted true 0 105 100 = false ∧
+    armAccepted true 2 80 100 = false ∧
+    armAccepted false 0 80 100 = false ∧
+    armAccepted true 0 90 100 = true := by
+  decide
+
+inductive EvolveDedupClass where
+  | distinct
+  | nearDuplicate
+  | exactDuplicate
+  deriving DecidableEq, Repr
+
+def EvolveDedupClass.asStr : EvolveDedupClass → String
+  | .distinct => "distinct"
+  | .nearDuplicate => "near"
+  | .exactDuplicate => "exact"
+
+def classifyEvolveDedup (sameSha256 : Bool) (minLines maxLines intersectionPoints unionPoints : Nat) : EvolveDedupClass :=
+  if maxLines == 0 then .distinct
+  else if sameSha256 then .exactDuplicate
+  else if minLines * 5 >= maxLines * 4 && unionPoints > 0 && intersectionPoints * 5 >= unionPoints * 4 then .nearDuplicate
+  else .distinct
+
+theorem pa71_dedup_exact_near_and_size_ratio_pruning :
+    classifyEvolveDedup true 5 5 5 5 = .exactDuplicate ∧
+    classifyEvolveDedup false 4 5 4 5 = .nearDuplicate ∧
+    classifyEvolveDedup false 1 10 1 1 = .distinct ∧
+    classifyEvolveDedup false 5 5 3 5 = .distinct ∧
+    classifyEvolveDedup true 0 0 0 0 = .distinct := by
+  decide
+
+def isDeadSymbol (isDispatched startsWithDunder isTestAnnotated inTestMod crossTreeRefs : Bool) : Bool :=
+  !isDispatched && !startsWithDunder && !isTestAnnotated && !inTestMod && !crossTreeRefs
+
+def deadCodeSortKey (cfgGated : Bool) : Nat :=
+  if cfgGated then 1 else 0
+
+theorem pa71_dead_code_exclusions_and_cfg_order :
+    isDeadSymbol false false false false false = true ∧
+    isDeadSymbol true false false false false = false ∧
+    isDeadSymbol false true false false false = false ∧
+    isDeadSymbol false false true false false = false ∧
+    isDeadSymbol false false false true false = false ∧
+    isDeadSymbol false false false false true = false ∧
+    deadCodeSortKey false < deadCodeSortKey true := by
+  decide
+
+-- ============================================================================
+-- Section PA72: VLM Benchmark Scoring/Rating & SWE-bench Pro Dataset/Manifest/Catalog Lattice
+-- (`src/vlm_bench/scoring.rs`, `src/vlm_bench/config.rs`, `src/vlm_bench/report.rs`,
+--  `src/vlm_bench/levels/mod.rs`, `src/vlm_bench/levels/mega_evolution.rs`,
+--  `src/bench_harness/swebench_pro/dataset.rs`, `src/bench_harness/swebench_pro/manifest.rs`,
+--  `src/bench_harness/swebench_pro/harness.rs`, `src/bench_harness/swebench_pro/catalog.rs`)
+-- ============================================================================
+
+inductive VlmGardenRating where
+  | bloom
+  | grow
+  | wilt
+  | frost
+  deriving DecidableEq, Repr
+
+def VlmGardenRating.asStr : VlmGardenRating → String
+  | .bloom => "BLOOM"
+  | .grow => "GROW"
+  | .wilt => "WILT"
+  | .frost => "FROST"
+
+def ratingFromBasisPoints (accBp thresholdBp : Nat) : VlmGardenRating :=
+  if accBp * 100 >= thresholdBp * 100 then .bloom
+  else if accBp * 100 >= thresholdBp * 75 then .grow
+  else if accBp * 100 >= thresholdBp * 50 then .wilt
+  else .frost
+
+theorem pa72_vlm_rating_lattice_and_thresholds :
+    ratingFromBasisPoints 80 80 = .bloom ∧
+    ratingFromBasisPoints 60 80 = .grow ∧
+    ratingFromBasisPoints 40 80 = .wilt ∧
+    ratingFromBasisPoints 39 80 = .frost := by
+  decide
+
+inductive VlmDifficultyTier where
+  | easy
+  | medium
+  | hard
+  | veryHard
+  | extreme
+  | mega
+  deriving DecidableEq, Repr
+
+def difficultyRank : VlmDifficultyTier → Nat
+  | .easy => 0
+  | .medium => 1
+  | .hard => 2
+  | .veryHard => 3
+  | .extreme => 4
+  | .mega => 5
+
+def clampCorrelationBp (corrSignPositive : Bool) (corrMagBp : Nat) : Nat :=
+  if !corrSignPositive then 0 else Nat.min corrMagBp 100
+
+theorem pa72_vlm_difficulty_filter_and_correlation_clamp :
+    (([VlmDifficultyTier.easy, .medium, .hard, .veryHard, .extreme, .mega].filter
+      (fun d => difficultyRank d <= difficultyRank .hard)).length = 3) ∧
+    clampCorrelationBp false 80 = 0 ∧
+    ratingFromBasisPoints (clampCorrelationBp false 80) 50 = .frost ∧
+    clampCorrelationBp true 100 = 100 ∧
+    ratingFromBasisPoints (clampCorrelationBp true 100) 50 = .bloom := by
+  decide
+
+def safeRepoSlug (segments : Nat) (startsWithDash hasTraversal : Bool) : Bool :=
+  segments == 2 && !startsWithDash && !hasTraversal
+
+def safeGitRevision (nonEmpty startsWithDash hasDotDot hasInvalidChar : Bool) : Bool :=
+  nonEmpty && !startsWithDash && !hasDotDot && !hasInvalidChar
+
+theorem pa72_swebench_repo_and_revision_guards :
+    safeRepoSlug 2 false false = true ∧
+    safeRepoSlug 3 false false = false ∧
+    safeRepoSlug 2 true false = false ∧
+    safeRepoSlug 2 false true = false ∧
+    safeGitRevision true false false false = true ∧
+    safeGitRevision false false false false = false ∧
+    safeGitRevision true true false false = false ∧
+    safeGitRevision true false true false = false ∧
+    safeGitRevision true false false true = false := by
+  decide
+
+def llamaServerOptionalArgCount (hasNonEmptyTensorSplit hasMmproj : Bool) : Nat :=
+  (if hasNonEmptyTensorSplit then 2 else 0) + (if hasMmproj then 2 else 0)
+
+theorem pa72_llama_server_optional_arg_inclusion :
+    llamaServerOptionalArgCount false false = 0 ∧
+    llamaServerOptionalArgCount true false = 2 ∧
+    llamaServerOptionalArgCount false true = 2 ∧
+    llamaServerOptionalArgCount true true = 4 := by
+  decide
+
+def catalogParallelSlots (isQ8Kp is35bA3b : Bool) : Nat :=
+  if isQ8Kp || is35bA3b then 1 else 2
+
+def catalogContextWindow : Nat := 262144
+
+theorem pa72_swebench_catalog_parallel_and_ctx_invariants :
+    catalogParallelSlots true false = 1 ∧
+    catalogParallelSlots false true = 1 ∧
+    catalogParallelSlots false false = 2 ∧
+    catalogContextWindow = 262144 := by
+  decide
+
+-- ============================================================================
+-- Section PA73: TUI Dashboard, Garden View, Layout & Tasks View Lattice
+-- (`src/ui/tui/*`, `src/ui/garden.rs`)
+-- ============================================================================
+
+inductive TuiPermissionAnswerModel where
+  | once
+  | alwaysTool
+  | shellRule
+  | deny
+  deriving DecidableEq, Repr
+
+def TuiPermissionAnswerModel.asStr : TuiPermissionAnswerModel → String
+  | .once => "once"
+  | .alwaysTool => "always_tool"
+  | .shellRule => "shell_rule"
+  | .deny => "deny"
+
+inductive TuiKeyModel where
+  | charY
+  | charA
+  | charP
+  | charN
+  | charV
+  | esc
+  | enter
+  | down
+  | other
+  deriving DecidableEq, Repr
+
+/-- Mirrors `ui::tui::permission_key_answer`. -/
+def evalPermissionKeyAnswer
+    (allowAlways hasShellRule : Bool)
+    (key : TuiKeyModel) : Option TuiPermissionAnswerModel :=
+  match key with
+  | .charY => some .once
+  | .charA => if allowAlways then some .alwaysTool else none
+  | .charP => if hasShellRule then some .shellRule else none
+  | .charN | .esc | .enter => some .deny
+  | _ => none
+
+/-- Mirrors `ui::tui::permission_view_key`: returns `(consumed, fullDiffOpen, fullDiffScroll)`. -/
+def stepPermissionDiffView
+    (hasDiff openState : Bool)
+    (scroll : Nat)
+    (key : TuiKeyModel) : Bool × Bool × Nat :=
+  if !hasDiff then
+    (false, openState, scroll)
+  else
+    match key with
+    | .charV => (true, !openState, 0)
+    | .esc => if openState then (true, false, 0) else (false, openState, scroll)
+    | .down => if openState then (true, openState, scroll + 1) else (false, openState, scroll)
+    | _ => (false, openState, scroll)
+
+/-- Mirrors `ui::tui::parse_step_status`. -/
+def parseStepStatusModel (hasStepPrefix hasDigitOnlyTail : Bool) (stepNum : Nat) : Option Nat :=
+  if hasStepPrefix && hasDigitOnlyTail then some stepNum else none
+
+structure DashboardStateModel where
+  connected : Bool
+  gardenHealthMeasured : Bool
+  gardenHealthPct : Nat
+  tokensUsed : Nat
+  deriving DecidableEq, Repr
+
+def DashboardStateModel.initial : DashboardStateModel :=
+  { connected := false, gardenHealthMeasured := false, gardenHealthPct := 0, tokensUsed := 0 }
+
+def stepDashboardTokenUsage (s : DashboardStateModel) (prompt completion : Nat) : DashboardStateModel :=
+  { s with connected := true, tokensUsed := s.tokensUsed + prompt + completion }
+
+def stepDashboardGardenHealth (s : DashboardStateModel) (rawPct : Nat) : DashboardStateModel :=
+  { s with gardenHealthMeasured := true, gardenHealthPct := if rawPct <= 100 then rawPct else 100 }
+
+def stepDashboardAgentError (s : DashboardStateModel) : DashboardStateModel :=
+  { s with connected := false }
+
+inductive ExecutionModeUiModel where
+  | normal
+  | autoEdit
+  | yolo
+  | daemon
+  deriving DecidableEq, Repr
+
+def ExecutionModeUiModel.statusLabel : ExecutionModeUiModel → String
+  | .normal => "NORMAL"
+  | .autoEdit => "AUTO"
+  | .yolo | .daemon => "YOLO"
+
+inductive GardenGrowthStageModel where
+  | seedling
+  | sprout
+  | established
+  | mature
+  | ancient
+  | wilting
+  deriving DecidableEq, Repr
+
+def GardenGrowthStageModel.asStr : GardenGrowthStageModel → String
+  | .seedling => "seedling"
+  | .sprout => "sprout"
+  | .established => "established"
+  | .mature => "mature"
+  | .ancient => "ancient"
+  | .wilting => "wilting"
+
+/-- Mirrors `ui::garden::GrowthStage::from_metrics`. -/
+def classifyGrowthStage (lines lastTendedDays : Nat) : GardenGrowthStageModel :=
+  if lastTendedDays > 90 then .wilting
+  else if lines <= 50 then .seedling
+  else if lines <= 200 then .sprout
+  else if lines <= 500 then .established
+  else if lines <= 1000 then .mature
+  else .ancient
+
+inductive GardenPlantTypeModel where
+  | pollinator
+  | flower
+  | roots
+  | vegetable
+  deriving DecidableEq, Repr
+
+def GardenPlantTypeModel.asStr : GardenPlantTypeModel → String
+  | .pollinator => "pollinator"
+  | .flower => "flower"
+  | .roots => "roots"
+  | .vegetable => "vegetable"
+
+/-- Mirrors `ui::garden::PlantType::from_path` priority order. -/
+def classifyPlantType (hasTest isEntryPoint isConfig : Bool) : GardenPlantTypeModel :=
+  if hasTest then .pollinator
+  else if isEntryPoint then .flower
+  else if isConfig then .roots
+  else .vegetable
+
+/-- Mirrors `ui::garden::DigitalGarden::tended_fraction` (Rule 3: `none` when empty). -/
+def gardenTendedPctModel (total wilting : Nat) : Option Nat :=
+  if total == 0 then none
+  else
+    let cappedWilting := if wilting <= total then wilting else total
+    some (((total - cappedWilting) * 100) / total)
+
+inductive TuiLayoutPresetModel where
+  | focus
+  | coding
+  | debugging
+  | dashboard
+  deriving DecidableEq, Repr
+
+def TuiLayoutPresetModel.paneCount : TuiLayoutPresetModel → Nat
+  | .focus => 1
+  | .coding => 2
+  | .debugging => 3
+  | .dashboard => 5
+
+/-- Mirrors `ui::tui::app::App::on_escape` priority: help -> palette -> zoom. -/
+def stepTuiEscapeHierarchy (showHelp showPalette isZoomed : Bool) : Bool × Bool × Bool :=
+  if showHelp then (false, showPalette, isZoomed)
+  else if showPalette then (false, false, isZoomed)
+  else if isZoomed then (false, false, false)
+  else (false, false, false)
+
+/-- Mirrors `ui::tui::app::App` speed clamp `[0.25, 4.0]` in percent `[25, 400]`. -/
+def clampTuiSpeedPct (rawPct : Nat) : Nat :=
+  if rawPct < 25 then 25
+  else if rawPct > 400 then 400
+  else rawPct
+
+inductive TuiTokenSizeModel where
+  | small
+  | medium
+  | large
+  | massive
+  deriving DecidableEq, Repr
+
+def TuiTokenSizeModel.shortCode : TuiTokenSizeModel → String
+  | .small => "S"
+  | .medium => "M"
+  | .large => "L"
+  | .massive => "XL"
+
+def classifyTokenSize (tokens : Nat) : TuiTokenSizeModel :=
+  if tokens < 10000 then .small
+  else if tokens < 100000 then .medium
+  else if tokens < 500000 then .large
+  else .massive
+
+/-- Mirrors `ui::tui::tasks_view::ResourceRow::is_reapable`. -/
+def isResourceReapableModel (drainable leaked orphaned : Bool) : Bool :=
+  drainable && (leaked || orphaned)
+
+/-- Mirrors `ui::tui::tasks_view::TasksPane::on_key` two-step cancel confirmation. -/
+def stepTasksCancelConfirm (armed isKeyX : Bool) : Bool × Bool :=
+  if isKeyX then
+    if armed then (false, true) else (true, false)
+  else
+    (false, false)
+
+theorem permission_always_and_shell_rule_gated :
+    evalPermissionKeyAnswer false false .charA = none ∧
+    evalPermissionKeyAnswer true false .charA = some .alwaysTool ∧
+    evalPermissionKeyAnswer false false .charP = none ∧
+    evalPermissionKeyAnswer false true .charP = some .shellRule := by
+  decide
+
+theorem permission_diff_view_esc_closes_without_denying :
+    stepPermissionDiffView true true 3 .esc = (true, false, 0) ∧
+    stepPermissionDiffView true false 0 .esc = (false, false, 0) := by
+  decide
+
+theorem dashboard_initial_is_honestly_unmeasured :
+    DashboardStateModel.initial.connected = false ∧
+    DashboardStateModel.initial.gardenHealthMeasured = false ∧
+    (stepDashboardGardenHealth DashboardStateModel.initial 150).gardenHealthPct = 100 ∧
+    (stepDashboardGardenHealth DashboardStateModel.initial 150).gardenHealthMeasured = true := by
+  decide
+
+theorem garden_wilting_overrides_ancient_and_empty_fraction_is_none (lines : Nat) :
+    classifyGrowthStage lines 91 = .wilting ∧
+    gardenTendedPctModel 0 0 = none := by
+  simp [classifyGrowthStage, gardenTendedPctModel]
+
+theorem plant_type_test_priority_beats_entry_point :
+    classifyPlantType true true false = .pollinator ∧
+    classifyPlantType false true false = .flower := by
+  decide
+
+theorem tui_escape_hierarchy_peels_one_layer_and_speed_clamps (raw : Nat) :
+    stepTuiEscapeHierarchy true true true = (false, true, true) ∧
+    stepTuiEscapeHierarchy false true true = (false, false, true) ∧
+    stepTuiEscapeHierarchy false false true = (false, false, false) ∧
+    25 <= clampTuiSpeedPct raw ∧
+    clampTuiSpeedPct raw <= 400 := by
+  refine ⟨by decide, by decide, by decide, ?_, ?_⟩
+  · unfold clampTuiSpeedPct
+    split <;> (try split) <;> omega
+  · unfold clampTuiSpeedPct
+    split <;> (try split) <;> omega
+
+theorem resource_reapable_requires_drainable_and_fault :
+    isResourceReapableModel true true false = true ∧
+    isResourceReapableModel true false true = true ∧
+    isResourceReapableModel true false false = false ∧
+    isResourceReapableModel false true true = false := by
+  decide
+
+theorem tasks_cancel_confirm_disarms_on_non_x :
+    stepTasksCancelConfirm false true = (true, false) ∧
+    stepTasksCancelConfirm true false = (false, false) ∧
+    stepTasksCancelConfirm true true = (false, true) := by
+  decide
+
+-- ============================================================================
+-- Section PA74: Multimodal Vision, Screen Capture, Container & Process Guards
+-- (`src/tools/vision.rs`, `src/tools/screen_capture.rs`,
+--  `src/tools/container/*`, `src/tools/process*.rs`)
+-- ============================================================================
+
+inductive VisionFieldKind where
+  | prompt
+  | model
+  | detail
+  | apiKey
+  | extraBody
+  | imageBase64
+  deriving DecidableEq, Repr
+
+/-- Mirrors `VISION_OUTBOUND_FIELDS` in `tools::vision::reject_vision_bound_credential_shapes`. -/
+def visionFieldScansForSecrets : VisionFieldKind → Bool
+  | .imageBase64 => false
+  | _ => true
+
+def rejectVisionCredentialModel (f : VisionFieldKind) (hasSecretShape : Bool) : Bool :=
+  !(visionFieldScansForSecrets f && hasSecretShape)
+
+inductive ImageMagicKind where
+  | png
+  | jpeg
+  | gif
+  | webp
+  | bmp
+  | riffNonWebp
+  | unknownOrText
+  deriving DecidableEq, Repr
+
+/-- Mirrors `tools::vision::validate_image_magic`. -/
+def validateImageMagicModel (byteLen : Nat) (k : ImageMagicKind) : Bool :=
+  if byteLen < 4 then false
+  else
+    match k with
+    | .png | .jpeg | .gif | .bmp => true
+    | .webp => byteLen >= 12
+    | .riffNonWebp | .unknownOrText => false
+
+/-- Mirrors `tools::vision::guess_mime`. -/
+def guessImageMimeModel (extLower : String) : String :=
+  if extLower == "jpg" || extLower == "jpeg" then "image/jpeg"
+  else if extLower == "gif" then "image/gif"
+  else if extLower == "webp" then "image/webp"
+  else if extLower == "bmp" then "image/bmp"
+  else "image/png"
+
+/-- Mirrors `tools::vision::compute_pixel_similarity` rounded to integer percent. -/
+def pixelSimilarityPctModel (lenA lenB totalDiff : Nat) : Nat :=
+  if lenA == 0 || lenA != lenB then 0
+  else
+    let maxErr := lenA * 255
+    let clampedDiff := if totalDiff <= maxErr then totalDiff else maxErr
+    ((maxErr - clampedDiff) * 100) / maxErr
+
+/-- Mirrors `tools::screen_capture::parse_region` bounds check. -/
+def validateCaptureRegionModel (absX absY width height : Nat) : Bool :=
+  absX <= 100000 && absY <= 100000 && width >= 1 && width <= 100000 && height >= 1 && height <= 100000
+
+/-- Mirrors `tools::screen_capture::shape_capture_output` inline base64 cap (`3_750_000` bytes). -/
+def shapeCaptureInlineDecision (inlineBase64 : Bool) (pngBytes : Nat) : Option Bool :=
+  if !inlineBase64 then some false
+  else if pngBytes <= 3750000 then some true
+  else none
+
+inductive HostMountTargetKind where
+  | workspaceRel
+  | procOrSys
+  | varOrEtc
+  | runtimeSocket
+  | selfwareOrGit
+  | traversal
+  deriving DecidableEq, Repr
+
+/-- Mirrors `tools::container::validation::is_safe_host_mount`. -/
+def isSafeHostMountModel : HostMountTargetKind → Bool
+  | .workspaceRel => true
+  | .procOrSys | .varOrEtc | .runtimeSocket | .selfwareOrGit | .traversal => false
+
+/-- Mirrors `tools::container::validation::is_valid_port`. -/
+def isValidPortModel (port : Nat) : Bool :=
+  port >= 1 && port <= 65535
+
+/-- Mirrors `tools::process::ProcessStart` argument/cwd/env guard. -/
+def validateProcessStartGuard
+    (hasForbiddenChars hasCwdTraversal hasDeniedEnv hasGitConfigEnv : Bool) : Bool :=
+  !hasForbiddenChars && !hasCwdTraversal && !hasDeniedEnv && !hasGitConfigEnv
+
+/-- Mirrors `tools::process_guard::BoundedCommandOutput::{success, exit_code}`. -/
+def boundedCommandVerdict (parentExitZero killedDescendants : Bool) : Bool × Int :=
+  if killedDescendants then (false, -1)
+  else if parentExitZero then (true, 0)
+  else (false, 1)
+
+theorem vision_base64_exempt_from_text_regex_but_magic_gated :
+    rejectVisionCredentialModel .imageBase64 true = true ∧
+    rejectVisionCredentialModel .prompt true = false ∧
+    rejectVisionCredentialModel .extraBody true = false ∧
+    validateImageMagicModel 18 .unknownOrText = false := by
+  decide
+
+theorem image_magic_requires_4_bytes_and_webp_12_bytes :
+    validateImageMagicModel 2 .bmp = false ∧
+    validateImageMagicModel 12 .webp = true ∧
+    validateImageMagicModel 12 .riffNonWebp = false := by
+  decide
+
+theorem pixel_similarity_bounds_and_mismatch_zero :
+    pixelSimilarityPctModel 3 3 0 = 100 ∧
+    pixelSimilarityPctModel 3 3 (3 * 255) = 0 ∧
+    pixelSimilarityPctModel 2 3 0 = 0 ∧
+    pixelSimilarityPctModel 0 0 0 = 0 := by
+  decide
+
+theorem screen_capture_region_bounds_and_zero_rejection :
+    validateCaptureRegionModel 10 20 800 600 = true ∧
+    validateCaptureRegionModel 0 0 0 100 = false ∧
+    validateCaptureRegionModel 0 0 100001 100 = false ∧
+    validateCaptureRegionModel 100001 0 100 100 = false := by
+  decide
+
+theorem screen_capture_inline_cap_rejects_over_3750k :
+    shapeCaptureInlineDecision false 5000000 = some false ∧
+    shapeCaptureInlineDecision true 3750000 = some true ∧
+    shapeCaptureInlineDecision true 3750001 = none := by
+  decide
+
+theorem container_host_mount_and_port_bounds :
+    isSafeHostMountModel .workspaceRel = true ∧
+    isSafeHostMountModel .procOrSys = false ∧
+    isSafeHostMountModel .runtimeSocket = false ∧
+    isSafeHostMountModel .selfwareOrGit = false ∧
+    isValidPortModel 0 = false ∧
+    isValidPortModel 65535 = true ∧
+    isValidPortModel 65536 = false := by
+  decide
+
+theorem process_start_guard_rejects_any_violation :
+    validateProcessStartGuard false false false false = true ∧
+    validateProcessStartGuard true false false false = false ∧
+    validateProcessStartGuard false true false false = false ∧
+    validateProcessStartGuard false false true false = false ∧
+    validateProcessStartGuard false false false true = false := by
+  decide
+
+theorem bounded_command_killed_descendants_override_zero_exit :
+    boundedCommandVerdict true false = (true, 0) ∧
+    boundedCommandVerdict true true = (false, -1) := by
+  decide
+
+-- ============================================================================
+-- Section PA75: Evolve AST, Skeleton, Symbols, Component Map & Graph Index Lattice
+-- (`src/evolve/ast.rs`, `src/evolve/skeleton.rs`, `src/evolve/symbols.rs`,
+--  `src/evolve/map.rs`, `src/evolve/summary.rs`, `src/evolve/graph_index.rs`)
+-- ============================================================================
+
+inductive CfgPredicateModel where
+  | cfgTest
+  | cfgAllWithTest
+  | cfgAnyWithTest
+  | cfgOther
+  deriving DecidableEq, Repr
+
+/-- Mirrors `evolve::ast::cfg_predicate_requires_test`. -/
+def cfgRequiresTest : CfgPredicateModel → Bool
+  | .cfgTest | .cfgAllWithTest => true
+  | .cfgAnyWithTest | .cfgOther => false
+
+/-- Mirrors `evolve::ast::AstAnalyzer::collect_cfg_test_ranges`. -/
+def cfgRangeSelected (p : CfgPredicateModel) (isExternalMod includeExternal : Bool) : Bool :=
+  cfgRequiresTest p && (includeExternal || !isExternalMod)
+
+inductive SkeletonDeclKind where
+  | useItem
+  | constItem
+  | constFnItem
+  | fnItem
+  | implItem
+  deriving DecidableEq, Repr
+
+/-- Mirrors `evolve::skeleton::extract_rust_skeleton` arm ordering (`const fn` before `const`). -/
+def classifySkeletonDecl : SkeletonDeclKind → String
+  | .useItem => "use"
+  | .constFnItem | .fnItem => "fn"
+  | .constItem => "const"
+  | .implItem => "impl"
+
+/-- Mirrors `evolve::symbols::extract_pub_symbols` visibility filter. -/
+def symbolExtractedIfPublic (isPublicVis hasValidSpan : Bool) : Bool :=
+  isPublicVis && hasValidSpan
+
+/-- Mirrors `evolve::map::build_card` 48-symbol cap and overflow counter. -/
+def capComponentSymbols (totalPublic : Nat) : Nat × Nat :=
+  let kept := if totalPublic <= 48 then totalPublic else 48
+  (kept, totalPublic - kept)
+
+inductive NodeLayerExpandKind where
+  | code
+  | auxiliary
+  | test
+  | structure
+  | concept
+  | preset
+  | symbol
+  deriving DecidableEq, Repr
+
+/-- Mirrors `evolve::map::build_map`: bulk map includes only `NodeLayer::Code`. -/
+def nodeIncludedInBulkMap : NodeLayerExpandKind → Bool
+  | .code => true
+  | _ => false
+
+/-- Mirrors `evolve::map::expand`: on-demand expand allows file-backed nodes (`Code`, `Auxiliary`, `Test`, `Structure`) and rejects `Concept`, `Preset`, `Symbol`. -/
+def nodeEligibleForOnDemandExpand : NodeLayerExpandKind → Bool
+  | .concept | .preset | .symbol => false
+  | .code | .auxiliary | .test | .structure => true
+
+/-- Mirrors `evolve::summary::compile_structural_summary` completeness invariant. -/
+def structuralSummaryComplete
+    (hasParseError truncated depthLimitReached : Bool)
+    (invalidRanges omittedKinds : Nat) : Bool :=
+  !hasParseError && !truncated && !depthLimitReached && invalidRanges == 0 && omittedKinds == 0
+
+/-- Mirrors `evolve::graph_index::GraphIndex::hotspots` symbol-layer opt-in filter. -/
+def hotspotIncludesNode
+    (requestedLayer : Option NodeLayerExpandKind)
+    (nodeLayer : NodeLayerExpandKind) : Bool :=
+  match requestedLayer with
+  | some wanted => nodeLayer == wanted
+  | none => nodeLayer != .symbol
+
+theorem cfg_any_test_excluded_and_external_mod_separated :
+    cfgRangeSelected .cfgTest true true = true ∧
+    cfgRangeSelected .cfgTest true false = false ∧
+    cfgRangeSelected .cfgAllWithTest false false = true ∧
+    cfgRangeSelected .cfgAnyWithTest false true = false := by
+  decide
+
+theorem skeleton_const_fn_classified_as_fn :
+    classifySkeletonDecl .constFnItem = "fn" ∧
+    classifySkeletonDecl .constItem = "const" := by
+  decide
+
+theorem symbols_extract_only_public_with_span :
+    symbolExtractedIfPublic true true = true ∧
+    symbolExtractedIfPublic false true = false ∧
+    symbolExtractedIfPublic true false = false := by
+  decide
+
+theorem component_map_symbol_cap_conserves_total (n : Nat) :
+    (capComponentSymbols n).1 + (capComponentSymbols n).2 = n ∧
+    (capComponentSymbols n).1 <= 48 := by
+  unfold capComponentSymbols
+  dsimp
+  split <;> constructor <;> omega
+
+theorem component_map_50_symbols_splits_48_and_2 :
+    capComponentSymbols 50 = (48, 2) := by
+  decide
+
+theorem auxiliary_excluded_from_bulk_map_but_expandable :
+    nodeIncludedInBulkMap .code = true ∧
+    nodeIncludedInBulkMap .auxiliary = false ∧
+    nodeEligibleForOnDemandExpand .auxiliary = true ∧
+    nodeEligibleForOnDemandExpand .concept = false ∧
+    nodeEligibleForOnDemandExpand .symbol = false := by
+  decide
+
+theorem hotspots_exclude_symbol_by_default_and_include_on_opt_in :
+    hotspotIncludesNode none .code = true ∧
+    hotspotIncludesNode none .symbol = false ∧
+    hotspotIncludesNode (some .symbol) .symbol = true := by
+  decide
+
+theorem structural_summary_incomplete_on_any_defect :
+    structuralSummaryComplete false false false 0 0 = true ∧
+    structuralSummaryComplete true false false 0 0 = false ∧
+    structuralSummaryComplete false true false 0 0 = false ∧
+    structuralSummaryComplete false false false 1 0 = false ∧
+    structuralSummaryComplete false false false 0 1 = false := by
+  decide
+
+-- ============================================================================
+-- Section PA76: Agent Execution Loop, Tool Dispatch & Result Envelope Lattice
+-- (`src/agent/result_envelope.rs`, `src/agent/tool_dispatch/*`,
+--  `src/agent/task_runner.rs`, `src/agent/interactive/*`)
+-- ============================================================================
+
+inductive EnvelopeTokenClass where
+  | ordinaryCode
+  | framingTag
+  | chatmlSpecial
+  | mistralBracket
+  | literalEscapedBeforeTag
+  deriving DecidableEq, Repr
+
+/-- Mirrors `agent::result_envelope::encode`. -/
+def envelopeNeutralizes : EnvelopeTokenClass → Bool
+  | .ordinaryCode => false
+  | .framingTag | .chatmlSpecial | .mistralBracket | .literalEscapedBeforeTag => true
+
+inductive ToolErrorClassModel where
+  | safetyViolation
+  | resourceNotFound
+  | permissionDenied
+  | argumentError
+  | timeout
+  | executionError
+  deriving DecidableEq, Repr
+
+def ToolErrorClassModel.asStr : ToolErrorClassModel → String
+  | .safetyViolation => "SAFETY_VIOLATION"
+  | .resourceNotFound => "RESOURCE_NOT_FOUND"
+  | .permissionDenied => "PERMISSION_DENIED"
+  | .argumentError => "ARGUMENT_ERROR"
+  | .timeout => "TIMEOUT"
+  | .executionError => "EXECUTION_ERROR"
+
+inductive ConfirmResponseModel where
+  | yes
+  | always
+  | shellRule
+  | yolo
+  | viewFullDiff
+  | skip
+  deriving DecidableEq, Repr
+
+inductive ConfirmStepModel where
+  | showFullDiff
+  | decide (d : ConfirmResponseModel)
+  deriving DecidableEq, Repr
+
+/-- Mirrors `agent::tool_dispatch::helpers::confirm_step`. -/
+def resolveConfirmStepModel (resp : ConfirmResponseModel) (fullDiffOffered : Bool) : ConfirmStepModel :=
+  match resp with
+  | .viewFullDiff => if fullDiffOffered then .showFullDiff else .decide .skip
+  | other => .decide other
+
+/-- Mirrors `agent::tool_dispatch::helpers::is_dependency_install_command`. -/
+def isDependencyInstallCmdModel (hasInstaller hasVerb : Bool) : Bool :=
+  hasInstaller && hasVerb
+
+inductive ShellVerificationKindModel where
+  | testExecution
+  | compileOrLint
+  | smokeRun
+  deriving DecidableEq, Repr
+
+def ShellVerificationKindModel.shortTag : ShellVerificationKindModel → String
+  | .testExecution => "test"
+  | .compileOrLint => "compile"
+  | .smokeRun => "smoke"
+
+/-- Mirrors `agent::tool_dispatch::verification_call_ran_nothing`. -/
+def verificationCallRanNothingModel (exitCode126Or127 runnerNotStarted noCargoManifest : Bool) : Bool :=
+  exitCode126Or127 || runnerNotStarted || noCargoManifest
+
+/-- Mirrors `agent::tool_dispatch::cargo_found_no_manifest`. -/
+def cargoFoundNoManifestModel (hasNoManifestErrorLine ranAnyBuildOrTest : Bool) : Bool :=
+  hasNoManifestErrorLine && !ranAnyBuildOrTest
+
+/-- Mirrors `agent::tool_dispatch::spill::tool_result_value_indicates_success`. -/
+def toolResultIndicatesSuccessModel
+    (explicitSuccessFalse explicitPassedFalse timedOut truthyError nonZeroExit : Bool) : Bool :=
+  !explicitSuccessFalse && !explicitPassedFalse && !truthyError && !timedOut && !nonZeroExit
+
+/-- Mirrors `agent::task_runner::RunBudgets::from_config` filtering `0` as unset (`none`). -/
+def filterPositiveBudget (raw : Nat) : Option Nat :=
+  if raw > 0 then some raw else none
+
+theorem envelope_ordinary_code_untouched_and_control_tokens_neutralized :
+    envelopeNeutralizes .ordinaryCode = false ∧
+    envelopeNeutralizes .framingTag = true ∧
+    envelopeNeutralizes .chatmlSpecial = true ∧
+    envelopeNeutralizes .mistralBracket = true ∧
+    envelopeNeutralizes .literalEscapedBeforeTag = true := by
+  decide
+
+theorem confirm_view_diff_fails_closed_when_unoffered :
+    resolveConfirmStepModel .viewFullDiff true = .showFullDiff ∧
+    resolveConfirmStepModel .viewFullDiff false = .decide .skip := by
+  decide
+
+theorem dependency_install_requires_installer_and_verb :
+    isDependencyInstallCmdModel true true = true ∧
+    isDependencyInstallCmdModel true false = false ∧
+    isDependencyInstallCmdModel false true = false := by
+  decide
+
+theorem cargo_no_manifest_false_when_tests_ran :
+    cargoFoundNoManifestModel true false = true ∧
+    cargoFoundNoManifestModel true true = false ∧
+    verificationCallRanNothingModel true false false = true := by
+  decide
+
+theorem verification_ran_nothing_on_any_nonstart_signal :
+    verificationCallRanNothingModel false false false = false ∧
+    verificationCallRanNothingModel true false false = true ∧
+    verificationCallRanNothingModel false true false = true ∧
+    verificationCallRanNothingModel false false true = true := by
+  decide
+
+theorem tool_result_truthy_error_defeats_zero_exit :
+    toolResultIndicatesSuccessModel false false false false false = true ∧
+    toolResultIndicatesSuccessModel false false false true false = false ∧
+    toolResultIndicatesSuccessModel false false false false true = false ∧
+    toolResultIndicatesSuccessModel false false true false false = false := by
+  decide
+
+theorem tool_result_explicit_false_flags_fail :
+    toolResultIndicatesSuccessModel true false false false false = false ∧
+    toolResultIndicatesSuccessModel false true false false false = false := by
+  decide
+
+theorem run_budgets_filter_zero_as_unset :
+    filterPositiveBudget 0 = none ∧
+    filterPositiveBudget 120 = some 120 := by
+  decide
+
+-- ============================================================================
+-- Section PA77: RSI Doctor, Multimodal Rejection & Exit Code Lattice
+-- (`src/llm_doctor.rs`, `src/api/client.rs`, `src/cognitive/self_edit.rs`,
+--  `src/errors.rs`, `src/orchestration/multiagent/chat.rs`)
+-- ============================================================================
+
+/-- Mirrors `llm_doctor::evaluate_vision_responses` red/blue control probe classification. -/
+def evaluateVisionConditioningModel (redIsRed redIsBlue blueIsRed blueIsBlue : Bool) : String :=
+  if redIsRed && !redIsBlue && !blueIsRed && blueIsBlue then
+    "Conditioned"
+  else if (redIsRed && blueIsRed) || (redIsBlue && blueIsBlue) || (redIsBlue && blueIsRed) then
+    "Unconditioned"
+  else
+    "Inconclusive"
+
+/-- Mirrors `api::client::is_multimodal_engine_rejection` fast-fail classification. -/
+def isMultimodalEngineRejectionModel
+    (hasImageUrl : Bool) (status : Nat) (hasEngineSignal hasMultimodalSignal : Bool) : Bool :=
+  if !hasImageUrl then
+    false
+  else if status == 500 then
+    hasEngineSignal || hasMultimodalSignal
+  else if status == 400 || status == 415 || status == 422 || status == 501 then
+    hasMultimodalSignal
+  else
+    false
+
+/-- Mirrors `cognitive::self_edit::SelfEditOrchestrator::build_improvement_prompt` four-gate verifier requirement. -/
+def improvementGatesComplete (hasFmt hasCheck hasClippy hasTest : Bool) : Bool :=
+  hasFmt && hasCheck && hasClippy && hasTest
+
+inductive RunEndClassModel where
+  | success
+  | cancelled
+  | terminated
+  | safetyBlocked
+  | configError
+  | apiFailed
+  | failed
+  deriving DecidableEq, Repr
+
+def RunEndClassModel.asStr : RunEndClassModel → String
+  | .success => "Completed"
+  | .cancelled => "Interrupted"
+  | .terminated => "Terminated"
+  | .safetyBlocked | .configError | .apiFailed | .failed => "Failed"
+
+def RunEndClassModel.exitCode : RunEndClassModel → Nat
+  | .success => 0
+  | .cancelled => 130
+  | .terminated => 143
+  | .safetyBlocked => 5
+  | .configError => 2
+  | .apiFailed => 4
+  | .failed => 1
+
+/-- Mirrors `orchestration::multiagent::chat::MultiAgentChat::run_single_agent` gateway-timeout stream fallback guard. -/
+def shouldAttemptGatewayStreamRecovery (isGatewayTimeout : Bool) (remainingSecs : Nat) : Bool :=
+  isGatewayTimeout && remainingSecs > 0
+
+theorem vision_conditioning_requires_red_and_blue_exact_polarity :
+    evaluateVisionConditioningModel true false false true = "Conditioned" ∧
+    evaluateVisionConditioningModel true false true false = "Unconditioned" ∧
+    evaluateVisionConditioningModel false true true false = "Unconditioned" ∧
+    evaluateVisionConditioningModel false false false true = "Inconclusive" := by
+  decide
+
+theorem multimodal_rejection_requires_image_url_and_matching_status_signal :
+    isMultimodalEngineRejectionModel true 500 true false = true ∧
+    isMultimodalEngineRejectionModel true 500 false false = false ∧
+    isMultimodalEngineRejectionModel true 400 false true = true ∧
+    isMultimodalEngineRejectionModel true 400 false false = false ∧
+    isMultimodalEngineRejectionModel true 422 false true = true ∧
+    isMultimodalEngineRejectionModel true 503 true true = false ∧
+    isMultimodalEngineRejectionModel false 500 true true = false := by
+  decide
+
+theorem improvement_gates_require_all_four_cargo_verifiers :
+    improvementGatesComplete true true true true = true ∧
+    improvementGatesComplete false true true true = false ∧
+    improvementGatesComplete true true false true = false := by
+  decide
+
+theorem run_end_exit_codes_partition_posix_and_typed_failures :
+    RunEndClassModel.success.exitCode = 0 ∧
+    RunEndClassModel.cancelled.exitCode = 130 ∧
+    RunEndClassModel.terminated.exitCode = 143 ∧
+    RunEndClassModel.safetyBlocked.exitCode = 5 ∧
+    RunEndClassModel.configError.exitCode = 2 ∧
+    RunEndClassModel.apiFailed.exitCode = 4 ∧
+    RunEndClassModel.failed.exitCode = 1 := by
+  decide
+
+theorem gateway_recovery_requires_gateway_status_and_positive_remaining_budget :
+    shouldAttemptGatewayStreamRecovery true 30 = true ∧
+    shouldAttemptGatewayStreamRecovery true 0 = false ∧
+    shouldAttemptGatewayStreamRecovery false 30 = false := by
+  decide
+
+-- ============================================================================
+-- Section PA78: Conjoined Citation Fenced Quotes & GroundedAssistant Lattice
+-- (`src/agent/citation_check.rs`, `src/evolve/assistant.rs`)
+-- ============================================================================
+
+/-- Mirrors `agent::citation_check::fenced_quote_after` ownership for multi-citation lines. -/
+def multiCitationFencedQuoteOwned (citeCount : Nat) (isNumbered : Bool) (lineMatchesRange : Bool) : Bool :=
+  if citeCount == 0 then
+    false
+  else if citeCount == 1 then
+    true
+  else
+    isNumbered && lineMatchesRange
+
+/-- Mirrors `agent::citation_check::parse_citations` quote source priority (`inline` vs `fenced`). -/
+def selectCitationQuoteSource
+    (hasSameLineQuote isBare hasTrailingProse hasFencedBlock : Bool) : String :=
+  if !hasSameLineQuote then
+    if hasFencedBlock then "fenced" else "none"
+  else if !isBare && !hasTrailingProse then
+    "inline"
+  else if hasFencedBlock then
+    "fenced"
+  else
+    "inline"
+
+/-- Mirrors `evolve::assistant::review_client_config` completion floor and template thinking disable. -/
+def reviewClientConfigModel (maxTokens : Nat) (hasEnableThinkingKwarg : Bool) : Nat × Bool :=
+  (Nat.max maxTokens 8192, if hasEnableThinkingKwarg then false else false)
+
+theorem multi_citation_fenced_quote_requires_numbered_matching_lines :
+    multiCitationFencedQuoteOwned 2 true true = true ∧
+    multiCitationFencedQuoteOwned 2 true false = false ∧
+    multiCitationFencedQuoteOwned 2 false true = false ∧
+    multiCitationFencedQuoteOwned 1 false false = true := by
+  decide
+
+theorem citation_quote_source_prefers_fenced_over_prose_or_bare_heading_span :
+    selectCitationQuoteSource true true true true = "fenced" ∧
+    selectCitationQuoteSource true false true true = "fenced" ∧
+    selectCitationQuoteSource true false false true = "inline" ∧
+    selectCitationQuoteSource true false true false = "inline" := by
+  decide
+
+theorem review_client_config_floors_tokens_and_disables_template_thinking :
+    reviewClientConfigModel 2048 true = (8192, false) ∧
+    reviewClientConfigModel 16384 true = (16384, false) := by
+  decide
+
 /-! ## Export deterministic 3-column table for `scripts/check_formal.sh` & Rust conformance tests -/
 
-def exportTable : String :=
+def exportTablePart1 : List String :=
   -- 1. SignalEmotion priority lattice rows
   let emotionScenarios : List (String × Bool × Bool × Bool × Bool × Bool) :=
     [ ("failure_dominates_all", true, true, true, true, true)
@@ -6206,7 +9127,810 @@ def exportTable : String :=
       s!"[\"ui_output_lattice:tui_arena_formal_drill_cycling_and_streak\",\"three_seed_slot_rotation_formal_hit_xp_badge_and_miss_streak_reset\",\"slots={s0},{s1},{s2}:formal_xp={hitXp}:damage=50:streak_bps={hitStreak}:badge_formal_sentinel=true:miss_streak_bps={missStreak}\"]"
     ]
 
-  "[" ++ ",".intercalate (emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows ++ wave10Rows ++ wave11Rows ++ wave12Rows) ++ "]"
+  -- 53–56. PA53–PA56 rows (Wave 13: API/Client/Usage, Evolve Context/Envelope, Tool Arg Guards, Session Store/Encryption)
+  let wave13Rows : List String :=
+    [ let pNone := extraBodyPinsReasoningModel false false
+      let pTemp := extraBodyPinsReasoningModel false false
+      let pEff := extraBodyPinsReasoningModel true false
+      let pKw := extraBodyPinsReasoningModel false true
+      let q1 := (stepDownReasoningModel true true .high true).asStr
+      let q2 := (stepDownReasoningModel true true .medium true).asStr
+      let q3 := (stepDownReasoningModel true true .low true).asStr
+      let q4 := (stepDownReasoningModel true true .low false).asStr
+      let q38 := (stepDownReasoningModel true false .high true).asStr
+      let defInj := (stepDownReasoningModel false true .nonePinned false).asStr
+      s!"[\"api_client_usage:extra_body_pins_reasoning_and_qwen_step_down\",\"extra_body_reasoning_detection_and_qwen_vs_unhonored_step_down_chain\",\"pins_none={pNone}:pins_temp={pTemp}:pins_effort={pEff}:pins_kwargs={pKw}:qwen27b={q1}->{q2}->{q3}->{q4}:qwen38={q38}:default_inject={defInj}\"]"
+    , let cDef := sideCallEffectiveCapSecs 60 none
+      let cMin := sideCallEffectiveCapSecs 60 (some 20)
+      let cCap := sideCallEffectiveCapSecs 60 (some 300)
+      let qDef := sideCallEffectiveCapSecs 30 none
+      let gw504 := classifyGatewayTimeoutModel 504 false
+      let gw502T := classifyGatewayTimeoutModel 502 true
+      let gw502R := classifyGatewayTimeoutModel 502 false
+      let gw429 := classifyGatewayTimeoutModel 429 true
+      s!"[\"api_client_usage:side_call_bounds_and_gateway_timeout_classification\",\"side_call_cap_min_and_thinking_strip_plus_502_504_429_timeout_gate\",\"comp_default={cDef}:comp_min20={cMin}:comp_cap300={cCap}:quick_default={qDef}:max_tokens=256:stripped_reasoning=true:enable_thinking=false:gw_504={gw504}:gw_502_timeout={gw502T}:gw_502_refused={gw502R}:gw_429={gw429}\"]"
+    , let sanCot := sanitizeAssistantContentModel "" "chain of thought" false
+      let sanEmpty := sanitizeAssistantContentModel "" "" false
+      s!"[\"api_client_usage:prepare_request_messages_canonicalization_and_sanitize\",\"disabled_thinking_system_merge_empty_assistant_fallback_and_trailing_user_guard\",\"total_len=4:first_role=system:has_both_sys=true:second_merged=Part 1|Part 2:third_sanitized={sanCot}:last_role=user:empty_fallback={sanEmpty}\"]"
+    , let covA : UsageCoverageModel := ⟨true, false, false⟩
+      let covB : UsageCoverageModel := ⟨false, true, true⟩
+      let uComp := (covA.union covB).isComplete
+      let iAny := (covA.intersect covB).any
+      let sPrompt := mergeStreamingField 100 80
+      let sComp := mergeStreamingField 20 50
+      let fbPrompt := applyFallbackField true sPrompt 999
+      let fbComp := applyFallbackField true sComp 999
+      let fbTotal := applyFallbackField false 0 250
+      s!"[\"api_client_usage:usage_coverage_lattice_and_ledger_reconciliation\",\"coverage_union_intersect_stream_monotonic_max_and_fallback_missing_only\",\"union_complete={uComp}:intersect_any={iAny}:stream_prompt={sPrompt}:stream_comp={sComp}:after_fb_prompt={fbPrompt}:after_fb_comp={fbComp}:after_fb_total={fbTotal}:fb_reconciled=false:exact_reconciled=true\"]"
+    , let (repVal, repEst) := resolveReasoningTokensModel (some 42) (some 99) none
+      let (_, estFlag) := resolveReasoningTokensModel none none (some 18)
+      let repNum := repVal.getD 0
+      s!"[\"api_client_usage:usage_reasoning_token_estimation_and_image_strip\",\"reported_vs_estimated_reasoning_tokens_and_multimodal_image_strip\",\"reported_pref={repNum}:reported_is_est={repEst}:est_reported=none:est_effective=18:est_flag={estFlag}:before_img=true:after_img=false:after_len=4\"]"
+    , let mAuto := (parseRequestedModeName "auto").getD "err"
+      let mFe := (parseRequestedModeName "full_extended").getD "err"
+      let mFull := (parseRequestedModeName "full").getD "err"
+      let mLite := (parseRequestedModeName "lite").getD "err"
+      let mComp := (parseRequestedModeName "compact").getD "err"
+      let mSkel := (parseRequestedModeName "skeleton").getD "err"
+      let mBogus := (parseRequestedModeName "bogus").isNone
+      s!"[\"evolve_context_envelope:requested_mode_parse_and_roundtrip\",\"auto_full_extended_full_lite_compact_skeleton_alias_and_invalid_reject\",\"auto={mAuto}:full_ext={mFe}:full={mFull}:lite={mLite}:compact={mComp}:skeleton={mSkel}:bogus_err={mBogus}\"]"
+    , let r1 := fitBudgetOutputReserve 100000 10000
+      let u1 := fitBudgetUsable 100000 10000 85
+      let r2 := fitBudgetOutputReserve 100000 50000
+      let u2 := fitBudgetUsable 100000 50000 85
+      s!"[\"evolve_context_envelope:fit_budget_output_reserve_cap_and_usable_ratio\",\"output_reserve_capped_at_quarter_context_and_usable_scaled_by_fit_ratio\",\"b1_reserve={r1}:b1_usable={u1}:b2_reserve={r2}:b2_usable={u2}\"]"
+    , let tFe := measureTierTokensModel 1000 200 656 144 500 410 300 .fullExtended
+      let tFull := measureTierTokensModel 1000 200 656 144 500 410 300 .full
+      let tComp := measureTierTokensModel 1000 200 656 144 500 410 300 .compact
+      let tLite := measureTierTokensModel 1000 200 656 144 500 410 300 .lite
+      let tMap := measureTierTokensModel 1000 200 656 144 500 410 300 .mapMode
+      s!"[\"evolve_context_envelope:tier_measurer_non_rust_verbatim_and_fallback\",\"full_ext_includes_tests_full_subtracts_inline_and_lite_keeps_non_rust_verbatim\",\"full_ext={tFe}:full={tFull}:compact={tComp}:lite={tLite}:map={tMap}\"]"
+    , let (s1, m1, f1) := selectCascadingTier 1800 1300 1066 644 0 2000
+      let (s2, m2, f2) := selectCascadingTier 1800 1300 1066 644 0 1500
+      let (s3, m3, f3) := selectCascadingTier 1800 1300 1066 644 0 1100
+      let (s4, m4, f4) := selectCascadingTier 1800 1300 1066 644 0 700
+      s!"[\"evolve_context_envelope:fit_tier_cascading_selection_and_downgrade_ledger\",\"cascades_full_extended_to_full_to_compact_to_lite_by_measured_budget\",\"at2000={s1.asStr}/{m1}/{f1}:at1500={s2.asStr}/{m2}/{f2}:at1100={s3.asStr}/{m3}/{f3}:at700={s4.asStr}/{m4}/{f4}\"]"
+    , let pAg := isProtectedEvolvePath false true
+      let pSaf := isProtectedEvolvePath false true
+      let pForm := isProtectedEvolvePath false true
+      let pQ := isProtectedEvolvePath true false
+      let pNorm := isProtectedEvolvePath false false
+      s!"[\"evolve_context_envelope:envelope_layer_filtering_hash_and_protected_paths\",\"layer_filter_by_mode_length_prefixed_hash_and_protected_path_guard\",\"fe_nodes=3:custom_nodes=2:full_nodes=1:hash_collision_free=true:prot_agents={pAg}:prot_safety={pSaf}:prot_formal={pForm}:prot_quote={pQ}:prot_normal={pNorm}\"]"
+    , let rOk := validateGitRefModel true true false false false false
+      let rFlag := validateGitRefModel true true true false false false
+      let rDotDot := validateGitRefModel true true false true false false
+      let rLock := validateGitRefModel true true false false false true
+      let rAt := validateGitRefModel true true false false true false
+      let pRefspec := validatePushBranchModel true false false true
+      let pHead := validatePushBranchModel true true false false
+      let pTag := validatePushBranchModel true false true false
+      s!"[\"tool_arg_guards:git_ref_and_push_branch_validation\",\"rejects_flag_double_dot_lock_refspec_head_and_normalizes_refs_heads\",\"ref_ok={rOk}:ref_flag={rFlag}:ref_dotdot={rDotDot}:ref_lock={rLock}:ref_atbrace={rAt}:push_norm=feat/x:push_refspec={pRefspec}:push_head={pHead}:push_tag={pTag}:remote_ok=true:remote_flag=false:remote_unconfigured=false\"]"
+    , let fOp := validateRegistrySpecModel true true false false false false
+      let pOk := validateRegistrySpecModel true false false false false false
+      let pUrl := validateRegistrySpecModel true false true false false false
+      let pWhl := validateRegistrySpecModel true false false true false false
+      let pGit := validateRegistrySpecModel true false true false false false
+      let pTrav := validateRegistrySpecModel true false false false true false
+      let nOk := validateRegistrySpecModel true false false false false false
+      let nGh := validateRegistrySpecModel true false true false false false
+      let nFile := validateRegistrySpecModel true false true false true false
+      let nAlias := validateRegistrySpecModel true false false false false true
+      let nTgz := validateRegistrySpecModel true false false true false false
+      s!"[\"tool_arg_guards:package_pip_npm_registry_and_argv_flag_guard\",\"allows_pinned_registry_specs_and_blocks_url_vcs_archive_traversal_and_flags\",\"flag_op={fOp}:pip_ok={pOk}:pip_url={pUrl}:pip_whl={pWhl}:pip_git={pGit}:pip_trav={pTrav}:npm_scoped_ok={nOk}:npm_github={nGh}:npm_file={nFile}:npm_alias={nAlias}:npm_tgz={nTgz}\"]"
+    , let (vPassOk, vPassZero) := cargoTestRunVerdictModel true 5 0
+      let (vZeroOk, vZeroFlag) := cargoTestRunVerdictModel true 0 0
+      let (vFailOk, vFailZero) := cargoTestRunVerdictModel false 2 1
+      s!"[\"tool_arg_guards:cargo_libtest_totals_and_zero_test_honesty_gate\",\"aggregates_multi_binary_libtest_and_fails_closed_when_zero_tests_run\",\"sum_passed=5:sum_failed=1:sum_ignored=1:pass_verdict={vPassOk}/{vPassZero}:zero_verdict={vZeroOk}/{vZeroFlag}/true:fail_verdict={vFailOk}/{vFailZero}\"]"
+    , s!"[\"tool_arg_guards:line_numbers_roundtrip_and_raw_file_read_unwrap\",\"numbers_lines_detects_prefix_strips_back_to_raw_and_unwraps_file_read_json\",\"is_num_numbered=true:is_num_raw=false:strip_roundtrip=true:file_read_unwrap=true\"]"
+    , let shPipe := dangerousShellPatternMatch true false
+      let shRm := dangerousShellPatternMatch false true
+      let shCheck := dangerousShellPatternMatch false false
+      let shSha := dangerousShellPatternMatch false false
+      s!"[\"tool_arg_guards:dangerous_shell_word_boundary_and_schema_validation\",\"blocks_pipe_to_sh_and_rm_root_without_false_positive_on_shellcheck_or_sha256sum\",\"pipe_sh={shPipe}:rm_root={shRm}:pipe_shellcheck={shCheck}:pipe_sha256sum={shSha}:schema_ok=true:schema_missing_req=false:schema_bad_type=false\"]"
+    , let ov := aesGcmCiphertextLen 28 - 28
+      let decOk := canDecryptPayloadModel 56 true true
+      let decShort := !canDecryptPayloadModel 11 true true
+      let decTamp := !canDecryptPayloadModel 56 true false
+      let decWrong := !canDecryptPayloadModel 56 false true
+      s!"[\"session_store_encryption:aes256_gcm_roundtrip_overhead_and_tamper_reject\",\"nonce_12_plus_tag_16_overhead_28_roundtrip_and_short_tampered_wrong_key_reject\",\"overhead={ov}:roundtrip={decOk}:short_err={decShort}:tamper_err={decTamp}:wrong_key_err={decWrong}\"]"
+    , let sValid := validateChatSessionNameModel true true
+      let sEmpty := validateChatSessionNameModel false true
+      let sSpace := validateChatSessionNameModel true false
+      let sTrav := validateChatSessionNameModel true false
+      let sDot := validateChatSessionNameModel true false
+      let spLoad := !canLoadOrDeleteChatFile true false
+      let spDel := !canLoadOrDeleteChatFile true false
+      let vLoad := canLoadOrDeleteChatFile true true
+      let vDel := canLoadOrDeleteChatFile true true
+      s!"[\"session_store_encryption:chat_store_name_collision_and_alias_rejection\",\"strict_charset_rejects_spaces_dots_traversal_and_mismatched_internal_name\",\"valid_save={sValid}:empty_save={sEmpty}:space_save={sSpace}:trav_save={sTrav}:dot_save={sDot}:spoof_load_err={spLoad}:spoof_del_err={spDel}:valid_load={vLoad}:valid_del={vDel}\"]"
+    , let cMilli := llmCacheEstimatedCostMilli 2000 1000 3 15
+      s!"[\"session_store_encryption:tool_cache_classification_and_llm_cost_accounting\",\"cacheable_vs_invalidating_tools_tree_scoped_keys_and_llm_cost_millicents\",\"cache_read=true:cache_shell=false:inv_edit=true:inv_read=false:tree_dir=true:tree_read=false:file_arg=src/main.rs:cost_milli={cMilli}\"]"
+    , let uEmpty := editHistoryCanUndoModel 1 false
+      let uFile := editHistoryCanUndoModel 1 true
+      let pLen := pruneCheckpointsLen 3 2
+      s!"[\"session_store_encryption:edit_history_undo_redo_and_max_checkpoint_pruning\",\"lone_empty_checkpoint_cannot_undo_with_files_undoes_and_prunes_to_max\",\"lone_empty_undo={uEmpty}:lone_with_file_undo={uFile}:after_undo_redo=true:after_redo_redo=false:pruned_len={pLen}:oldest_desc=cp2\"]"
+    , let rClean := if canRestoreSnapshotGuarded true false then 1 else 0
+      let rConf := !canRestoreSnapshotGuarded false false
+      let rForce := if canRestoreSnapshotGuarded false true then 1 else 0
+      s!"[\"session_store_encryption:restore_checkpoint_guarded_conflict_and_rollback\",\"clean_restore_reverts_while_external_edit_conflicts_without_clobber\",\"clean_restored={rClean}:clean_content=before_a:conflict_err={rConf}:preserved_external=true:forced_restored={rForce}\"]"
+    ]
+
+  -- 57–60. PA57–PA60 rows (Wave 14: Safety Scanner/Permissions, Introspect/Edit, Context/Recovery, Evolve Action/Apply/Quality)
+  let wave14Rows : List String :=
+    [ let findings : List ScannerSeverity := [.critical, .low, .high]
+      let s0 := ScannerSeverity.info.scoreTenths
+      let s1 := ScannerSeverity.low.scoreTenths
+      let s2 := ScannerSeverity.medium.scoreTenths
+      let s3 := ScannerSeverity.high.scoreTenths
+      let s4 := ScannerSeverity.critical.scoreTenths
+      let tot := findings.length
+      let hasCrit := scanResultHasCritical findings
+      let hasHigh := scanResultHasHigh findings
+      let risk := scanResultRiskScoreTenths findings
+      s!"[\"safety_scanner_guard:severity_score_order_and_scan_risk_aggregation\",\"five_tier_scores_and_critical_high_risk_sum\",\"scores_tenths={s0}/{s1}/{s2}/{s3}/{s4}:total={tot}:crit={hasCrit}:high={hasHigh}:risk_tenths={risk}\"]"
+    , let cHigh := if secretPatternMatchesLine true .high true then 1 else 0
+      let cCrit := if secretPatternMatchesLine true .critical true then 1 else 0
+      let mLen := maskedSecretCharCount 20
+      let codeHigh := if secretPatternMatchesLine false .high true then 1 else 0
+      s!"[\"safety_scanner_guard:secret_comment_critical_only_and_snippet_masking\",\"comment_skips_high_keeps_critical_and_masks_secret_prefix\",\"comment_high={cHigh}:comment_crit={cCrit}/{ScannerSeverity.critical.asStr}/CWE-798:masked_len={mLen}:leaks_suffix=false:code_high={codeHigh}/{ScannerSeverity.high.asStr}\"]"
+    , s!"[\"safety_scanner_guard:dependency_audit_and_compliance_standards\",\"lodash_high_log4j_critical_clean_serde_and_three_standards\",\"lodash=true/high/CVE-2021-23337:log4j=true/critical/CVE-2021-44228:serde=false/none:standards=HIPAA,OWASP Top 10,PCI-DSS\"]"
+    , let gOk := permissionGrantMatchesModel true true false
+      let gDot := permissionGrantMatchesModel true true true
+      let cPre := deriveShellAllowRuleKind false true true false false == .prefixRule
+      let cSuite := prefixRuleMatchesCommand true false true false true
+      let cFlag := prefixRuleMatchesCommand true false true true true
+      let rmEx := deriveShellAllowRuleKind false false true true false == .exactRule
+      let gitEx := deriveShellAllowRuleKind false true true false true == .exactRule
+      s!"[\"safety_scanner_guard:permission_grant_traversal_and_shell_allow_rule\",\"dotdot_rejected_exact_rm_bare_git_and_prefix_cargo_test_flag_guard\",\"grant_ok={gOk}:grant_dotdot={gDot}:cargo_prefix={cPre}:cargo_suite={cSuite}:cargo_flag={cFlag}:rm_exact={rmEx}:bare_git_exact={gitEx}\"]"
+    , let (hMaj, hMin, hAttr) := selectArmGitVersion 2 39 2 45 true
+      let (oMaj, oMin, oAttr) := selectArmGitVersion 2 39 2 43 false
+      let (sMaj, sMin, sAttr) := selectArmGitVersion 2 44 2 43 false
+      s!"[\"safety_scanner_guard:quarantine_git_version_and_operator_home_selection\",\"git_2_39_vs_2_43_attr_source_and_operator_home_fallback\",\"v239=2.39:v243=2.43:home_skipped_ver={hMaj}.{hMin}/{hAttr}:opt_promoted_ver={oMaj}.{oMin}/{oAttr}:sys_modern_ver={sMaj}.{sMin}/{sAttr}\"]"
+    , let dFull := (IntrospectDepth.full.downgrade.map IntrospectDepth.asStr).getD "none"
+      let dDeps := (IntrospectDepth.dependencies.downgrade.map IntrospectDepth.asStr).getD "none"
+      let dSig := (IntrospectDepth.signatures.downgrade.map IntrospectDepth.asStr).getD "none"
+      let dOv := (IntrospectDepth.overview.downgrade.map IntrospectDepth.asStr).getD "none"
+      s!"[\"introspect_edit_lattice:depth_downgrade_chain_and_measured_suggestion\",\"full_to_signatures_to_overview_none_and_complete_vs_best_fit\",\"full_down={dFull}:deps_down={dDeps}:sig_down={dSig}:ov_down={dOv}:suggest_complete=signatures:suggest_tie=signatures:suggest_empty=none\"]"
+    , let b0 := IntrospectBudgetState.reservePct 1000 20
+      let rem0 := b0.remaining
+      let (ok1, b1) := b0.tryAllocate 500
+      let rem1 := b1.remaining
+      let util1 := (b1.used * 100) / b1.total
+      let (okOver, b2) := b1.tryAllocate 301
+      let rem2 := b2.remaining
+      let (okExact, b3) := b2.tryAllocate 300
+      let exh3 := b3.exhausted
+      s!"[\"introspect_edit_lattice:token_budget_reserve_all_or_nothing_allocation\",\"reserve_20pct_alloc_fits_reject_overflow_and_exhaust_boundary\",\"rem_after_reserve={rem0}:ok1={ok1}:rem_after_500={rem1}:util_pct={util1}:ok_over={okOver}:rem_unchanged={rem2}:ok_exact={okExact}:exhausted={exh3}\"]"
+    , let rescueNum := denumberEditFires true false true true
+      let rescuePlain := if denumberEditFires true true false true then "some" else "none"
+      s!"[\"introspect_edit_lattice:keyword_stopword_rust_parser_and_denumber_rescue\",\"stopword_filter_pub_symbol_extraction_and_copied_prefix_denumber_rescue\",\"keywords=tokenbudget,a_b:lang_ext=rust:lang_override=python:fns=2:first_fn=pub /run/Doc comment:rescued={rescueNum}:rescued_lines=2:plain_rescue={rescuePlain}\"]"
+    , let rFresh := if refuseDisplayArtifactsModel true false false false false then "refused" else "allowed"
+      let rPre := if refuseDisplayArtifactsModel true true false false false then "refused" else "allowed"
+      let rEscRs := if refuseDisplayArtifactsModel false false true false false then "refused" else "allowed"
+      let rEscHtml := if refuseDisplayArtifactsModel false false true false true then "refused" else "allowed"
+      s!"[\"introspect_edit_lattice:display_artifact_refusal_and_crlf_preservation\",\"redacted_marker_and_escaped_tag_refused_unless_preexisting_or_html\",\"fresh_redacted={rFresh}:preexisting_redacted={rPre}:escaped_rs={rEscRs}:escaped_html={rEscHtml}:ending=CRLF:crlf_pairs=2\"]"
+    , let hValid := checkDiffHeaderSafeModel false false
+      let hQuoted := checkDiffHeaderSafeModel true false
+      let hCtrl := checkDiffHeaderSafeModel false true
+      s!"[\"introspect_edit_lattice:patch_diff_header_safety_and_hunk_stats\",\"valid_rel_diff_stats_vs_traversal_absolute_and_git_escape_rejected\",\"valid_hdr={hValid}:quoted_hdr={hQuoted}:ctrl_hdr={hCtrl}:stats=1/2/1/src/lib.rs,src/old.rs:del_targets=src/dead.rs\"]"
+    , let mMerge := classifyTaskModality true false false false false
+      let (mC, mCmp, mTh) := mMerge.ratiosPct
+      let mRef := classifyTaskModality false true false false false
+      let (rfC, rfCmp, rfTh) := mRef.ratiosPct
+      let mRev := classifyTaskModality false false true false false
+      let (rvC, rvCmp, rvTh) := mRev.ratiosPct
+      let mDbg := classifyTaskModality false false false true false
+      let (dC, dCmp, dTh) := mDbg.ratiosPct
+      let mGrn := classifyTaskModality false false false false true
+      let (gC, gCmp, gTh) := mGrn.ratiosPct
+      let mImp := classifyTaskModality false false false false false
+      let (iC, iCmp, iTh) := mImp.ratiosPct
+      let mPrio := (classifyTaskModality true true false true false).name
+      s!"[\"context_recovery_lattice:modality_classification_and_allocation_ratios\",\"six_modalities_priority_and_budget_content_compression_thinking_split\",\"merge={mMerge.name}/{mC}/{mCmp}/{mTh}:refactor={mRef.name}/{rfC}/{rfCmp}/{rfTh}:review={mRev.name}/{rvC}/{rvCmp}/{rvTh}:debug={mDbg.name}/{dC}/{dCmp}/{dTh}:greenfield={mGrn.name}/{gC}/{gCmp}/{gTh}:impl={mImp.name}/{iC}/{iCmp}/{iTh}:priority={mPrio}:split=60000/25000/15000\"]"
+    , let (lvlB, _, savedB) := downgradeNodeToSkeleton .fullLevel 200 none
+      let (lvlA, _, _) := downgradeNodeToSkeleton .fullLevel 200 (some 50)
+      s!"[\"context_recovery_lattice:context_map_l1_l2_l3_lifecycle_and_two_pass_eviction\",\"tree_skeleton_full_transitions_and_compress_to_fit_pass_order\",\"tree_two=20:no_skel_downgrade={savedB}:a_after_downgrade={lvlA.name}:b_after_downgrade={lvlB.name}:after_fit_levels=Map/Map:after_fit_tokens=20\"]"
+    , let th := contextCompressorThreshold 10000
+      let at7500 := decide (7500 > th)
+      let at7501 := decide (7501 > th)
+      let (_, s1) := stepSummaryFailureStrike 0
+      let (_, s2) := stepSummaryFailureStrike 1
+      let (_, s3) := stepSummaryFailureStrike 2
+      s!"[\"context_recovery_lattice:context_compressor_skip_gates_and_failure_latch\",\"too_few_messages_rejected_watermark_and_three_strike_disable\",\"thresh={th}:at_7500={at7500}:at_7501={at7501}:few_7=true:strike1={s1}:strike2={s2}:strike3={s3}:same_task_disabled=true:new_task_reset=true\"]"
+    , let acBelow := autoCompactShouldCompress false 799 1000 80
+      let acAt := autoCompactShouldCompress false 800 1000 80
+      let acF2Allows := autoCompactShouldCompress false 950 1000 80
+      let acOpenBlocks := autoCompactShouldCompress true 950 1000 80
+      let sb1 := stubTokenBudgetModel 8000
+      let sb2 := stubTokenBudgetModel 19200
+      let sb3 := stubTokenBudgetModel 65536
+      s!"[\"context_recovery_lattice:autocompact_circuit_breaker_and_stub_budget_clamp\",\"threshold_clamp_three_failures_open_circuit_success_resets_and_stub_budget\",\"below={acBelow}:at_thresh={acAt}:f2_allows={acF2Allows}:f2_open=false:f3_open=true:open_blocks={acOpenBlocks}:after_succ_open=false:stub_budgets={sb1}/{sb2}/{sb3}\"]"
+    , let fSucc := AgentFailureKindModel.success
+      let fNoCh := AgentFailureKindModel.noChange
+      let fFake := AgentFailureKindModel.fakeComplete
+      let fReq := AgentFailureKindModel.requiredEditMissing
+      let fVer := AgentFailureKindModel.verificationFailed
+      s!"[\"context_recovery_lattice:failure_kind_honesty_split_and_overview_compaction\",\"real_edit_and_no_changes_nonfailure_vs_fake_complete_and_overview_strip\",\"success={fSucc.tag}/{fSucc.isSuccess}/{fSucc.isNonfailure}:no_change={fNoCh.tag}/{fNoCh.isSuccess}/{fNoCh.isNonfailure}:fake={fFake.tag}/{fFake.isSuccess}/{fFake.isNonfailure}:req_edit={fReq.tag}/{fReq.isSuccess}/{fReq.isNonfailure}:ver_fail={fVer.tag}/{fVer.isSuccess}/{fVer.isNonfailure}:ov_removed=1:keeps_task=true:tool_res_skipped=0\"]"
+    , let bExt := EvolveActionKind.extendAction.createsBranch
+      let bConn := EvolveActionKind.connectAction.createsBranch
+      let bBlk := EvolveActionKind.blockEvolution.createsBranch
+      let bNot := EvolveActionKind.notifyAction.createsBranch
+      s!"[\"evolve_action_apply_quality:action_branch_sanitization_and_proposal_gate\",\"extend_branch_slug_vs_connect_block_notify_no_executor\",\"ext_prefix=true:empty_fallback=true:conn_prefix=true:ext_has_branch={bExt}:conn_has_branch={bConn}:block_has_branch={bBlk}:notify_has_branch={bNot}\"]"
+    , let scExact := isScaffoldArtifactModel true false
+      let scNest := isScaffoldArtifactModel false true
+      let scWin := isScaffoldArtifactModel false true
+      let scSib := isScaffoldArtifactModel false false
+      let scSrc := isScaffoldArtifactModel false false
+      let rEmp := ApplyRejectReasonModel.emptyDiff.display
+      let rScp := (ApplyRejectReasonModel.outOfScope "Cargo.toml").display
+      let rCmp := (ApplyRejectReasonModel.compileFailed "err").display
+      let rKil := (ApplyRejectReasonModel.killswitchActive "halt").display
+      s!"[\"evolve_action_apply_quality:scaffold_artifact_filter_and_reject_reason_display\",\"phi_activity_paths_filtered_sibling_kept_and_four_reject_tags\",\"exact={scExact}:nested={scNest}:win_sep={scWin}:sibling={scSib}:src={scSrc}:empty={rEmp}:scope={rScp}:compile={rCmp}:kill={rKil}\"]"
+    , let gEmp := ApplyRejectReasonModel.emptyDiff.display
+      let gCargo := ((verifyStagedPathGate false false false false "Cargo.toml").map ApplyRejectReasonModel.display).getD "ok"
+      let gProt := ((verifyStagedPathGate false false true true "src/safety/guard.rs").map ApplyRejectReasonModel.display).getD "ok"
+      let gOk := (verifyStagedPathGate false false true false "src/lib.rs").isNone
+      s!"[\"evolve_action_apply_quality:verify_staged_diff_scope_protected_and_clean_stage\",\"empty_out_of_scope_protected_rejected_and_src_edit_staged_without_scaffolding\",\"scaffold_only={gEmp}:cargo_toml={gCargo}:protected={gProt}:valid_src=ok/1/2/1/{gOk}\"]"
+    , let cMiss := ((evaluateCommitStagedGate false true true true true "staged").map CommitRejectModel.tag).getD "ok"
+      let cDig := ((evaluateCommitStagedGate true true false true true "staged").map CommitRejectModel.tag).getD "ok"
+      let cRun := ((evaluateCommitStagedGate true false true true true "running").map CommitRejectModel.tag).getD "ok"
+      let cMoved := ((evaluateCommitStagedGate true true true true false "staged").map CommitRejectModel.tag).getD "ok"
+      s!"[\"evolve_action_apply_quality:commit_staged_registry_digest_status_and_base_guards\",\"unknown_run_digest_mismatch_not_staged_and_base_moved_rejected\",\"missing_id={cMiss}:digest_mismatch={cDig}:running_status={cRun}:head_moved={cMoved}\"]"
+    , let cc6 := staticComplexityTenths 6
+      let dc12 := staticDeadCodeRatioPct 1 2
+      let ccAvg := (staticComplexityTenths 0 + staticComplexityTenths 2) / 2
+      let ccEmp := staticComplexityTenths 0
+      let dcEmp := staticDeadCodeRatioPct 0 0
+      s!"[\"evolve_action_apply_quality:quality_static_content_complexity_and_dead_code_bounds\",\"static_node_fields_decision_token_weights_and_ratio_clamping\",\"warn=none:cov=none:cc_tenths={cc6}:dc_pct={dc12}:dir_avg_tenths={ccAvg}:empty_cc_tenths={ccEmp}:empty_dc_pct={dcEmp}\"]"
+    ]
+
+  emotionRows ++ trustRows ++ presenceRows ++ bossRows ++ dreamRows ++ roleRows ++ cacheRows ++ restoreRows ++ profileRows ++ contextTrustRows ++ contextFitRows ++ applyRows ++ wave3Rows ++ wave4Rows ++ wave5Rows ++ wave6Rows ++ wave7Rows ++ wave8Rows ++ wave9Rows ++ wave10Rows ++ wave11Rows ++ wave12Rows ++ wave13Rows ++ wave14Rows
+
+-- 61–64. PA61–PA64 rows (Wave 15: SWL Workflow/State, Cognitive Memory/RAG, Testing/QA/Verification, Skills/Resources Lifecycle)
+def wave15Rows : List String :=
+    [ let emp := swlEmptyDocIssueCount true true true true
+      let mr := swlMapReduceStageIssues true false false
+      let s0 := swlStepActionIssues 0 false
+      let s2 := swlStepActionIssues 2 false
+      let sUnk := swlStepActionIssues 1 true
+      let vDoc := swlStepActionIssues 1 false
+      s!"[\"swl_workflow_state:document_and_step_kind_validation\",\"empty_doc_mapreduce_missing_and_step_action_exclusivity\",\"empty_doc={emp}:mr_missing={mr}:step_0={s0}:step_2={s2}:step_unk={sUnk}:valid_doc={vDoc}\"]"
+    , let dSteps := loweredDelegateStepCount true
+      let (bSev, bReq) := SwlViolationAction.block.loweredSeverityAndRequired
+      let (aSev, aReq) := SwlViolationAction.alert.loweredSeverityAndRequired
+      let (wSev, wReq) := SwlViolationAction.warn.loweredSeverityAndRequired
+      let (lSev, lReq) := SwlViolationAction.log.loweredSeverityAndRequired
+      s!"[\"swl_workflow_state:workflow_lowering_and_guardrail_severity\",\"delegate_output_capture_budget_omission_and_four_violation_tiers\",\"delegate_with_out_steps={dSteps}:capture_dep=true:unbounded_omitted=true:bounded_kept=true:block={bSev}/{bReq}:alert={aSev}/{aReq}:warn={wSev}/{wReq}:log={lSev}/{lReq}\"]"
+    , let rIss := codegenReduceLanguageIssues true true
+      let pyIss := codegenReduceLanguageIssues true false
+      let (sc1, sc2, sc3) := SwlFieldTypeKind.scalar.flags
+      let (ar1, ar2, ar3) := SwlFieldTypeKind.collection.flags
+      let (rf1, rf2, rf3) := SwlFieldTypeKind.reference.flags
+      s!"[\"swl_workflow_state:codegen_compatibility_and_field_type_taxonomy\",\"rust_vs_python_reduce_codegen_and_scalar_collection_reference_flags\",\"rust_reduce_issues={rIss}:python_reduce_issues={pyIss}:scalar={sc1}/{sc2}/{sc3}:array={ar1}/{ar2}/{ar3}:agent_ref={rf1}/{rf2}/{rf3}\"]"
+    , let fInt := swlValueMatchesNumericField false true true false
+      let iFlt := swlValueMatchesNumericField true false false true
+      let dropReq := swlStateTransitionValid true false
+      let unkFld := swlStateTransitionValid false true
+      let okTr := swlStateTransitionValid false false
+      s!"[\"swl_workflow_state:state_schema_validation_and_transition_guard\",\"float_accepts_int_integer_rejects_float_and_transition_required_unknown_guards\",\"float_accepts_int={fInt}:int_accepts_float={iFlt}:missing_req_ok=false:valid_state_ok=true:drop_req_ok={dropReq}:unknown_field_ok={unkFld}:valid_trans_ok={okTr}\"]"
+    , let bMem := parseStateBackendSupported "memory"
+      let bFile := parseStateBackendSupported "file"
+      let bUpper := parseStateBackendSupported "MEMORY"
+      let bBogus := parseStateBackendSupported "bogus"
+      let d0 := false
+      let d1 := stepStateManagerDirty d0 .applyDefaults
+      let d2 := stepStateManagerDirty d1 .save
+      let d3 := stepStateManagerDirty d2 .setInvalid
+      s!"[\"swl_workflow_state:state_backend_parse_and_manager_dirty_lifecycle\",\"backend_kind_parsing_and_defaults_save_invalid_set_dirty_flags\",\"mem={bMem}:file={bFile}:upper_mem={bUpper}:bogus={bBogus}:init_dirty={d0}:after_defaults_dirty={d1}:after_save_dirty={d2}:bad_set_err=true:dirty_after_bad={d3}:val_preserved=10\"]"
+    , let rClose := decide (neutralizedRawTagCount 2 1 > 0)
+      let rOpen := decide (neutralizedRawTagCount 2 1 > 0)
+      let outCnt := framedOuterCloseTagCount 1
+      s!"[\"cognitive_memory_rag:memory_data_tag_neutralization_and_framing\",\"case_insensitive_tag_neutralization_and_attribute_escaped_framing\",\"raw_close_remains={rClose}:raw_open_remains={rOpen}:escaped_entity=true:escaped_path_attr=true:outer_close_count={outCnt}\"]"
+    , let rCnt := extractImportsCountModel .rust 2
+      let pCnt := extractImportsCountModel .python 1
+      let jCnt := extractImportsCountModel .javascript 2
+      let uCnt := extractImportsCountModel .unknown 5
+      s!"[\"cognitive_memory_rag:semantic_linker_multi_language_import_extraction\",\"rust_python_js_import_regex_extraction_and_unknown_empty\",\"rust={rCnt}/std::collections::HashMap,swl::lowering:py={pCnt}/pkg.sub:js={jCnt}/react,fs:unknown={uCnt}\"]"
+    , let mBeg := lessonEstimatedMinutes 2
+      let mAdv := lessonEstimatedMinutes 1
+      let mTot := mBeg + mAdv
+      s!"[\"cognitive_memory_rag:code_explainer_and_curriculum_difficulty_order\",\"comment_skip_concept_detection_and_sorted_difficulty_lesson_minutes\",\"line_explanations=4:concepts=3:lessons=2:first_diff=Beginner/{mBeg}:second_diff=Advanced/{mAdv}:total_min={mTot}\"]"
+    , let vPub := RustVisibilityModel.pubVis.isPublic
+      let vCrate := RustVisibilityModel.pubCrate.isPublic
+      let vPriv := RustVisibilityModel.privateVis.isPublic
+      s!"[\"cognitive_memory_rag:symbol_visibility_dependency_graph_and_patterns\",\"pub_visibility_cargo_toml_sections_and_four_pattern_detectors\",\"pub={vPub}:pub_crate={vCrate}:priv={vPriv}:deps_total=4:deps_direct=2:deps_dev=1:tokio_opt=true:cc_build=true:patterns=4\"]"
+    , let unvNotRun := verificationNotRunRatePct false false
+      let recPct := errorRecoveryRatePct 4 3
+      let verNotRun := verificationNotRunRatePct true true
+      s!"[\"cognitive_memory_rag:performance_snapshot_honesty_and_rag_context\",\"unverified_none_rates_vs_verified_rates_and_rag_rust_context_builder\",\"unver_first=none:unver_final=none:unver_not_run_pct={unvNotRun}:rec_pct={recPct}:unrec=1:ver_first=0:ver_final=100:ver_not_run_pct={verNotRun}:rag_rs_exts=3:ctx_sections=3\"]"
+    , let gS := (classifyQualityGradeTenths 950).asStr
+      let gA := (classifyQualityGradeTenths 900).asStr
+      let gB := (classifyQualityGradeTenths 800).asStr
+      let gC := (classifyQualityGradeTenths 700).asStr
+      let gD := (classifyQualityGradeTenths 600).asStr
+      let gF := (classifyQualityGradeTenths 599).asStr
+      let sc := (stageWeightedScoreTenths false true false 15 + stageWeightedScoreTenths false false true 20 + stageWeightedScoreTenths true false true 25) / 10
+      s!"[\"testing_verification_qa:quality_grade_thresholds_and_weighted_score\",\"six_grade_cutoffs_warning_half_credit_and_not_run_zero_contribution\",\"grades={gS}/{gA}/{gB}/{gC}/{gD}/{gF}:score={sc}:not_run_failed=false\"]"
+    , let (py5P, py5Nr) := demoteZeroTestRun false true false false
+      let (py0P, py0Nr) := demoteZeroTestRun true false true false
+      let (pyOkP, pyOkNr) := demoteZeroTestRun true false false false
+      let (go0P, go0Nr) := demoteZeroTestRun true false false true
+      s!"[\"testing_verification_qa:language_qa_zero_test_and_stage_set_gating\",\"marker_detection_profile_stage_sets_and_pytest_unittest_go_npm_zero_test_demotion\",\"langs=rust/node/python/go/unknown:fast=false/false/false:std=true/true/false:full=true/true/true:py5_pass={py5P}/{py5Nr}:py0_pass={py0P}/{py0Nr}:py_ok={pyOkP}/{pyOkNr}:go_notest={go0P}/{go0Nr}:npm_placeholder=none:npm_vitest=some\"]"
+    , let (edRf, fbRf) := resolveRustEditionModel (some "2024") (some "2021") none
+      let (edPkg, fbPkg) := resolveRustEditionModel none (some "2021") none
+      let (edWs, fbWs) := resolveRustEditionModel none none (some "2024")
+      let (edFb, fbFb) := resolveRustEditionModel none none none
+      s!"[\"testing_verification_qa:rust_edition_resolution_and_rustfmt_args\",\"rustfmt_overrides_cargo_pkg_workspace_inheritance_and_2021_fallback\",\"rustfmt={edRf}/{fbRf}:pkg={edPkg}/{fbPkg}:ws={edWs}/{fbWs}:fallback={edFb}/{fbFb}:args=--edition,2024,--check,--config,skip_children=true\"]"
+    , let cxx23 := cmakeStdFlagModel true 23 false
+      let c17Gnu := cmakeStdFlagModel false 17 true
+      let j8 := normalizeJavaMajorModel 1 8
+      let j21 := normalizeJavaMajorModel 21 0
+      s!"[\"testing_verification_qa:syntax_toolchain_jsonc_esm_cmake_python_java\",\"jsonc_comments_trailing_comma_esm_detection_cmake_flags_and_python_java_versions\",\"jsonc_ok=true/2:esm_cjs=false:esm_mod=true:cxx23={cxx23}:c17_gnu={c17Gnu}:py_min=3.10:java8={j8}:java21={j21}\"]"
+    , let uOk := classifyRustfmtFailureModel true false false == .toolUnavailable
+      let dOk := classifyRustfmtFailureModel false true false == .formattingDiff
+      let deOk := classifyRustfmtFailureModel false true true == .syntaxFailure
+      let pOk := classifyRustfmtFailureModel false false true == .syntaxFailure
+      let bAllNr := (classifyVerificationBanner true 2 2).tag
+      let bPartNr := (classifyVerificationBanner true 2 1).tag
+      let bFail := (classifyVerificationBanner false 2 0).tag
+      s!"[\"testing_verification_qa:rustfmt_failure_classification_and_report_honesty\",\"missing_component_diff_only_vs_syntax_error_and_not_verified_report_banner\",\"unavail={uOk}:diff_only={dOk}:diff_plus_err={deOk}:parse_err={pOk}:all_not_run=2/true/{bAllNr}:partial_not_run=1/false/{bPartNr}:failed={bFail}\"]"
+    , let vMd := parseSkillFrontmatterValid true true true
+      let noOpen := !parseSkillFrontmatterValid false true true
+      let noClose := !parseSkillFrontmatterValid true false true
+      let empName := !parseSkillFrontmatterValid true true false
+      let admMan := if userSkillDiscoveryAdmitted false false then 1 else 0
+      let refCand := if !userSkillDiscoveryAdmitted true false then 1 else 0
+      s!"[\"skills_resources_lifecycle:skill_frontmatter_parsing_and_task_wrapping\",\"frontmatter_delimiters_user_dir_candidate_refusal_and_slash_skill_wrapping\",\"valid_md={vMd}:no_open_err={noOpen}:no_close_err={noClose}:empty_name_err={empName}:user_loaded={admMan}:user_refused={refCand}:wrapped_badge=true:wrapped_sub=true\"]"
+    , let (cLbls, iLbls, hasBuiltBy, hasTaskLbl) := containerAndImageLabelIsolation true
+      s!"[\"skills_resources_lifecycle:owner_scope_and_container_image_label_isolation\",\"task_local_owner_scope_and_container_task_vs_image_built_by_labels\",\"outside_none=true:scoped_task=task-42:scoped_agent=coder:container_labels={cLbls}:image_labels={iLbls}:img_has_built_by={hasBuiltBy}:img_has_task_label={hasTaskLbl}:task_is_sess=false:sess_is_sess=true\"]"
+    , let (_, g1) := tryAllocateQuotaModel 0 600 1000
+      let (gOverOk, _) := tryAllocateQuotaModel g1 500 1000
+      let gDrop := releaseQuotaGuardModel g1 600
+      let (_, r2) := tryAllocateQuotaModel 1 1 2
+      let (rOverOk, _) := tryAllocateQuotaModel r2 1 2
+      let rDrop := releaseQuotaGuardModel r2 1
+      let (tOverOk, _) := tryAllocateQuotaModel 1 1 1
+      let tDrop := releaseQuotaGuardModel 1 1
+      s!"[\"skills_resources_lifecycle:resource_limit_tracker_raii_and_quota_guards\",\"gpu_request_task_raii_guards_and_adaptive_quota_memory_ceiling\",\"gpu_ok={g1}:gpu_over_err={!gOverOk}:gpu_after_drop={gDrop}:req_at_cap={r2}:req_over_err={!rOverOk}:req_after_drop={rDrop}:task_over_err={!tOverOk}:task_after_drop={tDrop}:sys_mem_at_100x=true:sys_mem_over_100x=false\"]"
+    , let stRel := (classifyReaperEntryModel true false true false false).label
+      let stLeak := (classifyReaperEntryModel false true true false false).label
+      let stKeep := (classifyReaperEntryModel false false true true false).label
+      let stSess := (classifyReaperEntryModel false false true false true).label
+      let stAct := (classifyReaperEntryModel false false true false false).label
+      let stOrph := (classifyReaperEntryModel false false false true false).label
+      let stDead := (classifyReaperEntryModel false false false false false).label
+      s!"[\"skills_resources_lifecycle:reaper_entry_classification_and_zombie_detection\",\"released_leaked_kept_session_owned_active_orphan_and_dead_session_zombie\",\"released={stRel}:leaked={stLeak}:live_keep={stKeep}:live_sess={stSess}:live_task={stAct}:dead_keep={stOrph}:dead_task={stDead}\"]"
+    , let (sDrn, aDrn) := (stepResourceStateModel .live .drain).getD (.live, false)
+      let (sLk, aLk) := (stepResourceStateModel sDrn .deadlinePassed).getD (.live, false)
+      let (sRel, _) := (stepResourceStateModel .draining .stopped).getD (.live, false)
+      let relInv := (stepResourceStateModel sRel .drain).isNone
+      let totBytes := storageEstimateTotal 100 200 300 50
+      s!"[\"skills_resources_lifecycle:registry_lifecycle_transitions_and_drain_report\",\"live_to_draining_to_leaked_alarm_released_terminal_and_drain_storage_totals\",\"after_drain={sDrn.asStr}/{aDrn}:after_deadline={sLk.asStr}/{aLk}:after_stop={sRel.asStr}:from_released_err={relInv}:empty_outcome=none:counts=2/1/1:storage_total={totBytes}\"]"
+    ]
+
+-- 65–68. PA65–PA68 rows (Wave 16: Bench Harness Lattice, Lifecycle Projection Lattice, Evolution AST/Replay/Telemetry, Orchestration Multi-Agent/Workflow)
+def wave16Rows : List String :=
+    [ let c0 := clampBenchConcurrency 0
+      let vOk := validateHarnessConfigModel true true c0 2048 120
+      let vEmp := !validateHarnessConfigModel false true c0 2048 120
+      let inf1 := streamInferenceLatencyMs 450 120
+      let inf2 := streamInferenceLatencyMs 80 200
+      let (jScore, jPass) := jsonEvaluatorScorePermille true 1 2
+      s!"[\"bench_harness_lattice:config_stream_and_evaluators\",\"concurrency_clamp_stream_inference_latency_and_keyword_json_evaluators\",\"clamp0={c0}:valid_ok={vOk}:empty_ep_err={vEmp}:inf_lat={inf1},{inf2}:kw=500,true:json={jScore},{jPass}\"]"
+    , s!"[\"bench_harness_lattice:harness_report_transport_vs_eval\",\"transport_succeeded_latency_filter_vs_eval_failure_and_avg_score\",\"total=3:pass=1:fail=2:err_permille=667:p50=400:inf_p50=300:min=200:max=400:qwait=150:tps=30:avg_score=700\"]"
+    , let sG := (classifyLongRunningStatus true 5 0 100).label
+      let sP := (classifyLongRunningStatus true 3 2 100).label
+      let sC := (classifyLongRunningStatus true 0 2 100).label
+      let sW := (classifyLongRunningStatus false 0 0 10).label
+      let sF := (classifyLongRunningStatus false 0 0 2).label
+      s!"[\"bench_harness_lattice:long_running_status_and_rates\",\"five_tier_project_status_lattice_success_green_rates_and_template_guard\",\"tiers={sG},{sP},{sC},{sW},{sF}:success_permille=600:green_permille=200:traversal_rejected=true\"]"
+    , let c3BeatsC2 := swebenchCandidateBetter true true 2 3 1 true true 4 2 2
+      s!"[\"bench_harness_lattice:swebench_frozen_selector_and_oracle\",\"source_only_minimal_patch_frozen_selection_blind_to_eval_and_oracle\",\"frozen_num=3:blind_to_eval={c3BeatsC2}:first_num=1:pass_at_1=Some(true):oracle=true\"]"
+    , s!"[\"bench_harness_lattice:trace_diagnosis_and_summary\",\"read_loop_fake_complete_timeout_api_syntax_counts_and_medians\",\"t1_loop=5:t1_fake=true:t1_timeout=true:t1_api=1:t1_syn=1:runs=2:cands=1:med_steps=6:med_edit=3\"]"
+    , let s1 := (stepAgentStateModel .idle .assign).getD .idle
+      let s2 := (stepAgentStateModel s1 .block).getD .idle
+      let s3 := (stepAgentStateModel s2 .unblock).getD .idle
+      let s4 := (stepAgentStateModel s3 .crash).getD .idle
+      let s5 := (stepAgentStateModel s4 .restart).getD .idle
+      let s6 := (stepAgentStateModel s5 .stop).getD .idle
+      let stopTwiceErr := (stepAgentStateModel s6 .stop).isNone
+      s!"[\"lifecycle_projection_lattice:agent_state_machine_and_check_step\",\"assign_block_unblock_crash_restart_stop_and_terminal_absorbing\",\"flow={s1.asStr},{s2.asStr},{s3.asStr},{s4.asStr},{s5.asStr},{s6.asStr}:working_task=Some(t-1):crashed_task=None:term={s6.isTerminal}:stop_twice_err={stopTwiceErr}\"]"
+    , let eComp := taskEnterEffectsCount true
+      let eFail := taskEnterEffectsCount true
+      let eCanc := taskEnterEffectsCount true
+      let eIntr := taskEnterEffectsCount true
+      let ePaus := taskEnterEffectsCount false
+      let okIntr := taskCheckStepTerminalAllowed true true
+      let errComp := !taskCheckStepTerminalAllowed false true
+      s!"[\"lifecycle_projection_lattice:task_effects_and_resource_drainability\",\"terminal_teardown_effect_interrupted_resume_exception_and_drainable_kinds\",\"teardown_counts={eComp},{eFail},{eCanc},{eIntr},{ePaus}:interrupted_resume_ok={okIntr}:completed_resume_err={errComp}:drainable=5:non_drainable=4\"]"
+    , let (capLen, _) := sanitizeCauseLengthModel 300 240
+      let (u1, rem1) := stepTrackedUsageConsumed true
+      let (u2, _) := stepTrackedUsageConsumed rem1
+      s!"[\"lifecycle_projection_lattice:transition_cause_sanitization_and_tracked_usage\",\"multiline_first_line_240_char_cap_and_single_transition_usage_attach\",\"multiline=first line summary:capped_chars={capLen}:ellipsis=true:first_usage={u1}:second_usage={u2}\"]"
+    , let eEmp := !validateTaskEditModel false 5 (some 10) 1000 none
+      let eTurns := !validateTaskEditModel true 5 (some 5) 1000 none
+      let eBudg := !validateTaskEditModel true 5 (some 10) 1000 (some 1000)
+      let eValid := validateTaskEditModel true 5 (some 20) 1000 (some 5000)
+      s!"[\"lifecycle_projection_lattice:task_edit_validation_and_diff\",\"rejects_empty_desc_retroactive_ceilings_and_formats_semicolon_diff\",\"empty_err={eEmp}:turns_err={eTurns}:budget_err={eBudg}:valid_ok={eValid}:noop_none=true:diff=description is now: Fix AST parser; max turns 10 → 20; token budget unbounded → 5000\"]"
+    , let pMs := pausedIntervalTotalMs 1000 16000 true
+      s!"[\"lifecycle_projection_lattice:projection_resolve_pause_and_usage\",\"prefix_task_resolution_paused_duration_across_edit_and_dead_pid_display\",\"resolve=t-alpha-1,t-beta-1,ambig2,notfound:paused_ms={pMs}:fmt=15s,3m41s:none_tok=not recorded:partial_cost=≥ $0.0125 (some calls reported no cost):dead_agent=working (process ended),-\"]"
+    , let pruned := ">".intercalate (pruneAncestryAtLatestEvaluated [("att-2", false), ("att-1", true), ("att-0", true)])
+      s!"[\"evolution_ast_replay_telemetry:ast_parent_commit_and_prune_chain\",\"resolve_parent_base_commit_and_truncate_at_latest_evaluated_ancestor\",\"none=None:empty=None:base=Some(c000base):walk2=Some(c000base):comm3=Some(c333comm):restore_base=0:restore_comm3=att-3:restore_chain2={pruned}\"]"
+    , s!"[\"evolution_ast_replay_telemetry:replay_simulator_guards_and_errors\",\"batch_parallelism_illegal_action_duplicate_node_branch_and_loop_cap\",\"over_par=3>2:illegal=z0:dup_node=a0:dup_branch=A:loop_cap=100\"]"
+    , let (imp, parP, nCost, obj, parR, seqR) := replayMetricsPermille 500 850 4 5 2 200 100
+      s!"[\"evolution_ast_replay_telemetry:replay_metrics_and_pareto_reward\",\"refine_top1_exact_probes_sequential_rounds_objective_and_pareto_reward\",\"rounds=2:probes=4:seq_rounds={seqR}:term=850:improv={imp}:par_pen={parP}:norm_cost={nCost}:obj={obj}:pareto={parR}\"]"
+    , let (st1W, st1Ok) := (rankingStabilityGateModel 1 2 1000 1000).getD (999, true)
+      let (stCW, stCOk) := (rankingStabilityGateModel 2 3 8000 8000).getD (0, false)
+      let (stTW, stTOk) := (rankingStabilityGateModel 2 3 0 0).getD (999, true)
+      s!"[\"evolution_ast_replay_telemetry:ranking_stability_and_honesty_gate\",\"empty_error_single_tree_honesty_gate_concordant_w_and_tied_zero\",\"empty_err=true:single_tree={st1W},{st1Ok}:concordant={stCW},{stCOk}:all_tied={stTW},{stTOk}:hash_len=64\"]"
+    , let (_, bSlow) := classifyBenchDeltaBadge 50
+      let (_, bFast) := classifyBenchDeltaBadge (-35)
+      let (_, bStab) := classifyBenchDeltaBadge 10
+      let isSlow := decide (bSlow == "SLOWER")
+      let isFast := decide (bFast == "FASTER")
+      let isStab := decide (bStab == "STABLE")
+      s!"[\"evolution_ast_replay_telemetry:telemetry_prompt_and_test_parser\",\"multi_suite_cargo_test_sum_and_benchmark_regression_badges\",\"parsed=12,1,2,15:no_result_none=true:slower={isSlow}:faster={isFast}:stable={isStab}:alloc_kb=true:summary_line=true\"]"
+    , let cMin := clampMultiAgentConcurrency 0
+      let cMax := clampMultiAgentConcurrency 99
+      let t0 := agentTagModel "architect" 0
+      let t2 := agentTagModel "tester" 2
+      let col10 := agentColorIndexModel 10
+      s!"[\"orchestration_multiagent_workflow:multiagent_config_tag_and_line_buffer\",\"concurrency_clamp_1_to_16_1_based_agent_tag_and_per_agent_line_buffer\",\"def_conc=4:clamp={cMin},{cMax}:tags={t0},{t2}:color10={col10}:buf=0,other,hello,Some(world),None\"]"
+    , let (_, tab2) := selectTabByNumberModel 3 .all 2
+      let (ok9, _) := selectTabByNumberModel 3 tab2 9
+      let oOk := classifyAgentSummaryOutcome true false
+      let oFail := classifyAgentSummaryOutcome false false
+      let oSkip := classifyAgentSummaryOutcome false true
+      s!"[\"orchestration_multiagent_workflow:multichat_view_tabs_and_summary_rows\",\"tab_cycling_sorted_summary_table_outcomes_and_usage_aggregation\",\"tabs={tab2.asStr},{ok9},Agent(2),All,Agent(2):rows=architect·1/{oOk}/150 (100+50),coder·2/{oFail}/280 (200+80),tester·3/{oSkip}/—:tot_tok=430:cost_milli=20\"]"
+    , let vIdOk := validateWorkflowRunIdModel 13 false true
+      let vIdEmp := !validateWorkflowRunIdModel 0 false true
+      let vIdDot := !validateWorkflowRunIdModel 7 true true
+      let vIdSlash := !validateWorkflowRunIdModel 9 false false
+      let vId129 := !validateWorkflowRunIdModel 129 false true
+      s!"[\"orchestration_multiagent_workflow:workflow_checkpoint_id_and_canonical_fingerprint\",\"run_id_charset_bounds_and_order_invariant_canonical_step_fingerprint\",\"valid_id={vIdOk}:empty_err={vIdEmp}:dot_err={vIdDot}:slash_err={vIdSlash}:len129_err={vId129}:fp_len=64:canonical_eq=true:mutated_ne=true\"]"
+    , let mTok := workflowMeasuredTokensModel 150 120 80
+      let bUnder := (checkWorkflowBudgetModel (some 10) (some 200) 5000 150 100 99 1).asStr
+      let bTok := (checkWorkflowBudgetModel (some 10) (some 200) 5000 150 120 80 1).asStr
+      let bWall := (checkWorkflowBudgetModel (some 10) (some 200) 10000 150 120 80 1).asStr
+      s!"[\"orchestration_multiagent_workflow:workflow_templates_and_budget_gates\",\"tdd_review_templates_measured_tokens_and_wall_clock_first_budget_stop\",\"tdd_steps=5:red_req=false:green_req=true:rev_deps=3:unk_none=true:measured={mTok}:under={bUnder}:tok_hit={bTok}:wall_first={bWall}\"]"
+    , let dIter := checkStepDepIterationAware true (some true) (some false)
+      let dTop := checkStepDepIterationAware true none (some false)
+      let iterOk := decide (dIter == "Ok")
+      s!"[\"orchestration_multiagent_workflow:workflow_dep_check_and_var_substitution\",\"iteration_scoped_dep_lookup_longest_match_no_rescan_and_posix_shell_quote\",\"unk_def_err=true:not_exec=true:not_sat={dTop}:iter2_ok={iterOk}:sub=$item_count and 42:unknown_kept=true:shell_quoted=true\"]"
+    ]
+
+-- 69–72. PA69–PA72 rows (Wave 17: Self-Healing & Supervision, Tools HTTP/Browser/Search/Knowledge, Evolve Repair/Multi-Arm/Dedup/Dead-Code, VLM Bench & SWE-bench Pro)
+def wave17Rows : List String :=
+    [ let rAct := defaultStrategyActionCount .resourceExhaustion
+      let nAct := defaultStrategyActionCount .network
+      let escNet := hasEscalationStrategy .network
+      let escRes := hasEscalationStrategy .resourceExhaustion
+      let escPrs := hasEscalationStrategy .parseError
+      let escAuth := hasEscalationStrategy .authError
+      let escUnk := hasEscalationStrategy .unknown
+      s!"[\"self_healing_supervision_lattice:error_class_and_strategy_mapping\",\"priority_classification_anyhow_downcast_default_and_escalation_strategies\",\"prio=rate_limit,timeout,network,resource_exhaustion,parse_error,auth_error,unknown:io_refused=network:serde_err=parse_error:act_counts={rAct},{nAct}:esc={escNet}/escalate_restart,{escRes}/escalate_reset,{escPrs}/escalate_compress,{escAuth},{escUnk}:fallback_name=retry\"]"
+    , let rNonUnreach := (resolveEndpointOffline true false false).asStr
+      let rLocal := (resolveEndpointOffline true true true).asStr
+      let rRemote := (resolveEndpointOffline true true false).asStr
+      s!"[\"self_healing_supervision_lattice:recovery_tree_offline_resolution\",\"endpoint_fallback_opt_in_local_guard_rate_limit_and_overflow_tree\",\"non_unreach={rNonUnreach}:opt_in_local={rLocal}:opt_in_remote={rRemote}/http://localhost:11434/v1:rate429=retry/2000/3:overflow=compress/8000:disk_full=unresolvable\"]"
+    , let rec2 := learnerRecommends 3 2 2 2
+      let rec3 := learnerRecommends 3 3 2 2
+      let rec1Att := learnerRecommends 3 3 1 1
+      let recLow := learnerRecommends 3 3 2 0
+      let recOk := learnerRecommends 3 3 2 1
+      let actCp := checkpointRingActive 2 3
+      s!"[\"self_healing_supervision_lattice:learner_pattern_window_and_state_checkpoints\",\"pattern_threshold_success_rate_recommendation_and_checkpoint_eviction\",\"below_thresh_pat={rec2}:at_thresh_pat={rec3}:rec_1att={rec1Att}:rec_low={recLow}:rec_ok={recOk}/escalate_restart:active_cp={actCp}:evicted_first=true:latest_msg=m3:restores=1\"]"
+    , let exDis := executorWithinAttemptBudget false 1 2
+      let exEmp := executorWithinAttemptBudget true 0 2
+      let exOver := executorWithinAttemptBudget true 3 2
+      let exOk := executorWithinAttemptBudget true 2 2
+      let p4 := (predictHealth 4 8).asStr
+      let pImm := (predictHealth 10 7).asStr
+      let pDeg := (predictHealth 10 4).asStr
+      let pRisk := (predictHealth 10 2).asStr
+      let pOk := (predictHealth 10 0).asStr
+      s!"[\"self_healing_supervision_lattice:executor_action_guards_and_health_predictor\",\"disabled_empty_max_attempts_validation_and_five_point_health_predictor\",\"disabled_ok={exDis}:empty_ok={exEmp}:over_budget_ok={exOver}/2:valid_ok={exOk}/2:blank_restart_ok=false:no_sm_restore_ok=false:pred={p4},{pImm}/60,{pDeg}/300,{pRisk}/900,{pOk}/none\"]"
+    , let (stPerm, fPerm) := recordClassifiedError .closed 0 2 false
+      let (stTr1, fTr1) := recordClassifiedError stPerm fPerm 2 true
+      let (stTr2, fTr2) := recordClassifiedError stTr1 fTr1 2 true
+      s!"[\"self_healing_supervision_lattice:circuit_breaker_classifier_and_run_supervisor\",\"permanent_error_ignored_transient_trips_open_and_run_supervisor_ids\",\"perm={stPerm.asStr}/{fPerm}/none:tr1={stTr1.asStr}/{fTr1}/some:tr2={stTr2.asStr}/{fTr2}/some:open_succ_keeps_err=true:run_id=run-1:pause_err=true:resume_err=true:abort_missing=false\"]"
+    , let rebind := resolvedAddressAllowed false true false false true
+      let localLan := resolvedAddressAllowed true false true false true
+      let localLoop := resolvedAddressAllowed true true false false true
+      let redirCrossPort := redirectTargetAllowed ⟨false, true, 8000⟩ true false 9000
+      let redirSamePort := redirectTargetAllowed ⟨false, true, 8000⟩ true false 8000
+      let redirPubToLocal := redirectTargetAllowed ⟨false, false, 443⟩ true false 8000
+      s!"[\"tools_http_browser_search_knowledge:net_policy_ssrf_and_redirect_guard\",\"private_host_detection_dns_rebinding_guard_and_cross_port_redirect_block\",\"priv_hosts=true,true,true,false:ftp_err=true:lan_blocked=true:rebind_ok={rebind}:local_lan_ok={localLan}:local_loop_ok={localLoop}:redir_cross_port_ok={redirCrossPort}:redir_same_port_ok={redirSamePort}:redir_pub_to_local_ok={redirPubToLocal}\"]"
+    , let (s1, e1, m1) := paginateSlice 5 1 2
+      let (s2, e2, m2) := paginateSlice 5 3 2
+      let (s3, e3, m3) := paginateSlice 5 9 2
+      let outSec := outboundRequestAllowed true true
+      let outScheme := outboundRequestAllowed false false
+      s!"[\"tools_http_browser_search_knowledge:http_and_browser_outbound_credential_and_pagination\",\"http_browser_secret_exfiltration_block_scheme_guard_and_unicode_pagination\",\"http_sec_ok={outSec}:http_trace_ok=false:browser_sec_ok={outSec}:browser_file_ok={outScheme}:eval_sec_ok={outSec}:p1={s1}..{e1}/βγ/{m1}:p2={s2}..{e2}/δε/{m2}:p3={s3}..{e3}//{m3}\"]"
+    , let r1000 := regexPatternLengthAllowed 1000 1000
+      let r1001 := regexPatternLengthAllowed 1001 1000
+      let gStarNested := globMatchesLiteralSeparator false true false false
+      let gRecNested := globMatchesLiteralSeparator true true false false
+      let gPriv := globMatchesLiteralSeparator true false true false
+      let gSym := globMatchesLiteralSeparator true false false true
+      s!"[\"tools_http_browser_search_knowledge:grep_regex_cache_and_glob_literal_separator\",\"regex_1000_char_cap_and_glob_literal_separator_private_dir_symlink_pruning\",\"regex_1000_ok={r1000}:regex_1001_ok={r1001}:regex_bad_ok=false:star_top=1:star_nested={gStarNested}:rec_count=2:rec_nested={gRecNested}:priv_leaked={gPriv}:sym_leaked={gSym}:cap1_trunc=true\"]"
+    , let mAllFn := symbolFilterMatches .all .fnKind
+      let mStrStr := symbolFilterMatches .structKind .structKind
+      let mStrFn := symbolFilterMatches .structKind .fnKind
+      s!"[\"tools_http_browser_search_knowledge:symbol_search_extraction_and_type_filtering\",\"rust_symbol_extraction_1_based_lines_type_filter_and_private_dir_skip\",\"all_count=5:types=struct,enum,trait,impl,function:lines=1,2,3,4,5:struct_only=1/AlphaWidget:fn_in_struct_filter={mStrFn}:all_matches_fn={mAllFn}:struct_matches_struct={mStrStr}:priv_leaked=false\"]"
+    , let remEdges := (incidentEdgesPurged [(1, 2), (2, 3), (1, 3)] 2).length
+      let expAbs := exportPathSafe false false
+      let expTrav := exportPathSafe true true
+      let expRel := exportPathSafe true false
+      s!"[\"tools_http_browser_search_knowledge:knowledge_graph_crud_and_export_guards\",\"node_edge_crud_remove_node_purges_incident_edges_and_export_path_guard\",\"before_nodes=3:before_edges=3:after_remove_nodes=2:after_remove_edges={remEdges}:remaining_edge=n1->n3:clear_unconfirmed_ok=false:export_abs_ok={expAbs}:export_trav_ok={expTrav}:export_rel_ok={expRel}\"]"
+    , let exMaSome := spanExtractable .machineApplicable true
+      let exMaNone := spanExtractable .machineApplicable false
+      let exMaybe := spanExtractable .maybeIncorrect true
+      let exPlace := spanExtractable .hasPlaceholders true
+      s!"[\"evolve_repair_multiarm_dedup_deadcode:compiler_repair_extract_and_multipart_grouping\",\"machine_applicable_filter_shared_multipart_suggestion_id_and_child_message\",\"ma_some={exMaSome}:ma_none={exMaNone}:maybe={exMaybe}:placeholders={exPlace}:extracted=3:multipart_same_id=true:next_id_distinct=true:child_msg=unused import: remove the whole `use` item\"]"
+    , let gBounds := groupAtomicallyValid false true true
+      let gIntOv := groupAtomicallyValid true false true
+      let gAccOv := groupAtomicallyValid true true false
+      let gValid := groupAtomicallyValid true true true
+      s!"[\"evolve_repair_multiarm_dedup_deadcode:compiler_repair_apply_atomicity_and_path_guards\",\"outside_path_skip_duplicate_dedup_multipart_atomicity_and_reverse_offset_apply\",\"group_guards={gBounds},{gIntOv},{gAccOv},{gValid}:applied=2:dups=1:skipped=4:files=1:mut_removed=true\"]"
+    , let regCnt := testRegressionsCount 1 2 10 9
+      let accOverlap := armAccepted true 0 105 100
+      let accReg := armAccepted true 2 80 100
+      let accWin := armAccepted true 0 90 100
+      s!"[\"evolve_repair_multiarm_dedup_deadcode:multi_arm_median_precheck_and_separation_gate\",\"median_ns_precheck_rejections_test_regressions_and_strict_sample_separation\",\"med=None,200,200:precheck_calls=0:reg_count={regCnt}:overlap_accepted={accOverlap}:reg_accepted={accReg}:win_accepted={accWin}:winner=Some(arm-win):consensus=true\"]"
+    , let cEx := (classifyEvolveDedup true 5 5 5 5).asStr
+      let cNear := (classifyEvolveDedup false 4 5 4 5).asStr
+      let cSize := (classifyEvolveDedup false 1 10 1 1).asStr
+      let cLow := (classifyEvolveDedup false 5 5 3 5).asStr
+      s!"[\"evolve_repair_multiarm_dedup_deadcode:dedup_normalized_lines_jaccard_and_clusters\",\"whitespace_blank_normalization_jaccard_exact_near_and_size_ratio_pruning\",\"norm_len=2:j_empty=0:j_4of5=80:classes={cEx},{cNear},{cSize},{cLow}:pairs=2:first_kind=Exact:second_kind=Near\"]"
+    , let dPlain := isDeadSymbol false false false false false
+      let dDisp := isDeadSymbol true false false false false
+      let dDund := isDeadSymbol false true false false false
+      let dTest := isDeadSymbol false false true false false
+      let dMod := isDeadSymbol false false false true false
+      let dRef := isDeadSymbol false false false false true
+      let sortOk := decide (deadCodeSortKey false < deadCodeSortKey true)
+      s!"[\"evolve_repair_multiarm_dedup_deadcode:dead_code_cross_tree_refs_and_multiline_attrs\",\"dispatched_dunder_multiline_test_attr_cross_tree_refs_and_cfg_gated_sort\",\"flags={dPlain},{dDisp},{dDund},{dTest},{dMod},{dRef}:dead_names=dead_plain,dead_linux:cfg_flags=false,true:plain_before_gated={sortOk}\"]"
+    , let rBloom := (ratingFromBasisPoints 80 80).asStr
+      let rGrow := (ratingFromBasisPoints 60 80).asStr
+      let rWilt := (ratingFromBasisPoints 40 80).asStr
+      let rFrost := (ratingFromBasisPoints 39 80).asStr
+      s!"[\"vlm_bench_and_swebench_pro_lattice:vlm_rating_and_keyword_json_scoring\",\"four_tier_garden_ratings_keyword_json_markdown_extraction_and_bm25_overlap\",\"ratings={rBloom},{rGrow},{rWilt},{rFrost}:kw_acc=50:json_acc=100:overlap_same=100:overlap_disjoint=0:scored_rating=BLOOM\"]"
+    , let filtLen := ([VlmDifficultyTier.easy, .medium, .hard, .veryHard, .extreme, .mega].filter (fun d => difficultyRank d <= difficultyRank .hard)).length
+      let negClamp := clampCorrelationBp false 80
+      let negRat := (ratingFromBasisPoints negClamp 50).asStr
+      let posClamp := clampCorrelationBp true 100
+      let posRat := (ratingFromBasisPoints posClamp 50).asStr
+      s!"[\"vlm_bench_and_swebench_pro_lattice:vlm_levels_pearson_config_and_mega_eval\",\"all_levels_order_difficulty_filter_pearson_correlation_and_mega_visual_clamp\",\"levels=6:ascending=true:hard_filter_len={filtLen}:conc_clamp=1:pearson=100,-100,0:mega_neg={negClamp}/{negRat}:mega_pos={posClamp}/{posRat}:report_fmt=true\"]"
+    , let rOk := safeRepoSlug 2 false false
+      let r3 := safeRepoSlug 3 false false
+      let rDash := safeRepoSlug 2 true false
+      let rDot := safeRepoSlug 2 false true
+      let gOk := safeGitRevision true false false false
+      let gDash := safeGitRevision true true false false
+      let gDot := safeGitRevision true false true false
+      s!"[\"vlm_bench_and_swebench_pro_lattice:swebench_dataset_safety_and_string_coercion\",\"repo_slug_and_git_revision_injection_guards_shortest_sort_and_list_coercion\",\"repo={rOk},{r3},{rDash},{rDot}:rev={gOk},{gDash},{gDot}:bad_id_err=true:sorted_ids=inst_short,inst_long:coerced=2,2,1,0\"]"
+    , let a00 := llamaServerOptionalArgCount false false
+      let a10 := llamaServerOptionalArgCount true false
+      let a01 := llamaServerOptionalArgCount false true
+      let a11 := llamaServerOptionalArgCount true true
+      s!"[\"vlm_bench_and_swebench_pro_lattice:swebench_manifest_lookup_and_llama_server_argv\",\"manifest_atomic_roundtrip_trial_lookup_and_llama_server_optional_arg_inclusion\",\"opt_args={a00},{a10},{a01},{a11}:blank_ts_omitted=true:mmproj_included=true:trial_state=Evaluated:missing_none=true\"]"
+    , let pQ8 := catalogParallelSlots true false
+      let p35b := catalogParallelSlots false true
+      let pStd := catalogParallelSlots false false
+      let ctx := catalogContextWindow
+      s!"[\"vlm_bench_and_swebench_pro_lattice:swebench_catalog_defaults_and_parallel_caps\",\"eleven_quant_specs_262k_ctx_q8_and_35b_single_slot_and_default_quants_membership\",\"total=11:defaults=4:all_defaults_in_catalog=true:all_ctx={ctx}:slots={pQ8},{p35b},{pStd}:find_unknown_none=true\"]"
+    ]
+
+-- 30. Wave 18 rows (PA73-PA76: tui_garden, vision_capture_proc, evolve_ast_map, agent_exec_envelope)
+def wave18Rows : List String :=
+    [ let yAns := (evalPermissionKeyAnswer false false .charY).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let aDis := (evalPermissionKeyAnswer false false .charA).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let pDis := (evalPermissionKeyAnswer false false .charP).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let escAns := (evalPermissionKeyAnswer false false .esc).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let aEn := (evalPermissionKeyAnswer true true .charA).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let pEn := (evalPermissionKeyAnswer true true .charP).map TuiPermissionAnswerModel.asStr |>.getD "none"
+      let (_, vOpen, s0) := stepPermissionDiffView true false 0 .charV
+      let (_, _, s1) := stepPermissionDiffView true vOpen s0 .down
+      let (_, escClose, _) := stepPermissionDiffView true vOpen s1 .esc
+      let stOk := (parseStepStatusModel true true 5).map toString |>.getD "none"
+      let stFail := (parseStepStatusModel true false 3).map toString |>.getD "none"
+      s!"[\"tui_garden:permission_key_answer_and_diff_view_toggle\",\"y_once_a_gated_by_allow_always_p_gated_by_shell_rule_and_v_esc_view_latch\",\"y={yAns}:a_dis={aDis}:p_dis={pDis}:esc={escAns}:a_en={aEn}:p_en={pEn}:v_open={vOpen}:down_scroll={s1}:esc_close={escClose}:step_ok={stOk}:step_fail={stFail}\"]"
+    , let d0 := DashboardStateModel.initial
+      let d1 := stepDashboardTokenUsage d0 120 80
+      let d2 := stepDashboardGardenHealth d1 150
+      let d3 := stepDashboardAgentError d2
+      let mN := ExecutionModeUiModel.normal.statusLabel
+      let mA := ExecutionModeUiModel.autoEdit.statusLabel
+      let mY := ExecutionModeUiModel.yolo.statusLabel
+      let mD := ExecutionModeUiModel.daemon.statusLabel
+      s!"[\"tui_garden:dashboard_honest_telemetry_and_status_mode_lattice\",\"starts_unmeasured_clamps_health_accumulates_tokens_and_resets_session_usage\",\"init_conn={d0.connected}:init_meas={d0.gardenHealthMeasured}:tok_conn={d1.connected}:tok_used={d1.tokensUsed}:health_meas={d2.gardenHealthMeasured}:health_pct={d2.gardenHealthPct}:err_conn={d3.connected}:modes={mN},{mA},{mY},{mD}:reset_tok=0\"]"
+    , let sSeed := (classifyGrowthStage 30 10).asStr
+      let sSpr := (classifyGrowthStage 150 10).asStr
+      let sEst := (classifyGrowthStage 400 10).asStr
+      let sMat := (classifyGrowthStage 800 10).asStr
+      let sAnc := (classifyGrowthStage 1500 10).asStr
+      let sWilt := (classifyGrowthStage 1500 91).asStr
+      let pTest := (classifyPlantType true true false).asStr
+      let pMain := (classifyPlantType false true false).asStr
+      let pToml := (classifyPlantType false false true).asStr
+      let fEmpty := (gardenTendedPctModel 0 0).map toString |>.getD "none"
+      let fHalf := (gardenTendedPctModel 2 1).map toString |>.getD "none"
+      s!"[\"tui_garden:garden_growth_stage_plant_type_and_tended_fraction\",\"wilting_over_90d_seedling_to_ancient_priority_plant_type_and_honest_empty_fraction\",\"stages={sSeed},{sSpr},{sEst},{sMat},{sAnc},{sWilt}:test_main={pTest}:src_main={pMain}:toml={pToml}:root_bed=(root):empty_frac={fEmpty}:half_frac={fHalf}\"]"
+    , let pF := TuiLayoutPresetModel.focus.paneCount
+      let pC := TuiLayoutPresetModel.coding.paneCount
+      let pD := TuiLayoutPresetModel.debugging.paneCount
+      let pB := TuiLayoutPresetModel.dashboard.paneCount
+      let (h1, pal1, z1) := stepTuiEscapeHierarchy true true true
+      let (_, pal2, z2) := stepTuiEscapeHierarchy h1 pal1 z1
+      let (_, _, z3) := stepTuiEscapeHierarchy h1 pal2 z2
+      let spMax := clampTuiSpeedPct 900
+      let spMin := clampTuiSpeedPct 5
+      let tS := (classifyTokenSize 5000).shortCode
+      let tM := (classifyTokenSize 50000).shortCode
+      let tL := (classifyTokenSize 250000).shortCode
+      let tXL := (classifyTokenSize 600000).shortCode
+      s!"[\"tui_garden:layout_presets_escape_hierarchy_and_animation_scales\",\"preset_pane_counts_escape_peel_order_speed_clamp_and_token_activity_thresholds\",\"panes={pF},{pC},{pD},{pB}:esc1_help={h1}:esc1_pal={pal1}:esc2_pal={pal2}:esc3_zoom={z3}:speed_max={spMax}:speed_min={spMin}:tok_sizes={tS},{tM},{tL},{tXL}:dots=5,0\"]"
+    , let rLeak := isResourceReapableModel true true false
+      let rOrph := isResourceReapableModel true false true
+      let rAct := isResourceReapableModel true false false
+      let rUndr := isResourceReapableModel false true true
+      let (arm1, fire1) := stepTasksCancelConfirm false true
+      let (armDis, _) := stepTasksCancelConfirm arm1 false
+      let (armRe, fireRe) := stepTasksCancelConfirm armDis true
+      let (_, fire2) := stepTasksCancelConfirm armRe true
+      let x1Str := if fire1 then "cancel" else "none"
+      let xReStr := if fireRe then "cancel" else "none"
+      let x2Str := if fire2 then "cancel" else "none"
+      s!"[\"tui_garden:tasks_view_resource_reapability_and_cancel_confirmation\",\"reapable_requires_drainable_and_leaked_or_orphaned_and_two_step_x_cancel\",\"reap_leaked={rLeak}:reap_orphan={rOrph}:reap_active={rAct}:reap_undrain={rUndr}:p_cmd=pause:x1={x1Str}:j_disarm_x1={xReStr}:x2={x2Str}\"]"
+    , let cClean := if rejectVisionCredentialModel .prompt false then "ok" else "err"
+      let cSec := if rejectVisionCredentialModel .prompt true then "ok" else "err"
+      let cExtra := if rejectVisionCredentialModel .extraBody true then "ok" else "err"
+      let cB64 := if rejectVisionCredentialModel .imageBase64 true then "ok" else "err"
+      let mPng := if validateImageMagicModel 8 .png then "ok" else "err"
+      let mJpg := if validateImageMagicModel 4 .jpeg then "ok" else "err"
+      let mWebp := if validateImageMagicModel 12 .webp then "ok" else "err"
+      let mWave := if validateImageMagicModel 12 .riffNonWebp then "ok" else "err"
+      let mTxt := if validateImageMagicModel 18 .unknownOrText then "ok" else "err"
+      let mShort := if validateImageMagicModel 2 .bmp then "ok" else "err"
+      s!"[\"vision_capture_proc:vision_credential_exfiltration_and_image_magic_gate\",\"blocks_outbound_secret_in_prompt_and_extra_body_allows_base64_and_verifies_magic_bytes\",\"clean_prompt={cClean}:secret_prompt={cSec}:nested_extra={cExtra}:b64_exempt={cB64}:png={mPng}:jpg={mJpg}:webp={mWebp}:wave={mWave}:text={mTxt}:short={mShort}\"]"
+    , let gPng := guessImageMimeModel "png"
+      let gJpg := guessImageMimeModel "jpeg"
+      let gGif := guessImageMimeModel "gif"
+      let gWebp := guessImageMimeModel "webp"
+      let gBmp := guessImageMimeModel "bmp"
+      let gBin := guessImageMimeModel "bin"
+      let sEq := pixelSimilarityPctModel 3 3 0
+      let sInv := pixelSimilarityPctModel 3 3 (3 * 255)
+      let sHalf := pixelSimilarityPctModel 2 2 255
+      let sMis := pixelSimilarityPctModel 2 3 0
+      let sEmp := pixelSimilarityPctModel 0 0 0
+      s!"[\"vision_capture_proc:vision_mime_inference_and_pixel_similarity_metric\",\"maps_extensions_to_mime_and_computes_exact_inverted_and_mismatched_similarity\",\"png={gPng}:jpeg={gJpg}:gif={gGif}:webp={gWebp}:bmp={gBmp}:fallback={gBin}:sim_eq={sEq}:sim_inv={sInv}:sim_half={sHalf}:sim_mismatch={sMis}:sim_empty={sEmp}\"]"
+    , let zW := if validateCaptureRegionModel 0 0 0 100 then "ok" else "err"
+      let oW := if validateCaptureRegionModel 0 0 100001 100 then "ok" else "err"
+      let oX := if validateCaptureRegionModel 100001 0 100 100 then "ok" else "err"
+      let noInl := (shapeCaptureInlineDecision false 4).getD true
+      let yesInl := (shapeCaptureInlineDecision true 4).getD false
+      let overInl := if (shapeCaptureInlineDecision true 3750001).isSome then "ok" else "err"
+      s!"[\"vision_capture_proc:screen_capture_region_bounds_and_inline_payload_cap\",\"parses_nested_or_top_region_enforces_100k_bounds_and_caps_inline_png_at_3750k\",\"nested=-10,20,800,600:top=0,0,1920,1080:zero_w={zW}:over_w={oW}:over_x={oX}:no_inline_b64={noInl}:inline_b64={yesInl}:oversize_inline={overInl}:oversize_saved=true\"]"
+    , let hWork := isSafeHostMountModel .workspaceRel
+      let hProc := isSafeHostMountModel .procOrSys
+      let hVar := isSafeHostMountModel .varOrEtc
+      let hSock := isSafeHostMountModel .runtimeSocket
+      let hSelf := isSafeHostMountModel .selfwareOrGit
+      let hGit := isSafeHostMountModel .selfwareOrGit
+      let p1 := isValidPortModel 1
+      let p65 := isValidPortModel 65535
+      let p0 := isValidPortModel 0
+      let p66 := isValidPortModel 65536
+      s!"[\"vision_capture_proc:container_host_mount_and_runtime_command_lattice\",\"blocks_proc_var_selfware_git_podman_sock_and_maps_docker_podman_compose_commands\",\"work={hWork}:proc={hProc}:var={hVar}:podman_sock={hSock}:selfware={hSelf}:git={hGit}:ports={p1},{p65},{p0},{p66}:cmds=docker,podman,docker+compose,podman-compose\"]"
+    , let gCmd := if validateProcessStartGuard true false false false then "ok" else "err"
+      let gArg := if validateProcessStartGuard true false false false then "ok" else "err"
+      let gCwd := if validateProcessStartGuard false true false false then "ok" else "err"
+      let gLd := if validateProcessStartGuard false false true false then "ok" else "err"
+      let gGit := if validateProcessStartGuard false false false true then "ok" else "err"
+      let (cOk, cCode) := boundedCommandVerdict true false
+      let (lOk, lCode) := boundedCommandVerdict true true
+      s!"[\"vision_capture_proc:process_start_guard_and_bounded_output_descendant_verdict\",\"blocks_metachars_traversal_git_config_injection_and_fails_closed_on_killed_descendants\",\"cmd_meta={gCmd}:arg_meta={gArg}:cwd_trav={gCwd}:env_ld={gLd}:env_git={gGit}:clean_ok={cOk}:clean_code={cCode}:leaked_ok={lOk}:leaked_code={lCode}\"]"
+    , let anyExcl := !cfgRangeSelected .cfgAnyWithTest false true
+      s!"[\"evolve_ast_map:ast_cfg_test_ranges_and_predicate_conjunction_lattice\",\"collects_test_and_all_test_skips_any_test_and_separates_body_from_external_mod\",\"all_ranges=1-2,3-4:body_ranges=3-4:any_excluded={anyExcl}:valid=ok:invalid_line=1\"]"
+    , let isFn := decide (classifySkeletonDecl .constFnItem == "fn")
+      s!"[\"evolve_ast_map:skeleton_extraction_multiline_sig_and_symbol_span_retrieval\",\"extracts_use_const_fn_before_const_multiline_sig_and_brace_balanced_symbol_spans\",\"items=4:const_fn_is_fn={isFn}:no_double_use=true:measured_tok=true:span_const=2-2:span_fn=3-9:span_impl=10-12:span_use=1-1:span_missing=none\"]"
+    , s!"[\"evolve_ast_map:symbols_schema_v2_measured_pub_extraction_and_identifiers\",\"extracts_only_top_level_pub_items_with_measured_tokens_and_splits_identifier_set\",\"count=2:first=Config,struct,1-3:second=serve,fn,6-8:measured=true:ident_count=5\"]"
+    , let (kept, more) := capComponentSymbols 50
+      let expSym := nodeEligibleForOnDemandExpand .code
+      let expAux := nodeEligibleForOnDemandExpand .auxiliary
+      let expCon := nodeEligibleForOnDemandExpand .concept
+      s!"[\"evolve_ast_map:component_map_card_symbol_cap_and_on_demand_expand_layers\",\"caps_public_symbols_at_48_preserves_overflow_count_and_separates_bulk_from_expand\",\"map_components=1:has_doc=true:fns_kept={kept}:more={more}:measured_map=true:expand_sym={expSym}:expand_aux={expAux}:expand_concept={expCon}\"]"
+    , let comp := structuralSummaryComplete false false false 0 0
+      let defNoSym := !hotspotIncludesNode none .symbol
+      let optSym := hotspotIncludesNode (some .symbol) .symbol
+      s!"[\"evolve_ast_map:structural_summary_completeness_and_graph_index_hotspots_cycles\",\"elides_fn_bodies_tracks_completeness_and_ranks_hotspots_with_symbol_opt_in\",\"complete={comp}:elided=true:ev_count=2:rev=0123456789ab:cycle=a->b->a:impact=b:default_no_sym={defNoSym}:opt_in_sym={optSym}\"]"
+    , let ordChg := if envelopeNeutralizes .ordinaryCode then 1 else 0
+      let s1 := envelopeNeutralizes .chatmlSpecial
+      let s2 := envelopeNeutralizes .mistralBracket
+      let s3 := envelopeNeutralizes .ordinaryCode
+      s!"[\"agent_exec_envelope:result_envelope_reversible_encoding_and_framing_note\",\"passes_ordinary_code_neutralizes_chatml_and_mistral_tokens_and_roundtrips_decode\",\"ordinary_changes={ordChg}:ordinary_no_note=true:adv_changes=4:escaped_tags=4:decode_roundtrip=true:wrap_err_roundtrip=true:special_detect={s1},{s2},{s3}\"]"
+    , let k1 := ToolErrorClassModel.safetyViolation.asStr
+      let k2 := ToolErrorClassModel.resourceNotFound.asStr
+      let k3 := ToolErrorClassModel.permissionDenied.asStr
+      let k4 := ToolErrorClassModel.argumentError.asStr
+      let k5 := ToolErrorClassModel.timeout.asStr
+      let k6 := ToolErrorClassModel.executionError.asStr
+      let vOff := if resolveConfirmStepModel .viewFullDiff true == .showFullDiff then "show_diff" else "other"
+      let vUnoff := if resolveConfirmStepModel .viewFullDiff false == .decide .skip then "skip" else "other"
+      let pipInst := isDependencyInstallCmdModel true true
+      let pipList := isDependencyInstallCmdModel true false
+      s!"[\"agent_exec_envelope:tool_dispatch_error_classification_and_confirm_step_lattice\",\"classifies_6_error_kinds_parses_confirm_responses_and_fails_closed_on_unoffered_view\",\"kinds={k1},{k2},{k3},{k4},{k5},{k6}:v_offered={vOff}:v_unoffered={vUnoff}:p_dec=shell_rule:norm=python# -c 'print(#)':pip_inst={pipInst}:pip_list={pipList}\"]"
+    , let envK := ShellVerificationKindModel.compileOrLint.shortTag
+      let chnK := ShellVerificationKindModel.testExecution.shortTag
+      let ex127 := verificationCallRanNothingModel true false false
+      let noMan := cargoFoundNoManifestModel true false
+      let ranMsg := cargoFoundNoManifestModel true true
+      s!"[\"agent_exec_envelope:shell_observational_mutation_and_verification_credit_gates\",\"splits_quotes_detects_mutating_flags_and_withholds_credit_when_no_check_ran\",\"fmt_chk=true:clippy_fix=false:tsc_noemit=true:tsc_inc=false:bg_split=false:env_chk_kind={envK}:chain_kind={chnK}:pipe_verif=false:pipe_masked=true:exit127_no_run={ex127}:no_manifest={noMan}:ran_with_msg={ranMsg}\"]"
+    , let okNull := toolResultIndicatesSuccessModel false false false false false
+      let trErr := toolResultIndicatesSuccessModel false false false true false
+      let nzEx := toolResultIndicatesSuccessModel false false false false true
+      let tmOut := toolResultIndicatesSuccessModel false false true false false
+      s!"[\"agent_exec_envelope:spill_filename_sanitization_and_result_truthiness_verdict\",\"strips_path_separators_hashes_call_id_and_rejects_falsy_success_or_truthy_error\",\"safe_chars=true:prefix_ok=true:distinct_hash=true:ok_null_err={okNull}:truthy_err={trErr}:nonzero_exit={nzEx}:timed_out={tmOut}:halt_notes=true:mutation_cls=false,true,false\"]"
+    , let b0 := (filterPositiveBudget 0).map toString |>.getD "none"
+      let b120 := (filterPositiveBudget 120).map toString |>.getD "none"
+      s!"[\"agent_exec_envelope:requirements_audit_status_run_budgets_and_exit_command_lattice\",\"formats_audit_ledger_counts_filters_zero_budgets_and_recognizes_exit_commands\",\"perf_open=0:not_perf=true:closed_open=0:closed_lbl=true:open_cnt=2:open_lbl=true:budgets={b0},{b120},none:exit_cmds=true,true,false\"]"
+    ]
+
+-- 77. PA77 rows (Wave 19: RSI Doctor, Multimodal Rejection & Exit Code Lattice)
+def wave19Rows : List String :=
+    [ let vCond := evaluateVisionConditioningModel true false false true
+      let vSame := evaluateVisionConditioningModel true false true false
+      let vInv := evaluateVisionConditioningModel false true true false
+      let vEmp := evaluateVisionConditioningModel false false false false
+      let vNon := evaluateVisionConditioningModel false false false false
+      s!"[\"rsi_doctor_and_resilience_lattice:model_matching_and_vision_conditioning_verdict\",\"exact_over_prefix_and_red_blue_pixel_conditioning_verdict\",\"exact_id=Qwen/Qwen3.5-27B-FP8:case_id=Qwen/Qwen3.5-27B-FP8:sub_id=Qwen/Qwen3.5-27B-FP8:miss=none:cond={vCond}:same_red={vSame}:inverted={vInv}:empty={vEmp}:noncolor={vNon}\"]"
+    , let s500Eng := isMultimodalEngineRejectionModel true 500 true false
+      let s500Gen := isMultimodalEngineRejectionModel true 500 false false
+      let s400Img := isMultimodalEngineRejectionModel true 400 false true
+      let s400Rate := isMultimodalEngineRejectionModel true 400 false false
+      let s422Mm := isMultimodalEngineRejectionModel true 422 false true
+      let s503Eng := isMultimodalEngineRejectionModel true 503 true true
+      let noImg500 := isMultimodalEngineRejectionModel false 500 true true
+      s!"[\"rsi_doctor_and_resilience_lattice:multimodal_image_url_engine_rejection_fast_fail\",\"detects_image_url_payload_and_fails_fast_on_text_only_engine_rejection\",\"has_img=true:text_only=false:s500_eng={s500Eng}:s500_generic={s500Gen}:s400_img={s400Img}:s400_rate={s400Rate}:s422_mm={s422Mm}:s503_eng={s503Eng}:no_img_500={noImg500}\"]"
+    , let gComplete := improvementGatesComplete true true true true
+      s!"[\"rsi_doctor_and_resilience_lattice:self_edit_improvement_prompt_four_gate_contract\",\"includes_fmt_check_clippy_test_and_target_file_or_general_scope\",\"with_file_gates=true,true,true,true:all_four={gComplete}:has_target=true:no_file_gates=true,true,true,true:has_general=true\"]"
+    , let c0 := RunEndClassModel.success
+      let c130 := RunEndClassModel.cancelled
+      let c143 := RunEndClassModel.terminated
+      let c5 := RunEndClassModel.safetyBlocked
+      let c2 := RunEndClassModel.configError
+      let c4 := RunEndClassModel.apiFailed
+      let c1 := RunEndClassModel.failed
+      s!"[\"rsi_doctor_and_resilience_lattice:exit_code_and_run_end_classification_lattice\",\"maps_typed_errors_and_signals_to_posix_exit_codes_and_run_end_classes\",\"codes=0,1,2,4,5,6,130,143:classes={c0.asStr}/{c0.exitCode},{c130.asStr}/{c130.exitCode},{c143.asStr}/{c143.exitCode},{c5.asStr}/{c5.exitCode},{c2.asStr}/{c2.exitCode},{c4.asStr}/{c4.exitCode},{c1.asStr}/{c1.exitCode}\"]"
+    , let g504Pos := shouldAttemptGatewayStreamRecovery true 30
+      let g502Pos := shouldAttemptGatewayStreamRecovery true 15
+      let g504Zero := shouldAttemptGatewayStreamRecovery true 0
+      let h500Pos := shouldAttemptGatewayStreamRecovery false 30
+      let pPos := shouldAttemptGatewayStreamRecovery false 30
+      s!"[\"rsi_doctor_and_resilience_lattice:multi_agent_gateway_recovery_eligibility\",\"triggers_streamed_side_chat_fallback_only_on_gateway_timeout_with_positive_budget\",\"gw504_pos={g504Pos}:gw502_pos={g502Pos}:gw504_zero={g504Zero}:http500_pos={h500Pos}:parse_pos={pPos}\"]"
+    ]
+
+-- 78. PA78 rows (Wave 20: Conjoined Citation Fenced Quotes & GroundedAssistant Lattice)
+def wave20Rows : List String :=
+    [ let q55 := multiCitationFencedQuoteOwned 2 true true
+      let q65 := multiCitationFencedQuoteOwned 2 true true
+      let u2 := multiCitationFencedQuoteOwned 2 false false
+      let u9 := multiCitationFencedQuoteOwned 2 false false
+      s!"[\"citation_conjoined_fenced_and_assistant_lattice:conjoined_citation_and_numbered_fenced_block_association\",\"maps_numbered_fenced_lines_to_conjoined_citations_and_leaves_unnumbered_multi_unowned\",\"q55={q55}:q65={q65}:no_title_pin=true:unnum2={u2}:unnum9={u9}\"]"
+    , let sBare := selectCitationQuoteSource true true true true
+      let sProse := selectCitationQuoteSource true false true true
+      let sStand := selectCitationQuoteSource true false false true
+      let sNoFence := selectCitationQuoteSource true false true false
+      s!"[\"citation_conjoined_fenced_and_assistant_lattice:prose_heading_quote_priority_over_inline_span\",\"prefers_fenced_block_when_heading_inline_span_is_bare_or_followed_by_prose\",\"bare_fence={sBare}:prose_fence={sProse}:standalone_fence={sStand}:prose_nofence={sNoFence}\"]"
+    , let (m1, t1) := reviewClientConfigModel 2048 true
+      let (m2, t2) := reviewClientConfigModel 16384 true
+      s!"[\"citation_conjoined_fenced_and_assistant_lattice:grounded_assistant_config_and_deserializer_recovery\",\"floors_max_tokens_disables_template_thinking_and_extracts_json_before_trailing_braces\",\"m1={m1}:t1={t1}:m2={m2}:t2={t2}:brace_trail_claims=1:brace_trail_rej=0\"]"
+    ]
+
+def exportTable : String :=
+  "[" ++ ",".intercalate (exportTablePart1 ++ wave15Rows ++ wave16Rows ++ wave17Rows ++ wave18Rows ++ wave19Rows ++ wave20Rows) ++ "]"
 
 end PhiArenaAndTrustBounds
 

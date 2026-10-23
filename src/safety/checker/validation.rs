@@ -5103,12 +5103,21 @@ fn expand_command_word_vars(cmd: &str) -> String {
         // only ever matched against, never executed, so substituting a
         // single-token literal inside prose is harmless: a benign value
         // cannot complete a dangerous pattern on its own.
-        let reference = Regex::new(&format!(
-            r"(^|[;|&(\s])\$(?:\{{{}\}}|{}\b)",
-            regex::escape(name),
-            regex::escape(name)
-        ))
-        .expect("Invalid regex");
+        static VAR_REF_CACHE: LazyLock<
+            parking_lot::Mutex<std::collections::HashMap<String, Regex>>,
+        > = LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let reference = VAR_REF_CACHE
+            .lock()
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                Regex::new(&format!(
+                    r"(^|[;|&(\s])\$(?:\{{{}\}}|{}\b)",
+                    regex::escape(name),
+                    regex::escape(name)
+                ))
+                .expect("Invalid regex")
+            })
+            .clone();
         out = reference
             .replace_all(&out, format!("${{1}}{value}"))
             .into_owned();

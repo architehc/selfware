@@ -573,9 +573,10 @@ impl RSIOrchestrator {
                 )));
             }
         }
-        let _ = std::fs::write(
-            unique_out_dir.join(".lease_pid"),
-            std::process::id().to_string(),
+        let _ = crate::session::checkpoint::write_bytes_atomically(
+            &unique_out_dir.join(".lease_pid"),
+            std::process::id().to_string().as_bytes(),
+            0o600,
         );
         let _lease_guard = crate::evolution::fitness::LeaseGuard {
             dir: unique_out_dir.clone(),
@@ -603,7 +604,11 @@ impl RSIOrchestrator {
             )));
         }
 
-        if let Err(e) = std::fs::write(unique_out_dir.join(".completed"), b"") {
+        if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+            &unique_out_dir.join(".completed"),
+            b"",
+            0o600,
+        ) {
             tracing::warn!(
                 "Failed to write .completed marker to {}: {e}",
                 unique_out_dir.display()

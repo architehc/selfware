@@ -53,6 +53,10 @@ fn first_file_in(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+fn read_capped(p: &Path) -> Option<String> {
+    crate::tools::file::read_to_string_capped(p, crate::tools::file::MAX_SOURCE_READ_SIZE).ok()
+}
+
 /// Name of an executable inside `node_modules/.bin` on this platform.
 fn bin_name(name: &str) -> String {
     if cfg!(windows) {
@@ -175,10 +179,7 @@ pub fn parse_jsonc(text: &str) -> Option<serde_json::Value> {
 /// `include` covers the file is used (else the first reference).
 pub fn resolve_ts_project(file: &Path, root: &Path) -> Option<PathBuf> {
     let cfg = find_tsconfig(file, root)?;
-    let Some(json) = std::fs::read_to_string(&cfg)
-        .ok()
-        .and_then(|t| parse_jsonc(&t))
-    else {
+    let Some(json) = read_capped(&cfg).and_then(|t| parse_jsonc(&t)) else {
         return Some(cfg);
     };
     let refs = json.get("references").and_then(|r| r.as_array());
@@ -204,8 +205,7 @@ pub fn resolve_ts_project(file: &Path, root: &Path) -> Option<PathBuf> {
             continue;
         }
         let target_dir = target.parent().map(Path::to_path_buf).unwrap_or_default();
-        let includes: Vec<String> = std::fs::read_to_string(&target)
-            .ok()
+        let includes: Vec<String> = read_capped(&target)
             .and_then(|t| parse_jsonc(&t))
             .and_then(|v| v.get("include").cloned())
             .and_then(|v| v.as_array().cloned())
@@ -341,8 +341,7 @@ pub fn package_json_type(file: &Path, root: &Path) -> Option<(String, PathBuf)> 
         if !p.is_file() {
             continue;
         }
-        let ty = std::fs::read_to_string(&p)
-            .ok()
+        let ty = read_capped(&p)
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
             .unwrap_or_else(|| "commonjs".to_string());
@@ -629,7 +628,7 @@ pub fn flags_from_compile_commands(
     file: &Path,
     want: Option<CLang>,
 ) -> Option<(CLang, Vec<String>, String)> {
-    let text = std::fs::read_to_string(db).ok()?;
+    let text = read_capped(db)?;
     let entries: Vec<serde_json::Value> = serde_json::from_str(&text).ok()?;
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let target = canon(file);
@@ -753,7 +752,7 @@ pub fn cmake_std_flag(lang: CLang, n: u32, gnu: bool) -> String {
 pub fn find_cmake_standards(file: &Path, root: &Path) -> Option<(CmakeStandards, PathBuf)> {
     for dir in ancestor_dirs(file, root) {
         let p = dir.join("CMakeLists.txt");
-        if let Ok(text) = std::fs::read_to_string(&p) {
+        if let Some(text) = read_capped(&p) {
             let s = parse_cmake_standards(&text);
             if s.cxx.is_some() || s.c.is_some() {
                 return Some((s, p));
@@ -891,7 +890,7 @@ pub struct PythonPin {
 
 fn python_version_file(dir: &Path) -> Option<PythonPin> {
     let p = dir.join(".python-version");
-    let text = std::fs::read_to_string(&p).ok()?;
+    let text = read_capped(&p)?;
     // First non-comment line; `3.12.1`, `3.12`, `pypy3.10`, `cpython-3.11`.
     let line = text
         .lines()
@@ -906,7 +905,7 @@ fn python_version_file(dir: &Path) -> Option<PythonPin> {
 
 fn pyproject_requires(dir: &Path) -> Option<PythonPin> {
     let p = dir.join("pyproject.toml");
-    let text = std::fs::read_to_string(&p).ok()?;
+    let text = read_capped(&p)?;
     let v: toml::Value = toml::from_str(&text).ok()?;
     let spec = v
         .get("project")
@@ -927,7 +926,7 @@ fn pyproject_requires(dir: &Path) -> Option<PythonPin> {
 
 fn setup_cfg_requires(dir: &Path) -> Option<PythonPin> {
     let p = dir.join("setup.cfg");
-    let text = std::fs::read_to_string(&p).ok()?;
+    let text = read_capped(&p)?;
     let spec = text.lines().find_map(|l| {
         let (k, v) = l.split_once('=')?;
         (k.trim() == "python_requires").then(|| v.trim().to_string())
@@ -1056,7 +1055,7 @@ pub fn java_release_from_gradle(text: &str) -> Option<u32> {
 pub fn resolve_java_release(file: &Path, root: &Path) -> Option<JavaRelease> {
     for dir in ancestor_dirs(file, root) {
         let pom = dir.join("pom.xml");
-        if let Ok(text) = std::fs::read_to_string(&pom) {
+        if let Some(text) = read_capped(&pom) {
             if let Some(release) = java_release_from_pom(&text) {
                 return Some(JavaRelease {
                     release,
@@ -1066,7 +1065,7 @@ pub fn resolve_java_release(file: &Path, root: &Path) -> Option<JavaRelease> {
         }
         for name in ["build.gradle", "build.gradle.kts"] {
             let p = dir.join(name);
-            if let Ok(text) = std::fs::read_to_string(&p) {
+            if let Some(text) = read_capped(&p) {
                 if let Some(release) = java_release_from_gradle(&text) {
                     return Some(JavaRelease {
                         release,

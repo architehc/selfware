@@ -55,9 +55,10 @@ pub struct SweepManifest {
 
 impl SweepManifest {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes =
-            std::fs::read(path).with_context(|| format!("reading manifest {}", path.display()))?;
-        let manifest: SweepManifest = serde_json::from_slice(&bytes)
+        let text =
+            crate::tools::file::read_to_string_capped(path, crate::tools::file::MAX_READ_SIZE)
+                .with_context(|| format!("reading manifest {}", path.display()))?;
+        let manifest: SweepManifest = serde_json::from_str(&text)
             .with_context(|| format!("parsing manifest {}", path.display()))?;
         Ok(manifest)
     }

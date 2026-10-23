@@ -18,6 +18,7 @@ pub mod trace;
 pub use candidate::{Candidate, CandidatePool, OfficialEvalResult, TestResults};
 pub use catalog::{quant_catalog, QuantSpec};
 pub use dataset::{load_instances, Instance};
-pub use harness::{LlamaServer, LlamaServerOpts};
+pub use harness::{capture_patch, LlamaServer, LlamaServerOpts, RunOutcome};
 pub use manifest::{SwebenchProOptsSnapshot, SweepManifest, TrialManifest, TrialState};
 pub use runner::{run_swebench_pro, SwebenchProOpts};
+pub use trace::{DiagnosisSummary, PerRunDiagnosis, RunTrace, TraceEvent};

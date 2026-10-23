@@ -649,3 +649,23 @@ fn rust_run_end_and_exit_code_match_lean_formal_table() {
         "expected all 44 Lean run_end rows to be checked"
     );
 }
+
+#[test]
+fn wrapped_selfware_api_and_agent_errors_unwrap_through_helpers() {
+    let wrapped_overflow = anyhow::Error::from(SelfwareError::Api(ApiError::ContextOverflow(
+        "exceeded 128k".into(),
+    )))
+    .context("outer layer");
+    assert!(is_context_overflow_error(&wrapped_overflow));
+
+    let wrapped_reasoning =
+        anyhow::Error::from(SelfwareError::Api(ApiError::ReasoningBudgetExhausted {
+            reasoning_chars: 4096,
+            retry: Some("retried once".into()),
+        }))
+        .context("outer layer");
+    assert_eq!(
+        reasoning_budget_exhaustion(&wrapped_reasoning),
+        Some((4096, Some("retried once".into())))
+    );
+}

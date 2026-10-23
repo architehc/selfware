@@ -181,12 +181,15 @@ impl SharedMemory {
         }
     }
 
-    /// Find by tag
+    /// Find by tag (deterministically ordered by key)
     pub fn find_by_tag(&self, tag: &str) -> Vec<&MemoryEntry> {
-        self.data
+        let mut entries: Vec<&MemoryEntry> = self
+            .data
             .values()
-            .filter(|e| e.tags.contains(&tag.to_string()))
-            .collect()
+            .filter(|e| e.tags.iter().any(|t| t == tag))
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        entries
     }
 
     /// Get access log

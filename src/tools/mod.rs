@@ -63,31 +63,45 @@ pub mod tool_search;
 pub mod vision;
 pub mod workspace_root;
 
-use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
-use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
-use container::{
+pub use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
+pub use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
+pub use clarify::ClarificationTool;
+pub use code_metrics::CodeMetricsTool;
+pub use codemap::{CodeMapTool, ContextActionTool, ContextBudgetTool};
+pub use computer::{
+    ComputerKeyboardTool, ComputerMouseTool, ComputerScreenTool, ComputerWindowTool,
+};
+pub use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
-use file::{DirectoryTree, FileDelete, FileEdit, FileMultiEdit, FileRead, FileWrite};
-use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
-use git_worktree::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
-use grep_search::GrepSearch;
-use http::HttpRequest;
-use knowledge::{
+pub use file::{DirectoryTree, FileDelete, FileEdit, FileMultiEdit, FileRead, FileWrite};
+pub use fim::FileFimEdit;
+pub use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
+pub use git_worktree::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
+pub use graph::{
+    ContextPackTool, CyclesTool, DupsTool, GraphSummaryTool, HotspotsTool, ImpactTool,
+    NeighborsTool, TestMapTool,
+};
+pub use grep_search::GrepSearch;
+pub use http::HttpRequest;
+pub use introspect::{CodeDiffPlan, CodeIntrospect, CodePlan, CodeQuery};
+pub use knowledge::{
     KnowledgeAdd, KnowledgeAutoExtract, KnowledgeClear, KnowledgeExport, KnowledgeQuery,
     KnowledgeRelate, KnowledgeRemove, KnowledgeStats as KnowledgeStatsTool,
 };
-use localize_issue::LocalizeIssue;
-use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
-use page_controller::PageControlTool;
-use patch_apply::PatchApply;
-use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
-use pty_shell::PtyShellTool;
-use screen_capture::ScreenCapture;
-use search::{GlobFind, SymbolSearch};
-use shell_exec::ShellExec;
-use vision::{VisionAnalyze, VisionCompare};
+pub use localize_issue::LocalizeIssue;
+pub use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
+pub use page_controller::PageControlTool;
+pub use patch_apply::PatchApply;
+pub use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
+pub use pty_shell::PtyShellTool;
+pub use screen_capture::ScreenCapture;
+pub use search::{GlobFind, SymbolSearch};
+pub use shell_exec::ShellExec;
+pub use task_focus::{classify_task, reorder_tools, TaskType};
+pub use tool_search::ToolSearchTool;
+pub use vision::{VisionAnalyze, VisionCompare};
 
 /// Pagination metadata for truncated tool output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -735,7 +749,7 @@ impl ToolRegistry {
         let mut index = self
             .tool_search_index
             .write()
-            .expect("tool_search index poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         index.clear();
         index.extend(
             self.all_tools

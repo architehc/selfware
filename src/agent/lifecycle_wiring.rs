@@ -42,7 +42,7 @@
 //! Tasks pane's agent list project.
 
 use super::Agent;
-use crate::errors::{AgentError, RunEnd, SelfwareError};
+use crate::errors::{AgentError, RunEnd};
 use crate::lifecycle::control::{LiveTask, TaskConstraints, TaskControl, TaskEdit, MAIN_AGENT};
 use crate::lifecycle::{
     AgentEvent, AgentMachine, AgentState, Effect, Entity, RecordedUsage, TaskEvent, TaskMachine,
@@ -119,12 +119,8 @@ fn is_deadline_stop(result: &anyhow::Result<()>, shutdown: Option<crate::Shutdow
         c.is::<crate::api::client::WallClockBudgetExceeded>()
             || c.is::<crate::api::client::CallTimeBudgetExceeded>()
             || matches!(
-                c.downcast_ref::<AgentError>(),
+                crate::errors::as_agent_error(c),
                 Some(AgentError::CancelledWithReason(_))
-            )
-            || matches!(
-                c.downcast_ref::<SelfwareError>(),
-                Some(SelfwareError::Agent(AgentError::CancelledWithReason(_)))
             )
     })
 }

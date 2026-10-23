@@ -1078,12 +1078,14 @@ pub enum AlertStatus {
 
 impl Alert {
     pub fn new(title: &str, severity: AlertSeverity, source: &str) -> Self {
+        static NEXT_ALERT_SEQ: AtomicU64 = AtomicU64::new(1);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let seq = NEXT_ALERT_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
-            id: format!("alert_{}", now),
+            id: format!("alert_{}_{}", now, seq),
             title: title.to_string(),
             severity,
             source: source.to_string(),
@@ -1136,46 +1138,44 @@ impl AlertCorrelator {
             .as_secs();
 
         // Look for existing correlated alert
-        if let Ok(mut alerts) = self.alerts.write() {
-            // Find alerts from same source in correlation window
-            let related: Vec<String> = alerts
-                .iter()
-                .filter(|(_, a)| {
-                    a.source == source
-                        && a.status == AlertStatus::Open
-                        && now - a.timestamp < self.window_secs
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
+        let mut alerts = self.alerts.write().unwrap_or_else(|e| e.into_inner());
+        // Find alerts from same source in correlation window
+        let related: Vec<String> = alerts
+            .iter()
+            .filter(|(_, a)| {
+                a.source == source
+                    && a.status == AlertStatus::Open
+                    && now.saturating_sub(a.timestamp) < self.window_secs
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
 
-            if !related.is_empty() {
-                // Correlate with existing
-                if let Some(existing) = alerts.get_mut(&related[0]) {
-                    existing.related_logs.extend(log_ids);
-                    existing.related_alerts.extend(related[1..].to_vec());
-                    self.stats.alerts_correlated.fetch_add(1, Ordering::Relaxed);
-                    return existing.clone();
-                }
+        if !related.is_empty() {
+            // Correlate with existing
+            if let Some(existing) = alerts.get_mut(&related[0]) {
+                existing.related_logs.extend(log_ids);
+                existing.related_alerts.extend(related[1..].to_vec());
+                self.stats.alerts_correlated.fetch_add(1, Ordering::Relaxed);
+                return existing.clone();
             }
-
-            // Create new alert
-            let mut alert = Alert::new(title, severity, source);
-            alert.related_logs = log_ids;
-            alert.related_alerts = related;
-
-            alerts.insert(alert.id.clone(), alert.clone());
-            self.stats.alerts_created.fetch_add(1, Ordering::Relaxed);
-
-            alert
-        } else {
-            Alert::new(title, severity, source)
         }
+
+        // Create new alert
+        let mut alert = Alert::new(title, severity, source);
+        alert.related_logs = log_ids;
+        alert.related_alerts = related;
+
+        alerts.insert(alert.id.clone(), alert.clone());
+        self.stats.alerts_created.fetch_add(1, Ordering::Relaxed);
+
+        alert
     }
 
     /// Resolve an alert
     pub fn resolve(&self, alert_id: &str) {
-        if let Ok(mut alerts) = self.alerts.write() {
-            if let Some(alert) = alerts.get_mut(alert_id) {
+        let mut alerts = self.alerts.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(alert) = alerts.get_mut(alert_id) {
+            if alert.status != AlertStatus::Resolved {
                 alert.status = AlertStatus::Resolved;
                 self.stats.alerts_resolved.fetch_add(1, Ordering::Relaxed);
             }

@@ -110,7 +110,7 @@ mod execution;
 pub mod failure_mode;
 mod finish_stall;
 pub mod input_census;
-mod interactive;
+pub(crate) mod interactive;
 pub mod last_tool;
 mod learning;
 mod lifecycle_wiring;
@@ -146,18 +146,19 @@ pub mod turn_artifacts;
 pub mod turn_workload;
 pub(crate) mod verification_scope;
 
+pub use context::ContextCompressor;
+pub use context_map::{ContextMap, ContextModality};
 pub use done_check::{DoneCheckEntry, DoneCheckReport};
+pub use loop_control::{AgentLoop, AgentState};
+pub use planning::Planner;
 pub use review_coverage::{ReviewCoverageReport, ReviewPhase};
 pub use review_shards::ShardRunReport;
 pub use task_runner::{RequirementsAuditStatus, RunBudgets, RunSummary};
+pub use tui_events::{AgentEvent, EventEmitter, NoopEmitter};
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
 use compression::CompressionOrchestrator;
-use context::ContextCompressor;
-use loop_control::{AgentLoop, AgentState};
-use planning::Planner;
-use tui_events::{AgentEvent, EventEmitter, NoopEmitter};
 
 /// Upper bound for queued interactive messages to avoid unbounded memory growth.
 pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
@@ -3486,7 +3487,7 @@ To call a tool, use this EXACT XML structure:
     pub fn set_plan_mode(&mut self, enabled: bool) {
         self.plan_mode = enabled;
         if enabled {
-            if !self.plan_mode_manager.is_in_plan_mode() {
+            if !self.plan_mode_manager.is_planning() {
                 self.plan_mode_manager.enter_plan_mode();
             }
         } else if self.plan_mode_manager.is_planning() {

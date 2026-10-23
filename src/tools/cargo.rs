@@ -266,6 +266,7 @@ impl Tool for CargoTest {
         ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         cmd.in_workspace_root();
         cmd.arg("test");
 
@@ -397,6 +398,7 @@ impl Tool for CargoCheck {
         ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         cmd.in_workspace_root();
         cmd.arg("check");
         cmd.arg("--message-format=json");
@@ -518,6 +520,7 @@ impl Tool for CargoClippy {
         ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         cmd.in_workspace_root();
         cmd.arg("clippy");
         cmd.arg("--message-format=json");
@@ -632,6 +635,7 @@ impl Tool for CargoFmt {
         ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
         cmd.in_workspace_root();
         cmd.arg("fmt");
         cmd.kill_on_drop(true);

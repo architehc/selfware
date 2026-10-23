@@ -47,19 +47,28 @@ fn git_sha() -> Option<String> {
 
     let head = git_dir.join("HEAD");
     println!("cargo:rerun-if-changed={}", head.display());
+    let head_log = git_dir.join("logs/HEAD");
+    if head_log.exists() {
+        println!("cargo:rerun-if-changed={}", head_log.display());
+    }
     if let Ok(contents) = std::fs::read_to_string(&head) {
         if let Some(reference) = contents.strip_prefix("ref:") {
             // Branch checkout: also watch the ref HEAD points at. Refs live in
             // the common dir (the main repo's `.git` for a worktree) and may
-            // only exist inside packed-refs; watch that as the fallback.
+            // start inside packed-refs before being unpacked on commit; watch
+            // both the ref (or its parent dir) and packed-refs so unpacking a
+            // packed ref on commit always re-runs build.rs.
             let ref_file = common_dir.join(reference.trim());
             if ref_file.exists() {
                 println!("cargo:rerun-if-changed={}", ref_file.display());
-            } else {
-                let packed = common_dir.join("packed-refs");
-                if packed.exists() {
-                    println!("cargo:rerun-if-changed={}", packed.display());
+            } else if let Some(parent) = ref_file.parent() {
+                if parent.exists() {
+                    println!("cargo:rerun-if-changed={}", parent.display());
                 }
+            }
+            let packed = common_dir.join("packed-refs");
+            if packed.exists() {
+                println!("cargo:rerun-if-changed={}", packed.display());
             }
         }
         // Detached HEAD: HEAD itself is rewritten on every commit, so

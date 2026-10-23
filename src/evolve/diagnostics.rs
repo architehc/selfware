@@ -129,8 +129,9 @@ impl DiagnosticsEngine {
             kind.args()
         };
         use crate::tools::process_guard::GroupedOutputExt;
-        let output = Command::new("cargo")
+        let output = Command::new(crate::tools::cargo::cargo_program())
             .sanitized_env()
+            .pin_rustup_toolchain()
             .kill_on_drop(true)
             .args(args)
             .current_dir(&self.project_root)

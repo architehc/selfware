@@ -221,7 +221,9 @@ impl EventLog {
         let mut records = Vec::new();
         let mut skipped = 0;
         for p in [rotated_path(path), path.clone()] {
-            let Ok(text) = std::fs::read_to_string(&p) else {
+            let Ok(text) =
+                crate::tools::file::read_to_string_capped(&p, crate::tools::file::MAX_READ_SIZE)
+            else {
                 continue;
             };
             for line in text.lines().filter(|l| !l.trim().is_empty()) {

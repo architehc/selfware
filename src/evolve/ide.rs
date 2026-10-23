@@ -152,7 +152,11 @@ impl IdeEngine {
                 let metadata = fs::symlink_metadata(&root.path)?;
                 let path = root.display_prefix.to_string_lossy().replace('\\', "/");
                 if !repository_relative_path_supported(&root.display_prefix)
-                    || fs::read_to_string(&root.path).is_err()
+                    || crate::tools::file::read_to_string_capped(
+                        &root.path,
+                        crate::tools::file::MAX_SOURCE_READ_SIZE,
+                    )
+                    .is_err()
                 {
                     continue;
                 }
@@ -459,8 +463,11 @@ impl IdeEngine {
             }
             content
         } else {
-            fs::read_to_string(&resolved.full)
-                .with_context(|| format!("failed to read {}", resolved.logical))?
+            crate::tools::file::read_to_string_capped(
+                &resolved.full,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            )
+            .with_context(|| format!("failed to read {}", resolved.logical))?
         };
         Ok(Some(DocumentSnapshot {
             path: resolved.logical.clone(),

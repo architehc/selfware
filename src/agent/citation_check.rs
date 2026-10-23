@@ -619,18 +619,32 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
         let end = num("e").or_else(|| num("he")).unwrap_or(start);
         let path = m.as_str().trim_start_matches("./").to_string();
         let symbol = symbol_before(before);
-        let same_line_quote = quote_after(&text[whole.end()..], before.ends_with('`'));
+        let (same_line_quote, same_line_has_trailing_prose) =
+            if is_conjoined_citation_on_line(text, m.start()) {
+                (None, false)
+            } else {
+                match quote_after_with_prose(&text[whole.end()..], before.ends_with('`')) {
+                    Some((q, trailing)) => (Some(q), trailing),
+                    None => (None, false),
+                }
+            };
         let same_line_is_bare = same_line_quote
             .as_deref()
             .and_then(QuotePattern::new)
             .is_some_and(|q| q.bare_name);
         let quote = match &same_line_quote {
-            Some(_) if !same_line_is_bare => same_line_quote,
+            Some(_) if !same_line_is_bare && !same_line_has_trailing_prose => same_line_quote,
+            Some(_) if !same_line_is_bare => {
+                bold_header_quote_after(text, whole.start(), whole.end())
+                    .or_else(|| fenced_quote_after(text, whole.start(), whole.end(), start, end))
+                    .or(same_line_quote)
+            }
             Some(_) => bold_header_quote_after(text, whole.start(), whole.end())
+                .or_else(|| fenced_quote_after(text, whole.start(), whole.end(), start, end))
                 .or_else(|| next_line_inline_quote_after(text, whole.start(), whole.end()))
                 .or(same_line_quote),
             None => bold_header_quote_after(text, whole.start(), whole.end())
-                .or_else(|| fenced_quote_after(text, whole.start(), whole.end()))
+                .or_else(|| fenced_quote_after(text, whole.start(), whole.end(), start, end))
                 .or_else(|| next_line_inline_quote_after(text, whole.start(), whole.end())),
         };
         let key = (path.clone(), start, end, symbol.clone(), quote.clone());
@@ -882,13 +896,38 @@ fn prose_citations(text: &str) -> Vec<Citation> {
     out
 }
 
+/// Whether the citation at `cite_start` is conjoined with an earlier citation
+/// on the same line (e.g. `` `slugify.py:55` + `slugify.py:65` — `backend='auto'` ``),
+/// so a trailing post-separator code span belongs to the compound heading
+/// rather than exclusively to the second citation.
+fn is_conjoined_citation_on_line(text: &str, cite_start: usize) -> bool {
+    let line_start = text[..cite_start].rfind('\n').map_or(0, |i| i + 1);
+    let Some(prev) = citation_regex()
+        .find_iter(&text[line_start..cite_start])
+        .last()
+    else {
+        return false;
+    };
+    let between = &text[line_start + prev.end()..cite_start];
+    let conn = between
+        .trim_matches(['`', '*', '(', ')', ' ', '\t'])
+        .to_ascii_lowercase();
+    matches!(
+        conn.as_str(),
+        "+" | "," | "/" | "&" | "and" | "or" | "with" | "vs" | "vs."
+    )
+}
+
 /// The inline code span quoted right after a citation, on the same line:
 /// "p:12 `code`", "p:12: `code`", "p:12 — `code`", "**p:12** `code`",
 /// "`p:12` `code`". `in_span` says the citation itself sits in a code span,
 /// whose closing backtick comes first. A span that is itself a citation, or
 /// anything else between the citation and the span (";", ")", a word), is
-/// not a quote of the cited line.
-fn quote_after(after: &str, in_span: bool) -> Option<String> {
+/// not a quote of the cited line. Also returns whether prose follows the
+/// closing backtick on the same line (so a fenced block immediately below
+/// a heading takes priority over an inline code token inside the heading's
+/// prose title).
+fn quote_after_with_prose(after: &str, in_span: bool) -> Option<(String, bool)> {
     let line = &after[..after.find('\n').unwrap_or(after.len())];
     let mut rest = line;
     if in_span {
@@ -910,7 +949,8 @@ fn quote_after(after: &str, in_span: bool) -> Option<String> {
     if quote.is_empty() || citation_regex().is_match(quote) {
         return None;
     }
-    Some(quote.to_string())
+    let trailing = inner[close + 1..].trim_matches(['*', ' ', '\t', ':', '.', ',', ';', ')']);
+    Some((quote.to_string(), !trailing.is_empty()))
 }
 
 /// Most lines of a fenced code block taken as a citation's quote; a longer
@@ -927,23 +967,30 @@ const MAX_BLANK_BEFORE_FENCE: usize = 2;
 /// cited line; `quote_after` looks at the citation's own line only, so all
 /// of them were counted location-only — "content not checked").
 ///
-/// Association rule: the citation is the only `path:line` on its line (two
-/// citations on one line leave the block unowned), and the next non-blank
-/// line (at most [`MAX_BLANK_BEFORE_FENCE`] blank lines between) opens a
-/// ```` ``` ```` / `~~~` fence that is closed within
-/// [`MAX_FENCED_QUOTE_LINES`] lines. `diff`/`patch` blocks are proposed
-/// changes, not quotes. Copied `N<TAB>` / `N:` / `N|` line-number prefixes
-/// are stripped when every non-blank line carries one.
-fn fenced_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<String> {
+/// Association rule: the citation is the only `path:line` on its line (or
+/// when multiple citations share the heading line, the fenced block is
+/// line-numbered with `N:` / `N<TAB>` / `N|` prefixes that map specific lines
+/// to `start..=end`), and the next non-blank line (at most
+/// [`MAX_BLANK_BEFORE_FENCE`] blank lines between) opens a ```` ``` ```` /
+/// `~~~` fence that is closed within [`MAX_FENCED_QUOTE_LINES`] lines.
+/// `diff`/`patch` blocks are proposed changes, not quotes. Copied
+/// `N<TAB>` / `N:` / `N|` line-number prefixes are stripped when every
+/// non-blank line carries one.
+fn fenced_quote_after(
+    text: &str,
+    cite_start: usize,
+    cite_end: usize,
+    start: usize,
+    end: usize,
+) -> Option<String> {
     let line_start = text[..cite_start].rfind('\n').map_or(0, |i| i + 1);
     let line_end = text[cite_end..]
         .find('\n')
         .map_or(text.len(), |i| cite_end + i);
-    if citation_regex()
+    let cite_count = citation_regex()
         .find_iter(&text[line_start..line_end])
-        .count()
-        != 1
-    {
+        .count();
+    if cite_count == 0 {
         return None;
     }
     let mut rest = text.get(line_end + 1..)?.lines();
@@ -984,6 +1031,22 @@ fn fenced_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Option<
         return None;
     }
     let numbered = nonblank.iter().all(|l| number_prefix_len(l).is_some());
+    if cite_count > 1 {
+        if !numbered {
+            return None;
+        }
+        let matched: Vec<&str> = nonblank
+            .iter()
+            .filter_map(|l| {
+                let (line_no, prefix_len) = number_prefix(l)?;
+                (start <= line_no && line_no <= end).then_some(&l[prefix_len..])
+            })
+            .collect();
+        if matched.is_empty() {
+            return None;
+        }
+        return Some(matched.join("\n"));
+    }
     let lines: Vec<&str> = nonblank
         .iter()
         .map(|l| match number_prefix_len(l) {
@@ -1079,9 +1142,9 @@ fn bold_header_quote_after(text: &str, cite_start: usize, cite_end: usize) -> Op
     Some(quote.to_string())
 }
 
-/// Byte length of a copied line-number prefix (`12\t`, `12:`, `12|`,
-/// optional leading whitespace), or `None`.
-fn number_prefix_len(line: &str) -> Option<usize> {
+/// Parsed `(line_number, prefix_byte_len)` of a copied line-number prefix
+/// (`12\t`, `12:`, `12|`, optional leading whitespace), or `None`.
+fn number_prefix(line: &str) -> Option<(usize, usize)> {
     let lead = line.len() - line.trim_start().len();
     let digits = line[lead..]
         .chars()
@@ -1090,10 +1153,17 @@ fn number_prefix_len(line: &str) -> Option<usize> {
     if digits == 0 {
         return None;
     }
+    let line_no = line[lead..lead + digits].parse::<usize>().ok()?;
     let after = &line[lead + digits..];
     let sep = after.trim_start_matches(' ');
     sep.starts_with(['\t', ':', '|'])
-        .then(|| line.len() - sep.len() + 1)
+        .then(|| (line_no, line.len() - sep.len() + 1))
+}
+
+/// Byte length of a copied line-number prefix (`12\t`, `12:`, `12|`,
+/// optional leading whitespace), or `None`.
+fn number_prefix_len(line: &str) -> Option<usize> {
+    number_prefix(line).map(|(_, len)| len)
 }
 
 /// A code quote prepared for matching (see the module docs): whitespace

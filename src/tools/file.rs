@@ -166,8 +166,9 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     }
 
     // Secondary hash check for same-mtime modifications
-    let current_bytes = std::fs::read(&key).or_else(|_| std::fs::read(path)).ok()?;
-    let current_text = String::from_utf8_lossy(&current_bytes);
+    let current_text = read_to_string_capped(Path::new(&key), MAX_READ_SIZE)
+        .or_else(|_| read_to_string_capped(Path::new(path), MAX_READ_SIZE))
+        .ok()?;
     let mut hasher = DefaultHasher::new();
     current_text.hash(&mut hasher);
     let current_hash = hasher.finish();

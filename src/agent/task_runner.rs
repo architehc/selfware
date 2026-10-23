@@ -225,19 +225,23 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
     if crate::errors::reasoning_budget_exhaustion(error).is_some_and(|(_, retry)| retry.is_some()) {
         return true;
     }
-    if error
-        .downcast_ref::<crate::safety::killswitch::KillswitchError>()
-        .is_some()
-    {
+    if error.chain().any(|c| {
+        c.downcast_ref::<crate::safety::killswitch::KillswitchError>()
+            .is_some()
+    }) {
         return true;
     }
-    if let Some(crate::errors::SelfwareError::Safety(
-        crate::errors::SafetyError::KillswitchActive { .. },
-    )) = error.downcast_ref::<crate::errors::SelfwareError>()
-    {
+    if error.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<crate::errors::SelfwareError>(),
+            Some(crate::errors::SelfwareError::Safety(
+                crate::errors::SafetyError::KillswitchActive { .. },
+            ))
+        )
+    }) {
         return true;
     }
-    let msg = error.to_string();
+    let msg = format!("{error:#}");
     msg.contains("READ_LOOP_NO_EDIT")
         || msg.contains("WORKSPACE_STAGNATION")
         || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
@@ -347,7 +351,7 @@ impl ErrorRecoveryBudget {
 pub(super) fn recovery_error_text(error: &anyhow::Error) -> String {
     if crate::errors::is_context_overflow_error(error) {
         for cause in error.chain() {
-            match cause.downcast_ref::<crate::errors::ApiError>() {
+            match crate::errors::as_api_error(cause) {
                 Some(overflow @ crate::errors::ApiError::ContextOverflow(_)) => {
                     return overflow.to_string();
                 }

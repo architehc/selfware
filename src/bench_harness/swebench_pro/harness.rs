@@ -372,7 +372,7 @@ fn write_bench_selfware_config(path: &Path, endpoint: &str, alias: &str) -> Resu
         toml_string(endpoint),
         toml_string(alias)
     );
-    std::fs::write(path, content)?;
+    crate::session::checkpoint::write_bytes_atomically(path, content.as_bytes(), 0o644)?;
     Ok(())
 }
 
@@ -406,7 +406,7 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
 
     // After the agent ran, the workdir's `.git/config` is agent-writable:
     // neutralise repo-configured programs (filters, fsmonitor, textconv).
-    let _ = Command::new("git")
+    let add_status = Command::new("git")
         .sanitized_env()
         .args(crate::safety::git_exec::hardening_args(
             workdir,
@@ -422,7 +422,12 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .args(["add", "-A"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .context("failed to spawn git add -A for patch capture")?;
+    if !add_status.success() {
+        let _ = std::fs::remove_file(&tmp_index);
+        anyhow::bail!("git add -A failed during patch capture: {}", add_status);
+    }
 
     let out = Command::new("git")
         .sanitized_env()
@@ -499,9 +504,10 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
     let url = format!("https://github.com/{}.git", repo);
 
+    use crate::safety::git_exec::{GitScope, SanitizedGitExt};
     // First strategy: init + fetch a single SHA.
     let init = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(dest, GitScope::Internal)
         .arg("init")
         .arg(dest)
         .stdout(Stdio::null())
@@ -511,13 +517,13 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
     if init.success() {
         let add_remote = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(dest, GitScope::Internal)
             .args(["-C"])
             .arg(dest)
             .args(["remote", "add", "origin", &url])
             .status()?;
         let fetch = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(dest, GitScope::Internal)
             .args(["-C"])
             .arg(dest)
             .args(["fetch", "--depth", "1", "origin", base_commit])
@@ -525,7 +531,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
             .stderr(Stdio::null())
             .status()?;
         let checkout = Command::new("git")
-            .sanitized_env()
+            .sanitized_git(dest, GitScope::Internal)
             .args(["-C"])
             .arg(dest)
             .args(["checkout", "FETCH_HEAD"])
@@ -543,7 +549,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
         let _ = std::fs::remove_dir_all(dest);
     }
     let clone_status = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(dest, GitScope::Internal)
         .args(["clone", "--filter=blob:none", "--depth", "200", &url])
         .arg(dest)
         .stdout(Stdio::null())
@@ -558,7 +564,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
         );
     }
     let checkout_status = Command::new("git")
-        .sanitized_env()
+        .sanitized_git(dest, GitScope::Internal)
         .args(["-C"])
         .arg(dest)
         .args(["checkout", base_commit])

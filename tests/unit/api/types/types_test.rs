@@ -394,6 +394,35 @@ fn test_message_content_helpers() {
     assert!(!mc.contains("xyz"));
     assert_eq!(mc.chars().count(), 5);
     assert_eq!(format!("{}", mc), "hello");
+
+    // Multi-block and image-only content must not pretend to be empty or ignore
+    // subsequent text blocks.
+    let image_only = MessageContent::Blocks(vec![ContentBlock::ImageUrl {
+        image_url: ImageUrl {
+            url: "data:image/png;base64,abc".to_string(),
+            detail: None,
+        },
+    }]);
+    assert!(!image_only.is_empty());
+    assert_eq!(image_only.len(), 0);
+
+    let multi_text = MessageContent::Blocks(vec![
+        ContentBlock::Text {
+            text: "first".to_string(),
+        },
+        ContentBlock::ImageUrl {
+            image_url: ImageUrl {
+                url: "data:image/png;base64,abc".to_string(),
+                detail: None,
+            },
+        },
+        ContentBlock::Text {
+            text: "second".to_string(),
+        },
+    ]);
+    assert_eq!(multi_text.len(), 11);
+    assert!(multi_text.contains("second"));
+    assert_eq!(format!("{}", multi_text), "first\nsecond");
 }
 
 #[test]

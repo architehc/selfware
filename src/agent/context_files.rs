@@ -63,10 +63,7 @@ pub(super) fn context_file_header(path: &std::path::Path) -> String {
 
 fn context_file_message_name(path: &std::path::Path) -> String {
     let digest = Sha256::digest(path.to_string_lossy().as_bytes());
-    let short_hash = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let short_hash = hex::encode(&digest[..16]);
     format!("selfware_ctx_{short_hash}")
 }
 

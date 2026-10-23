@@ -1083,7 +1083,11 @@ pub fn validate_benchmark_report_resolved(
         ));
     }
 
-    let content = std::fs::read_to_string(resolved).map_err(|e| {
+    let content = crate::tools::file::read_to_string_capped(
+        resolved,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .map_err(|e| {
         format!(
             "Benchmark report artifact '{}' corrupted or unreadable: {e}",
             resolved.display()

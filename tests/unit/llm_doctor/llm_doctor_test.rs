@@ -724,6 +724,19 @@ fn test_map_vision_status_and_detail_all_variants() {
     assert_eq!(status, CheckOutcome::Warn);
     assert!(detail.contains("unknown"));
     assert!(fix.is_some());
+
+    // 7. HttpError(500) -> Warn with HTTP status surfaced (Rule 3)
+    let (status, detail, fix) = map_vision_status_and_detail(
+        Some(VisionProbeOutcome::HttpError(500)),
+        Some("model profile 'vision' (deepseek-v4.1-flash)"),
+        true,
+    );
+    assert_eq!(status, CheckOutcome::Warn);
+    assert!(detail.contains("HTTP 500"), "{detail}");
+    assert!(
+        fix.unwrap().contains("HTTP 500"),
+        "fix hint should surface HTTP status code"
+    );
 }
 
 #[tokio::test]
@@ -742,6 +755,30 @@ async fn test_probe_vision_conditioning_401_returns_unauthorized_without_second_
         server.captured_request_bodies().await.len(),
         1,
         "must not send second (blue) probe after red probe 401"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_probe_vision_conditioning_500_returns_http_error_without_second_probe() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_error(
+            500,
+            r#"{"error":{"message":"Engine processing failed","type":"engine_error"}}"#,
+        )
+        .build()
+        .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", server.url());
+    let outcome =
+        probe_vision_conditioning(&client, &url, "deepseek-v4.1-flash", Some("valid-key")).await;
+
+    assert_eq!(outcome, VisionProbeOutcome::HttpError(500));
+    assert_eq!(
+        server.captured_request_bodies().await.len(),
+        1,
+        "must not send second (blue) probe after red probe 500"
     );
     server.stop().await;
 }

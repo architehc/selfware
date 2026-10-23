@@ -89,7 +89,11 @@ impl SelfwareCompleter {
             })
             .collect();
 
-        suggestions.sort_by_key(|x| std::cmp::Reverse(x.0));
+        suggestions.sort_by(|a, b| {
+            std::cmp::Reverse(a.0)
+                .cmp(&std::cmp::Reverse(b.0))
+                .then_with(|| a.1.value.cmp(&b.1.value))
+        });
         suggestions.into_iter().map(|(_, s)| s).collect()
     }
 
@@ -128,7 +132,11 @@ impl SelfwareCompleter {
             })
             .collect();
 
-        suggestions.sort_by_key(|x| std::cmp::Reverse(x.0));
+        suggestions.sort_by(|a, b| {
+            std::cmp::Reverse(a.0)
+                .cmp(&std::cmp::Reverse(b.0))
+                .then_with(|| a.1.value.cmp(&b.1.value))
+        });
         suggestions.into_iter().map(|(_, s)| s).collect()
     }
 
@@ -207,7 +215,11 @@ impl SelfwareCompleter {
             }
         }
 
-        suggestions.sort_by_key(|x| std::cmp::Reverse(x.0));
+        suggestions.sort_by(|a, b| {
+            std::cmp::Reverse(a.0)
+                .cmp(&std::cmp::Reverse(b.0))
+                .then_with(|| a.1.value.cmp(&b.1.value))
+        });
         suggestions.into_iter().take(20).map(|(_, s)| s).collect()
     }
 

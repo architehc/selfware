@@ -1172,3 +1172,87 @@ fn rust_step_down_and_budget_guard_match_lean_formal_table() {
         "all 4 SV4 budget_reserve rows in formal/supervision_table.json must be verified"
     );
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_run_task_recovers_from_gateway_timeout_via_streamed_side_chat() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(&mut stream);
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = rest.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body_bytes = vec![0u8; content_length];
+                if content_length > 0 {
+                    let _ = reader.read_exact(&mut body_bytes).await;
+                }
+                let body_str = String::from_utf8_lossy(&body_bytes);
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body_str).unwrap_or(serde_json::Value::Null);
+                let is_stream = parsed.get("stream").and_then(|v| v.as_bool()) == Some(true);
+
+                if !is_stream {
+                    // Simulate ngrok 300s gateway cut on non-streaming call
+                    let err_body = "ERR_NGROK_3004: gateway timeout waiting for upstream";
+                    let resp = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        err_body.len(),
+                        err_body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else {
+                    // Streamed side_chat recovery succeeds with SSE chunks
+                    let sse = "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Recovered via SSE\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16}}\n\ndata: [DONE]\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        sse.len(),
+                        sse
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+        }
+    });
+
+    let mut config = mock_fanout_config(endpoint);
+    config.retry.max_retries = 0;
+    let chat = MultiAgentChat::new(
+        &config,
+        MultiAgentConfig::default().with_roles(vec![AgentRole::Architect, AgentRole::Coder]),
+    )
+    .unwrap();
+
+    let results = chat
+        .run_task("Explain resilience in two bullets without referencing a workspace.")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(r.success, "agent {} failed: {:?}", r.agent_id, r.error);
+        assert_eq!(r.content, "Recovered via SSE");
+    }
+
+    server.abort();
+}

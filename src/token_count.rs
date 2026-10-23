@@ -91,12 +91,23 @@ fn apply_code_calibration(count: usize, content: &str) -> usize {
 static CONFIGURED_MODEL: RwLock<Option<String>> = RwLock::new(None);
 
 /// Record the model name from the already-loaded config so the tokenizer can
-/// pick a matching HF tokenizer. Call once, early at startup — the tokenizer
-/// is built lazily on first use, so registration after the first token
-/// count has no effect.
+/// pick a matching HF tokenizer. If the tokenizer was already initialized with
+/// a different model family's repo, this refreshes the active tokenizer and
+/// clears `TOKEN_CACHE`.
 pub fn set_configured_model(model: &str) {
-    if let Ok(mut slot) = CONFIGURED_MODEL.write() {
+    let changed = if let Ok(mut slot) = CONFIGURED_MODEL.write() {
+        let changed = slot.as_deref() != Some(model);
         *slot = Some(model.to_string());
+        changed
+    } else {
+        false
+    };
+    if changed {
+        if let Some(active) = Lazy::get(&TOKENIZER) {
+            active.refresh_if_needed();
+        } else if let Ok(mut cache) = TOKEN_CACHE.write() {
+            cache.clear();
+        }
     }
 }
 
@@ -108,13 +119,59 @@ fn configured_model_name() -> Option<String> {
         .or_else(|| CONFIGURED_MODEL.read().ok().and_then(|slot| slot.clone()))
 }
 
+struct ActiveTokenizer {
+    state: RwLock<(Option<&'static str>, std::sync::Arc<TokenizerState>)>,
+}
+
+impl ActiveTokenizer {
+    fn new() -> Self {
+        let model = configured_model_name();
+        let repo = model.as_deref().and_then(hf_tokenizer_repo);
+        let state = std::sync::Arc::new(TokenizerState::for_model(model.as_deref()));
+        Self {
+            state: RwLock::new((repo, state)),
+        }
+    }
+
+    fn current(&self) -> std::sync::Arc<TokenizerState> {
+        let model = configured_model_name();
+        let desired_repo = model.as_deref().and_then(hf_tokenizer_repo);
+        if let Ok(guard) = self.state.read() {
+            if guard.0 == desired_repo {
+                return std::sync::Arc::clone(&guard.1);
+            }
+        }
+        let rebuilt = std::sync::Arc::new(TokenizerState::for_model(model.as_deref()));
+        if let Ok(mut guard) = self.state.write() {
+            guard.0 = desired_repo;
+            guard.1 = std::sync::Arc::clone(&rebuilt);
+        }
+        if let Ok(mut cache) = TOKEN_CACHE.write() {
+            cache.clear();
+        }
+        rebuilt
+    }
+
+    fn refresh_if_needed(&self) {
+        let _ = self.current();
+    }
+
+    fn count(&self, content: &str) -> usize {
+        self.current().count(content)
+    }
+
+    #[cfg(test)]
+    fn active_repo(&self) -> Option<&'static str> {
+        let _ = self.current();
+        self.state.read().ok().and_then(|guard| guard.0)
+    }
+}
+
 // Try to load a tokenizer matching the configured model, fall back to tiktoken
-// cl100k_base, and finally to a heuristic.  TokenizerState is Send + Sync
-// (both Tokenizer and CoreBPE are), and count() only requires &self, so no
-// Mutex is needed — Lazy alone provides safe one-time initialization and
-// lock-free concurrent reads.
-static TOKENIZER: Lazy<TokenizerState> =
-    Lazy::new(|| TokenizerState::for_model(configured_model_name().as_deref()));
+// cl100k_base, and finally to a heuristic. ActiveTokenizer uses a read lock in
+// the steady state and transparently rebuilds when `set_configured_model` or
+// `SELFWARE_MODEL` switches the target HF tokenizer repo after first use.
+static TOKENIZER: Lazy<ActiveTokenizer> = Lazy::new(ActiveTokenizer::new);
 
 /// Thread-safe cache mapping (content hash, content byte length) -> token count.
 static TOKEN_CACHE: Lazy<RwLock<HashMap<(u64, usize), usize>>> =

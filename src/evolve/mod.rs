@@ -61,7 +61,10 @@ pub use assistant::{ActionHop, GroundedClaim, GroundedRecommendation, GroundingE
 pub use ast::{AstAnalyzer, AstNode};
 pub use ast_scaffold::{validate_rust_syntax, AstSyntaxError};
 pub use clusters::{cluster_of, clustered, ClusteredGraph};
-pub use compiler_repair::{MachineApplicableFix, SkippedFix};
+pub use compiler_repair::{
+    DiagnosticRepairEngine, MachineApplicableFix, RepairApplication, RepairLoopOutcome, RepairStop,
+    SkippedFix,
+};
 pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
@@ -78,7 +81,9 @@ pub use dedup::{jaccard, DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use deletion::{
     preview_deletion, DeletionPreview, DeletionTarget, ImpactEdge, VerificationStep,
 };
-pub use diagnostics::{AnalysisKind, CompilerDiagnostic, DiagnosticSpan};
+pub use diagnostics::{
+    AnalysisKind, AnalysisReport, CompilerDiagnostic, DiagnosticSpan, DiagnosticsEngine,
+};
 pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use git::{BranchResult, GitEngine, GitFileState, GitStatusReport};
@@ -96,7 +101,10 @@ pub use module_graph::{
     from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
 #[cfg(feature = "self-improvement")]
-pub use multi_arm_runner::{MultiArmConfig, MultiArmReport, OptimizationArm};
+pub use multi_arm_runner::{
+    ArmEvaluation, ArmMeasurement, BaselineSummary, MultiArmConfig, MultiArmEvolutionRunner,
+    MultiArmReport, OptimizationArm,
+};
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,

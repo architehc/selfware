@@ -29,6 +29,7 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 # reviews on this endpoint measured 91-136 turns, so 100 would cut them off.
 step_timeout_secs = 1200
 native_function_calling = false
+done_check = true
 
 [retry]
 max_retries = 3

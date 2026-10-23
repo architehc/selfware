@@ -345,8 +345,8 @@ impl LongTermStore {
             })
             .collect();
 
-        // Sort by descending similarity.
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by descending similarity with deterministic ID tie-breaking.
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         // Take top-k semantic hits.
         let semantic_hits: Vec<(String, f32)> = scored.into_iter().take(k).collect();

@@ -107,8 +107,9 @@ impl CodeQueryEngine {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
 
-                // Calculate BM25 score
-                let score = self.bm25_score(&parsed, &query_terms, content.len());
+                // Calculate BM25 score using measured token length (AGENTS.md Rule 4)
+                let doc_tokens = estimate_content_tokens(&content);
+                let score = self.bm25_score(&parsed, &query_terms, doc_tokens);
                 let combined_score = score * base_score;
 
                 ranked.push((path.clone(), combined_score));
@@ -146,8 +147,9 @@ impl CodeQueryEngine {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
 
-                // Calculate relevance score before consuming symbols
-                let score = self.bm25_score(&parsed, &query_terms, content.len());
+                // Calculate relevance score before consuming symbols (AGENTS.md Rule 4)
+                let doc_tokens = estimate_content_tokens(&content);
+                let score = self.bm25_score(&parsed, &query_terms, doc_tokens);
 
                 // Find matching symbols
                 let matched: Vec<Symbol> = parsed
@@ -276,7 +278,7 @@ impl CodeQueryEngine {
 
         for path in files {
             if let Some(content) = read_query_source(path, self.discovered).await {
-                total_len += content.len();
+                total_len += estimate_content_tokens(&content);
                 let terms = tokenize(&content);
 
                 // Count unique terms per document

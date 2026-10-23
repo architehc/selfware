@@ -18,12 +18,16 @@ pub mod query;
 pub mod render;
 pub(crate) mod walk;
 
+pub use budget::{Depth, TokenBudget};
+pub use parser::{parse, Language, ParsedFile, Symbol, SymbolKind, Visibility};
+pub use planner::{ActionType, EvolutionPlan, PlanPhase, RiskLevel};
+pub use query::{
+    extract_keywords, find_related_symbols, CodeQueryEngine, QueryResults, RankedResult,
+};
+pub use render::OutputRenderer;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use budget::{Depth, TokenBudget};
-use parser::Language;
-use query::CodeQueryEngine;
-use render::OutputRenderer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

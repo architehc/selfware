@@ -934,7 +934,7 @@ fn synthesize_local_bot_turn(
                 });
             }
             format!(
-                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA52 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21–PA24 ConfirmView/ResourcePressure/AgentLoop/AgentMemory bounds, PA25–PA28 RSI DarwinX/Evolution Sabotage/MultiArm Repair/SelfHealing bounds, PA29–PA32 Investigative Governance/MicroMode/MetaLearning/Swarm Task Completion, PA33–PA36 Consolidation Retention/SWL Guardrails/Safety Redaction/Workflow Lattice, PA37–PA40 Verification Attribution/Skill Admission/Vector Auto-Compact/Evolve Readiness, PA41–PA44 Hook Quoting Gate (`src/hooks/mod.rs:145`), MCP Protocol Gate (`src/mcp/server.rs:300`), Evolution Replay Readiness (`src/evolution/replay.rs:195`), Observability Alert Gate (`src/observability/log_analysis.rs:140`), PA45–PA48 Supervision Sticky Terminal (`src/supervision/run_registry.rs:58`), Session Checkpoint Delta (`src/session/checkpoint.rs:140`), Devops & Container Isolation (`src/tools/container/validation.rs:10`), Phi Ledger Assessment (`src/phi/ledger.rs:210`), and PA49–PA52 Config & CLI Endpoint/Budget (`src/config/mod.rs:345`), Tool Parser & Measured Token Accounting (`src/token_count.rs:145`), LSP & Computer Window Rule 6 Guards (`src/computer/window.rs:75`), and UI Theme/Spinner/Output Sink (`src/ui/theme.rs:110`)."
+                "Lean 4 formal twin status: `table_conformance_verified` across {total_rows} exported transition rows (`formal/PhiArenaAndTrustBounds.lean` PA1–PA64 + `formal/HarnessAndTwinBounds.lean` PT1–PT5). Verified invariants cover PA1 SignalEmotion dominance (`src/evolve/server/phi_activity.rs:563`), PA2 Grounded TrustState (`redaction_always_withholds`), PA3 PhiPresence attention routing (`src/phi/policy.rs:880`), PA4 DebtBoss priority & HP bounds (`src/phi/arena.rs:340`), PA5 Dream consolidation honesty (`src/cognitive/dream_subprocess.rs:180`), PA6 KV-prefix role demotion (`src/agent/context_management.rs:1054`), PA7 worktree-isolated ToolCache invalidation (`src/session/cache.rs:180`), PA8 EditHistory RestoreOutcome honesty (`src/session/edit_history.rs:505`), PA9–PA12 ArenaProfile/ContextTrust/ContextFit/ApplyStatus bounds, PA13–PA16 Safety/CircuitBreaker/Ontology/Viseme bounds, PA17–PA20 RecoveryTree/ActionRateLimiter/HookRegistry/GuardrailEnforcer bounds, PA21–PA24 ConfirmView/ResourcePressure/AgentLoop/AgentMemory bounds, PA25–PA28 RSI DarwinX/Evolution Sabotage/MultiArm Repair/SelfHealing bounds, PA29–PA32 Investigative Governance/MicroMode/MetaLearning/Swarm Task Completion, PA33–PA36 Consolidation Retention/SWL Guardrails/Safety Redaction/Workflow Lattice, PA37–PA40 Verification Attribution/Skill Admission/Vector Auto-Compact/Evolve Readiness, PA41–PA44 Hook Quoting Gate (`src/hooks/mod.rs:145`), MCP Protocol Gate (`src/mcp/server.rs:300`), Evolution Replay Readiness (`src/evolution/replay.rs:195`), Observability Alert Gate (`src/observability/log_analysis.rs:140`), PA45–PA48 Supervision Sticky Terminal (`src/supervision/run_registry.rs:58`), Session Checkpoint Delta (`src/session/checkpoint.rs:140`), Devops & Container Isolation (`src/tools/container/validation.rs:10`), Phi Ledger Assessment (`src/phi/ledger.rs:210`), PA49–PA52 Config & CLI Endpoint/Budget (`src/config/mod.rs:345`), Tool Parser & Measured Token Accounting (`src/token_count.rs:145`), LSP & Computer Window Rule 6 Guards (`src/computer/window.rs:75`), UI Theme/Spinner/Output Sink (`src/ui/theme.rs:110`), PA53–PA56 API Client Reasoning & Usage (`src/api/client.rs:3147`), Evolve Context Envelope (`src/evolve/context_fit.rs:233`), Tool Arg & Registry Guards (`src/tools/git.rs:43`), Session Store & AES-256-GCM Encryption (`src/session/encryption.rs:161`), PA57–PA60 Safety Scanner & Quarantine (`src/safety/scanner.rs:45`), Introspect Budget & Display Artifact Refusal (`src/tools/introspect/budget.rs:35`), Agent Context Modality & Compressor Latch (`src/agent/context_map.rs:82`), Evolve Action & Staged Apply Gate (`src/evolve/apply.rs:241`), and PA61–PA64 SWL Map-Reduce & Token Gate (`src/swl/runtime/mod.rs:1058`), Cognitive Episodic/KG/RAG (`src/cognitive/episodic.rs:60`), Verification & Language QA Gate (`src/verification/mod.rs:116`), and Skill Frontmatter & GPU Throttle (`src/resources/gpu.rs:180`)."
             )
         }
         "explain_selection" => {
@@ -1022,6 +1022,18 @@ fn synthesize_local_bot_turn(
                 "pa50",
                 "pa51",
                 "pa52",
+                "pa53",
+                "pa54",
+                "pa55",
+                "pa56",
+                "pa57",
+                "pa58",
+                "pa59",
+                "pa60",
+                "pa61",
+                "pa62",
+                "pa63",
+                "pa64",
                 "pt1",
                 "pt2",
                 "pt3",
@@ -1038,7 +1050,7 @@ fn synthesize_local_bot_turn(
                 let formal = crate::phi::arena::verify_phi_formal_invariants();
                 let total_rows = formal["total_rows"].as_u64().unwrap_or(0);
                 parts.push(format!(
-                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA52, PT1–PT5)."
+                    "Lean 4 formal twin (`formal/PhiArenaAndTrustBounds.lean` + `formal/HarnessAndTwinBounds.lean`): {total_rows} transition rows verified under `table_conformance_verified` (PA1–PA68, PT1–PT5)."
                 ));
             }
             if let Some(path) = doc_path {

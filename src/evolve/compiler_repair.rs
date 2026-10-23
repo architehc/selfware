@@ -223,8 +223,12 @@ impl DiagnosticRepairEngine {
             for (start, end, replacement) in &accepted {
                 new_content.replace_range(*start..*end, replacement);
             }
-            fs::write(&path, new_content)
-                .with_context(|| format!("failed to write repaired {}", path.display()))?;
+            crate::session::checkpoint::write_bytes_atomically(
+                &path,
+                new_content.as_bytes(),
+                0o644,
+            )
+            .with_context(|| format!("failed to write repaired {}", path.display()))?;
             out.applied += accepted.len();
             out.files_changed.push(file);
         }

@@ -67,9 +67,23 @@ pub mod computer_control;
 pub mod long_running;
 pub mod swebench_pro;
 
+pub use computer_control::{
+    BrowserBenchConfig, BrowserBenchReport, BrowserBenchRunner, InteractionRecorder,
+    InteractionTrace, RecordedAction, ScreenshotRef, SuccessCriterion, WebAction, WebTask,
+};
 pub use config::HarnessConfig;
+pub use long_running::{
+    LongRunningConfig, LongRunningReport, LongRunningRunner, ProjectResult, ProjectStatus,
+    ProjectType, RoundSummary, TaskSetup, TestTask,
+};
 pub use report::HarnessReport;
 pub use runner::HarnessRunner;
+pub use swebench_pro::{
+    capture_patch, load_instances, quant_catalog, run_swebench_pro, Candidate, CandidatePool,
+    DiagnosisSummary, Instance, LlamaServer, LlamaServerOpts, OfficialEvalResult, PerRunDiagnosis,
+    QuantSpec, RunOutcome, RunTrace, SwebenchProOpts, SwebenchProOptsSnapshot, SweepManifest,
+    TestResults, TraceEvent, TrialManifest, TrialState,
+};
 pub use task::{
     BenchTask, EvalDetail, EvalResult, JsonEvaluator, KeywordEvaluator, NoopEvaluator,
     StreamResult, TaskEvaluator,

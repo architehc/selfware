@@ -1689,7 +1689,22 @@ fn slugify_workspace() -> tempfile::TempDir {
             ),
         ],
     );
-    write("slugify.py", 219, &[]);
+    write(
+        "slugify.py",
+        219,
+        &[
+            (55, "    if backend == 'auto':"),
+            (
+                65,
+                "    result: str = getattr(module, 'anyascii' if backend == 'anyascii' else 'unidecode')(text)",
+            ),
+            (165, "    text = re.sub(pattern, DEFAULT_SEPARATOR, text)"),
+            (
+                207,
+                "    allow_unicode uses NFKC without transliteration. backend='auto' prefers",
+            ),
+        ],
+    );
     dir
 }
 
@@ -2017,4 +2032,48 @@ fn finding_heading_with_inline_code_quote_on_next_line_verifies() {
         r.check(&citations2[0]),
         CitationVerdict::Verified { .. }
     ));
+}
+
+#[test]
+fn conjoined_heading_with_numbered_fenced_block_and_prose_heading_fenced_block_verify() {
+    let ws = slugify_workspace();
+    let mut r = CitationResolver::new(ws.path());
+
+    // Live review-slugify shape (20261022T191649Z-review-slugify-5492):
+    // conjoined citations in a bold heading followed by a numbered fenced block,
+    // plus a single-citation heading with a bare-name or prose code span
+    // followed by a fenced code block.
+    let text = "\
+**1. `slugify/slugify.py:55` + `slugify/slugify.py:65` — `backend='auto'` can call a function that doesn't exist**
+```python
+55:     if backend == 'auto':
+65:     result: str = getattr(module, 'anyascii' if backend == 'anyascii' else 'unidecode')(text)
+```
+The docstring at `slugify/slugify.py:207` (`allow_unicode uses NFKC without transliteration. backend='auto' prefers`) promises fallback works.
+
+**3. `slugify/slugify.py:165` — `regex_pattern` is handed to `re.sub` unchecked**
+```python
+text = re.sub(pattern, DEFAULT_SEPARATOR, text)
+```
+";
+    let citations = parse_citations(text);
+    assert_eq!(citations.len(), 4, "{citations:#?}");
+    assert_eq!(
+        citations[0].quote.as_deref(),
+        Some("     if backend == 'auto':")
+    );
+    assert_eq!(
+        citations[1].quote.as_deref(),
+        Some("     result: str = getattr(module, 'anyascii' if backend == 'anyascii' else 'unidecode')(text)")
+    );
+    assert_eq!(
+        citations[3].quote.as_deref(),
+        Some("text = re.sub(pattern, DEFAULT_SEPARATOR, text)")
+    );
+
+    let report = r.verify_text(text, ANSWER_SOURCE);
+    assert_eq!(report.total, 4, "{report:#?}");
+    assert_eq!(report.verified, 3, "{report:#?}");
+    assert_eq!(report.location_verified, 1, "{report:#?}");
+    assert_eq!(report.problem_count(), 0, "{report:#?}");
 }

@@ -63,6 +63,11 @@ pub use metrics::{MetricsStore, PerformanceSnapshot, TerminalOutcome, TerminalRu
 pub use rag::{ContextBuilder, RagConfig, RagEngine, RagStats, RetrievedContext};
 #[cfg(feature = "self-improvement")]
 pub use rsi_orchestrator::{BenchmarkReport, CycleOutcome, RSIOrchestrator, RSIState};
+#[cfg(feature = "self-improvement")]
+pub use self_edit::{
+    AppliedMutation, ImprovementCategory, ImprovementRecord, ImprovementSource, ImprovementStatus,
+    ImprovementTarget, ProposalStatus, SelfEditOrchestrator, FAILURE_COOLDOWN_SECS,
+};
 pub use self_improvement::{
     ErrorPatternLearner, PromptOptimizer, SelfImprovementEngine, ToolSelectionLearner,
     UsageAnalyzer,

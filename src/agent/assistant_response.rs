@@ -55,6 +55,96 @@ impl Agent {
         });
     }
 
+    /// Reconcile provider-reported step token usage with measured tokenizer
+    /// estimates when the backend omits `usage` (common on local vLLM/SGLang
+    /// or Colibri fast-path SSE responses). Without this fallback, cumulative
+    /// usage stays at 0 on omitted-usage streams and `max_budget_tokens`
+    /// never trips.
+    pub(super) fn reconcile_step_token_usage(
+        &mut self,
+        chat_metadata: Option<&crate::api::types::ChatMetadata>,
+        prompt_token_estimate: usize,
+        content: &str,
+        reasoning: Option<&str>,
+    ) {
+        let reported_prompt = chat_metadata
+            .and_then(|m| m.prompt_tokens)
+            .map(|p| p as usize);
+        let reported_completion = chat_metadata
+            .and_then(|m| m.completion_tokens)
+            .map(|c| c as usize);
+
+        let output_estimate = crate::token_count::estimate_content_tokens(content)
+            + reasoning
+                .map(crate::token_count::estimate_content_tokens)
+                .unwrap_or(0);
+        let (input_tokens, output_tokens) = resolve_step_token_counts(
+            reported_prompt,
+            reported_completion,
+            prompt_token_estimate,
+            output_estimate,
+        );
+
+        self.sync_api_usage();
+
+        // Validate raw provider measurements before fallback estimation or aggregation (Rule 3)
+        if let Some(meta) = chat_metadata {
+            if let (Some(p), Some(c), Some(t)) = (
+                meta.prompt_tokens,
+                meta.completion_tokens,
+                meta.total_tokens,
+            ) {
+                if t != 0 && (p as usize).saturating_add(c as usize) != t as usize {
+                    warn!(
+                        "Provider reported unreconciled token usage: prompt={} + completion={} != total={}",
+                        p, c, t
+                    );
+                }
+            }
+        }
+        // Missing provider fields still use the measured content-token fallback.
+        // Reported components have already been charged by the attempt ledger.
+        let already_accounted = chat_metadata.is_some_and(|meta| meta.accounted_usage.is_some());
+        let reported_total = chat_metadata
+            .and_then(|m| m.total_tokens)
+            .map(|t| t as usize);
+        let estimated_input = if !already_accounted && reported_prompt.is_none() {
+            input_tokens
+        } else {
+            0
+        };
+        let estimated_output = if !already_accounted && reported_completion.is_none() {
+            output_tokens
+        } else {
+            0
+        };
+        // Reconcile missing estimated components against what the ledger has already
+        // accounted for this step (Rule 4). If the provider reported a total_tokens
+        // that already covers the step's expected total, adding estimated output/input
+        // directly to cumulative total would double-count those tokens.
+        let missing_total = if !already_accounted {
+            let step_expected_total = input_tokens.saturating_add(output_tokens);
+            let step_accounted_total = reported_total.unwrap_or(0).max(
+                reported_prompt
+                    .unwrap_or(0)
+                    .saturating_add(reported_completion.unwrap_or(0)),
+            );
+            step_expected_total.saturating_sub(step_accounted_total)
+        } else {
+            0
+        };
+        self.cumulative_token_usage.input += estimated_input;
+        self.cumulative_token_usage.output += estimated_output;
+        self.cumulative_token_usage.total += missing_total;
+        self.cumulative_token_usage.total = self.cumulative_token_usage.total.max(
+            self.cumulative_token_usage
+                .input
+                .saturating_add(self.cumulative_token_usage.output),
+        );
+        self.client
+            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
+    }
+
     pub(super) async fn get_assistant_step_response(
         &mut self,
         use_last_message: bool,
@@ -566,92 +656,13 @@ impl Agent {
 
         // Accumulate token usage from this assistant step. Prefer the provider-
         // reported numbers, but fall back to a tokenizer estimate when the
-        // backend omits `usage` (common on local vLLM/SGLang). Without this,
-        // cumulative usage never grows on those backends and `max_budget_tokens`
-        // silently never trips. The estimate is intentionally conservative — a
-        // hard cap should err toward stopping slightly early, not overshooting.
-        let reported_prompt = chat_metadata
-            .as_ref()
-            .and_then(|m| m.prompt_tokens)
-            .map(|p| p as usize);
-        let reported_completion = chat_metadata
-            .as_ref()
-            .and_then(|m| m.completion_tokens)
-            .map(|c| c as usize);
-
-        let output_estimate = crate::token_count::estimate_content_tokens(&content)
-            + reasoning
-                .as_ref()
-                .map(|r| crate::token_count::estimate_content_tokens(r))
-                .unwrap_or(0);
-        let (input_tokens, output_tokens) = resolve_step_token_counts(
-            reported_prompt,
-            reported_completion,
+        // backend omits `usage` (common on local vLLM/SGLang or Colibri fast-path).
+        self.reconcile_step_token_usage(
+            chat_metadata.as_ref(),
             prompt_token_estimate,
-            output_estimate,
+            &content,
+            reasoning.as_deref(),
         );
-
-        self.sync_api_usage();
-
-        // Validate raw provider measurements before fallback estimation or aggregation (Rule 3)
-        if let Some(meta) = chat_metadata.as_ref() {
-            if let (Some(p), Some(c), Some(t)) = (
-                meta.prompt_tokens,
-                meta.completion_tokens,
-                meta.total_tokens,
-            ) {
-                if t != 0 && (p as usize).saturating_add(c as usize) != t as usize {
-                    warn!(
-                        "Provider reported unreconciled token usage: prompt={} + completion={} != total={}",
-                        p, c, t
-                    );
-                }
-            }
-        }
-        // Missing provider fields still use the measured content-token fallback.
-        // Reported components have already been charged by the attempt ledger.
-        let already_accounted = chat_metadata
-            .as_ref()
-            .is_some_and(|meta| meta.accounted_usage.is_some());
-        let reported_total = chat_metadata
-            .as_ref()
-            .and_then(|m| m.total_tokens)
-            .map(|t| t as usize);
-        let estimated_input = if !already_accounted && reported_prompt.is_none() {
-            input_tokens
-        } else {
-            0
-        };
-        let estimated_output = if !already_accounted && reported_completion.is_none() {
-            output_tokens
-        } else {
-            0
-        };
-        // Reconcile missing estimated components against what the ledger has already
-        // accounted for this step (Rule 4). If the provider reported a total_tokens
-        // that already covers the step's expected total, adding estimated output/input
-        // directly to cumulative total would double-count those tokens.
-        let missing_total = if !already_accounted {
-            let step_expected_total = input_tokens.saturating_add(output_tokens);
-            let step_accounted_total = reported_total.unwrap_or(0).max(
-                reported_prompt
-                    .unwrap_or(0)
-                    .saturating_add(reported_completion.unwrap_or(0)),
-            );
-            step_expected_total.saturating_sub(step_accounted_total)
-        } else {
-            0
-        };
-        self.cumulative_token_usage.input += estimated_input;
-        self.cumulative_token_usage.output += estimated_output;
-        self.cumulative_token_usage.total += missing_total;
-        self.cumulative_token_usage.total = self.cumulative_token_usage.total.max(
-            self.cumulative_token_usage
-                .input
-                .saturating_add(self.cumulative_token_usage.output),
-        );
-        self.client
-            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
 
         let response = AssistantStepResponse {
             reasoning_chars: reasoning.as_ref().map(|r| r.len()).unwrap_or(0),
@@ -1271,7 +1282,7 @@ pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
             return true;
         }
         matches!(
-            cause.downcast_ref::<crate::errors::ApiError>(),
+            crate::errors::as_api_error(cause),
             Some(crate::errors::ApiError::HttpStatus { status, message })
                 if (400..500).contains(status)
                     && *status != 429

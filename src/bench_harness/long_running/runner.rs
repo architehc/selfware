@@ -87,7 +87,13 @@ impl LongRunningRunner {
 
         // Write selfware.toml
         let config_toml = self.config.to_selfware_toml();
-        let _ = std::fs::write(work_dir.join("selfware.toml"), config_toml);
+        if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+            &work_dir.join("selfware.toml"),
+            config_toml.as_bytes(),
+            0o644,
+        ) {
+            return self.create_error_result(&task.name, &format!("config_write_failed: {}", e));
+        }
 
         // Run selfware
         let log_path = work_dir
@@ -137,7 +143,11 @@ impl LongRunningRunner {
         }
 
         // Save log
-        let _ = std::fs::write(&log_path, outcome.stdout.as_bytes());
+        let _ = crate::session::checkpoint::write_bytes_atomically(
+            &log_path,
+            outcome.stdout.as_bytes(),
+            0o644,
+        );
 
         // Evaluate results
         let duration = task_start.elapsed().as_secs();
@@ -201,8 +211,14 @@ impl LongRunningRunner {
             return false;
         }
 
-        let mut cmd = Command::new(cmd_parts[0]);
+        let prog = if cmd_parts[0] == "cargo" {
+            crate::tools::cargo::cargo_program()
+        } else {
+            std::path::PathBuf::from(cmd_parts[0])
+        };
+        let mut cmd = Command::new(prog);
         apply_env_allowlist(&mut cmd);
+        crate::safety::process_env::pin_std_rustup_toolchain(&mut cmd);
         cmd.args(&cmd_parts[1..])
             .current_dir(work_dir)
             .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware");
@@ -224,8 +240,14 @@ impl LongRunningRunner {
             return (0, 0);
         }
 
-        let mut cmd = Command::new(cmd_parts[0]);
+        let prog = if cmd_parts[0] == "cargo" {
+            crate::tools::cargo::cargo_program()
+        } else {
+            std::path::PathBuf::from(cmd_parts[0])
+        };
+        let mut cmd = Command::new(prog);
         apply_env_allowlist(&mut cmd);
+        crate::safety::process_env::pin_std_rustup_toolchain(&mut cmd);
         cmd.args(&cmd_parts[1..])
             .current_dir(work_dir)
             .env("XDG_RUNTIME_DIR", "/tmp/xdg-run-selfware");
@@ -252,7 +274,10 @@ impl LongRunningRunner {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == ext).unwrap_or(false) {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(content) = crate::tools::file::read_to_string_capped(
+                        &path,
+                        crate::tools::file::MAX_READ_SIZE,
+                    ) {
                         total += content.lines().count();
                     }
                 }
@@ -265,7 +290,10 @@ impl LongRunningRunner {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(content) = crate::tools::file::read_to_string_capped(
+                            &path,
+                            crate::tools::file::MAX_READ_SIZE,
+                        ) {
                             total += content.lines().count();
                         }
                     }

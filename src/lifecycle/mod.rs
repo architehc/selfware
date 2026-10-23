@@ -32,8 +32,18 @@ mod task;
 mod tracked;
 
 pub use agent::{AgentEvent, AgentMachine, AgentState};
+pub use control::{
+    EditedDescription, LiveTask, TaskConstraints, TaskControl, TaskEdit, MAIN_AGENT,
+};
 pub use log::{
     EventLog, RecordedUsage, TransitionRecord, EVENT_LOG_ENV, MAX_CAUSE_CHARS, MAX_LOG_BYTES,
+};
+pub use projection::{
+    agent_display, agent_summaries, agents_command_output, fmt_paused, paused_total_ms,
+    render_agent_list, render_task_list, render_task_resources, render_task_tree, render_timeline,
+    resolve_task_id, resources_held, task_show_output, task_show_output_with, task_summaries,
+    task_timeline, tasks_command_output, usage_line, AgentDisplay, AgentSummary, ResolveError,
+    TaskSummary,
 };
 pub use resource::{
     table as resource_table, ResourceEvent, ResourceKind, ResourceMachine, ResourceState,

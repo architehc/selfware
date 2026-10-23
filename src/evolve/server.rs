@@ -2070,7 +2070,10 @@ enum ReviewJobStatus {
 
 impl ReviewJobStatus {
     fn failed(error: anyhow::Error) -> Self {
-        match error.downcast_ref::<ReviewProtocolError>() {
+        match error
+            .chain()
+            .find_map(|c| c.downcast_ref::<ReviewProtocolError>())
+        {
             Some(protocol) => Self::Failed {
                 error: protocol.to_string(),
                 error_detail: protocol.body(),
@@ -3202,7 +3205,10 @@ fn unprocessable(value: Value) -> ApiError {
 /// Map a grounded-review failure: typed protocol failures (spec §2.1) become
 /// 422 with the spec body verbatim; anything else stays an untyped 500.
 fn review_error(error: anyhow::Error) -> ApiError {
-    match error.downcast_ref::<ReviewProtocolError>() {
+    match error
+        .chain()
+        .find_map(|c| c.downcast_ref::<ReviewProtocolError>())
+    {
         Some(protocol) => unprocessable(protocol.body()),
         None => internal_error(error),
     }

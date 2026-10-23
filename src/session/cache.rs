@@ -80,6 +80,53 @@ impl ToolCache {
             .find_map(|key| args.get(key).and_then(|v| v.as_str()))
     }
 
+    /// Check if a tool is cacheable (read-only operations).
+    pub fn is_cacheable(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "file_read"
+                | "directory_tree"
+                | "git_status"
+                | "git_diff"
+                | "git_log"
+                | "git_show"
+                | "grep_search"
+                | "glob_find"
+                | "symbol_search"
+                | "read_file"
+        )
+    }
+
+    /// Check if a tool invalidates cache entries (mutating operations).
+    pub fn invalidates_cache(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "file_write"
+                | "file_edit"
+                | "file_fim_edit"
+                | "cargo_fmt"
+                | "cargo_clippy"
+                | "file_delete"
+                | "file_multi_edit"
+                | "git_commit"
+                | "git_checkout"
+                | "git_reset"
+                | "git_checkpoint"
+                | "shell_exec"
+                | "pty_shell"
+                | "patch_apply"
+                | "write_file"
+                | "edit_file"
+                // Opaque workspace mutations: lockfiles, manifests, generated
+                // files and arbitrary package scripts. They name no written
+                // path, so the dispatcher clears the whole tool cache for them.
+                | "npm_install"
+                | "yarn_install"
+                | "pip_install"
+                | "npm_run"
+        )
+    }
+
     /// Get a cached result if available and not expired
     pub async fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
         let workspace_root = crate::tools::workspace_root::current_path();
@@ -266,49 +313,12 @@ pub(crate) fn is_tree_scoped_key(key: &str) -> bool {
 
 /// Check if a tool is cacheable (read-only operations)
 pub fn is_cacheable(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "file_read"
-            | "directory_tree"
-            | "git_status"
-            | "git_diff"
-            | "git_log"
-            | "git_show"
-            | "grep_search"
-            | "glob_find"
-            | "symbol_search"
-            | "read_file"
-    )
+    ToolCache::is_cacheable(tool_name)
 }
 
 /// Check if a tool invalidates cache entries (mutating operations)
 pub fn invalidates_cache(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "file_write"
-            | "file_edit"
-            | "file_fim_edit"
-            | "cargo_fmt"
-            | "cargo_clippy"
-            | "file_delete"
-            | "file_multi_edit"
-            | "git_commit"
-            | "git_checkout"
-            | "git_reset"
-            | "git_checkpoint"
-            | "shell_exec"
-            | "pty_shell"
-            | "patch_apply"
-            | "write_file"
-            | "edit_file"
-            // Opaque workspace mutations: lockfiles, manifests, generated
-            // files and arbitrary package scripts. They name no written
-            // path, so the dispatcher clears the whole tool cache for them.
-            | "npm_install"
-            | "yarn_install"
-            | "pip_install"
-            | "npm_run"
-    )
+    ToolCache::invalidates_cache(tool_name)
 }
 
 /// Configuration for LLM response caching

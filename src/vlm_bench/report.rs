@@ -101,8 +101,16 @@ impl BenchReport {
         let json_path = dir.join("vlm_benchmark_report.json");
         let md_path = dir.join("vlm_benchmark_report.md");
 
-        std::fs::write(&json_path, self.to_json()?)?;
-        std::fs::write(&md_path, self.to_markdown())?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &json_path,
+            self.to_json()?.as_bytes(),
+            0o644,
+        )?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &md_path,
+            self.to_markdown().as_bytes(),
+            0o644,
+        )?;
 
         Ok(())
     }

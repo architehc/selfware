@@ -105,6 +105,7 @@ impl HostToolchain {
             .unwrap_or_else(|| home.join(".cargo"));
         let mut cmd = std::process::Command::new("rustc");
         crate::safety::process_env::sanitize_std_command_env(&mut cmd);
+        crate::safety::process_env::pin_std_rustup_toolchain(&mut cmd);
         let out = cmd
             .args(["--print", "sysroot"])
             .current_dir(repo)
@@ -788,12 +789,14 @@ impl ArmQuarantine {
 /// a symlink, so git finds its own exec-path from its real location).
 #[cfg(unix)]
 fn write_git_wrapper(bin: &Path, target: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(bin)?;
     let quoted = target.to_string_lossy().replace('\'', r"'\''");
     let git = bin.join("git");
-    std::fs::write(&git, format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n"))?;
-    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+    crate::session::checkpoint::write_bytes_atomically(
+        &git,
+        format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n").as_bytes(),
+        0o755,
+    )?;
     Ok(())
 }
 

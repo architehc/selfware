@@ -83,19 +83,42 @@ impl MessageContent {
         }
     }
 
-    /// Length of the text portion (for token estimation, truncation, etc.).
+    /// Length of the text portion across all text blocks (for token estimation, truncation, etc.).
     pub fn len(&self) -> usize {
-        self.text().len()
+        match self {
+            Self::Text(s) => s.len(),
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::ImageUrl { .. } => 0,
+                })
+                .sum(),
+        }
     }
 
-    /// Returns `true` if the text portion is empty.
+    /// Returns `true` if there is no non-empty text block and no non-empty image block.
     pub fn is_empty(&self) -> bool {
-        self.text().is_empty()
+        match self {
+            Self::Text(s) => s.is_empty(),
+            Self::Blocks(blocks) => !blocks.iter().any(|b| match b {
+                ContentBlock::Text { text } => !text.is_empty(),
+                ContentBlock::ImageUrl { image_url } => !image_url.url.is_empty(),
+            }),
+        }
     }
 
-    /// Check if the text portion contains a substring.
+    /// Check if any text block (or the joined text across blocks) contains a substring.
     pub fn contains(&self, pat: &str) -> bool {
-        self.text().contains(pat)
+        match self {
+            Self::Text(s) => s.contains(pat),
+            Self::Blocks(blocks) => {
+                blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text.contains(pat)))
+                    || self.text_all().contains(pat)
+            }
+        }
     }
 
     /// Iterator over the characters of the text portion.
@@ -162,7 +185,10 @@ impl Eq for MessageContent {}
 
 impl std::fmt::Display for MessageContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.text())
+        match self {
+            Self::Text(s) => f.write_str(s),
+            Self::Blocks(_) => f.write_str(&self.text_all()),
+        }
     }
 }
 

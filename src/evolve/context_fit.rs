@@ -130,8 +130,9 @@ impl<'a> TierMeasurer<'a> {
             ContextMode::Full => self.measured_full(),
             ContextMode::Compact => self.cached("compact", Self::measure_compact),
             ContextMode::Lite => self.cached("lite", Self::measure_lite),
+            ContextMode::Custom => self.cached("custom", Self::measure_custom),
             ContextMode::Map => self.cached("map", Self::measure_map),
-            ContextMode::Preset(_) | ContextMode::Custom => self.measured_full(),
+            ContextMode::Preset(_) => self.measured_full(),
         }
     }
 
@@ -222,6 +223,20 @@ impl<'a> TierMeasurer<'a> {
             };
         }
         total
+    }
+
+    fn measure_custom(&self) -> usize {
+        let aux_tokens: usize = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.layer == NodeLayer::Auxiliary)
+            .map(|n| match self.read_node_source(n) {
+                Some((_, src)) => crate::token_count::estimate_content_tokens(&src),
+                None => n.tokens,
+            })
+            .sum();
+        self.cached("lite", Self::measure_lite) + aux_tokens
     }
 
     fn measure_map(&self) -> usize {

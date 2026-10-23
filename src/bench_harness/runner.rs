@@ -358,8 +358,20 @@ async fn execute_task(
             "response has no usage.completion_tokens; throughput will undercount this request"
         );
     }
-    let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
-    let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+    let prompt_tokens = usage["prompt_tokens"]
+        .as_u64()
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| crate::token_count::estimate_messages_tokens(&task.messages) as u64);
+    let completion_tokens = usage["completion_tokens"]
+        .as_u64()
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            if content.is_empty() {
+                0
+            } else {
+                crate::token_count::estimate_content_tokens(&content) as u64
+            }
+        });
 
     let latency_ms = start.elapsed().as_millis() as u64;
 

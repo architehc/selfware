@@ -207,14 +207,17 @@ class Toolchain:
         # The rustup proxies (cargo, rustc, ...) as links: rustup dispatches
         # on the name. `cargo install` writes HERE, not into ~/.cargo/bin.
         bin_dir = self.cargo_home / "bin"
-        if not bin_dir.exists():
-            bin_dir.mkdir()
-            rustup_bin = real_cargo / "bin" / "rustup"
-            if rustup_bin.exists():
-                for proxy in ("cargo", "rustc", "rustup", "rustdoc", "rustfmt", "cargo-fmt",
-                              "cargo-clippy", "clippy-driver", "rust-analyzer"):
-                    if (real_cargo / "bin" / proxy).exists():
-                        (bin_dir / proxy).symlink_to(rustup_bin.resolve())
+        bin_dir.mkdir(exist_ok=True)
+        rustup_bin = real_cargo / "bin" / "rustup"
+        if rustup_bin.exists():
+            resolved_rustup = rustup_bin.resolve()
+            for proxy in ("cargo", "rustc", "rustup", "rustdoc", "rustfmt", "cargo-fmt",
+                          "cargo-clippy", "clippy-driver", "rust-analyzer"):
+                if (real_cargo / "bin" / proxy).exists():
+                    link = bin_dir / proxy
+                    if not link.exists() or (link.is_symlink() and link.resolve() != resolved_rustup):
+                        link.unlink(missing_ok=True)
+                        link.symlink_to(resolved_rustup)
         for cache in ("registry", "git"):
             dest = self.cargo_home / cache
             if not dest.exists():
@@ -222,6 +225,9 @@ class Toolchain:
                 self.isolation[f"cargo_{cache}"] = "clone" if cloned else "empty (downloads)"
             else:
                 self.isolation.setdefault(f"cargo_{cache}", "harness-owned")
+        if self.rustup_home.exists() and (real_rustup / "settings.toml").is_file():
+            if not (self.rustup_home / "settings.toml").is_file():
+                _remove(self.rustup_home)
         if not self.rustup_home.exists():
             if not _clone_tree(real_rustup, self.rustup_home):
                 self.isolation["rustup"] = "shared (read-write: no copy-on-write clone here)"

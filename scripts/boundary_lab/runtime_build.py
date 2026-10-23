@@ -30,8 +30,8 @@ RUST_IMAGE = "rust:1.95-bookworm"
 BUILD_TIMEOUT = 1200
 CLI_TIMEOUT = 30
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
-MAX_FILE_BYTES = 64 * 1024 * 1024
-SOURCE_ROOTS = {"src", "templates", "tests", "benches", "examples"}
+MAX_FILE_BYTES = 128 * 1024 * 1024
+SOURCE_ROOTS = {"src", "templates", "tests", "benches", "examples", "formal"}
 SOURCE_FILES = {"Cargo.toml", "Cargo.lock", "build.rs", "README.md",
                 "scripts/playwright-bridge.js", "selfware-qa-schema.yaml"}
 PROBE = "tests/boundary_runtime.rs"
@@ -319,6 +319,10 @@ def build_runtime(repo: Path, output: Path, *, memory_gib: int = 3) -> dict:
                    "--memory", f"{memory_gib}g", "--memory-swap", f"{memory_gib}g", "--pids-limit", "256", "--network", "bridge",
                    "--mount", f"type=volume,source={volume},target=/build",
                    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
+                   "--env", "CARGO_PROFILE_DEV_CODEGEN_UNITS=8",
+                   "--env", "CARGO_PROFILE_TEST_CODEGEN_UNITS=8",
+                   "--env", "CARGO_PROFILE_DEV_DEBUG=0",
+                   "--env", "CARGO_PROFILE_TEST_DEBUG=0",
                    "--env", "SELFWARE_GIT_SHA=" + provenance["commit"][:12], base["image_id"], "sleep", "1800"]
         ident = _docker(command, timeout=budget(CLI_TIMEOUT))
         if not re.fullmatch(r"[a-f0-9]{64}", ident):

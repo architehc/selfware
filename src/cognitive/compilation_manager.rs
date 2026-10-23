@@ -278,8 +278,9 @@ impl CompilationSandbox {
     /// Check if the code compiles without errors (cargo check)
     pub fn check(&self) -> Result<CompileResult> {
         info!("Running 'cargo check' in sandbox");
-        let output = Command::new("cargo")
+        let output = Command::new(crate::tools::cargo::cargo_program())
             .sanitized_env()
+            .pin_rustup_toolchain()
             .arg("check")
             .current_dir(&self.work_dir)
             .output()?;
@@ -290,8 +291,9 @@ impl CompilationSandbox {
     /// Run tests (cargo test)
     pub fn test(&self) -> Result<CompileResult> {
         info!("Running 'cargo test' in sandbox");
-        let output = Command::new("cargo")
+        let output = Command::new(crate::tools::cargo::cargo_program())
             .sanitized_env()
+            .pin_rustup_toolchain()
             .arg("test")
             .current_dir(&self.work_dir)
             .output()?;

@@ -287,6 +287,7 @@ impl Tool for FileFimEdit {
             let mut check = Command::new("rustfmt");
             check
                 .sanitized_env()
+                .pin_rustup_toolchain()
                 // rustfmt discovers rustfmt.toml from its cwd: the workspace root.
                 .current_dir(&workspace)
                 .args(["--edition", edition.edition.as_str(), "--check"])

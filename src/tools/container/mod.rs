@@ -11,11 +11,12 @@ mod validation;
 mod tests;
 
 // Re-export public types
-pub use runtime::{get_runtime, ContainerRuntime};
+pub use runtime::{detect_runtime, get_runtime, ContainerRuntime};
 pub use tools::{
     security_flags, ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages,
     ContainerList, ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
 pub use validation::{
-    is_valid_memory, is_valid_port, is_valid_user, validate_port_mapping, validate_volume_spec,
+    is_safe_host_mount, is_valid_memory, is_valid_port, is_valid_user, validate_port_mapping,
+    validate_volume_spec, SHELL_METACHARACTERS,
 };

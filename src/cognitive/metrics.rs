@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -309,16 +309,17 @@ impl MetricsStore {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let file = std::fs::File::open(&self.path)?;
-        let reader = std::io::BufReader::new(file);
+        let content = crate::tools::file::read_to_string_capped(
+            &self.path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         let mut snapshots = Vec::new();
         let mut skipped = 0usize;
-        for line in reader.lines() {
-            let line = line?;
+        for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<PerformanceSnapshot>(&line) {
+            match serde_json::from_str::<PerformanceSnapshot>(line) {
                 Ok(snapshot) => snapshots.push(snapshot),
                 Err(_) => skipped += 1,
             }

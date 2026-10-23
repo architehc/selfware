@@ -17,15 +17,20 @@ pub mod swarm;
 pub mod workflows;
 
 pub use multiagent::{
-    print_agent_summary, run_multiagent_task, AgentInstance, AgentResult, MultiAgentChat,
+    agent_color_index, agent_tag, print_agent_summary, run_multiagent_task, summary_table_rows,
+    AgentInstance, AgentLineBuffer, AgentResult, AgentStatus as MultiAgentStatus, MultiAgentChat,
     MultiAgentConfig, MultiAgentEvent, MultiAgentFailurePolicy, MultiChatView, ViewTab,
     MAX_CONCURRENT_AGENTS,
 };
 pub use swarm::{
-    create_dev_swarm, Agent as SwarmAgent, AgentRole, ConflictStrategy, Decision, DecisionStatus,
-    MemoryAccess, MemoryAction, MemoryEntry, SharedMemory, Swarm, SwarmStats, SwarmTask, Vote,
+    create_dev_swarm, Agent as SwarmAgent, AgentRole, AgentStatus as SwarmAgentStatus,
+    ConflictStrategy, Decision, DecisionStatus, MemoryAccess, MemoryAction, MemoryEntry,
+    SharedMemory, Swarm, SwarmStats, SwarmTask, TaskStatus as SwarmTaskStatus, Vote,
 };
 pub use workflows::{
-    new_run_id, step_fingerprint, validate_run_id, CheckpointStore, WorkflowCheckpoint,
-    WorkflowRun, WorkflowStatus, CHECKPOINT_FORMAT_VERSION,
+    new_run_id, step_fingerprint, validate_run_id, CheckpointStore, DependencyError, LlmHandler,
+    RetryConfig, StepResult, StepStatus, StepType, ToolHandler, VarValue, Workflow, WorkflowBudget,
+    WorkflowCheckpoint, WorkflowContext, WorkflowExecutor, WorkflowInput, WorkflowOutput,
+    WorkflowResult, WorkflowRun, WorkflowStatus, WorkflowStep, WorkflowStopReason,
+    WorkflowTelemetry, WorkflowTemplates, CHECKPOINT_FORMAT_VERSION,
 };

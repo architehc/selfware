@@ -503,6 +503,15 @@ def _stop_child(proc, grace=60):
         proc.wait()
 
 
+def _has_stream_activity(buf):
+    """True when stream-json output shows active model streaming (text_delta or reasoning/streaming heartbeat)."""
+    return (
+        b'"text_delta"' in buf
+        or b'"phase":"reasoning"' in buf
+        or b'"phase":"streaming"' in buf
+    )
+
+
 def run_child(cmd, cwd, env, out_path, err_path, hard_timeout, abandon=None, interrupt=None):
     """Run the agent, watching for a harness timeout, abandon or interrupt.
 
@@ -529,7 +538,7 @@ def run_child(cmd, cwd, env, out_path, err_path, hard_timeout, abandon=None, int
                     chunk = fh.read()
                 read_pos += len(chunk)
                 buf += chunk
-                if first_stream is None and b'"text_delta"' in buf:
+                if first_stream is None and _has_stream_activity(buf):
                     first_stream = now
                 buf = buf[-4096:]
                 due = (

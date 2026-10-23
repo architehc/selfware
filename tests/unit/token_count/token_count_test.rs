@@ -445,3 +445,18 @@ fn test_estimate_messages_tokens_counts_sender_name() {
         "single-message and conversation estimators must count the same serialized fields"
     );
 }
+
+#[test]
+fn set_configured_model_updates_active_tokenizer_after_first_use() {
+    let _guard = crate::test_support::EnvGuard::clear_selfware_env();
+
+    // Force initial tokenizer use with an unknown model (no HF repo match).
+    set_configured_model("some-random-model");
+    let _ = estimate_content_tokens("initial token count call");
+    assert_eq!(TOKENIZER.active_repo(), None);
+
+    // Switching to a Qwen model after first use must update the active repo.
+    set_configured_model("qwen3.5-27b");
+    assert_eq!(TOKENIZER.active_repo(), hf_tokenizer_repo("qwen3.5-27b"));
+    assert!(TOKENIZER.active_repo().is_some());
+}

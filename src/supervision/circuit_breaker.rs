@@ -49,6 +49,16 @@ pub enum CircuitState {
     HalfOpen, // Testing if service recovered
 }
 
+impl std::fmt::Display for CircuitState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => write!(f, "closed"),
+            Self::Open => write!(f, "open"),
+            Self::HalfOpen => write!(f, "half_open"),
+        }
+    }
+}
+
 /// Circuit breaker error
 #[derive(Debug, Clone)]
 pub enum CircuitBreakerError<E> {

@@ -13,6 +13,18 @@ pub mod report;
 pub mod runner;
 pub mod scoring;
 
+pub use config::VlmBenchConfig;
+pub use fixtures::{create_solid_png, ensure_fixture_dir, text_to_png, GroundTruth, ScenarioTruth};
+pub use levels::{
+    all_levels, L1TuiState, L2Diagnostics, L3Architecture, L4Profiling, L5Layout, MegaEvolution,
+};
+pub use report::{BenchReport, LevelReport};
+pub use runner::VlmBenchRunner;
+pub use scoring::{
+    json_field_accuracy, keyword_accuracy, keyword_overlap_score, pearson_correlation, LevelScore,
+    Rating,
+};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -110,13 +122,32 @@ pub(crate) fn score_response(
             (acc, details)
         }
         ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+        ExpectedAnswer::KeyValuePairs(pairs) => {
+            let mut total = 0.0;
+            let mut details = Vec::new();
+            for (key, value) in pairs {
+                let score = if response.to_lowercase().contains(&key.to_lowercase()) {
+                    scoring::keyword_overlap_score(response, value)
+                } else {
+                    0.0
+                };
+                details.push((key.clone(), score));
+                total += score;
+            }
+            let acc = if pairs.is_empty() {
+                1.0
+            } else {
+                total / pairs.len() as f64
+            };
+            (acc, details)
+        }
         _ => (0.0, vec![]),
     };
     let rating = scoring::Rating::from_accuracy(accuracy, pass_threshold);
     scoring::LevelScore {
         accuracy,
         detail_scores: details,
-        response_tokens: 0,
+        response_tokens: crate::token_count::estimate_content_tokens(response) as u64,
         latency_ms: 0,
         rating,
     }

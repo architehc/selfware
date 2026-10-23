@@ -343,8 +343,9 @@ fn force_kill_telemetry_group_while_unreaped(child: &std::process::Child) {
 /// project-controlled benchmarks/tests, and an unsanitized child would
 /// inherit every credential on the box.
 fn cargo_telemetry_command(repo_root: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("cargo");
+    let mut cmd = std::process::Command::new(crate::tools::cargo::cargo_program());
     crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+    crate::safety::process_env::pin_std_rustup_toolchain(&mut cmd);
     cmd.current_dir(repo_root);
     // Isolate target directory so telemetry builds do not conflict with or dirty user's target/
     let target_dir = repo_root.join("target").join("evolve-telemetry");
@@ -390,8 +391,8 @@ fn capture_cpu_hotspots(
 }
 
 fn parse_folded_stacks(path: &Path) -> Result<Vec<CpuHotspot>, TelemetryError> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| TelemetryError::ParseFailed(e.to_string()))?;
+    let content = crate::tools::file::read_to_string_capped(path, 128 * 1024 * 1024)
+        .map_err(|e| TelemetryError::ParseFailed(e.to_string()))?;
 
     let mut function_samples: HashMap<String, u64> = HashMap::new();
     let mut total_samples: u64 = 0;
@@ -427,7 +428,11 @@ fn parse_folded_stacks(path: &Path) -> Result<Vec<CpuHotspot>, TelemetryError> {
         })
         .collect();
 
-    hotspots.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+    hotspots.sort_by(|a, b| {
+        b.cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(hotspots)
 }
 
@@ -563,7 +568,11 @@ fn capture_benchmark_deltas(repo_root: &Path) -> Result<Vec<BenchmarkDelta>, Tel
                         parse_criterion_estimate(&estimates),
                         parse_criterion_estimate(&baseline),
                     ) {
-                        let delta_pct = ((new_val - base_val) / base_val) * 100.0;
+                        let delta_pct = if base_val.abs() > f64::EPSILON {
+                            ((new_val - base_val) / base_val) * 100.0
+                        } else {
+                            0.0
+                        };
                         deltas.push(BenchmarkDelta {
                             name: entry.file_name().to_string_lossy().to_string(),
                             baseline_ms: base_val,
@@ -580,14 +589,15 @@ fn capture_benchmark_deltas(repo_root: &Path) -> Result<Vec<BenchmarkDelta>, Tel
         b.delta_percent
             .abs()
             .partial_cmp(&a.delta_percent.abs())
-            .unwrap()
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(deltas)
 }
 
 fn parse_criterion_estimate(path: &Path) -> Result<f64, TelemetryError> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| TelemetryError::ParseFailed(e.to_string()))?;
+        crate::tools::file::read_to_string_capped(path, crate::tools::file::MAX_SOURCE_READ_SIZE)
+            .map_err(|e| TelemetryError::ParseFailed(e.to_string()))?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| TelemetryError::ParseFailed(e.to_string()))?;
 

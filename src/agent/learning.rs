@@ -523,7 +523,7 @@ pub(super) fn classify_terminal_outcome(
         Err(e) => e,
     };
     for cause in err.chain() {
-        if let Some(agent_error) = cause.downcast_ref::<AgentError>() {
+        if let Some(agent_error) = crate::errors::as_agent_error(cause) {
             match agent_error {
                 // The internal run timeout cancels with this reason.
                 AgentError::CancelledWithReason(reason) if reason == "timeout" => {
@@ -534,6 +534,23 @@ pub(super) fn classify_terminal_outcome(
                 | AgentError::CancelledWithReason(_) => return TerminalOutcome::Interrupted,
                 _ => {}
             }
+        }
+        if matches!(
+            cause.downcast_ref::<crate::errors::SelfwareError>(),
+            Some(crate::errors::SelfwareError::Interrupted)
+        ) {
+            return TerminalOutcome::Interrupted;
+        }
+        if let Some(crate::errors::ApiError::ShutdownRequested(reason)) =
+            crate::errors::as_api_error(cause)
+        {
+            return if reason == "timeout"
+                || crate::shutdown_reason() == Some(crate::ShutdownReason::Timeout)
+            {
+                TerminalOutcome::Timeout
+            } else {
+                TerminalOutcome::Interrupted
+            };
         }
         if cause
             .downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
@@ -554,7 +571,13 @@ pub(super) fn classify_terminal_outcome(
     match verdict.map(|fm| &fm.kind) {
         Some(FailureKind::Timeout | FailureKind::CallTimeCap) => TerminalOutcome::Timeout,
         Some(FailureKind::BudgetExhausted) => TerminalOutcome::BudgetStop,
-        _ if cancelled => TerminalOutcome::Interrupted,
+        _ if cancelled => {
+            if crate::shutdown_reason() == Some(crate::ShutdownReason::Timeout) {
+                TerminalOutcome::Timeout
+            } else {
+                TerminalOutcome::Interrupted
+            }
+        }
         _ => TerminalOutcome::Failed,
     }
 }
@@ -625,6 +648,30 @@ mod terminal_outcome_tests {
         assert_eq!(
             classify_terminal_outcome(&planning, false, None),
             TerminalOutcome::Failed
+        );
+        // Wrapped SelfwareError::Agent and SelfwareError::Api(ShutdownRequested)
+        // must classify identically to bare AgentError / ApiError causes.
+        let wrapped_timeout: Result<()> = Err(crate::errors::SelfwareError::Agent(
+            AgentError::CancelledWithReason("timeout".into()),
+        )
+        .into());
+        assert_eq!(
+            classify_terminal_outcome(&wrapped_timeout, true, None),
+            TerminalOutcome::Timeout
+        );
+        let wrapped_cancel: Result<()> =
+            Err(crate::errors::SelfwareError::Agent(AgentError::Cancelled).into());
+        assert_eq!(
+            classify_terminal_outcome(&wrapped_cancel, true, None),
+            TerminalOutcome::Interrupted
+        );
+        let wrapped_shutdown_timeout: Result<()> = Err(crate::errors::SelfwareError::Api(
+            crate::errors::ApiError::ShutdownRequested("timeout".into()),
+        )
+        .into());
+        assert_eq!(
+            classify_terminal_outcome(&wrapped_shutdown_timeout, true, None),
+            TerminalOutcome::Timeout
         );
     }
 }

@@ -41,19 +41,23 @@ pub use killswitch::{check_killswitch, is_killswitch_active, KillswitchError, Ki
 pub use path_validator::{lexical_normalize_path, PathValidator, ValidatedFile};
 pub use permissions::{PermissionGrant, PermissionStore, ShellAllowRule};
 pub use process_env::{
-    protect_process_env, sanitize_command_env, sanitize_std_command_env, SanitizedEnvExt,
+    pin_rustup_toolchain, pin_std_rustup_toolchain, protect_process_env, sanitize_command_env,
+    sanitize_std_command_env, SanitizedEnvExt,
 };
 pub use quarantine::{ArmQuarantine, HostToolchain, IsolationReport, QuarantineOptions};
 pub use redact::{
     redact_for_model, redact_json_for_model, redact_secrets, ModelRedaction, RedactionContext,
 };
 pub use scanner::{
-    SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
+    ComplianceChecker, ComplianceRule, Dependency, DependencyAuditor, KnownVulnerability,
+    ScanResult, ScannerStats, SecretPattern, SecretScanner, SecurityCategory, SecurityFinding,
+    SecurityScanner, SecuritySeverity, VulnerabilityDetector, VulnerabilityPattern,
 };
 pub use tool_metadata::{
     classify_tool_metadata, default_tool_metadata, normal_mode_needs_confirmation, ExecutionMode,
     PermissionChecker, PermissionResult, RiskLevel, ToolMetadata,
 };
+pub use yolo::YoloConfig;
 
 /// Internal bridge for standalone workspace binaries, which are separate
 /// crates and cannot call the crate-private source-context module directly.

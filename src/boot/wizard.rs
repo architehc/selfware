@@ -223,7 +223,7 @@ pub fn emit_config(plan: &WizardPlan) -> Result<PathBuf> {
             );
         }
     }
-    std::fs::write(&plan.config_path, &body)
+    crate::session::checkpoint::write_bytes_atomically(&plan.config_path, body.as_bytes(), 0o600)
         .with_context(|| format!("writing {}", plan.config_path.display()))?;
     let _ = crate::config::trust::add_trusted_config(&plan.config_path);
     Ok(plan.config_path.clone())

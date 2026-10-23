@@ -144,7 +144,10 @@ fn test_build_improvement_prompt() {
     .with_file("src/api/client.rs");
     let prompt = orchestrator.build_improvement_prompt(&target);
     assert!(prompt.contains("Add retry logic"));
+    assert!(prompt.contains("cargo fmt"));
     assert!(prompt.contains("cargo check"));
+    assert!(prompt.contains("cargo clippy --all-targets -- -D warnings"));
+    assert!(prompt.contains("cargo test"));
 }
 
 #[test]

@@ -151,8 +151,9 @@ fn rating_from_score(score: f64) -> GenerationRating {
 /// and any task-specific env (e.g. the isolated `CARGO_TARGET_DIR`) AFTER —
 /// those additions survive the clear.
 fn evolution_cargo_command() -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("cargo");
+    let mut cmd = tokio::process::Command::new(crate::tools::cargo::cargo_program());
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     cmd
 }
 
@@ -1060,9 +1061,10 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
             for (i, tf_val) in tree_files_arr.iter().enumerate() {
                 if let Some(tf_str) = tf_val.as_str() {
                     let tf_path = Path::new(tf_str);
-                    match std::fs::read(tf_path) {
-                        Ok(bytes) => {
-                            let disk_sha = crate::evolution::tree_log::compute_sha256(&bytes);
+                    match crate::tools::file::read_to_string_capped(tf_path, 64 * 1024 * 1024) {
+                        Ok(content) => {
+                            let disk_sha =
+                                crate::evolution::tree_log::compute_sha256(content.as_bytes());
                             if let Some(expected_digest) = tree_digests.get(i) {
                                 if &disk_sha != expected_digest {
                                     let msg = format!(
@@ -1136,7 +1138,10 @@ pub fn decide_next_search_action(
     let mut id_to_node: std::collections::HashMap<String, AttemptNode> =
         std::collections::HashMap::new();
 
-    if let Ok(content) = std::fs::read_to_string(attempts_file) {
+    if let Ok(content) = crate::tools::file::read_to_string_capped(
+        attempts_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    ) {
         for line in content.lines() {
             if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
                 // Control anchors are excluded from search policy prefix
@@ -1321,7 +1326,10 @@ fn failure_excerpt(output_tail: &str) -> Option<String> {
 /// Format the structured failure history and context of a specific parent attempt
 /// to instruct the LLM on its refinement/repair task.
 fn format_parent_refinement_context(attempts_file: &Path, parent_id: &str) -> String {
-    let content = match std::fs::read_to_string(attempts_file) {
+    let content = match crate::tools::file::read_to_string_capped(
+        attempts_file,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    ) {
         Ok(c) => c,
         Err(_) => return format!("Parent Attempt ID: {parent_id}\n"),
     };
@@ -4156,9 +4164,12 @@ pub fn evolution_target_dir(repo_root: &Path) -> PathBuf {
 /// Prevents the hypothesis generator from getting trapped in local loops
 /// (e.g. repeatedly attempting the same failing patch across multiple generations).
 pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -> String {
-    let content = match std::fs::read_to_string(attempts_file) {
+    let content = match crate::tools::file::read_to_string_capped(attempts_file, 64 * 1024 * 1024) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return String::new(),
+        Err(e) if !attempts_file.exists() => {
+            let _ = e;
+            return String::new();
+        }
         Err(e) => {
             tracing::warn!(
                 "Failed to read attempts file {} for failure history: {e}",
@@ -4244,7 +4255,8 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
 /// Excludes environment/infrastructure failures and control anchors so transient errors can be retried.
 pub(crate) fn load_failed_diff_shas(attempts_file: &Path) -> std::collections::HashSet<String> {
     let mut failed = std::collections::HashSet::new();
-    let Ok(content) = std::fs::read_to_string(attempts_file) else {
+    let Ok(content) = crate::tools::file::read_to_string_capped(attempts_file, 64 * 1024 * 1024)
+    else {
         return failed;
     };
     for line in content.lines() {
@@ -4285,7 +4297,10 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
             ));
             continue;
         };
-        match std::fs::read_to_string(&full_path) {
+        match crate::tools::file::read_to_string_capped(
+            &full_path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             Ok(contents) => {
                 let len = contents.len();
                 let signatures = extract_function_signatures(&contents);
@@ -4314,8 +4329,9 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         let remaining = MAX_CONTEXT_CHARS.saturating_sub(context.len());
         if remaining < 500 {
             log_warning(&format!(
-                "Context limit reached ({} chars), skipping remaining files",
-                context.len()
+                "Context limit reached ({} chars, ~{} tokens), skipping remaining files",
+                context.len(),
+                crate::token_count::estimate_content_tokens(&context)
             ));
             break;
         }
@@ -4380,8 +4396,9 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         ));
     }
     log_phase(&format!(
-        "Source context: {} chars from {} files ({} full, {} truncated, {} signatures)",
+        "Source context: {} chars (~{} tokens) from {} files ({} full, {} truncated, {} signatures)",
         context.len(),
+        crate::token_count::estimate_content_tokens(&context),
         files_full + files_truncated,
         files_full,
         files_truncated,
@@ -5080,7 +5097,9 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
         }
     }
     let patch_file = dir.join(".evolution-patch");
-    if std::fs::write(&patch_file, patch).is_err() {
+    if crate::session::checkpoint::write_bytes_atomically(&patch_file, patch.as_bytes(), 0o600)
+        .is_err()
+    {
         return false;
     }
 
@@ -5302,7 +5321,13 @@ fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
         return false;
     }
     let patch_file = repo_root.join(".evolution-tested.patch");
-    if std::fs::write(&patch_file, tested_diff).is_err() {
+    if crate::session::checkpoint::write_bytes_atomically(
+        &patch_file,
+        tested_diff.as_bytes(),
+        0o600,
+    )
+    .is_err()
+    {
         return false;
     }
     let applied = evolution_git_command(repo_root)
@@ -5331,7 +5356,13 @@ fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
 /// commit fails — so the user's worktree returns to its pre-apply state.
 fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
     let patch_file = repo_root.join(".evolution-tested.patch");
-    if std::fs::write(&patch_file, tested_diff).is_err() {
+    if crate::session::checkpoint::write_bytes_atomically(
+        &patch_file,
+        tested_diff.as_bytes(),
+        0o600,
+    )
+    .is_err()
+    {
         return;
     }
     let _ = evolution_git_command(repo_root)
@@ -6192,7 +6223,10 @@ struct RecoveredRunProgress {
 /// Returns the number of orphaned runs closed.
 pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
     let log_path = repo_root.join(".evolution-log.jsonl");
-    let content = match std::fs::read_to_string(&log_path) {
+    let content = match crate::tools::file::read_to_string_capped(
+        &log_path,
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    ) {
         Ok(c) => c,
         Err(_) => return 0,
     };
@@ -6291,7 +6325,10 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
 
         // If lock file exists and records PID, read it if not already in start event
         if lock_path.exists() && progress.pid.is_none() {
-            if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid_str) = crate::tools::file::read_to_string_capped(
+                &lock_path,
+                crate::tools::file::MAX_SOURCE_READ_SIZE,
+            ) {
                 if let Ok(p) = pid_str.trim().parse::<i32>() {
                     progress.pid = Some(p);
                 }
@@ -6353,7 +6390,10 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
 
         // The run is confirmed dead. Recover any additional progress from attempts file
         let run_attempts_file = attempts_dir.join(format!("{run_id}.jsonl"));
-        if let Ok(attempts_content) = std::fs::read_to_string(&run_attempts_file) {
+        if let Ok(attempts_content) = crate::tools::file::read_to_string_capped(
+            &run_attempts_file,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        ) {
             for line in attempts_content.lines() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {

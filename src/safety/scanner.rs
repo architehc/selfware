@@ -491,6 +491,28 @@ pub struct VulnerabilityDetector {
     findings: Vec<SecurityFinding>,
 }
 
+fn compiled_scanner_regex(pattern: &str) -> Option<regex::Regex> {
+    static CACHE: std::sync::LazyLock<RwLock<HashMap<String, Option<regex::Regex>>>> =
+        std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+    if let Some(cached) = CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(pattern)
+        .cloned()
+    {
+        return cached;
+    }
+    let compiled = regex::RegexBuilder::new(pattern)
+        .size_limit(1 << 20)
+        .build()
+        .ok();
+    CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(pattern.to_string(), compiled.clone());
+    compiled
+}
+
 impl VulnerabilityDetector {
     pub fn new() -> Self {
         Self {
@@ -608,34 +630,33 @@ impl VulnerabilityDetector {
     ) -> Vec<SecurityFinding> {
         let mut findings = Vec::new();
 
-        // Filter patterns for this language
-        let applicable: Vec<_> = self
+        // Filter patterns and pre-resolve compiled regexes for this language before scanning lines.
+        let applicable: Vec<(&VulnerabilityPattern, regex::Regex)> = self
             .patterns
             .iter()
             .filter(|p| p.language == language || p.language == "*")
+            .filter_map(|p| compiled_scanner_regex(&p.pattern).map(|re| (p, re)))
             .collect();
 
         for (line_num, line) in content.lines().enumerate() {
-            for pattern in &applicable {
-                if let Ok(re) = regex::Regex::new(&pattern.pattern) {
-                    if re.is_match(line) {
-                        let mut finding = SecurityFinding::new(
-                            &pattern.name,
-                            SecurityCategory::CodeQuality,
-                            pattern.severity,
-                        )
-                        .with_description(&pattern.description)
-                        .with_cwe(&pattern.cwe)
-                        .with_remediation(&pattern.remediation)
-                        .with_snippet(line.trim());
+            for (pattern, re) in &applicable {
+                if re.is_match(line) {
+                    let mut finding = SecurityFinding::new(
+                        &pattern.name,
+                        SecurityCategory::CodeQuality,
+                        pattern.severity,
+                    )
+                    .with_description(&pattern.description)
+                    .with_cwe(&pattern.cwe)
+                    .with_remediation(&pattern.remediation)
+                    .with_snippet(line.trim());
 
-                        if let Some(f) = file {
-                            finding = finding.with_location(f.clone(), (line_num + 1) as u32);
-                        }
-
-                        findings.push(finding.clone());
-                        self.findings.push(finding);
+                    if let Some(f) = file {
+                        finding = finding.with_location(f.clone(), (line_num + 1) as u32);
                     }
+
+                    findings.push(finding.clone());
+                    self.findings.push(finding);
                 }
             }
         }
@@ -917,27 +938,34 @@ impl ComplianceChecker {
     pub fn check_content(&mut self, content: &str, file: Option<&PathBuf>) -> Vec<SecurityFinding> {
         let mut findings = Vec::new();
 
+        let applicable: Vec<(&ComplianceRule, regex::Regex)> = self
+            .rules
+            .iter()
+            .filter_map(|rule| {
+                rule.pattern
+                    .as_deref()
+                    .and_then(compiled_scanner_regex)
+                    .map(|re| (rule, re))
+            })
+            .collect();
+
         for (line_num, line) in content.lines().enumerate() {
-            for rule in &self.rules {
-                if let Some(pattern) = &rule.pattern {
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        if re.is_match(line) {
-                            let mut finding = SecurityFinding::new(
-                                &format!("{}: {}", rule.id, rule.description),
-                                SecurityCategory::Compliance,
-                                rule.severity,
-                            )
-                            .with_description(&format!("Potential {} violation", rule.standard))
-                            .with_snippet(line.trim());
+            for (rule, re) in &applicable {
+                if re.is_match(line) {
+                    let mut finding = SecurityFinding::new(
+                        &format!("{}: {}", rule.id, rule.description),
+                        SecurityCategory::Compliance,
+                        rule.severity,
+                    )
+                    .with_description(&format!("Potential {} violation", rule.standard))
+                    .with_snippet(line.trim());
 
-                            if let Some(f) = file {
-                                finding = finding.with_location(f.clone(), (line_num + 1) as u32);
-                            }
-
-                            findings.push(finding.clone());
-                            self.findings.push(finding);
-                        }
+                    if let Some(f) = file {
+                        finding = finding.with_location(f.clone(), (line_num + 1) as u32);
                     }
+
+                    findings.push(finding.clone());
+                    self.findings.push(finding);
                 }
             }
         }
@@ -1020,6 +1048,11 @@ impl ScanResult {
         self.by_severity
             .get(&SecuritySeverity::High)
             .is_some_and(|&c| c > 0)
+    }
+
+    /// True only when every scan class ran without warnings (`AGENTS.md` §3).
+    pub fn is_complete(&self) -> bool {
+        self.scan_warnings.is_empty()
     }
 
     /// Overall risk score
@@ -1114,7 +1147,8 @@ impl SecurityScanner {
         result.lines_scanned = content.lines().count();
 
         // Save to history
-        if let Ok(mut history) = self.scan_history.write() {
+        {
+            let mut history = self.scan_history.write().unwrap_or_else(|e| e.into_inner());
             history.push(result.clone());
             if history.len() > 100 {
                 history.remove(0);
@@ -1126,44 +1160,39 @@ impl SecurityScanner {
 
     /// Audit a dependency
     pub fn audit_dependency(&self, name: &str, version: &str, source: &str) -> Dependency {
-        if let Ok(mut auditor) = self.dep_auditor.write() {
-            auditor.audit_dependency(name, version, source)
-        } else {
-            Dependency::new(name, version, source)
-        }
+        self.dep_auditor
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .audit_dependency(name, version, source)
     }
 
     /// Get scan statistics
     pub fn get_stats(&self) -> ScannerStats {
-        let history = self.scan_history.read().ok();
-        let total_scans = history.as_ref().map_or(0, |h| h.len());
-        let total_findings: usize = history
-            .as_ref()
-            .map_or(0, |h| h.iter().map(|r| r.total_findings()).sum());
+        let history = self.scan_history.read().unwrap_or_else(|e| e.into_inner());
+        let total_scans = history.len();
+        let total_findings: usize = history.iter().map(|r| r.total_findings()).sum();
 
         ScannerStats {
             total_scans,
             total_findings,
-            critical_findings: history.as_ref().map_or(0, |h| {
-                h.iter()
-                    .map(|r| {
-                        r.by_severity
-                            .get(&SecuritySeverity::Critical)
-                            .copied()
-                            .unwrap_or(0)
-                    })
-                    .sum()
-            }),
-            high_findings: history.as_ref().map_or(0, |h| {
-                h.iter()
-                    .map(|r| {
-                        r.by_severity
-                            .get(&SecuritySeverity::High)
-                            .copied()
-                            .unwrap_or(0)
-                    })
-                    .sum()
-            }),
+            critical_findings: history
+                .iter()
+                .map(|r| {
+                    r.by_severity
+                        .get(&SecuritySeverity::Critical)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum(),
+            high_findings: history
+                .iter()
+                .map(|r| {
+                    r.by_severity
+                        .get(&SecuritySeverity::High)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum(),
         }
     }
 
@@ -1177,6 +1206,14 @@ impl SecurityScanner {
         report.push_str(&format!("- Scan duration: {}ms\n", result.duration_ms));
         report.push_str(&format!("- Total findings: {}\n", result.total_findings()));
         report.push_str(&format!("- Risk score: {:.1}\n\n", result.risk_score()));
+
+        if !result.scan_warnings.is_empty() {
+            report.push_str("## Scan Warnings (Partial Coverage)\n");
+            for warning in &result.scan_warnings {
+                report.push_str(&format!("- WARNING: {}\n", warning));
+            }
+            report.push('\n');
+        }
 
         if result.has_critical() {
             report.push_str("## CRITICAL Findings\n");

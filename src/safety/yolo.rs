@@ -139,12 +139,21 @@ impl YoloConfig {
     /// Uses regex word-boundary matching with whitespace normalization to prevent
     /// bypass via extra whitespace, backslash escapes, or other trivial variations.
     pub fn is_forbidden(&self, operation: &str) -> bool {
+        static FORBIDDEN_RE_CACHE: std::sync::LazyLock<
+            parking_lot::Mutex<std::collections::HashMap<String, Option<Regex>>>,
+        > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
         let normalized = normalize_input(operation);
+        let mut cache = FORBIDDEN_RE_CACHE.lock();
         self.forbidden_operations.iter().any(|f| {
-            let pattern = build_boundary_pattern(f);
-            Regex::new(&pattern)
-                .map(|re| re.is_match(&normalized))
-                .unwrap_or(false)
+            cache
+                .entry(f.clone())
+                .or_insert_with(|| {
+                    let pattern = build_boundary_pattern(f);
+                    Regex::new(&pattern).ok()
+                })
+                .as_ref()
+                .is_some_and(|re| re.is_match(&normalized))
         })
     }
 

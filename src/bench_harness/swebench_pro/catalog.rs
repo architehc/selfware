@@ -236,7 +236,10 @@ pub fn quant_catalog() -> BTreeMap<String, QuantSpec> {
     // mapping label -> QuantSpec, merged over the compiled defaults so
     // arbitrary local GGUFs can be used without editing this source.
     match std::env::var("SWEBENCH_QUANT_CATALOG") {
-        Ok(path) if !path.is_empty() => match std::fs::read_to_string(&path) {
+        Ok(path) if !path.is_empty() => match crate::tools::file::read_to_string_capped(
+            std::path::Path::new(&path),
+            crate::tools::file::MAX_READ_SIZE,
+        ) {
             Ok(text) => apply_external_catalog(base, &text),
             Err(e) => {
                 eprintln!("warning: cannot read SWEBENCH_QUANT_CATALOG {path}: {e}");

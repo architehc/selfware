@@ -383,6 +383,7 @@ enum CompileGate {
 async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileGate {
     let mut cmd = Command::new(crate::tools::cargo::cargo_program());
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     cmd.arg("check")
         .current_dir(shadow_path)
         .stdout(Stdio::null())
@@ -587,7 +588,7 @@ pub async fn stage_run(
         let shadow_git = shadow_path.join(".git");
         let mut target = None;
         if shadow_git.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&shadow_git) {
+            if let Ok(content) = crate::tools::file::read_to_string_capped(&shadow_git, 64 * 1024) {
                 if let Some(gitdir) = content.trim().strip_prefix("gitdir:") {
                     let p = PathBuf::from(gitdir.trim());
                     let abs = if p.is_absolute() {
@@ -606,7 +607,8 @@ pub async fn stage_run(
             if let Some(parent) = target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let existing = std::fs::read_to_string(&target).unwrap_or_default();
+            let existing =
+                crate::tools::file::read_to_string_capped(&target, 64 * 1024).unwrap_or_default();
             if !existing.contains(".selfware/") {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -716,6 +718,7 @@ pub async fn spawn(
 
     let mut command = Command::new(exe);
     crate::safety::process_env::sanitize_command_env(&mut command);
+    crate::safety::process_env::pin_rustup_toolchain(&mut command);
     command.env_remove("SELFWARE_CONFIG");
     command
         .arg("run")

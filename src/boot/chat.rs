@@ -60,10 +60,12 @@ fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries: Vec<_> = read_dir.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if out.len() >= MAX_DOC_FILES {
             break;
         }

@@ -341,6 +341,7 @@ impl EvolutionPlanner {
         // Phase 3: Detailed introspection of most relevant files
         let top_files: Vec<_> = files.iter().take(3).cloned().collect();
         for file in top_files {
+            let estimated_tokens = measure_signature_phase_tokens(&file, 1500, 1000);
             phases.push(PlanPhase {
                 phase: phase_num,
                 action: ActionType::Introspect,
@@ -355,7 +356,7 @@ impl EvolutionPlanner {
                     "Understand the API of {}",
                     file.file_name().unwrap_or_default().to_string_lossy()
                 ),
-                estimated_tokens: 1000,
+                estimated_tokens,
                 dependencies: vec![phase_num - 1],
             });
             phase_num += 1;
@@ -437,6 +438,7 @@ impl EvolutionPlanner {
         let target_files: Vec<_> = files.iter().take(5).cloned().collect();
 
         for file in target_files {
+            let estimated_tokens = measure_signature_phase_tokens(&file, 1000, 800);
             // Read signatures of each relevant file
             phases.push(PlanPhase {
                 phase: phase_num,
@@ -452,7 +454,7 @@ impl EvolutionPlanner {
                     "Understand {}",
                     file.file_name().unwrap_or_default().to_string_lossy()
                 ),
-                estimated_tokens: 800,
+                estimated_tokens,
                 dependencies: if phase_num > 1 {
                     vec![phase_num - 1]
                 } else {
@@ -606,6 +608,20 @@ impl EvolutionPlanner {
 
         criteria
     }
+}
+
+fn measure_signature_phase_tokens(path: &Path, max_cap: usize, fallback: usize) -> usize {
+    let Ok(content) =
+        crate::tools::file::read_to_string_capped(path, crate::tools::file::MAX_SOURCE_READ_SIZE)
+    else {
+        return fallback;
+    };
+    let measured = if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        crate::evolve::skeleton::extract_rust_skeleton(path, &content).token_count
+    } else {
+        crate::token_count::estimate_content_tokens(&content)
+    };
+    measured.clamp(1, max_cap)
 }
 
 /// Planning strategies

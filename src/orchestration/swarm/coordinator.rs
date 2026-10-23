@@ -270,6 +270,13 @@ impl Swarm {
         confidence: f32,
         reasoning: impl Into<String>,
     ) -> Result<()> {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return Err(anyhow!(
+                "Vote confidence must be finite and within [0.0, 1.0], got {}",
+                confidence
+            ));
+        }
+
         let agent = self
             .agents
             .get(agent_id)

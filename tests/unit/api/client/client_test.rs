@@ -762,3 +762,78 @@ fn context_overflow_body_mentioning_functions_is_not_a_tool_schema_400() {
         r#"{"error":"tool_choice auto is not supported"}"#
     ));
 }
+
+#[tokio::test]
+async fn multimodal_image_url_engine_error_fails_fast_without_500_retries() {
+    use crate::api::types::{ContentBlock, ImageUrl, MessageContent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let hits_server = std::sync::Arc::clone(&hits);
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            hits_server.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let body =
+                r#"{"error":{"message":null,"type":"engine_error","param":null,"code":null}}"#;
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut config = crate::config::Config {
+        endpoint,
+        ..Default::default()
+    };
+    config.retry.max_retries = 3;
+    config.retry.base_delay_ms = 1;
+    config.retry.max_delay_ms = 5;
+    let client = ApiClient::new(&config).unwrap();
+
+    let multimodal_msg = Message {
+        role: "user".into(),
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "Describe this image".into(),
+            },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                    detail: None,
+                },
+            },
+        ]),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    };
+
+    let err = client
+        .chat(vec![multimodal_msg], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("multimodal engine_error must fail");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "multimodal engine_error 500 must fail fast on attempt 1 without burning 5xx retries"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("image_url") && msg.contains("selfware llm-doctor"),
+        "error must include actionable multimodal hint, got: {msg}"
+    );
+
+    server.abort();
+}

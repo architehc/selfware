@@ -107,6 +107,9 @@ impl GuardedSwlRuntime {
         let workflow_start = std::time::Instant::now();
         record_state_transition("idle", "executing_workflow");
 
+        // Initialize base execution context with workflow inputs and schema defaults
+        self.base.initialize_workflow_context(doc, &inputs).await;
+
         // Build guardrail context for pre-workflow check
         let pre_context = self
             .build_guardrail_context(None, None, Some(&inputs))
@@ -254,30 +257,7 @@ impl GuardedSwlRuntime {
         let workflow_start = std::time::Instant::now();
 
         let mut outputs = HashMap::new();
-
-        let declared: Vec<(String, AgentDefinition)> = if workflow.steps.is_empty() {
-            doc.agents
-                .iter()
-                .map(|(name, agent)| (name.clone(), agent.clone()))
-                .collect()
-        } else {
-            let mut resolved = Vec::with_capacity(workflow.steps.len());
-            for (idx, step) in workflow.steps.iter().enumerate() {
-                let name = step.agent.as_ref().or(step.delegate.as_ref());
-                let Some(name) = name else {
-                    return Err(SelfwareError::Internal(format!(
-                        "workflow step {idx} declares neither `agent` nor `delegate` — unsupported step form"
-                    )));
-                };
-                let Some(agent) = doc.agents.get(name) else {
-                    return Err(SelfwareError::Internal(format!(
-                        "workflow step {idx} references unknown agent '{name}'"
-                    )));
-                };
-                resolved.push((name.clone(), agent.clone()));
-            }
-            resolved
-        };
+        let declared = resolve_declared_agents(doc, workflow)?;
 
         for (agent_name, agent) in &declared {
             // Agent execution with guardrails is handled inside
@@ -522,13 +502,47 @@ impl GuardedSwlRuntime {
     }
 }
 
+/// Resolve the ordered list of `(agent_name, AgentDefinition)` pairs for a sequential workflow.
+///
+/// Declared `steps` define execution order and subset; when `steps` is empty,
+/// falls back to the document's `agents` map order for backwards compatibility.
+pub(crate) fn resolve_declared_agents(
+    doc: &SwlDocument,
+    workflow: &WorkflowDefinition,
+) -> crate::errors::Result<Vec<(String, AgentDefinition)>> {
+    if workflow.steps.is_empty() {
+        Ok(doc
+            .agents
+            .iter()
+            .map(|(name, agent)| (name.clone(), agent.clone()))
+            .collect())
+    } else {
+        let mut resolved = Vec::with_capacity(workflow.steps.len());
+        for (idx, step) in workflow.steps.iter().enumerate() {
+            let name = step.agent.as_ref().or(step.delegate.as_ref());
+            let Some(name) = name else {
+                return Err(SelfwareError::Internal(format!(
+                    "workflow step {idx} declares neither `agent` nor `delegate` — unsupported step form"
+                )));
+            };
+            let Some(agent) = doc.agents.get(name) else {
+                return Err(SelfwareError::Internal(format!(
+                    "workflow step {idx} references unknown agent '{name}'"
+                )));
+            };
+            resolved.push((name.clone(), agent.clone()));
+        }
+        Ok(resolved)
+    }
+}
+
 /// Evaluate an agent's condition output for a conditional workflow.
 ///
 /// Matches the base runtime's policy: the trimmed output must be exactly a
 /// recognized truthy token. The previous substring check
 /// (`contains("true")`) treated "untrue", "true_value", or any prose
 /// mentioning the word "true" as a green light to run the branch.
-fn condition_result_is_true(result: &str) -> bool {
+pub(crate) fn condition_result_is_true(result: &str) -> bool {
     let trimmed = result.trim();
     trimmed.eq_ignore_ascii_case("true")
         || trimmed.eq_ignore_ascii_case("yes")
@@ -541,7 +555,10 @@ fn condition_result_is_true(result: &str) -> bool {
 /// reduce stage. `ReduceStage::Aggregate` names the reducer explicitly;
 /// `ReduceStage::Code` has no named agent, so fall back to the last agent in
 /// the document (legacy behavior).
-fn select_reduce_agent(workflow: &WorkflowDefinition, doc: &SwlDocument) -> Option<String> {
+pub(crate) fn select_reduce_agent(
+    workflow: &WorkflowDefinition,
+    doc: &SwlDocument,
+) -> Option<String> {
     workflow.reduce.as_ref().and_then(|reduce| match reduce {
         ReduceStage::Aggregate(agg) => Some(agg.agent.clone()),
         ReduceStage::Code(_) => doc.agents.keys().last().cloned(),

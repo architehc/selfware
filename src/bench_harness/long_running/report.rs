@@ -101,6 +101,13 @@ impl LongRunningReport {
 
         let hours = self.total_duration_secs / 3600;
         let minutes = (self.total_duration_secs % 3600) / 60;
+        let pct = |n: usize| -> f64 {
+            if total == 0 {
+                0.0
+            } else {
+                n as f64 / total as f64 * 100.0
+            }
+        };
 
         let mut md = format!(
             r#"# Long-Running Test Report
@@ -131,11 +138,11 @@ impl LongRunningReport {
 "#,
             self.success_rate() * 100.0,
             self.green_rate() * 100.0,
-            green as f64 / total as f64 * 100.0,
-            partial as f64 / total as f64 * 100.0,
-            compiles as f64 / total as f64 * 100.0,
-            wrote as f64 / total as f64 * 100.0,
-            fail as f64 / total as f64 * 100.0,
+            pct(green),
+            pct(partial),
+            pct(compiles),
+            pct(wrote),
+            pct(fail),
         );
 
         for (i, result) in self.results.iter().enumerate() {
@@ -195,7 +202,11 @@ impl LongRunningReport {
 
         // Write main report
         let report_path = dir.join("report.md");
-        std::fs::write(&report_path, self.to_markdown())?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &report_path,
+            self.to_markdown().as_bytes(),
+            0o644,
+        )?;
 
         // Write summary JSON
         let summary = serde_json::json!({
@@ -226,7 +237,8 @@ impl LongRunningReport {
         });
 
         let json_path = dir.join("summary.json");
-        std::fs::write(&json_path, serde_json::to_string_pretty(&summary).unwrap())?;
+        let summary_bytes = serde_json::to_vec_pretty(&summary).map_err(std::io::Error::other)?;
+        crate::session::checkpoint::write_bytes_atomically(&json_path, &summary_bytes, 0o644)?;
 
         Ok(())
     }

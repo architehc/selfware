@@ -220,6 +220,15 @@ class ScenarioScorerTest(unittest.TestCase):
         _m, c = scorers.score_interrupt(scorers.ScoreInput(130, "", extra=extra))
         self.assertFalse(c["no_leaked_resources"])
         self.assertFalse(c["outcome_interrupted"])
+        self.assertTrue(harness._has_stream_activity(b'{"event":"text_delta","text":"hi"}\n'))
+        self.assertTrue(
+            harness._has_stream_activity(
+                b'{"event":"llm_waiting","phase":"reasoning","tokens_so_far":128}\n'
+            )
+        )
+        self.assertFalse(
+            harness._has_stream_activity(b'{"event":"llm_waiting","phase":"waiting"}\n')
+        )
 
     def test_comments_only_diff(self):
         ok = "--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,3 @@\n+/// Doc.\n pub fn a() {}\n"
@@ -804,6 +813,20 @@ class HarnessHardeningTest(unittest.TestCase):
                     os.environ[k] = v
         self.assertFalse((tc.cargo_home / "bin").is_symlink())
         self.assertTrue((tc.cargo_home / "bin" / "cargo").is_symlink())
+        # Broken or stale proxy symlinks in an existing bin/ dir are repaired.
+        (tc.cargo_home / "bin" / "cargo").unlink()
+        (tc.cargo_home / "bin" / "cargo").symlink_to("rustup")
+        os.environ["CARGO_HOME"], os.environ["RUSTUP_HOME"] = str(real), str(rustup)
+        try:
+            tc.ensure_cargo()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertTrue((tc.cargo_home / "bin" / "cargo").exists())
+        self.assertEqual((tc.cargo_home / "bin" / "cargo").resolve(), (real / "bin" / "rustup").resolve())
         config = (tc.cargo_home / "config.toml").read_text()
         self.assertIn("retry = 3", config)
         self.assertIn(str(self.results / "child-target"), config)

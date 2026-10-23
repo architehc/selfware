@@ -1023,10 +1023,13 @@ impl ErrorClass {
     /// typed downcast still works. String matching is kept as a fallback for
     /// errors that cannot be represented by a concrete type.
     pub fn classify_anyhow(error: &anyhow::Error) -> Self {
-        // --- Typed downcasts (preferred) ---
+        // --- Typed downcasts across the full cause chain (preferred) ---
 
         // reqwest::Error -- covers network, timeout, and HTTP status errors
-        if let Some(reqwest_err) = error.downcast_ref::<reqwest::Error>() {
+        if let Some(reqwest_err) = error
+            .chain()
+            .find_map(|c| c.downcast_ref::<reqwest::Error>())
+        {
             if reqwest_err.is_timeout() {
                 return ErrorClass::Timeout;
             }
@@ -1045,7 +1048,10 @@ impl ErrorClass {
         }
 
         // std::io::Error -- covers OS-level failures
-        if let Some(io_err) = error.downcast_ref::<std::io::Error>() {
+        if let Some(io_err) = error
+            .chain()
+            .find_map(|c| c.downcast_ref::<std::io::Error>())
+        {
             return match io_err.kind() {
                 std::io::ErrorKind::TimedOut => ErrorClass::Timeout,
                 std::io::ErrorKind::ConnectionRefused
@@ -1069,7 +1075,10 @@ impl ErrorClass {
         }
 
         // serde_json::Error -- JSON parse/deserialization failures
-        if error.downcast_ref::<serde_json::Error>().is_some() {
+        if error
+            .chain()
+            .any(|c| c.downcast_ref::<serde_json::Error>().is_some())
+        {
             return ErrorClass::ParseError;
         }
 

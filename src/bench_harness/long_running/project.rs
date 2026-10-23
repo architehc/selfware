@@ -115,10 +115,18 @@ edition = "2021"
 "#,
         name = name.replace("-", "_")
     );
-    std::fs::write(dir.join("Cargo.toml"), cargo_toml)?;
+    crate::session::checkpoint::write_bytes_atomically(
+        &dir.join("Cargo.toml"),
+        cargo_toml.as_bytes(),
+        0o644,
+    )?;
 
     // src/lib.rs
-    std::fs::write(dir.join("src/lib.rs"), "// Implement here\n")?;
+    crate::session::checkpoint::write_bytes_atomically(
+        &dir.join("src/lib.rs"),
+        b"// Implement here\n",
+        0o644,
+    )?;
 
     init_scaffold_git_repo(dir, true);
 
@@ -146,7 +154,11 @@ go 1.21
 "#,
         module = module
     );
-    std::fs::write(dir.join("go.mod"), go_mod)?;
+    crate::session::checkpoint::write_bytes_atomically(
+        &dir.join("go.mod"),
+        go_mod.as_bytes(),
+        0o644,
+    )?;
 
     init_scaffold_git_repo(dir, true);
 

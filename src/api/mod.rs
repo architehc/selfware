@@ -51,7 +51,10 @@ fn sanitize_assistant_content(messages: &mut [Message]) {
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty());
-        if has_tool_calls || !message.content.text_all().trim().is_empty() {
+        if has_tool_calls
+            || message.content.has_images()
+            || !message.content.text_all().trim().is_empty()
+        {
             continue;
         }
         let filler = message

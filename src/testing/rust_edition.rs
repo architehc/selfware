@@ -106,7 +106,9 @@ fn valid_edition(s: &str) -> Option<String> {
 }
 
 fn read_toml(path: &Path) -> Option<toml::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text =
+        crate::tools::file::read_to_string_capped(path, crate::tools::file::MAX_SOURCE_READ_SIZE)
+            .ok()?;
     toml::from_str::<toml::Value>(&text).ok()
 }
 

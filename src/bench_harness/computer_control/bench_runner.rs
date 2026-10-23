@@ -122,15 +122,24 @@ impl BrowserBenchReport {
 
     pub fn write_to_dir(&self, dir: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("browser_bench_report.json"), self.to_json()?)?;
-        std::fs::write(dir.join("browser_bench_report.md"), self.to_markdown())?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &dir.join("browser_bench_report.json"),
+            self.to_json()?.as_bytes(),
+            0o644,
+        )?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &dir.join("browser_bench_report.md"),
+            self.to_markdown().as_bytes(),
+            0o644,
+        )?;
 
         // Write individual traces
         let traces_dir = dir.join("traces");
         std::fs::create_dir_all(&traces_dir)?;
         for trace in &self.traces {
             let path = traces_dir.join(format!("{}.json", trace.task_id));
-            std::fs::write(&path, serde_json::to_string_pretty(trace)?)?;
+            let json = serde_json::to_string_pretty(trace)?;
+            crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o644)?;
         }
 
         Ok(())
@@ -226,7 +235,8 @@ impl BrowserBenchRunner {
             std::fs::create_dir_all(&traces_dir)?;
             for trace in &traces {
                 let path = traces_dir.join(format!("{}.json", trace.task_id));
-                std::fs::write(&path, serde_json::to_string_pretty(trace)?)?;
+                let json = serde_json::to_string_pretty(trace)?;
+                crate::session::checkpoint::write_bytes_atomically(&path, json.as_bytes(), 0o644)?;
             }
             eprintln!("\nTraces saved to {}", traces_dir.display(),);
         }
@@ -276,7 +286,10 @@ impl BrowserBenchRunner {
                     continue;
                 }
                 if ss.path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&ss.path) {
+                    if let Ok(content) = crate::tools::file::read_to_string_capped(
+                        &ss.path,
+                        crate::tools::file::MAX_SOURCE_READ_SIZE,
+                    ) {
                         // Strip HTML tags and truncate to keep prompts small
                         let text = strip_html_tags(&content);
                         let truncated = if text.chars().count() > 3000 {

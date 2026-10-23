@@ -114,6 +114,7 @@ impl Default for QualityAnalyzer {
 pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
     let output = match Command::new(cmd)
         .sanitized_env()
+        .pin_rustup_toolchain()
         .env("CARGO_TERM_COLOR", "never")
         .args(["check", "--message-format=json"])
         .output()

@@ -131,8 +131,8 @@ assert.equal(huge.snapshot.reason,'request_failed');huge.destroy();
     def test_phi_bot_response_and_citation_contracts(self):
         self.node("""
 const chips=buildQuickChips();
-assert.equal(chips.length,4);
-assert.deepEqual(chips.map(c=>c.id),['whats_red','explain_selection','audit_unreviewed','check_debt']);
+assert.equal(chips.length,5);
+assert.deepEqual(chips.map(c=>c.id),['whats_red','explain_selection','audit_unreviewed','check_debt','check_formal']);
 assert.equal(formatBotCitation({path:'src/lib.rs',start_line:1,end_line:3}),'src/lib.rs:1–3');
 assert.equal(formatBotCitation({path:'src/lib.rs',start_line:5,end_line:5}),'src/lib.rs:5');
 assert.throws(()=>formatBotCitation({path:'',start_line:1,end_line:2}));

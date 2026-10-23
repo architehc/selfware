@@ -5024,7 +5024,7 @@ pub(crate) fn requirements_audit_failure_reason(e: &anyhow::Error) -> String {
             status,
             elapsed_secs,
             ..
-        }) = cause.downcast_ref::<crate::errors::ApiError>()
+        }) = crate::errors::as_api_error(cause)
         {
             return format!("gateway timeout (HTTP {status} after {elapsed_secs}s)");
         }

@@ -697,11 +697,19 @@ async fn measure_in(
 
     if let Some(arm) = arm {
         let target = q.worktree.join(&arm.target_file);
-        let before = std::fs::read_to_string(&target).unwrap_or_default();
+        let before = crate::tools::file::read_to_string_capped(
+            &target,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .unwrap_or_default();
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&target, &arm.proposed_source) {
+        if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+            &target,
+            arm.proposed_source.as_bytes(),
+            0o644,
+        ) {
             m.error = Some(format!("writing {}: {e}", arm.target_file));
             return m;
         }
@@ -744,7 +752,11 @@ async fn measure_in(
                 m.error = Some(format!("{e:#}"));
             }
         }
-        let after = std::fs::read_to_string(&target).unwrap_or_default();
+        let after = crate::tools::file::read_to_string_capped(
+            &target,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )
+        .unwrap_or_default();
         m.diff = Some(
             similar::TextDiff::from_lines(&before, &after)
                 .unified_diff()

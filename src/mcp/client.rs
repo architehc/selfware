@@ -181,11 +181,15 @@ impl McpClient {
             .request("tools/call", Some(params))
             .await
             .map_err(|e| {
+                let transport = e
+                    .chain()
+                    .find_map(|c| c.downcast_ref::<McpTransportError>())
+                    .cloned();
                 anyhow::Error::new(McpToolCallError {
                     tool: name.to_string(),
                     server: self.server_name.clone(),
                     cause: format!("{e:#}"),
-                    transport: e.downcast_ref::<McpTransportError>().cloned(),
+                    transport,
                 })
             })?;
 

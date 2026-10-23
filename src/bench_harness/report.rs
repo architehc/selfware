@@ -278,8 +278,18 @@ impl HarnessReport {
     /// Write report files to the output directory.
     pub fn write_to_dir(&self, dir: &std::path::Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("bench_report.json"), self.to_json()?)?;
-        std::fs::write(dir.join("bench_report.md"), self.to_markdown())?;
+        let json = self.to_json()?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &dir.join("bench_report.json"),
+            json.as_bytes(),
+            0o644,
+        )?;
+        let md = self.to_markdown();
+        crate::session::checkpoint::write_bytes_atomically(
+            &dir.join("bench_report.md"),
+            md.as_bytes(),
+            0o644,
+        )?;
         Ok(())
     }
 }

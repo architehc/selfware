@@ -368,10 +368,26 @@ pub const REVIEW_MIN_COMPLETION_TOKENS: usize = 8192;
 
 /// Config for the grounded assistant's API client: the caller's config with
 /// the completion budget raised to at least [`REVIEW_MIN_COMPLETION_TOKENS`]
-/// so reasoning models are not starved mid-answer. Public for contract tests.
+/// so reasoning models are not starved mid-answer, and template-level
+/// `chat_template_kwargs.enable_thinking` switched off when present so
+/// [`ThinkingMode::Disabled`] is honored on `deepseek-v4` / `qwen3` profiles.
+/// Public for contract tests.
 pub fn review_client_config(config: &Config) -> Config {
     let mut review_config = config.clone();
     review_config.max_tokens = review_config.max_tokens.max(REVIEW_MIN_COMPLETION_TOKENS);
+    if let Some(kwargs) = review_config
+        .extra_body
+        .as_mut()
+        .and_then(|extra| extra.get_mut("chat_template_kwargs"))
+        .and_then(|value| value.as_object_mut())
+    {
+        if kwargs.contains_key("enable_thinking") {
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+        }
+    }
     review_config
 }
 
@@ -739,6 +755,16 @@ fn parse_model_review(text: &str) -> Result<ModelReview> {
         // "} ... {" ordering would panic on the inclusive slice — this is a
         // parse failure like any other, routed through the repair loop.
         anyhow::bail!("model response has no well-formed JSON object");
+    }
+    if let Ok(review) = serde_json::from_str(&trimmed[start..=end]) {
+        return Ok(review);
+    }
+    for (offset, _) in trimmed.match_indices('{') {
+        let mut stream =
+            serde_json::Deserializer::from_str(&trimmed[offset..]).into_iter::<ModelReview>();
+        if let Some(Ok(review)) = stream.next() {
+            return Ok(review);
+        }
     }
     serde_json::from_str(&trimmed[start..=end]).context("model returned invalid review JSON")
 }

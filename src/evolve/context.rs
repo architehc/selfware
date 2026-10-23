@@ -249,6 +249,7 @@ impl ContextComposer {
     pub fn layer_summaries(&self) -> Vec<ContextLayerSummary> {
         [
             NodeLayer::Code,
+            NodeLayer::Auxiliary,
             NodeLayer::Test,
             NodeLayer::Concept,
             NodeLayer::Preset,

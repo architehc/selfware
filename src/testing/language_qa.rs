@@ -146,6 +146,7 @@ async fn run_stage_with_code(
 
     let mut cmd = Command::new(program);
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    crate::safety::process_env::pin_rustup_toolchain(&mut cmd);
     cmd.kill_on_drop(true);
     cmd.args(args).current_dir(project_root);
     #[cfg(unix)]
@@ -480,7 +481,11 @@ async fn resolve_node_tool(project_root: &Path, name: &str) -> Option<String> {
 
 /// Read `package.json` at the project root.
 fn read_package_json(project_root: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(project_root.join("package.json")).ok()?;
+    let text = crate::tools::file::read_to_string_capped(
+        &project_root.join("package.json"),
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -615,7 +620,8 @@ fn demote_to_not_run(mut r: QaStageResult, reason: String) -> QaStageResult {
 
 /// Contents of a text file, or empty.
 fn read_or_empty(p: &Path) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
+    crate::tools::file::read_to_string_capped(p, crate::tools::file::MAX_SOURCE_READ_SIZE)
+        .unwrap_or_default()
 }
 
 /// A Python tool is configured by a dedicated file or a section in

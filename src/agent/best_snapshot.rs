@@ -89,7 +89,7 @@ impl AgentSnapshot {
             Some((bytes, permissions)) => {
                 std::fs::create_dir_all(dir)?;
                 let slot = dir.join(uuid::Uuid::new_v4().to_string());
-                std::fs::write(&slot, &bytes)?;
+                crate::session::checkpoint::write_bytes_atomically(&slot, &bytes, 0o600)?;
                 std::fs::set_permissions(&slot, permissions)?;
                 Ok(SnapshotEntry {
                     saved: Some(slot),

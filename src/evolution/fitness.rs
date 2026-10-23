@@ -437,9 +437,10 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             )));
         }
     }
-    let _ = std::fs::write(
-        unique_out_dir.join(".lease_pid"),
-        std::process::id().to_string(),
+    let _ = crate::session::checkpoint::write_bytes_atomically(
+        &unique_out_dir.join(".lease_pid"),
+        std::process::id().to_string().as_bytes(),
+        0o600,
     );
     let lease_guard = LeaseGuard {
         dir: unique_out_dir.clone(),
@@ -546,14 +547,20 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
 
     let wall_clock = start.elapsed();
 
-    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
-    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    let stdout = crate::tools::file::read_to_string_capped(&stdout_path, 64 * 1024 * 1024)
+        .unwrap_or_default();
+    let stderr = crate::tools::file::read_to_string_capped(&stderr_path, 64 * 1024 * 1024)
+        .unwrap_or_default();
 
     if !exit_status.success() {
         return Err(FitnessError::SabRunFailed(stderr));
     }
 
-    if let Err(e) = std::fs::write(unique_out_dir.join(".completed"), b"") {
+    if let Err(e) = crate::session::checkpoint::write_bytes_atomically(
+        &unique_out_dir.join(".completed"),
+        b"",
+        0o600,
+    ) {
         tracing::warn!(
             "Failed to write .completed marker to {}: {e}",
             unique_out_dir.display()
@@ -601,8 +608,11 @@ fn parse_sab_output(
             )
         })?;
 
-    let content = std::fs::read_to_string(report_path)
-        .map_err(|e| FitnessError::ReportParseFailed(format!("{report_path}: {e}")))?;
+    let content = crate::tools::file::read_to_string_capped(
+        Path::new(report_path),
+        crate::tools::file::MAX_SOURCE_READ_SIZE,
+    )
+    .map_err(|e| FitnessError::ReportParseFailed(format!("{report_path}: {e}")))?;
 
     let requested = sha256_of(requested_binary)?;
     let mut result = parse_sab_report_content(&content, Some(&requested))?;

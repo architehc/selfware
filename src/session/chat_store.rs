@@ -75,8 +75,13 @@ impl ChatStore {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("selfware")
             .join("chats");
-        ensure_private_dir(&base)?;
-        Ok(Self { chats_dir: base })
+        Self::with_dir(base)
+    }
+
+    /// Create a new chat store backed by an explicit directory path.
+    pub fn with_dir(chats_dir: PathBuf) -> Result<Self> {
+        ensure_private_dir(&chats_dir)?;
+        Ok(Self { chats_dir })
     }
 
     /// Fallback constructor that uses a temp directory (for when default location fails)

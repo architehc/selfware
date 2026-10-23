@@ -10,5 +10,6 @@ pub mod recorder;
 pub mod tasks;
 
 pub use bench_runner::{BrowserBenchConfig, BrowserBenchReport, BrowserBenchRunner};
+pub use browser_executor::BrowserTaskExecutor;
 pub use recorder::{InteractionRecorder, InteractionTrace, RecordedAction, ScreenshotRef};
 pub use tasks::{SuccessCriterion, WebAction, WebTask};

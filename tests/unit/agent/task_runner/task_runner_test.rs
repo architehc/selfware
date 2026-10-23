@@ -3216,6 +3216,14 @@ async fn shell_passthrough_redacts_secrets_in_context_and_plan_mode_stays_synced
     );
     assert!(agent.is_plan_approved());
 
+    // Re-entering plan mode via set_plan_mode(true) / toggle_plan_mode() while
+    // in PlanModeState::Executing must transition back to Planning and clear
+    // the previous approval flag.
+    agent.set_plan_mode(true);
+    assert!(agent.plan_mode);
+    assert!(agent.plan_mode_manager.is_planning());
+    assert!(!agent.is_plan_approved());
+
     agent.clear_plan();
     assert!(!agent.plan_mode);
     assert!(!agent.is_in_plan_mode());

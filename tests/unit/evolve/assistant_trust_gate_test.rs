@@ -140,3 +140,40 @@ fn review_evidence_is_redacted_for_the_model_line_preserving() {
     assert_eq!(chunks[0].excerpt, excerpt, "stored evidence untouched");
     assert_eq!(sent[0].id, chunks[0].id);
 }
+
+#[test]
+fn review_client_config_disables_template_thinking_and_parse_handles_trailing_braces() {
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({
+            "enable_thinking": true,
+            "preserve_thinking": false
+        }),
+    );
+    let config = Config {
+        max_tokens: 2048,
+        extra_body: Some(extra),
+        ..Config::default()
+    };
+    let review_cfg = review_client_config(&config);
+    assert_eq!(review_cfg.max_tokens, REVIEW_MIN_COMPLETION_TOKENS);
+    assert_eq!(
+        review_cfg
+            .extra_body
+            .as_ref()
+            .and_then(|e| e.get("chat_template_kwargs"))
+            .and_then(|k| k.get("enable_thinking")),
+        Some(&serde_json::Value::Bool(false))
+    );
+
+    let (ev, _) = evidence_from_document("src/lib.rs", "pub fn grounded() {}\n", "hash", 40);
+    let with_trailing_braces = r#"```json
+{"claims":[{"text":"TierMeasurer caches projections","evidence_ids":["E1"]}],"recommendations":[]}
+```
+Note: see `WorkloadQuota { max_tokens: None }` in `src/api/client.rs`."#;
+    let (claims, recs, rejected) = validate_review_json(with_trailing_braces, &ev).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert!(recs.is_empty());
+    assert_eq!(rejected, 0);
+}

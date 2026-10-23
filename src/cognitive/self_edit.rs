@@ -499,7 +499,11 @@ impl SelfEditOrchestrator {
             }
         };
 
-        std::fs::write(&canonical_path, updated)?;
+        crate::session::checkpoint::write_bytes_atomically(
+            &canonical_path,
+            updated.as_bytes(),
+            0o644,
+        )?;
 
         Ok(AppliedMutation {
             edited_files: vec![file.clone()],
@@ -526,10 +530,11 @@ impl SelfEditOrchestrator {
             "\n## Instructions\n\
              1. Read the relevant file(s)\n\
              2. Make the minimal change needed\n\
-             3. Run `cargo check` to verify compilation\n\
-             4. Run `cargo test` on the affected module\n\
-             5. If tests fail, fix or revert the change\n\
-             6. Summarize what you changed and why\n\n\
+             3. Run `cargo fmt` and `cargo check` to verify formatting and compilation\n\
+             4. Run `cargo clippy --all-targets -- -D warnings` to ensure zero lint warnings\n\
+             5. Run `cargo test` on the affected module\n\
+             6. If checks or tests fail, fix or revert the change\n\
+             7. Summarize what you changed and why\n\n\
              IMPORTANT: Make only the change described above. Do not refactor unrelated code.",
         );
 

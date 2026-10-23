@@ -62,7 +62,7 @@ pub fn load_instances(
     // Offline path: read the dataset from a local JSONL file instead of pulling
     // it from HuggingFace via the Python loader.
     let raw = match jsonl_path {
-        Some(p) => std::fs::read_to_string(p)
+        Some(p) => crate::tools::file::read_to_string_capped(p, 256 * 1024 * 1024)
             .with_context(|| format!("reading instances JSONL {}", p.display()))?,
         None => run_loader_script()?,
     };

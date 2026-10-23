@@ -43,7 +43,7 @@ pub enum AttemptOutcome {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageCoverage {
     pub prompt: bool,
     pub completion: bool,
@@ -57,6 +57,12 @@ impl UsageCoverage {
             completion: true,
             total: true,
         }
+    }
+    pub fn is_complete(self) -> bool {
+        self.prompt && self.completion && self.total
+    }
+    pub fn any(self) -> bool {
+        self.prompt || self.completion || self.total
     }
     pub fn from_json(value: &serde_json::Value) -> Self {
         Self {

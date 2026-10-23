@@ -289,6 +289,77 @@ const GATEWAY_TIMEOUT_BODY_MARKERS: &[&str] = &[
     "upstream timed out",
 ];
 
+/// Lower-case body markers indicating that a text-only backend rejected a
+/// multimodal (`image_url`) request payload.
+const MULTIMODAL_REJECTION_BODY_MARKERS: &[&str] = &[
+    "engine_error",
+    "image_url",
+    "multimodal",
+    "does not support image",
+    "vision is not",
+    "image input",
+];
+
+/// Whether a serialized chat-completion request body carries at least one
+/// `image_url` content block inside `messages`.
+pub(crate) fn body_has_image_url(request_body: &serde_json::Value) -> bool {
+    request_body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|msgs| {
+            msgs.iter().any(|msg| {
+                msg.get("content")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|b| {
+                            b.get("type").and_then(|t| t.as_str()) == Some("image_url")
+                                || b.get("image_url").is_some()
+                        })
+                    })
+            })
+        })
+}
+
+/// Detect when a backend rejects a multimodal (`image_url`) request with an
+/// engine or schema error (such as SGLang/vLLM returning HTTP 500
+/// `{"error":{"type":"engine_error"}}` when no vision tower / `--mmproj` is
+/// loaded, or HTTP 400/415/422/501 naming `image_url` / `multimodal`).
+///
+/// Retrying a deterministic capability mismatch against the same text-only
+/// model burns the entire 5xx retry backoff budget for nothing.
+pub(crate) fn is_multimodal_engine_rejection(
+    status: u16,
+    error_body: &str,
+    request_body: &serde_json::Value,
+) -> bool {
+    if !matches!(status, 400 | 415 | 422 | 500 | 501) {
+        return false;
+    }
+    if !body_has_image_url(request_body) {
+        return false;
+    }
+    let lower = error_body.to_lowercase();
+    MULTIMODAL_REJECTION_BODY_MARKERS
+        .iter()
+        .any(|marker| lower.contains(*marker))
+}
+
+pub(crate) fn format_multimodal_rejection_hint(
+    endpoint: &str,
+    status: reqwest::StatusCode,
+    error_body: String,
+) -> String {
+    let redacted_endpoint = crate::config::redact_endpoint(endpoint);
+    format!(
+        "{}\nHint: the request contained `image_url` multimodal content and '{}' rejected it (HTTP {}). \
+         This model or server engine may not have a vision encoder loaded; use a vision-capable model \
+         or run `selfware llm-doctor` to check vision support.",
+        error_body.trim(),
+        redacted_endpoint,
+        status.as_u16()
+    )
+}
+
 /// Classify a retryable HTTP error as a gateway timeout
 /// ([`ApiError::GatewayTimeout`]): status 502/503/504 AND either a body that
 /// names a proxy timeout (`ERR_NGROK_3004`, "gateway timeout", …) or an
@@ -1804,7 +1875,7 @@ impl ApiClient {
             }
             let is_gateway = err.chain().any(|c| {
                 matches!(
-                    c.downcast_ref::<ApiError>(),
+                    crate::errors::as_api_error(c),
                     Some(ApiError::GatewayTimeout { .. })
                 )
             });
@@ -2037,6 +2108,20 @@ impl ApiClient {
                                     return Err(gateway.into());
                                 }
                                 gateway_retries += 1;
+                            }
+                            if is_multimodal_engine_rejection(status.as_u16(), &text, &body) {
+                                let hinted =
+                                    format_multimodal_rejection_hint(&self.base_url, status, text);
+                                warn!(
+                                    "Streaming request: multimodal payload rejected by engine ({}) — failing fast without retry",
+                                    status
+                                );
+                                return Err(Self::http_status_error(
+                                    &self.base_url,
+                                    status,
+                                    hinted,
+                                    self.config.api_key.as_ref(),
+                                ));
                             }
                             if Self::is_retryable_status(status) && attempt < max_attempts {
                                 let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
@@ -2794,6 +2879,15 @@ impl ApiClient {
                             }
                             _ => error_text,
                         };
+                        if is_multimodal_engine_rejection(status.as_u16(), &error_text, &body) {
+                            let hinted =
+                                format_multimodal_rejection_hint(endpoint, status, error_text);
+                            warn!(
+                                "Multimodal payload rejected by engine ({}) — failing fast without retry",
+                                status
+                            );
+                            return Err(Self::http_status_error(endpoint, status, hinted, api_key));
+                        }
                         if let Some(gateway) = classify_gateway_timeout(
                             status.as_u16(),
                             &error_text,
@@ -2854,6 +2948,13 @@ impl ApiClient {
                         tool_mode_retry = true;
                         continue;
                     }
+                    let error_text =
+                        if is_multimodal_engine_rejection(status_code.as_u16(), &error_text, &body)
+                        {
+                            format_multimodal_rejection_hint(endpoint, status_code, error_text)
+                        } else {
+                            error_text
+                        };
                     return Err(Self::http_status_error(
                         endpoint,
                         status_code,
@@ -3259,7 +3360,7 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
 /// their own remediation message instead of tripping the breaker and being
 /// masked as "API unavailable".
 fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
-    match err.downcast_ref::<ApiError>() {
+    match err.chain().find_map(crate::errors::as_api_error) {
         Some(ApiError::Network(_))
         | Some(ApiError::Timeout)
         | Some(ApiError::RateLimit { .. })
@@ -3269,12 +3370,12 @@ fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
         // Untyped errors (e.g. reqwest body-read failures) keep the previous
         // behavior and count — except the budget stops (run wall-clock, usage,
         // per-call time cap), which are deliberate halts, not a sick backend.
-        None => {
-            err.downcast_ref::<WallClockBudgetExceeded>().is_none()
-                && err.downcast_ref::<UsageBudgetExceeded>().is_none()
-                && err.downcast_ref::<CallTimeBudgetExceeded>().is_none()
-                && err.downcast_ref::<SideCallTimeout>().is_none()
-        }
+        None => !err.chain().any(|c| {
+            c.downcast_ref::<WallClockBudgetExceeded>().is_some()
+                || c.downcast_ref::<UsageBudgetExceeded>().is_some()
+                || c.downcast_ref::<CallTimeBudgetExceeded>().is_some()
+                || c.downcast_ref::<SideCallTimeout>().is_some()
+        }),
     }
 }
 

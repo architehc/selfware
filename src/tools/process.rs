@@ -442,7 +442,32 @@ impl Tool for ProcessRestart {
         let manager = PROCESS_MANAGER.read().await;
         let summary = manager.restart_tracked(id).await?;
 
-        Ok(serde_json::to_value(summary)?)
+        use crate::process_manager::ProcessStatus;
+        match &summary.status {
+            ProcessStatus::Running => Ok(serde_json::to_value(summary)?),
+            ProcessStatus::HealthCheckFailed => {
+                anyhow::bail!(
+                    "Process '{}' restarted but health check failed. Check logs with process_logs.",
+                    summary.id
+                );
+            }
+            ProcessStatus::Crashed { exit_code } => {
+                anyhow::bail!(
+                    "Process '{}' exited immediately after restart with code {}. Check logs with process_logs.",
+                    summary.id,
+                    exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "Process '{}' is in unexpected state {:?} after restart. Check logs with process_logs.",
+                    summary.id,
+                    other,
+                );
+            }
+        }
     }
 }
 
@@ -549,10 +574,11 @@ impl Tool for PortCheck {
             } else {
                 find_available_port(range_start, range_end).await
             };
+            let reserved = reserve && port.is_some();
             return Ok(serde_json::json!({
                 "available_port": port,
                 "range_searched": format!("{}-{}", range_start, range_end),
-                "reserved": reserve
+                "reserved": reserved
             }));
         }
 

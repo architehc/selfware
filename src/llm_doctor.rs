@@ -770,6 +770,8 @@ pub(crate) enum VisionProbeOutcome {
     Inconclusive,
     /// Authentication failed (HTTP 401/403) when reaching the vision endpoint.
     Unauthorized,
+    /// Non-success HTTP status (other than 401/403) returned by the vision endpoint (e.g. HTTP 500 engine_error).
+    HttpError(u16),
 }
 
 /// Capability probe results.
@@ -849,6 +851,20 @@ pub(crate) fn map_vision_status_and_detail(
                 "Vision endpoint returned 401/403 Unauthorized. Check API key in config or model profile."
                     .to_string(),
             ),
+        ),
+        Some(VisionProbeOutcome::HttpError(code)) => (
+            CheckOutcome::Warn,
+            match target_label {
+                Some(t) => format!(
+                    "vision probe for {} failed: backend returned HTTP {}",
+                    t, code
+                ),
+                None => format!("vision probe failed: backend returned HTTP {}", code),
+            },
+            Some(format!(
+                "Vision endpoint returned HTTP {} on image_url request. Verify backend multimodal processor or disable vision modality.",
+                code
+            )),
         ),
         None => {
             if is_vision_expected {
@@ -1430,8 +1446,6 @@ async fn probe_vision_conditioning(
         req
     };
 
-    let mut auth_failed = false;
-
     let red_res = match send_probe(RED_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
             resp.json::<serde_json::Value>().await.ok().and_then(|j| {
@@ -1457,15 +1471,18 @@ async fn probe_vision_conditioning(
                 "  ⚠ vision probe: unauthorized (HTTP {}) — check API key",
                 resp.status()
             );
-            auth_failed = true;
-            None
+            return VisionProbeOutcome::Unauthorized;
         }
-        _ => None,
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            eprintln!(
+                "  ⚠ vision probe: backend returned HTTP {} on image request",
+                resp.status()
+            );
+            return VisionProbeOutcome::HttpError(code);
+        }
+        Err(_) => None,
     };
-
-    if auth_failed {
-        return VisionProbeOutcome::Unauthorized;
-    }
 
     let blue_res = match send_probe(BLUE_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -1492,15 +1509,18 @@ async fn probe_vision_conditioning(
                 "  ⚠ vision probe: unauthorized (HTTP {}) — check API key",
                 resp.status()
             );
-            auth_failed = true;
-            None
+            return VisionProbeOutcome::Unauthorized;
         }
-        _ => None,
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            eprintln!(
+                "  ⚠ vision probe: backend returned HTTP {} on image request",
+                resp.status()
+            );
+            return VisionProbeOutcome::HttpError(code);
+        }
+        Err(_) => None,
     };
-
-    if auth_failed {
-        return VisionProbeOutcome::Unauthorized;
-    }
 
     evaluate_vision_responses(red_res.as_deref(), blue_res.as_deref())
 }
@@ -1953,15 +1973,30 @@ async fn identify_backend(
 
 // ── Step 2 implementation ────────────────────────────────────────────────────
 
+pub(crate) fn find_matching_model<'a>(
+    models: &'a [ModelInfo],
+    configured_model: &str,
+) -> Option<&'a ModelInfo> {
+    models
+        .iter()
+        .find(|m| m.id == configured_model)
+        .or_else(|| {
+            models
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(configured_model))
+        })
+        .or_else(|| {
+            models
+                .iter()
+                .find(|m| m.id.contains(configured_model) || configured_model.contains(&m.id))
+        })
+}
+
 fn analyse_model(det: &DetectionResult, config: &Config) {
     let configured_model = config.model.as_str();
 
-    // Try to find the configured model in the list
-    let matching = det.models.iter().find(|m| {
-        m.id == configured_model
-            || m.id.contains(configured_model)
-            || configured_model.contains(&m.id)
-    });
+    // Try to find the configured model in the list (prefer exact match over prefix/substring)
+    let matching = find_matching_model(&det.models, configured_model);
 
     let is_qwen35 = is_qwen35_model(configured_model);
 
@@ -2653,11 +2688,8 @@ fn print_recommendations(
     thinking_support: Option<bool>,
 ) {
     let model_name = config.model.as_str();
-    // Find the model in the list
-    let model_info = det
-        .models
-        .iter()
-        .find(|m| m.id == model_name || m.id.contains(model_name) || model_name.contains(&m.id));
+    // Find the model in the list (prefer exact match over prefix/substring)
+    let model_info = find_matching_model(&det.models, model_name);
 
     let ctx_str = model_info
         .and_then(|m| m.max_model_len)

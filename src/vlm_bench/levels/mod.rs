@@ -7,6 +7,13 @@ pub mod l4_profiling;
 pub mod l5_layout;
 pub mod mega_evolution;
 
+pub use l1_tui_state::L1TuiState;
+pub use l2_diagnostics::L2Diagnostics;
+pub use l3_architecture::L3Architecture;
+pub use l4_profiling::L4Profiling;
+pub use l5_layout::L5Layout;
+pub use mega_evolution::MegaEvolution;
+
 use super::VlmBenchLevel;
 
 /// Build the default set of all benchmark levels.

@@ -402,9 +402,41 @@ impl MultiAgentChat {
         }
 
         // Call the API with timeout
-        let result =
-            tokio::time::timeout(timeout, client.chat(messages, None, ThinkingMode::Disabled))
-                .await;
+        let mut result = tokio::time::timeout(
+            timeout,
+            client.chat(messages.clone(), None, ThinkingMode::Disabled),
+        )
+        .await;
+
+        // If a proxy/tunnel cut the non-streaming call (e.g. ngrok ERR_NGROK_3004
+        // after 300s of silent reasoning), retry once via streamed `side_chat`
+        // with `thinking_off()` so SSE chunks keep the tunnel alive and the
+        // backend skips silent thinking tokens.
+        if let Ok(Err(ref e)) = result {
+            let is_gateway_timeout = e.chain().any(|cause| {
+                matches!(
+                    crate::errors::as_api_error(cause),
+                    Some(crate::errors::ApiError::GatewayTimeout { .. })
+                )
+            });
+            if is_gateway_timeout {
+                let remaining = timeout.saturating_sub(start.elapsed());
+                if !remaining.is_zero() {
+                    tracing::warn!(
+                        "multi-chat: agent {} hit gateway timeout ({}); retrying via streamed side_chat with thinking_off",
+                        agent_id,
+                        e
+                    );
+                    let spec = crate::api::SideCall::new("multi_chat_gateway_recovery")
+                        .thinking_off()
+                        .max_tokens(crate::api::SideCall::DEFAULT_MAX_TOKENS)
+                        .time_cap_secs(remaining.as_secs().max(1))
+                        .single_attempt();
+                    result =
+                        tokio::time::timeout(remaining, client.side_chat(messages, spec)).await;
+                }
+            }
+        }
 
         let duration = start.elapsed();
 
@@ -638,7 +670,7 @@ impl BudgetGuard {
     /// Try to reserve budget for one new call. Returns the reserved token count,
     /// or a human-readable reason when launching the call would exceed a configured limit.
     pub(super) fn try_reserve(&self, prompt_tokens: usize) -> Result<usize, String> {
-        let mut tracker = self.tracker.lock().unwrap();
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         let call_estimate = self.estimate + prompt_tokens;
         if let Some(max) = self.limits.max_budget_tokens {
             let committed = tracker.actual_tokens + tracker.reserved_tokens;
@@ -671,7 +703,7 @@ impl BudgetGuard {
     /// Settle a finished (or abandoned) call: release its reservation and
     /// record actual provider-reported usage, when available.
     fn settle(&self, reserved: usize, usage: Option<&Usage>, fallback_tokens: usize) {
-        let mut tracker = self.tracker.lock().unwrap();
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         tracker.reserved_tokens = tracker.reserved_tokens.saturating_sub(reserved);
         if let Some(usage) = usage {
             tracker.actual_tokens += if usage.total_tokens > 0 {

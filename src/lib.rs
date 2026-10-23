@@ -96,11 +96,11 @@ pub mod testing;
 pub mod evolution;
 
 // VLM benchmark suite for visual understanding evaluation
-#[cfg(feature = "vlm-bench")]
+#[cfg(any(test, feature = "vlm-bench"))]
 pub mod vlm_bench;
 
 // Concurrent benchmark harness for throughput testing
-#[cfg(feature = "bench-harness")]
+#[cfg(any(test, feature = "bench-harness"))]
 pub mod bench_harness;
 
 // Memory consolidation ("sleep") system
@@ -130,9 +130,42 @@ pub use testing::visual_verification;
 
 // Canonical root-level umbrella re-exports for core entrypoints
 pub use agent::Agent;
+#[cfg(any(test, feature = "bench-harness"))]
+pub use bench_harness::{BenchTask, HarnessConfig, HarnessReport, HarnessRunner, TaskEvaluator};
+pub use boot::{
+    find_card, retrieve_bundled_snippet, retrieve_snippet, BootCheck, BootCheckStatus, BootIo,
+    DetectedModel, RecipeCard, ScriptedIo, StdinIo, WizardPlan, CARDS,
+};
 pub use config::Config;
+#[cfg(feature = "consolidation")]
+pub use consolidation::{
+    CollectedItem, CompactedContent, ConsolidationReport, LongTermStore, RecordImportance,
+    SourceType, StoreResult, TemporalRecord,
+};
 pub use errors::{AgentError, SelfwareError};
+pub use input::{InputConfig, InputMode, SelfwareCompleter, SelfwarePrompt};
+pub use lifecycle::{
+    AgentEvent, AgentMachine, AgentState, Effect, Entity, EventLog, InvalidTransition, Label,
+    LiveTask, Machine, RecordedUsage, ResourceEvent, ResourceKind, ResourceMachine, ResourceState,
+    TaskControl, TaskEvent, TaskMachine, TaskState, Tracked, TransitionRecord,
+};
+pub use orchestration::{
+    MultiAgentChat, MultiAgentConfig, Swarm, Workflow, WorkflowExecutor, WorkflowResult,
+    WorkflowStatus,
+};
+pub use safety::SafetyChecker;
+#[cfg(feature = "resilience")]
+pub use self_healing::{
+    ErrorClass, ErrorLearner, HealthPredictor, RecoveryAction, RecoveryExecutor, RecoveryStrategy,
+    SelfHealingConfig, SelfHealingEngine, StateManager,
+};
 pub use token_count::estimate_content_tokens;
+pub use tools::{Tool, ToolRegistry};
+#[cfg(any(test, feature = "vlm-bench"))]
+pub use vlm_bench::{
+    BenchReport, BenchScenario, Difficulty as VlmDifficulty, ExpectedAnswer, LevelReport,
+    LevelScore, Rating as VlmRating, VlmBenchConfig, VlmBenchLevel, VlmBenchRunner,
+};
 
 // ============================================================================
 // New feature modules

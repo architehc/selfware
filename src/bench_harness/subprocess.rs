@@ -35,6 +35,7 @@ pub fn env_allowed(key: &str) -> bool {
             | "TZ"
             | "CARGO_HOME"
             | "RUSTUP_HOME"
+            | "RUSTUP_TOOLCHAIN"
             | "RUST_BACKTRACE"
             | "GOPATH"
             | "GOROOT"
@@ -58,6 +59,7 @@ pub fn apply_env_allowlist(cmd: &mut Command) {
             cmd.env(k, v);
         }
     }
+    crate::safety::process_env::pin_std_rustup_toolchain(cmd);
 }
 
 /// Outcome of a group-timeout subprocess run.

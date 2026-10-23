@@ -1398,7 +1398,10 @@ impl WorkflowExecutor {
 
     /// Load workflow from file
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::tools::file::read_to_string_capped(
+            path,
+            crate::tools::file::MAX_SOURCE_READ_SIZE,
+        )?;
         self.load_yaml(&content)
     }
 

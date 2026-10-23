@@ -56,7 +56,10 @@ pub mod report;
 pub mod runner;
 
 pub use config::LongRunningConfig;
-pub use project::{ProjectResult, ProjectStatus, ProjectType};
+pub use project::{
+    scaffold_go, scaffold_python, scaffold_rust, scaffold_template, ProjectResult, ProjectStatus,
+    ProjectType,
+};
 pub use report::{LongRunningReport, RoundSummary};
 pub use runner::TaskSetup;
 pub use runner::{LongRunningRunner, TestTask};

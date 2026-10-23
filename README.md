@@ -450,6 +450,41 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.9
+
+0.9.9 expands the Lean 4 ↔ Rust formal bisimulation suite to 395 proved rows
+(`PA1–PA78` and `PT1–PT5`), makes the verified completion gate (`done_check = true`)
+the default, and hardens live-endpoint reviews, citations, and 4-gate
+self-improvement (`evolve`). Details are in [CHANGELOG.md](CHANGELOG.md):
+
+- **1,056 Lean 4 ↔ Rust bisimulation rows (`670` theorems across `11` `.lean` specs).**
+  `formal/PhiArenaAndTrustBounds.lean` (`395` rows in `formal/phi_arena_trust_table.json`,
+  `PA1–PA78`) and its 10 sibling `.lean` specifications in `formal/` (`14,655` lines
+  of Lean 4 with zero `sorry`/`admit`/`axiom`) export 10 JSON decision tables
+  (`1,056` total rows) checked against `src/phi/policy_tests.rs` on every commit
+  (`scripts/check_formal.sh`). Covers `WorkLedger` state transitions,
+  `PhiMediator` cooldowns, `Arena` winner selection, `GroundedAssistant` trust
+  gates, conjoined multi-citation fenced quotes, multimodal fast-fail, and RSI
+  4-gate promotion.
+- **Verified completion by default (`done_check = true`).** Multi-step coding
+  runs verify completion before exiting, cutting live `c24` runtime by **19.8×**
+  (`21.2s` vs `420s`, `-88.2%` tokens).
+- **Stronger citation grounding.** `src/agent/citation_check.rs` verifies
+  conjoined multi-citation lines (`a.rs:10 and b.rs:20`), fenced code blocks
+  following introductory prose, and numbered `file_read` code fences (`12 |`,
+  `12:`).
+- **Hardened 4-gate `evolve` & `GroundedAssistant`.** `GroundedAssistant`
+  overrides template-pinned thinking on bounded review calls so reasoning tokens
+  never starve the JSON verdict, recovers valid `ModelReview` JSON before
+  trailing braces, and `SelfEditOrchestrator` enforces all 4 promotion gates
+  (`git diff` protected-path audit, `cargo check`, `cargo test --lib`, and
+  line-cited review).
+- **Live endpoint resilience.** `selfware multi-chat` falls back to streamed
+  `chat_stream` when a reverse proxy times out on non-streaming `side_chat`,
+  `ApiClient` fails fast on unsupported `image_url` payloads, `llm-doctor`
+  enforces exact model matching and surfaces HTTP 500 vision probe errors, and
+  step token usage is reconciled across all execution paths.
+
 ## What's New in 0.9.8
 
 0.9.8 adds the read-only artifact harness and corrects its review findings.
@@ -1666,6 +1701,7 @@ Full guides are available in the [`docs/`](docs/) directory:
 | [Doctor](docs/doctor.md) | System and LLM diagnostics |
 | [Serving with SGLang](docs/serving-sglang.md) | Measured SGLang launch flags for `qwen38-flash-next`-class models |
 | [ZED Extension](docs/zed-extension.md) | IDE integration via ZED |
+| [Website Redesign Guidelines](docs/SELFWARE_DESIGN_WEBSITE_GUIDELINES.md) | Anti-slop engineering specification & blueprint for `selfware.design` |
 
 ---
 
