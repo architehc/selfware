@@ -3041,6 +3041,188 @@ fn test_path_qualified_unknown_model_gets_fallback() {
 }
 
 #[test]
+fn test_local_gguf_clamps_context_despite_profile_match() {
+    // The real regression: a sharded llama.cpp quant of a family a built-in
+    // profile recognizes. That profile pins no context, so the 1M struct
+    // default survived and the agent planned a ~773k-token prompt against a
+    // server whose window is only its own `-c`.
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:8082/v1"
+        model = "GLM-5.2-UD-IQ2_M-00001-of-00006.gguf"
+        "#,
+        "gguf_matched.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config.matched_profile.as_deref(),
+        Some("glm-5.2"),
+        "the family name still matches its profile — only the context is clamped"
+    );
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "a local GGUF's window is its server's -c, never the 1M built-in default"
+    );
+    assert_eq!(
+        config.agent.token_budget,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH * 3 / 5,
+        "the derived budget must follow the clamped window"
+    );
+    assert_eq!(
+        config.models["default"].context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "the synthesized default profile inherits the clamped window"
+    );
+}
+
+#[test]
+fn test_local_gguf_reclamps_after_a_profile_context_pin() {
+    // qwen38 pins a card-recommended window for the provider deployment. For a
+    // quantized file that figure is meaningless, so the clamp is re-asserted
+    // after the profile pass instead of being overridden by it.
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:8080/v1"
+        model = "qwen38-flash-next.gguf"
+        "#,
+        "gguf_pinned_profile.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen38"));
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "a profile's provider-deployment window must not survive onto a local GGUF"
+    );
+    assert_eq!(
+        config.agent.token_budget,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH * 3 / 5,
+        "re-clamping must re-derive the budget it was pinned against"
+    );
+}
+
+#[test]
+fn test_local_gguf_explicit_context_length_wins() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:8082/v1"
+        model = "GLM-5.2-UD-IQ2_M-00001-of-00006.gguf"
+        context_length = 131072
+        "#,
+        "gguf_explicit.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config.context_length, 131072,
+        "an explicit pin always wins over the GGUF clamp"
+    );
+    assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+}
+
+#[test]
+fn test_lm_studio_gguf_id_is_clamped() {
+    // LM Studio serves hub ids rather than file names; the `-GGUF` suffix is
+    // the same "this is a local weight file" signal.
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:1234/v1"
+        model = "lmstudio-community/llama-3.2-3b-instruct-GGUF"
+        "#,
+        "lmstudio_gguf.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "a -GGUF hub id is a local weight file too"
+    );
+}
+
+#[test]
+fn test_model_is_local_gguf_predicate() {
+    assert!(Config::model_is_local_gguf(
+        "GLM-5.2-UD-IQ2_M-00001-of-00006.gguf"
+    ));
+    assert!(Config::model_is_local_gguf(
+        "lmstudio-community/llama-3.2-3b-instruct-GGUF"
+    ));
+    assert!(Config::model_is_local_gguf("/models/qwen3-8b-Q4_K_M.gguf"));
+    // Provider deployments, including a local proxy in front of one, are not.
+    assert!(!Config::model_is_local_gguf("z-ai/glm-5.2"));
+    assert!(!Config::model_is_local_gguf("deepseek-v4.1-flash"));
+    assert!(!Config::model_is_local_gguf("qwen38-flash-next"));
+    assert!(!Config::model_is_local_gguf(""));
+}
+
+#[test]
+fn test_cli_model_override_to_local_gguf_clamps_context() {
+    // `/model` and `--model` re-derive the window after the load path already
+    // sized it, so the clamp has to hold on the override path too.
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:8082/v1"
+        model = "deepseek-v4.1-flash"
+        "#,
+        "override_gguf.toml",
+    );
+    let mut config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert!(
+        config.context_length > crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "the provider deployment starts on its profile window: {}",
+        config.context_length
+    );
+
+    config.apply_cli_model_override("GLM-5.2-UD-IQ2_M-00001-of-00006.gguf".to_string());
+
+    assert_eq!(config.matched_profile.as_deref(), Some("glm-5.2"));
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "switching to a local quant must clamp, not keep the previous window"
+    );
+    assert_eq!(
+        config.agent.token_budget,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH * 3 / 5
+    );
+}
+
+#[test]
+fn test_cli_model_override_reclamps_after_a_profile_context_pin() {
+    // qwen38 pins a card-recommended window, so `apply_profile` re-inflates
+    // the value the fallback just clamped; the override path needs the same
+    // post-profile re-clamp `Config::load` has.
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:8080/v1"
+        model = "deepseek-v4.1-flash"
+        "#,
+        "override_gguf_pinned.toml",
+    );
+    let mut config = Config::load(Some(path.to_str().unwrap())).unwrap();
+
+    config.apply_cli_model_override("qwen38-flash-next.gguf".to_string());
+
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen38"));
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "a profile's provider window must not survive a switch to a local GGUF"
+    );
+    assert_eq!(
+        config.agent.token_budget,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH * 3 / 5,
+        "re-clamping must re-derive the budget it was pinned against"
+    );
+}
+
+#[test]
 fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
     let _guard = clear_env();
     let (_dir, path) = write_temp_config(

@@ -1473,6 +1473,22 @@ impl Config {
             }
         }
 
+        // Re-assert the conservative window for a local GGUF AFTER the profile
+        // pass: a profile pins the card-recommended context of the provider
+        // deployment, which says nothing about the `-c` a quantized file was
+        // actually served with. The warning already fired in
+        // `apply_unknown_model_context_fallback`, so keep the derived budget in
+        // step with the window it announced.
+        if !context_length_explicit
+            && Self::model_is_local_gguf(&config.model)
+            && config.context_length != super::UNKNOWN_MODEL_CONTEXT_LENGTH
+        {
+            config.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+            if !token_budget_was_explicit {
+                config.agent.token_budget = config.context_length * 3 / 5;
+            }
+        }
+
         // Ensure a "default" model profile exists, synthesized from the
         // top-level endpoint/model/api_key fields so that existing configs
         // without explicit [models.*] sections keep working.
@@ -1736,6 +1752,21 @@ impl Config {
             }
         }
 
+        // Same re-clamp as `Config::load`: a profile pins the context of the
+        // provider deployment, which says nothing about the `-c` a local GGUF
+        // was actually served with. Without this, switching to a quantized
+        // model at runtime (`/model`, `--model`) would silently re-inflate the
+        // window the load path had just clamped.
+        if !user_explicit.context_length
+            && Self::model_is_local_gguf(&self.model)
+            && self.context_length != super::UNKNOWN_MODEL_CONTEXT_LENGTH
+        {
+            self.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+            if !token_budget_was_explicit {
+                self.agent.token_budget = self.context_length * 3 / 5;
+            }
+        }
+
         self.sync_default_model_profile();
     }
 
@@ -1772,11 +1803,25 @@ impl Config {
         self.normalize_agent_limits();
     }
 
-    /// Conservative context window for UNRECOGNIZED models when the source
-    /// TOML did not set `context_length` explicitly. Single implementation of
-    /// the fallback `Config::load` applies on disk reads, shared with
-    /// [`Config::validate_generated_toml`] so a generated config is judged
-    /// against the SAME effective context window it gets at load time.
+    /// Conservative context window when the source TOML did not pin
+    /// `context_length`. Single implementation of the fallback `Config::load`
+    /// applies on disk reads, shared with [`Config::validate_generated_toml`]
+    /// so a generated config is judged against the SAME effective context
+    /// window it gets at load time.
+    ///
+    /// Fires for two kinds of model:
+    ///
+    /// * NO built-in profile matches — an arbitrary model would otherwise get
+    ///   the 1M struct default, which describes the shipped default model.
+    /// * The id names a local GGUF file ([`Self::model_is_local_gguf`]) — its
+    ///   window is whatever its server was started with, and a profile that
+    ///   matches only the family name (glm-5.2, qwen3.6, …) cannot know that.
+    ///   Because such a profile can still pin a card-recommended window for
+    ///   the provider deployment, `Config::load` re-checks this after the
+    ///   profile pass so that pin cannot override the clamp.
+    ///
+    /// Any other profile match keeps the built-in default: pinning the real
+    /// window of a provider deployment stays a user-config choice.
     ///
     /// This is a degradation, not a default: it warns loudly every time it
     /// fires. With the stock `max_tokens` the derived conversation budget
@@ -1784,8 +1829,28 @@ impl Config {
     /// warning names the model, the assumed window, and the remediation
     /// (set `context_length` explicitly) rather than silently proceeding.
     fn apply_unknown_model_context_fallback(&mut self, context_length_explicit: bool) {
-        if !context_length_explicit && match_profile(&self.model).is_none() {
-            self.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+        if context_length_explicit {
+            return;
+        }
+        let local_gguf = Self::model_is_local_gguf(&self.model);
+        if !local_gguf && match_profile(&self.model).is_some() {
+            return;
+        }
+        self.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+        if local_gguf {
+            warn!(
+                "LOCAL GGUF MODEL '{}': a quantized weight file's context window is whatever \
+                 its server was started with, so the {}-token built-in default does not \
+                 describe it — assuming a conservative {} tokens instead. With the default \
+                 max_tokens this collapses the conversation budget to the {}-token floor. \
+                 Set context_length explicitly (top-level or in the [models.*] profile) to \
+                 the server's real context; see docs/configuration.md.",
+                self.model,
+                super::default_context_length(),
+                super::UNKNOWN_MODEL_CONTEXT_LENGTH,
+                super::MIN_CONVERSATION_TOKENS,
+            );
+        } else {
             warn!(
                 "UNKNOWN MODEL '{}': no built-in profile matches and context_length is not \
                  set — assuming a conservative {}-token context window. With the default \
@@ -1797,6 +1862,16 @@ impl Config {
                 super::MIN_CONVERSATION_TOKENS,
             );
         }
+    }
+
+    /// Whether a model id names a local GGUF weight file rather than a
+    /// provider deployment: a llama.cpp server's `GLM-5.2-UD-IQ2_M-00001-of-
+    /// 00006.gguf`, or an LM Studio hub id ending in `-GGUF`. Only a
+    /// self-hosted file has a context window decided by a server flag, so only
+    /// these are clamped when the user pinned nothing.
+    fn model_is_local_gguf(model: &str) -> bool {
+        let id = model.to_ascii_lowercase();
+        id.contains(".gguf") || id.contains("-gguf")
     }
 
     /// Validate this in-memory generated config the way the loader would.
