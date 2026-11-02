@@ -1524,3 +1524,203 @@ async fn run_llm_doctor_report_returns_structured_report_when_endpoint_is_unreac
         "unexpected error: {err}"
     );
 }
+
+// =========================================================================
+// Headless endpoint preflight
+// =========================================================================
+
+/// Answer exactly one request with `status` and `body`; returns the address it
+/// listens on and the task to await once the probe has been made.
+async fn one_shot_models_server(
+    status: &'static str,
+    body: String,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_request_body(&mut socket).await;
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    (addr, handle)
+}
+
+/// A port nothing is listening on: bind, note the assigned port, drop it.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn preflight_config(endpoint: String, model: &str) -> Config {
+    Config {
+        endpoint,
+        model: model.to_string(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn test_preflight_endpoint_unreachable_names_the_endpoint() {
+    // The regression this exists for: a dead local backend used to surface from
+    // inside the agent loop as a nameless "Network error" after five retries.
+    let _lock = crate::test_support::state_lock();
+    let saved = std::env::var_os("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+    std::env::remove_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+
+    let port = closed_port();
+    let endpoint = format!("http://127.0.0.1:{port}/v1");
+    let config = preflight_config(endpoint.clone(), "any-model");
+    let err = preflight_endpoint(&config)
+        .await
+        .expect_err("a refused connection must fail the preflight");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains(&endpoint), "must name the endpoint: {msg}");
+    assert!(msg.contains("unreachable"), "{msg}");
+    assert!(
+        msg.contains("llm-doctor"),
+        "must point at the full diagnostic: {msg}"
+    );
+    assert!(
+        msg.contains("SELFWARE_SKIP_ENDPOINT_PREFLIGHT"),
+        "must offer the escape hatch: {msg}"
+    );
+
+    if let Some(v) = saved {
+        std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", v);
+    }
+}
+
+#[tokio::test]
+async fn test_preflight_endpoint_accepts_a_listed_model() {
+    let _lock = crate::test_support::state_lock();
+    let saved = std::env::var_os("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+    std::env::remove_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+
+    let body = serde_json::json!({
+        "object": "list",
+        "data": [{
+            "id": "deepseek-v4.1-flash",
+            "object": "model",
+            "max_model_len": 131072,
+        }],
+    })
+    .to_string();
+    let (addr, server) = one_shot_models_server("200 OK", body).await;
+    let config = preflight_config(format!("http://{addr}/v1"), "deepseek-v4.1-flash");
+
+    let preflight = preflight_endpoint(&config)
+        .await
+        .expect("a listening backend must pass");
+    server.await.unwrap();
+
+    assert!(preflight.status.is_some_and(|s| s.is_success()));
+    assert!(!preflight.skipped);
+    assert!(preflight.configured_model_listed);
+    assert_eq!(preflight.models.len(), 1);
+    assert_eq!(
+        preflight.models[0].max_model_len,
+        Some(131072),
+        "the served context length is what an unpinned config should learn from"
+    );
+    assert_eq!(
+        preflight.advisory(&config),
+        None,
+        "a listed model needs no advisory"
+    );
+
+    if let Some(v) = saved {
+        std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", v);
+    }
+}
+
+#[tokio::test]
+async fn test_preflight_endpoint_advises_when_the_model_is_not_listed() {
+    let _lock = crate::test_support::state_lock();
+    let saved = std::env::var_os("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+    std::env::remove_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+
+    let body = serde_json::json!({
+        "object": "list",
+        "data": [{"id": "some-other-model", "object": "model"}],
+    })
+    .to_string();
+    let (addr, server) = one_shot_models_server("200 OK", body).await;
+    let config = preflight_config(format!("http://{addr}/v1"), "deepseek-v4.1-flash");
+
+    let preflight = preflight_endpoint(&config)
+        .await
+        .expect("reachability is satisfied even when the model is absent");
+    server.await.unwrap();
+
+    assert!(!preflight.configured_model_listed);
+    let advisory = preflight
+        .advisory(&config)
+        .expect("an unlisted model must produce an advisory");
+    assert!(
+        advisory.contains("deepseek-v4.1-flash") && advisory.contains("some-other-model"),
+        "the advisory must name both the configured and the served ids: {advisory}"
+    );
+
+    if let Some(v) = saved {
+        std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", v);
+    }
+}
+
+#[tokio::test]
+async fn test_preflight_endpoint_treats_an_http_error_status_as_reachable() {
+    // A backend that answers 404 because it does not implement `/models` is
+    // listening; only a transport failure may fail the run.
+    let _lock = crate::test_support::state_lock();
+    let saved = std::env::var_os("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+    std::env::remove_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+
+    let (addr, server) =
+        one_shot_models_server("404 Not Found", r#"{"error":"no such route"}"#.to_string()).await;
+    let config = preflight_config(format!("http://{addr}/v1"), "any-model");
+
+    let preflight = preflight_endpoint(&config)
+        .await
+        .expect("an HTTP error status is not a transport failure");
+    server.await.unwrap();
+
+    assert_eq!(preflight.status.map(|s| s.as_u16()), Some(404));
+    assert_eq!(
+        preflight.advisory(&config),
+        None,
+        "with no listing to compare against there is nothing to advise"
+    );
+
+    if let Some(v) = saved {
+        std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", v);
+    }
+}
+
+#[tokio::test]
+async fn test_preflight_endpoint_skip_env_bypasses_the_probe() {
+    let _lock = crate::test_support::state_lock();
+    let saved = std::env::var_os("SELFWARE_SKIP_ENDPOINT_PREFLIGHT");
+    std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", "1");
+
+    let port = closed_port();
+    let config = preflight_config(format!("http://127.0.0.1:{port}/v1"), "any-model");
+    let preflight = preflight_endpoint(&config)
+        .await
+        .expect("the skip switch must bypass an otherwise-fatal probe");
+
+    assert!(preflight.skipped);
+    assert!(preflight.models.is_empty());
+    assert_eq!(preflight.advisory(&config), None);
+
+    match saved {
+        Some(v) => std::env::set_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT", v),
+        None => std::env::remove_var("SELFWARE_SKIP_ENDPOINT_PREFLIGHT"),
+    }
+}

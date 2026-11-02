@@ -134,6 +134,9 @@ pub(crate) async fn handle_batch_command(
 
     let mut results: Vec<TaskResult> = Vec::with_capacity(tasks.len());
 
+    // Once for the whole batch, not per task: a dead backend should stop the
+    // run before the first task, not fail every one of them.
+    crate::cli::preflight_llm_endpoint(config).await?;
     for (i, task) in tasks.iter().enumerate() {
         if !quiet {
             println!("\n── Task {}/{}: {} ──", i + 1, tasks.len(), task);

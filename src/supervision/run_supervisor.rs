@@ -309,6 +309,13 @@ impl RunSupervisor {
             cancel,
             Some(abort_grace),
             async move {
+                // A supervised run is unattended, so a backend that is not
+                // listening must be named here rather than surfacing later as
+                // an agent-loop "Network error" after five streaming retries.
+                let preflight = crate::llm_doctor::preflight_endpoint(&config).await?;
+                if let Some(advisory) = preflight.advisory(&config) {
+                    tracing::warn!("{advisory}");
+                }
                 let mut agent = crate::agent::Agent::new(config)
                     .await?
                     .with_event_emitter(agent_emitter.clone())

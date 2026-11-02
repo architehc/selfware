@@ -553,6 +553,22 @@ fn is_structured_format(output_format: HeadlessOutputFormat) -> bool {
     )
 }
 
+/// Fail a headless run before it starts when nothing is listening on the
+/// configured endpoint. These are the unattended entry points (systemd timers,
+/// CI, batch files), where a dead local backend otherwise costs five streaming
+/// retries per turn and reports a "Network error" that never names the
+/// endpoint.
+///
+/// The advisory goes to stderr: structured modes reserve stdout for the JSON
+/// result, so a human-oriented line there would corrupt it.
+pub(crate) async fn preflight_llm_endpoint(config: &Config) -> Result<()> {
+    let preflight = crate::llm_doctor::preflight_endpoint(config).await?;
+    if let Some(advisory) = preflight.advisory(config) {
+        eprintln!("{advisory}");
+    }
+    Ok(())
+}
+
 /// Print the end-of-run summary for a resumed run — the same block a fresh
 /// headless run prints. The iteration figure is chain-wide
 /// (`chain_run_summary`): token/cost totals, the budget caps, and the
@@ -1409,6 +1425,7 @@ pub async fn run() -> Result<()> {
             );
         }
 
+        preflight_llm_endpoint(&config).await?;
         let start = std::time::Instant::now();
         let mut agent = Agent::new(config)
             .await?
@@ -2624,6 +2641,7 @@ async fn handle_command(
                 None => task,
             };
 
+            preflight_llm_endpoint(&config).await?;
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config)
                 .await?
@@ -2732,6 +2750,7 @@ async fn handle_command(
                 );
             }
 
+            preflight_llm_endpoint(&config).await?;
             let mut agent = Agent::new(config).await?;
             agent.analyze(&path).await?;
         }

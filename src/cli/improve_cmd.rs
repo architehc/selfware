@@ -908,6 +908,7 @@ pub(crate) async fn handle_improve_command(
     }
 
     let cycles = if continuous { max_cycles } else { 1 };
+    crate::cli::preflight_llm_endpoint(&config).await?;
     let mut agent = Agent::new(config)
         .await?
         .with_confirmation_timeout(ONE_SHOT_CONFIRM_TIMEOUT);

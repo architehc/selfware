@@ -274,6 +274,145 @@ pub async fn run_llm_doctor_report(config: &Config) -> Result<DoctorReport> {
     Ok(report)
 }
 
+// ── Headless endpoint preflight ─────────────────────────────────────────────
+
+/// One `GET {endpoint}/models`: long enough to reach a loaded local server,
+/// short enough that every attempt together costs less than one streaming
+/// retry of the agent loop.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+const PREFLIGHT_ATTEMPTS: u32 = 3;
+const PREFLIGHT_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Escape hatch for the rare backend that refuses `GET /models` at the
+/// transport level yet still serves completions. Any non-empty value other
+/// than `0` skips the probe.
+const PREFLIGHT_SKIP_ENV: &str = "SELFWARE_SKIP_ENDPOINT_PREFLIGHT";
+
+/// What the preflight learned about the configured endpoint.
+#[derive(Debug)]
+pub struct EndpointPreflight {
+    /// Status `GET /models` answered with, or `None` when skipped. Every
+    /// status counts as reachable — a 404 only means the backend does not
+    /// implement the listing.
+    pub status: Option<reqwest::StatusCode>,
+    pub models: Vec<ModelInfo>,
+    /// Whether the configured model is among the served IDs, matched leniently
+    /// the way llm-doctor's "configured model available" check does.
+    pub configured_model_listed: bool,
+    pub skipped: bool,
+}
+
+impl EndpointPreflight {
+    /// A one-line note when the endpoint serves models but not the configured
+    /// one. Deliberately a warning and not a failure: backends differ in how
+    /// they name a served model, and llm-doctor owns the authoritative check.
+    pub fn advisory(&self, config: &Config) -> Option<String> {
+        if self.skipped
+            || !self.status.is_some_and(|s| s.is_success())
+            || self.configured_model_listed
+            || self.models.is_empty()
+        {
+            return None;
+        }
+        let served: Vec<&str> = self.models.iter().take(5).map(|m| m.id.as_str()).collect();
+        let suffix = if self.models.len() > served.len() {
+            ", …"
+        } else {
+            ""
+        };
+        Some(format!(
+            "endpoint `{}` does not list the configured model `{}` (it serves: {}{}) — \
+             check the `model` key, or run `selfware llm-doctor` for the full diagnostic",
+            config.endpoint,
+            config.model,
+            served.join(", "),
+            suffix
+        ))
+    }
+}
+
+/// Reachability preflight for the unattended entry points (`run`, `-p`).
+///
+/// Without it, a backend that is not listening surfaces from inside the agent
+/// loop as "Network error: Failed to send streaming request after 5 attempts …
+/// Non-streaming fallback request also failed" — a message that names neither
+/// the endpoint nor the cause, so a daily timer can fail that way for weeks
+/// while looking like a model problem. One listing request before the agent is
+/// constructed turns that into a single actionable error.
+///
+/// Only a TRANSPORT failure is fatal: `reqwest` reports a refused connection,
+/// timeout, DNS or TLS failure as an `Err` from `send()`, while every HTTP
+/// status arrives as `Ok`. A backend that answers 404 because it does not
+/// implement `/models` is therefore reachable and is left to the run itself.
+pub async fn preflight_endpoint(config: &Config) -> Result<EndpointPreflight> {
+    let skipped = std::env::var(PREFLIGHT_SKIP_ENV)
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0"
+        })
+        .unwrap_or(false);
+    if skipped {
+        return Ok(EndpointPreflight {
+            status: None,
+            models: Vec::new(),
+            configured_model_listed: false,
+            skipped: true,
+        });
+    }
+
+    let url = format!("{}/models", config.endpoint.trim_end_matches('/'));
+    // Reuse the doctor's probe client: it refuses redirects (so a 302 cannot
+    // carry a Bearer token off-host) and bypasses system `HTTP_PROXY` for
+    // loopback endpoints — which is the whole point when the backend is a
+    // local model server.
+    let client = build_probe_client(&config.endpoint, PREFLIGHT_TIMEOUT)?;
+    let mut last_error = None;
+    for attempt in 1..=PREFLIGHT_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(PREFLIGHT_BACKOFF * (attempt - 1)).await;
+        }
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                // An unparseable body just means there is no listing to advise
+                // on; reachability was already established by the response.
+                let models = resp
+                    .json::<Value>()
+                    .await
+                    .map(|body| parse_models(&body))
+                    .unwrap_or_default();
+                let configured_model_listed = models.iter().any(|m| {
+                    m.id == config.model
+                        || m.id.contains(&config.model)
+                        || config.model.contains(&m.id)
+                });
+                return Ok(EndpointPreflight {
+                    status: Some(status),
+                    models,
+                    configured_model_listed,
+                    skipped: false,
+                });
+            }
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    let last_error = last_error.ok_or_else(|| {
+        anyhow::anyhow!("endpoint preflight exhausted its attempts without an error")
+    })?;
+    anyhow::bail!(
+        "LLM endpoint `{}` is unreachable after {} attempts: {}\n\
+         No task can run without a model backend. Start the server that should answer \
+         there (vLLM / SGLang / Ollama / llama.cpp / LM Studio), or point `endpoint` at \
+         one that is listening. `selfware llm-doctor` prints the full diagnostic; \
+         {}=1 skips this probe.",
+        config.endpoint,
+        PREFLIGHT_ATTEMPTS,
+        last_error,
+        PREFLIGHT_SKIP_ENV
+    )
+}
+
 /// Internal implementation shared by both public entry points.
 async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     let mut report = DoctorReport::new();
