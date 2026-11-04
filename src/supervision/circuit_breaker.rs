@@ -201,6 +201,7 @@ impl CircuitBreaker {
             active: bool,
         }
         impl Drop for HalfOpenSlotGuard<'_> {
+            #[allow(deprecated)]
             fn drop(&mut self) {
                 if self.active {
                     let _ = self.cb.half_open_requests.fetch_update(
@@ -234,6 +235,7 @@ impl CircuitBreaker {
     }
 
     /// Handle successful operation
+    #[allow(deprecated)]
     pub async fn on_success(&self) {
         match self.current_state() {
             CircuitState::HalfOpen => {

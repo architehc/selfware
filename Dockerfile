@@ -59,6 +59,7 @@ COPY tests ./tests
 COPY benches ./benches
 COPY examples ./examples
 COPY templates ./templates
+COPY formal ./formal
 COPY selfware-qa-schema.yaml ./selfware-qa-schema.yaml
 
 # `.git` is intentionally outside the Docker context. CI passes the immutable

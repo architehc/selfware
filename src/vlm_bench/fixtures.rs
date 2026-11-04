@@ -82,10 +82,7 @@ pub fn text_to_png(text: &str, char_width: u32, char_height: u32) -> Vec<u8> {
         return create_solid_png(1, 1, [0, 0, 0, 255]);
     }
 
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    for px in pixels.chunks_exact_mut(4) {
-        px[3] = 255; // Opaque black background
-    }
+    let mut pixels = [0u8, 0, 0, 255].repeat((width * height) as usize);
 
     let inner_w = char_width.saturating_sub(1).max(1);
     let inner_h = char_height.saturating_sub(2).max(1);

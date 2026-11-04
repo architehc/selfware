@@ -14213,6 +14213,11 @@ cc = "1.0"
                         use std::os::unix::process::ExitStatusExt;
                         ExitStatus::from_raw(0)
                     };
+                    #[cfg(windows)]
+                    let zero_status = {
+                        use std::os::windows::process::ExitStatusExt;
+                        ExitStatus::from_raw(0)
+                    };
                     let clean_out = BoundedCommandOutput {
                         status: zero_status,
                         stdout: Vec::new(),

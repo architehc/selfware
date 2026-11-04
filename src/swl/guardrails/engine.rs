@@ -848,8 +848,8 @@ impl GuardrailEngine {
 
         let else_str = if after_then.is_empty() {
             "true"
-        } else if let Some(after_else) = after_then.strip_prefix("else") {
-            let after_else = after_else.trim();
+        } else {
+            let after_else = after_then.strip_prefix("else")?.trim();
             if after_else.starts_with('{') {
                 let else_close = Self::find_matching_brace(after_else, 0)?;
                 after_else[1..else_close].trim()
@@ -858,8 +858,6 @@ impl GuardrailEngine {
             } else {
                 return None;
             }
-        } else {
-            return None;
         };
 
         match self.evaluate_inline_expression(cond_str, context) {

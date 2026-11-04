@@ -708,7 +708,7 @@ pub fn format_download_preflight_banner(
     let ram_badge = if readiness.ram_ok { "PASS" } else { "WARN" };
     let disk_badge = if readiness.disk_ok { "PASS" } else { "FAIL" };
     let mut lines = vec![
-        format!("  ┌─ Selfware Local Model Download ──────────────────────────────────────────"),
+        "  ┌─ Selfware Local Model Download ──────────────────────────────────────────".to_string(),
         format!("  │ Model:       {} ({})", spec.id, spec.file_name),
         format!("  │ Description: {}", spec.description),
         format!(
