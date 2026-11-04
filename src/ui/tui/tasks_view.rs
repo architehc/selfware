@@ -1013,6 +1013,9 @@ impl TasksPane {
         inputs: &TasksInputs,
         control: &TaskControl,
     ) -> Option<PaneAction> {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return None;
+        }
         if self.editor.is_some() {
             return self.on_editor_key(key, control);
         }
@@ -1090,6 +1093,9 @@ impl TasksPane {
     }
 
     fn on_editor_key(&mut self, key: KeyEvent, control: &TaskControl) -> Option<PaneAction> {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return None;
+        }
         let editor = self.editor.as_mut()?;
         match key.code {
             KeyCode::Esc => {

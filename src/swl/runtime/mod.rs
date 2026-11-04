@@ -837,11 +837,18 @@ impl SwlRuntime {
                         Ok(result) => result.to_string(),
                         Err(e) => format!("Error: {}", e),
                     };
+                    let sanitized_content = crate::safety::source_context::sanitize_tool_context(
+                        &tool_call.function.name,
+                        &tool_call.function.arguments,
+                        &result_content,
+                        true,
+                    )
+                    .content;
 
                     // Add tool response message — use the (possibly
                     // synthetic) tool_call_id so backends that demand
                     // matching ids accept the trace.
-                    messages.push(Message::tool(result_content, &tool_call.id));
+                    messages.push(Message::tool(sanitized_content, &tool_call.id));
                 }
 
                 // Continue the loop for the agent to process tool results

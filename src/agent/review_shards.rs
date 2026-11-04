@@ -1311,13 +1311,6 @@ impl Agent {
         );
         self.review_shard_progress("review_shards", &start_detail);
 
-        let shard_thinking = cfg.shard_thinking;
-        let client = self.client.clone();
-        let governor = std::sync::Arc::clone(&self.governor);
-        // Longest shard call so far (seconds), for the wall-budget reserve.
-        let longest_shard_secs = std::sync::atomic::AtomicU64::new(0);
-        let longest_ref = &longest_shard_secs;
-        let max_tokens = cfg.shard_max_tokens.max(1024);
         let pre_reserve_secs = self
             .config
             .agent
@@ -1328,6 +1321,21 @@ impl Agent {
                 let reserve = synthesis_reserve_secs(max, self.call_forecast().answer_secs());
                 remaining.saturating_sub(reserve)
             });
+        // When a multi-file review (>4 files) is packed into a single shard
+        // under a tight wall-clock window (<600s before the synthesis reserve),
+        // skip hidden reasoning on the first shard attempt so it emits the
+        // structured JSON digest directly instead of burning its time cap
+        // inside <think> and then retrying with thinking_off().
+        let shard_thinking = cfg.shard_thinking
+            && !(shards.len() == 1
+                && files_targeted > 4
+                && pre_reserve_secs.is_some_and(|p| p < 600));
+        let client = self.client.clone();
+        let governor = std::sync::Arc::clone(&self.governor);
+        // Longest shard call so far (seconds), for the wall-budget reserve.
+        let longest_shard_secs = std::sync::atomic::AtomicU64::new(0);
+        let longest_ref = &longest_shard_secs;
+        let max_tokens = cfg.shard_max_tokens.max(1024);
         // Never let a single shard attempt consume the entire pre-reserve
         // window (which would starve both its own thinking-off retry and the
         // main loop's fallback reading turns).

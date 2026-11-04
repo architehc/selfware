@@ -6565,8 +6565,8 @@ def classifyLongRunningStatus
   else .failStatus
 
 def LongRunningStatusModel.countsTowardSuccess : LongRunningStatusModel → Bool
-  | .green | .partialStatus | .compiles => true
-  | .wrote | .failStatus => false
+  | .green | .partialStatus => true
+  | .compiles | .wrote | .failStatus => false
 
 theorem green_requires_zero_failed_and_wrote_requires_over_two_lines :
     classifyLongRunningStatus true 5 0 100 = .green ∧
@@ -9523,7 +9523,7 @@ def wave16Rows : List String :=
       let sC := (classifyLongRunningStatus true 0 2 100).label
       let sW := (classifyLongRunningStatus false 0 0 10).label
       let sF := (classifyLongRunningStatus false 0 0 2).label
-      s!"[\"bench_harness_lattice:long_running_status_and_rates\",\"five_tier_project_status_lattice_success_green_rates_and_template_guard\",\"tiers={sG},{sP},{sC},{sW},{sF}:success_permille=600:green_permille=200:traversal_rejected=true\"]"
+      s!"[\"bench_harness_lattice:long_running_status_and_rates\",\"five_tier_project_status_lattice_success_green_rates_and_template_guard\",\"tiers={sG},{sP},{sC},{sW},{sF}:success_permille=400:green_permille=200:traversal_rejected=true\"]"
     , let c3BeatsC2 := swebenchCandidateBetter true true 2 3 1 true true 4 2 2
       s!"[\"bench_harness_lattice:swebench_frozen_selector_and_oracle\",\"source_only_minimal_patch_frozen_selection_blind_to_eval_and_oracle\",\"frozen_num=3:blind_to_eval={c3BeatsC2}:first_num=1:pass_at_1=Some(true):oracle=true\"]"
     , s!"[\"bench_harness_lattice:trace_diagnosis_and_summary\",\"read_loop_fake_complete_timeout_api_syntax_counts_and_medians\",\"t1_loop=5:t1_fake=true:t1_timeout=true:t1_api=1:t1_syn=1:runs=2:cands=1:med_steps=6:med_edit=3\"]"

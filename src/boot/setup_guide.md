@@ -1,6 +1,6 @@
 # Selfware setup and recovery
 
-For endpoint setup, run `selfware boot` to choose a verified recipe card. It supports OpenRouter, Ollama, vLLM/SGLang, and LM Studio. The guided wizard writes configuration after showing the selected recipe; an existing file requires overwrite confirmation. Use `selfware --config <path> boot` to repair a specific configuration. Finish with `selfware llm-doctor` to check the result.
+For endpoint setup, run `selfware boot` to choose a verified recipe card. It supports Selfware Cloud (`https://llm.selfware.design/v1`, `deepseek-v4.1-flash`, 1M context), OpenRouter, Ollama, vLLM/SGLang, LM Studio, and the bundled local inference engine (`local-bundled` on `http://127.0.0.1:8787/v1`). The guided wizard writes configuration after showing the selected recipe; an existing file requires overwrite confirmation. Use `selfware --config <path> boot` to repair a specific configuration. Finish with `selfware llm-doctor` to check the result.
 
 For API keys and credentials, the guided wizard can store an OpenRouter key in the operating system keyring. Keys are scoped to the endpoint origin. `SELFWARE_API_KEY` is an alternative for the selected session. Never paste secrets into setup chat or project documentation. Remote authenticated endpoints require HTTPS by default; the explicit `SELFWARE_ALLOW_PLAINTEXT_REMOTE` opt-in is for a trusted LAN and does not permit embedded credentials in URLs.
 

@@ -20,13 +20,13 @@ from typing import Dict, List, Optional
 import signal
 import shutil
 
-# Configure logging
+# Configure default console logging; file handler is added in main() so
+# importing this module or running `--help` does not create files in CWD.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('test_session.log')
     ]
 )
 logger = logging.getLogger('mega_test')
@@ -106,6 +106,7 @@ class CheckpointManager:
 
         checkpoint_data = {
             'id': checkpoint_id,
+            'selfware_task_id': self._get_latest_selfware_task_id(),
             'timestamp': timestamp,
             'phase': phase,
             'metrics': asdict(metrics),
@@ -119,6 +120,23 @@ class CheckpointManager:
         self.last_checkpoint = checkpoint_path
         logger.info(f"Checkpoint created: {checkpoint_path}")
         return checkpoint_path
+
+    @staticmethod
+    def _get_latest_selfware_task_id() -> Optional[str]:
+        """Return the task_id of the most recent ~/.selfware/checkpoints/*.json file."""
+        cp_dir = Path.home() / ".selfware" / "checkpoints"
+        if not cp_dir.exists():
+            return None
+        try:
+            cps = sorted(cp_dir.glob("*.json"), key=os.path.getmtime, reverse=True)
+            if not cps:
+                return None
+            with open(cps[0], 'r') as f:
+                data = json.load(f)
+            payload = data.get("payload", data)
+            return payload.get("task_id") or cps[0].stem
+        except Exception:
+            return None
 
     def _get_git_commit(self) -> Optional[str]:
         """Get current git commit hash"""
@@ -154,16 +172,17 @@ class CheckpointManager:
                 checkpoint_data = json.load(f)
 
             checkpoint_id = checkpoint_data.get('id')
+            resume_id = checkpoint_data.get('selfware_task_id') or checkpoint_id
             phase = checkpoint_data.get('phase', 'unknown')
             if not checkpoint_id:
                 logger.error(f"Checkpoint missing 'id' field: {checkpoint_path}")
                 return False
 
-            logger.info(f"Checkpoint id={checkpoint_id}, phase={phase}")
+            logger.info(f"Checkpoint id={checkpoint_id} (resume_id={resume_id}), phase={phase}")
 
             # Attempt to resume via selfware CLI
             result = subprocess.run(
-                ['selfware', 'resume', checkpoint_id],
+                ['selfware', 'resume', resume_id],
                 capture_output=True,
                 text=True,
                 timeout=60
@@ -263,20 +282,26 @@ class MegaTestRunner:
         start_time = time.time()
 
         try:
-            # Phase 1: Bootstrap
-            if not self._run_phase("bootstrap", 60 * 60):  # 1 hour
+            total_seconds = max(60, int(self.config.duration_hours * 3600))
+            bootstrap_secs = total_seconds // 6
+            dev_secs = total_seconds // 3
+            refine_secs = total_seconds // 3
+            final_secs = max(1, total_seconds - bootstrap_secs - dev_secs - refine_secs)
+
+            # Phase 1: Bootstrap (1/6 of total duration)
+            if not self._run_phase("bootstrap", bootstrap_secs):
                 return False
 
-            # Phase 2: Core Development
-            if not self._run_phase("development", 2 * 60 * 60):  # 2 hours
+            # Phase 2: Core Development (2/6 of total duration)
+            if not self._run_phase("development", dev_secs):
                 return False
 
-            # Phase 3: Refinement
-            if not self._run_phase("refinement", 2 * 60 * 60):  # 2 hours
+            # Phase 3: Refinement (2/6 of total duration)
+            if not self._run_phase("refinement", refine_secs):
                 return False
 
-            # Phase 4: Finalization
-            if not self._run_phase("finalization", 60 * 60):  # 1 hour
+            # Phase 4: Finalization (1/6 of total duration)
+            if not self._run_phase("finalization", final_secs):
                 return False
 
             self.metrics.status = "completed"
@@ -458,14 +483,22 @@ class MegaTestRunner:
                 ["vm_stat"], capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
+                try:
+                    page_size = os.sysconf("SC_PAGE_SIZE")
+                except (ValueError, AttributeError):
+                    page_size = 4096
                 free_pages = 0
                 for line in result.stdout.splitlines():
-                    if "Pages free" in line or "Pages inactive" in line:
+                    if "page size of" in line:
+                        for token in line.split():
+                            if token.isdigit():
+                                page_size = int(token)
+                                break
+                    elif "Pages free" in line or "Pages inactive" in line:
                         parts = line.split()
                         # Last element is the count (with trailing period)
                         free_pages += int(parts[-1].rstrip("."))
-                # vm_stat pages are 4096 bytes on macOS
-                return free_pages * 4096
+                return free_pages * page_size
         except Exception:
             pass
 
@@ -474,18 +507,21 @@ class MegaTestRunner:
     @staticmethod
     def _check_agent_heartbeat() -> Optional[bool]:
         """Check if a selfware agent process is running. Returns None if check is unsupported."""
-        # Look for selfware processes via pgrep
+        # Look for exact selfware binary processes via pgrep -x
         try:
             result = subprocess.run(
-                ["pgrep", "-f", "selfware"],
+                ["pgrep", "-x", "selfware"],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0 and result.stdout.strip():
+                my_pid = os.getpid()
                 pids = result.stdout.strip().split('\n')
                 # Verify at least one PID is alive
                 for pid_str in pids:
                     try:
                         pid = int(pid_str.strip())
+                        if pid == my_pid:
+                            continue
                         os.kill(pid, 0)  # signal 0 checks existence
                         return True
                     except (ValueError, ProcessLookupError, PermissionError):
@@ -544,6 +580,7 @@ def main():
                        help='Session ID (auto-generated if not provided)')
 
     args = parser.parse_args()
+    logger.addHandler(logging.FileHandler('test_session.log'))
 
     # Create config
     config = TestConfig(

@@ -149,7 +149,13 @@ pub fn classify(error_message: &str) -> FailureKind {
     }
 
     // ---- RateLimited ----
-    let rate_markers = ["429", "rate limit", "too many requests"];
+    let rate_markers = [
+        "429",
+        "rate limit",
+        "too many requests",
+        "cooldown",
+        "circuit breaker is open",
+    ];
     for marker in &rate_markers {
         if msg.contains(marker) {
             return FailureKind::RateLimited;
@@ -463,9 +469,27 @@ impl Resolution for RateLimitBackoff {
         if classify(ctx.message) != FailureKind::RateLimited {
             return ResolutionOutcome::Escalate;
         }
+        if crate::api::client::parse_retry_after_secs_unclamped(ctx.message)
+            .is_some_and(|secs| secs > 180)
+        {
+            return ResolutionOutcome::Escalate;
+        }
+
+        let mut delay_ms = self.delay_ms;
+        if ctx.config.retry.max_delay_ms >= 1000 {
+            if let Some(secs) = crate::api::client::parse_retry_after_from_body(ctx.message) {
+                delay_ms = ((secs + 1).min(180) * 1000).max(delay_ms);
+            } else if ctx
+                .message
+                .to_lowercase()
+                .contains("circuit breaker is open")
+            {
+                delay_ms = 10_000.max(delay_ms);
+            }
+        }
 
         ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
-            delay_ms: self.delay_ms,
+            delay_ms,
             max_attempts: self.max_attempts,
         }))
     }

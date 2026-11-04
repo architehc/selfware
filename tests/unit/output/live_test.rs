@@ -275,6 +275,21 @@ fn reasoning_indicator_is_one_compact_line() {
 }
 
 #[test]
+fn reasoning_live_indicator_surfaces_tokens_rate_and_snippet() {
+    let line = reasoning_live_indicator(
+        12_345,
+        3_100,
+        false,
+        Some(48.52),
+        Some("First line\n### Checking the 1M context window budget"),
+    );
+    assert_eq!(
+        line,
+        "Thinking… · ~3.1k tokens (12.3k chars) · 48.5 tok/s — Checking the 1M context window budget"
+    );
+}
+
+#[test]
 fn reasoning_summary_line_is_the_first_line_capped() {
     let long = format!("{}\nsecond line\n", "word ".repeat(40));
     let line = reasoning_summary_line(&long);

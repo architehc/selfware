@@ -641,7 +641,7 @@ fn match_profile_picks_deepseek_v4_for_all_colibri_aliases() {
     ] {
         let p = match_profile(alias).unwrap_or_else(|| panic!("should match {alias}"));
         assert_eq!(p.name, "deepseek-v4", "alias {alias}");
-        assert_eq!(p.context_length, Some(262_144));
+        assert_eq!(p.context_length, Some(1_048_576));
         assert_eq!(p.max_tokens, Some(65_536));
         assert_eq!(p.max_call_secs, Some(3_600));
         assert_eq!(p.max_streams, Some(8));

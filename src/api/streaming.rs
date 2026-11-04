@@ -110,6 +110,17 @@ pub struct StreamingResponse {
     /// Raw response byte ceiling, including SSE framing. `None` preserves the
     /// ordinary streaming client's existing behavior.
     response_byte_limit: Option<usize>,
+    /// Optional longer timeout for the VERY FIRST SSE chunk after HTTP headers
+    /// arrive (when a reverse proxy flushed headers early while the backend is
+    /// still prefilling a large prompt).
+    first_chunk_timeout: Option<Duration>,
+    /// When set (`Some(max_tokens)` on main agent streaming calls), actively
+    /// receiving token chunks extends the stream's adaptive deadline based on
+    /// the live streaming speed (`tok/s`) so a healthy token stream is never
+    /// cut off mid-generation.
+    adaptive_token_budget: Option<usize>,
+    /// Shared endpoint speed tracker updated with live streaming speed.
+    speed_tracker: Option<std::sync::Arc<std::sync::Mutex<super::client::ServerSpeedTracker>>>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -139,6 +150,9 @@ impl StreamingResponse {
             run_deadline: None,
             wall_limit_secs: None,
             response_byte_limit: None,
+            first_chunk_timeout: None,
+            adaptive_token_budget: None,
+            speed_tracker: None,
         }
     }
 
@@ -177,6 +191,24 @@ impl StreamingResponse {
 
     pub(crate) fn with_response_byte_limit(mut self, limit: Option<usize>) -> Self {
         self.response_byte_limit = limit;
+        self
+    }
+
+    pub(crate) fn with_first_chunk_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.first_chunk_timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_adaptive_token_budget(mut self, max_tokens: Option<usize>) -> Self {
+        self.adaptive_token_budget = max_tokens;
+        self
+    }
+
+    pub(crate) fn with_speed_tracker(
+        mut self,
+        tracker: std::sync::Arc<std::sync::Mutex<super::client::ServerSpeedTracker>>,
+    ) -> Self {
+        self.speed_tracker = Some(tracker);
         self
     }
 
@@ -221,38 +253,52 @@ impl StreamingResponse {
             let mut pending_utf8 = Vec::new();
             let mut accumulator = ToolCallAccumulator::new();
             let chunk_timeout = self.chunk_timeout;
-            let deadline = self.deadline;
+            let first_chunk_timeout = self.first_chunk_timeout.unwrap_or(chunk_timeout);
+            let mut deadline = self.deadline;
             let mut saw_terminal_event = false;
+            let mut saw_first_chunk = false;
             let mut received_bytes = 0usize;
             let response_byte_limit = self.response_byte_limit;
+            let adaptive_token_budget = self.adaptive_token_budget;
+            let speed_tracker = self.speed_tracker;
 
-            let call_cap_secs = self.call_cap_secs;
+            let mut call_cap_secs = self.call_cap_secs;
             let run_deadline = self.run_deadline;
             let wall_limit_secs = self.wall_limit_secs;
             let call_started = self.call_started;
-
-            let classify_timeout = || -> anyhow::Error {
-                classify_stream_timeout(
-                    Instant::now(),
-                    call_started,
-                    call_cap_secs,
-                    run_deadline,
-                    wall_limit_secs,
-                )
-            };
+            let mut first_token_at: Option<Instant> = None;
+            let mut streamed_tokens_est = 0usize;
+            let mut last_speed_sample = Instant::now();
 
             loop {
                 // Bound each chunk wait by BOTH the per-chunk timeout and the
-                // absolute deadline. Once the deadline passes, stop — otherwise
-                // a stream that keeps emitting chunks just under chunk_timeout
-                // runs unbounded past the wall-clock budget.
+                // absolute deadline. Before the first chunk arrives, allow
+                // `first_chunk_timeout` so a proxy that flushes headers before
+                // large-prompt prefill finishes does not trip a tight stall cap.
+                let active_chunk_timeout = if saw_first_chunk {
+                    chunk_timeout
+                } else {
+                    first_chunk_timeout.max(chunk_timeout)
+                };
                 let effective_timeout = match deadline {
                     Some(d) => match d.checked_duration_since(Instant::now()) {
-                        Some(remaining) if !remaining.is_zero() => remaining.min(chunk_timeout),
+                        Some(remaining) if !remaining.is_zero() => {
+                            remaining.min(active_chunk_timeout)
+                        }
                         _ => {
                             // Deadline reached: end the stream with a timeout error
                             // without flushing incomplete tool calls.
-                            if tx.send(Err(classify_timeout())).await.is_err() {
+                            if tx
+                                .send(Err(classify_stream_timeout(
+                                    Instant::now(),
+                                    call_started,
+                                    call_cap_secs,
+                                    run_deadline,
+                                    wall_limit_secs,
+                                )))
+                                .await
+                                .is_err()
+                            {
                                 warn!(
                                     "Streaming receiver dropped while sending deadline timeout error"
                                 );
@@ -260,7 +306,7 @@ impl StreamingResponse {
                             return;
                         }
                     },
-                    None => chunk_timeout,
+                    None => active_chunk_timeout,
                 };
                 let next = tokio::select! {
                     biased;
@@ -275,7 +321,17 @@ impl StreamingResponse {
                     Ok(Some(result)) => Some(result),
                     Ok(None) => None, // Stream ended
                     Err(_elapsed) => {
-                        if tx.send(Err(classify_timeout())).await.is_err() {
+                        if tx
+                            .send(Err(classify_stream_timeout(
+                                Instant::now(),
+                                call_started,
+                                call_cap_secs,
+                                run_deadline,
+                                wall_limit_secs,
+                            )))
+                            .await
+                            .is_err()
+                        {
                             warn!("Streaming receiver dropped while sending timeout error");
                         }
                         return;
@@ -309,7 +365,54 @@ impl StreamingResponse {
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            for mut chunk in parse_sse_event(&event, &mut accumulator) {
+                            let parsed_chunks = parse_sse_event(&event, &mut accumulator);
+                            let count_tokens = adaptive_token_budget.is_some();
+                            let mut event_tokens = 0usize;
+
+                            if let Some((name, delta)) = accumulator.take_progress() {
+                                saw_first_chunk = true;
+                                if count_tokens {
+                                    event_tokens = event_tokens.saturating_add(
+                                        crate::token_count::estimate_content_tokens(&delta).max(1),
+                                    );
+                                }
+                                if tx
+                                    .send(Ok(StreamChunk::ToolCallProgress { name, delta }))
+                                    .await
+                                    .is_err()
+                                {
+                                    warn!(
+                                        "Streaming receiver dropped while forwarding tool call progress"
+                                    );
+                                    return;
+                                }
+                            }
+
+                            for mut chunk in parsed_chunks {
+                                saw_first_chunk = true;
+                                if count_tokens {
+                                    match &chunk {
+                                        StreamChunk::Content(t) | StreamChunk::Reasoning(t)
+                                            if !t.is_empty() =>
+                                        {
+                                            event_tokens = event_tokens.saturating_add(
+                                                crate::token_count::estimate_content_tokens(t)
+                                                    .max(1),
+                                            );
+                                        }
+                                        StreamChunk::ToolCall(tc) if event_tokens == 0 => {
+                                            event_tokens = event_tokens.saturating_add(
+                                                crate::token_count::estimate_content_tokens(
+                                                    &tc.function.name,
+                                                ) + crate::token_count::estimate_content_tokens(
+                                                    &tc.function.arguments,
+                                                )
+                                                .max(1),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 if matches!(
                                     &chunk,
                                     StreamChunk::Done | StreamChunk::FinishReason(_)
@@ -325,6 +428,88 @@ impl StreamingResponse {
                                         "Streaming receiver dropped while forwarding parsed stream chunk"
                                     );
                                     return; // Receiver dropped
+                                }
+                            }
+
+                            // Activity-aware deadline extension: when real token chunks
+                            // are actively arriving, align the stream deadline with the
+                            // measured streaming speed so a healthy stream is never cut
+                            // off mid-generation.
+                            if event_tokens > 0 {
+                                saw_first_chunk = true;
+                                streamed_tokens_est =
+                                    streamed_tokens_est.saturating_add(event_tokens);
+                                let now = Instant::now();
+                                let first_tok = *first_token_at.get_or_insert(now);
+                                if let Some(max_tok) = adaptive_token_budget {
+                                    let est_tokens = streamed_tokens_est.max(1);
+                                    // Guard against runaway infinite generation past 2x max_tokens
+                                    if est_tokens <= max_tok.saturating_mul(2) {
+                                        let decode_secs =
+                                            now.saturating_duration_since(first_tok).as_secs_f64();
+                                        let live_tps = if decode_secs >= 0.5 && est_tokens >= 4 {
+                                            (est_tokens as f64 / decode_secs).clamp(1.0, 500.0)
+                                        } else {
+                                            15.0
+                                        };
+                                        if decode_secs >= 1.0
+                                            && est_tokens >= 16
+                                            && last_speed_sample.elapsed() >= Duration::from_secs(2)
+                                        {
+                                            if let Some(ref tracker) = speed_tracker {
+                                                tracker
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner())
+                                                    .record(live_tps);
+                                            }
+                                            last_speed_sample = now;
+                                        }
+                                        let remaining_tokens =
+                                            max_tok.saturating_sub(est_tokens).max(256);
+                                        let needed_secs =
+                                            ((remaining_tokens as f64 / live_tps) * 2.5).ceil()
+                                                as u64;
+                                        let extension_secs = needed_secs
+                                            .max(chunk_timeout.as_secs())
+                                            .clamp(60, 7200);
+                                        let mut extended =
+                                            now + Duration::from_secs(extension_secs);
+                                        if let Some(rd) = run_deadline {
+                                            extended = extended.min(rd);
+                                        }
+                                        if let (Some(started), Some(cap)) =
+                                            (call_started, call_cap_secs)
+                                        {
+                                            if cap < 1800 {
+                                                // Explicit tight cap (e.g. test or side call)
+                                                extended = extended
+                                                    .min(started + Duration::from_secs(cap));
+                                            } else {
+                                                // Profile long-call cap: clamp to 7200s max and only
+                                                // raise call_cap_secs when approaching the cap.
+                                                let hard_cap = cap.max(7200);
+                                                extended = extended
+                                                    .min(started + Duration::from_secs(hard_cap));
+                                                let elapsed_secs = now
+                                                    .saturating_duration_since(started)
+                                                    .as_secs();
+                                                if elapsed_secs.saturating_add(120) >= cap {
+                                                    let needed_total = extended
+                                                        .saturating_duration_since(started)
+                                                        .as_secs()
+                                                        .min(hard_cap);
+                                                    if needed_total > cap {
+                                                        call_cap_secs = Some(needed_total);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(d) = deadline.as_mut() {
+                                            if extended > *d {
+                                                *d = extended;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -413,6 +598,9 @@ impl StreamingResponse {
                 StreamChunk::ToolCall(call) => {
                     saw_events = true;
                     tool_calls.push(call);
+                }
+                StreamChunk::ToolCallProgress { .. } => {
+                    saw_events = true;
                 }
                 StreamChunk::Usage(u, coverage) => {
                     saw_events = true;
@@ -624,6 +812,8 @@ pub enum StreamChunk {
     Reasoning(String),
     /// A tool call
     ToolCall(ToolCall),
+    /// Incremental progress while a native tool call's arguments are streaming
+    ToolCallProgress { name: String, delta: String },
     /// Token usage information and its field coverage
     Usage(Usage, super::usage::UsageCoverage),
     /// Log probabilities information for choice tokens
@@ -645,11 +835,24 @@ pub enum StreamChunk {
 pub(crate) struct ToolCallAccumulator {
     /// In-progress tool calls keyed by index
     pending: std::collections::HashMap<usize, (String, String, String, String)>, // (id, type, name, args)
+    /// Most recently seen tool name across incremental deltas
+    last_name: String,
+    /// Unflushed argument/name delta text since the last `take_progress` call
+    progress_delta: String,
 }
 
 impl ToolCallAccumulator {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn take_progress(&mut self) -> Option<(String, String)> {
+        if self.progress_delta.is_empty() {
+            None
+        } else {
+            let delta = std::mem::take(&mut self.progress_delta);
+            Some((self.last_name.clone(), delta))
+        }
     }
 
     pub(crate) fn process_delta(&mut self, delta: &serde_json::Value) -> Option<types::ToolCall> {
@@ -703,7 +906,7 @@ impl ToolCallAccumulator {
                     args_chunk.clone(),
                 ),
             );
-            (id, call_type, name, args_chunk)
+            (id, call_type, name.clone(), args_chunk.clone())
         };
 
         // Emit the tool call as soon as all required fields are present and the
@@ -723,6 +926,15 @@ impl ToolCallAccumulator {
                 },
             })
         } else {
+            if !entry.2.is_empty() {
+                self.last_name = entry.2;
+            }
+            if !name.is_empty() {
+                self.progress_delta.push_str(&name);
+            }
+            if !args_chunk.is_empty() {
+                self.progress_delta.push_str(&args_chunk);
+            }
             None
         }
     }

@@ -724,6 +724,7 @@ impl Agent {
             || workload == escalate_to
             || step_completion_has_tool_calls(&completion)
             || self.is_cancelled()
+            || self.wrap_up_issued().is_some()
         {
             self.record_turn_workload(workload, completion_tokens(&completion));
             return Ok(completion);
@@ -775,17 +776,41 @@ impl Agent {
         workload: crate::config::TurnWorkload,
         turn_start: std::time::Instant,
     ) -> Result<StepCompletion> {
+        let initial_thinking =
+            if self.wrap_up_issued() == Some(crate::agent::deadline::WrapUpCause::Deadline) {
+                ThinkingMode::StepDown(Some(workload))
+            } else {
+                ThinkingMode::Workload(workload)
+            };
         let first_err = match self
-            .request_step_completion(
-                request_messages.clone(),
-                ThinkingMode::Workload(workload),
-                turn_start,
-            )
+            .request_step_completion(request_messages.clone(), initial_thinking, turn_start)
             .await
         {
             Ok(completion) => return Ok(completion),
             Err(e) => e,
         };
+        if (crate::errors::is_gateway_timeout_error(&first_err)
+            || crate::errors::is_stream_truncated_error(&first_err))
+            && !self.is_cancelled()
+        {
+            self.force_non_streaming = false;
+            let detail = format!(
+                "{first_err} — retrying this turn once over streaming with stepped-down reasoning"
+            );
+            warn!("{detail}");
+            cli_println!("{} {}", "⚠".yellow(), detail);
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "gateway_timeout_retry".to_string(),
+                detail,
+            });
+            return self
+                .request_step_completion(
+                    request_messages,
+                    ThinkingMode::StepDown(Some(workload)),
+                    turn_start,
+                )
+                .await;
+        }
         let Some((reasoning_chars, None)) = crate::errors::reasoning_budget_exhaustion(&first_err)
         else {
             return Err(first_err);
@@ -995,11 +1020,25 @@ impl Agent {
                     // non-streaming endpoint (same payload); surface it to the
                     // loop's compression recovery instead of re-sending it.
                     let context_overflow = crate::errors::is_context_overflow_error(&stream_err);
-                    if is_terminal_api_client_error(&stream_err) || context_overflow {
+                    let cooldown_or_circuit = is_provider_cooldown_or_circuit_open(&stream_err);
+                    let gateway_timeout = crate::errors::is_gateway_timeout_error(&stream_err);
+                    let stream_truncated = crate::errors::is_stream_truncated_error(&stream_err);
+                    if is_terminal_api_client_error(&stream_err)
+                        || context_overflow
+                        || cooldown_or_circuit
+                        || gateway_timeout
+                        || stream_truncated
+                    {
                         warn!(
                             "Streaming request failed with {} ({}); not falling back to non-streaming",
                             if context_overflow {
                                 "context-window overflow"
+                            } else if cooldown_or_circuit {
+                                "rate-limit cooldown or open circuit breaker"
+                            } else if gateway_timeout {
+                                "gateway timeout"
+                            } else if stream_truncated {
+                                "mid-stream truncation"
                             } else {
                                 "terminal client error"
                             },
@@ -1118,6 +1157,9 @@ impl Agent {
                 Err(e) => {
                     if self.is_cancelled() {
                         return Err(crate::errors::AgentError::for_current_shutdown().into());
+                    }
+                    if crate::errors::is_gateway_timeout_error(&e) {
+                        self.force_non_streaming = false;
                     }
                     if e.to_string()
                         .to_lowercase()
@@ -1265,6 +1307,25 @@ fn step_completion_has_tool_calls(c: &StepCompletion) -> bool {
         || c.reasoning
             .as_deref()
             .is_some_and(reasoning_carries_tool_markup)
+}
+
+pub(super) fn is_provider_cooldown_or_circuit_open(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        if let Some(api_err) = crate::errors::as_api_error(cause) {
+            match api_err {
+                crate::errors::ApiError::HttpStatus { status: 429, .. }
+                | crate::errors::ApiError::RateLimit { .. } => return true,
+                crate::errors::ApiError::Network(msg)
+                    if msg.to_lowercase().contains("circuit breaker is open") =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        let text = cause.to_string().to_lowercase();
+        text.contains("circuit breaker is open") || text.contains("queue_purged_cooldown")
+    })
 }
 
 pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {

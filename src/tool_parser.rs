@@ -127,20 +127,22 @@ fn xml_tool_regex() -> &'static Regex {
     })
 }
 
-/// Alternate XML format used by some models (e.g., Qwen3-Coder)
+/// Alternate XML format used by some models (e.g., Qwen3-Coder, DeepSeek)
 /// Format: <tool><name=tool_name</name><arguments>{...}</arguments></tool>
+/// or: <tool><name name="tool_name"></name><arguments>{...}</arguments></tool>
 fn xml_tool_alt_regex() -> &'static Regex {
     XML_TOOL_ALT_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)<tool>\s*<name=([^<>\s]+)\s*</name>\s*<arguments>([\s\S]*?)</arguments>\s*</tool>")
+        Regex::new(r#"(?s)<tool>\s*<name(?:\s*=\s*|\s+name\s*=\s*)["']?([^<>\s"']+)["']?\s*>?\s*</name>\s*<arguments>([\s\S]*?)</arguments>\s*</tool>"#)
             .expect("Invalid XML tool alt regex")
     })
 }
 
-/// Second alternate XML format with closing angle bracket
+/// Second alternate XML format with closing angle bracket and no `</name>`
 /// Format: <tool><name=tool_name><arguments>{...}</arguments></tool>
+/// or: <tool><name name="tool_name"><arguments>{...}</arguments></tool>
 fn xml_tool_alt2_regex() -> &'static Regex {
     XML_TOOL_ALT2_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)<tool>\s*<name=([^<>\s]+)>\s*<arguments>([\s\S]*?)</arguments>\s*</tool>")
+        Regex::new(r#"(?s)<tool>\s*<name(?:\s*=\s*|\s+name\s*=\s*)["']?([^<>\s"']+)["']?\s*>\s*<arguments>([\s\S]*?)</arguments>\s*</tool>"#)
             .expect("Invalid XML tool alt2 regex")
     })
 }
@@ -300,7 +302,7 @@ fn generic_wrapper_element_call(
     if !identifier {
         return None;
     }
-    let arguments = serde_json::from_str::<serde_json::Value>(cap[3].trim()).ok()?;
+    let arguments = parse_json_lenient(cap[3].trim()).ok()?;
     let call = unwrap_generic_wrapper(ParsedToolCall {
         tool_name: wrapper.to_string(),
         arguments: serde_json::json!({"name": inner_name, "arguments": arguments}),
@@ -422,6 +424,8 @@ fn at_line_start(content: &str, pos: usize) -> bool {
 fn payload_values(text: &str) -> Vec<std::ops::Range<usize>> {
     static PARAM_OPEN: OnceLock<Regex> = OnceLock::new();
     static KIMI_ARG_OPEN: OnceLock<Regex> = OnceLock::new();
+    static ARGS_OPEN: OnceLock<Regex> = OnceLock::new();
+    static DSML_PARAM_OPEN: OnceLock<Regex> = OnceLock::new();
     let param_open = PARAM_OPEN.get_or_init(|| {
         Regex::new(QWEN3_PARAMETER_OPEN).expect("Invalid Qwen3 parameter open regex")
     });
@@ -429,10 +433,21 @@ fn payload_values(text: &str) -> Vec<std::ops::Range<usize>> {
         Regex::new(r#"<\|open\|>argument\s+key="[^"]+"[^<]*?<\|sep\|>"#)
             .expect("Invalid Kimi argument open regex")
     });
+    let args_open =
+        ARGS_OPEN.get_or_init(|| Regex::new(r"<arguments>").expect("Invalid arguments open regex"));
+    let dsml_open = DSML_PARAM_OPEN.get_or_init(|| {
+        Regex::new(
+            r#"(?:<｜DSML｜|<\|DSML\|)parameter\s+name="[^"]+"(?:\s+string="(?:true|false)")?\s*>"#,
+        )
+        .expect("Invalid DSML parameter open regex")
+    });
     let mut values = Vec::new();
     for (open, close, reopen) in [
         (param_open, "</parameter>", "<parameter"),
         (kimi_open, "<|close|>argument", "<|open|>argument"),
+        (args_open, "</arguments>", "<arguments"),
+        (dsml_open, "</｜DSML｜parameter>", "DSML｜parameter"),
+        (dsml_open, "</|DSML|parameter>", "DSML|parameter"),
     ] {
         for m in open.find_iter(text) {
             let Some(len) = text[m.end()..].find(close) else {
@@ -610,7 +625,7 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
         tool_call_json_regex(),
         7,
         &code,
-        |cap, raw| match serde_json::from_str::<serde_json::Value>(cap[1].trim()) {
+        |cap, raw| match parse_json_lenient(cap[1].trim()) {
             Ok(json) => {
                 let name = json
                     .get("name")
@@ -655,7 +670,7 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
         |cap, raw| {
             let name = cap[1].trim().to_string();
             Some(
-                serde_json::from_str::<serde_json::Value>(cap[2].trim())
+                parse_json_lenient(cap[2].trim())
                     .map(|arguments| ParsedToolCall {
                         tool_name: name,
                         arguments,
@@ -772,12 +787,10 @@ fn unwrap_generic_wrapper(mut call: ParsedToolCall) -> ParsedToolCall {
     };
     let inner_args = match obj.get("arguments") {
         Some(v @ serde_json::Value::Object(_)) => v.clone(),
-        Some(serde_json::Value::String(s)) => {
-            match serde_json::from_str::<serde_json::Value>(s.trim()) {
-                Ok(v @ serde_json::Value::Object(_)) => v,
-                _ => return call,
-            }
-        }
+        Some(serde_json::Value::String(s)) => match parse_json_lenient(s.trim()) {
+            Ok(v @ serde_json::Value::Object(_)) => v,
+            _ => return call,
+        },
         _ => return call,
     };
     call.tool_name = inner_name.to_string();
@@ -983,6 +996,39 @@ fn rejection_preview(raw: &str) -> String {
     }
 }
 
+fn rejection_tail_preview(raw: &str) -> String {
+    const MAX: usize = 120;
+    let raw = raw.trim();
+    if raw.len() <= MAX {
+        raw.to_string()
+    } else {
+        let start = raw.ceil_char_boundary(raw.len() - MAX);
+        format!("…{}", &raw[start..])
+    }
+}
+
+/// True when an unparsed tool-call region opens a call tag whose matching
+/// closing tag never appeared before the end of the region (e.g. when the
+/// upstream server cuts the stream mid-call on a repetition stop sequence or
+/// token limit).
+fn is_truncated_tool_call_region(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    (trimmed.contains("<tool>") && !trimmed.contains("</tool>"))
+        || (trimmed.contains("<tool_call>")
+            && !trimmed.contains("</tool_call>")
+            && !trimmed.contains("</tool>"))
+        || (trimmed.contains("<function=")
+            && !trimmed.contains("</function>")
+            && !trimmed.contains("</tool>"))
+        || (trimmed.contains("<|open|>call ") && !trimmed.contains("<|close|>call"))
+        || ((trimmed.contains("<｜tool▁call▁begin｜>") || trimmed.contains("<|tool_call_begin|>"))
+            && !trimmed.contains("<｜tool▁call▁end｜>")
+            && !trimmed.contains("<|tool_call_end|>"))
+        || ((trimmed.contains("<｜DSML｜invoke") || trimmed.contains("<|DSML|invoke"))
+            && !trimmed.contains("</｜DSML｜invoke")
+            && !trimmed.contains("</|DSML|invoke"))
+}
+
 /// Regions outside every claimed span that open like a tool call (a
 /// [`TOOL_CALL_OPENERS`] token at line start, outside markdown code) but that
 /// no parser accepted. Prose and quoted code never produce a rejection.
@@ -1156,16 +1202,28 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
             "Unparsed tool-call markup: {}",
             rejection_preview(raw)
         ));
+        let reason = if is_truncated_tool_call_region(raw) {
+            format!(
+                "Tool call NOT executed: {} was truncated mid-stream before its closing tag (malformed or mixed syntax: missing </arguments></tool> after {} chars; cut off at: {}). Avoid long runs of repeated box-drawing characters (e.g. '────' or '════') that trigger server stop sequences, or write the file in smaller sections. {} Call text: {}",
+                what,
+                raw.len(),
+                rejection_tail_preview(raw),
+                REJECTION_FORMAT_HINT,
+                rejection_preview(raw)
+            )
+        } else {
+            format!(
+                "Tool call NOT executed: {} was written in a malformed or mixed syntax that no parser accepts. {} Call text: {}",
+                what,
+                REJECTION_FORMAT_HINT,
+                rejection_preview(raw)
+            )
+        };
         rejected.push((
             region.start,
             ParseRejection {
                 tool_name,
-                reason: format!(
-                    "Tool call NOT executed: {} was written in a malformed or mixed syntax that no parser accepts. {} Call text: {}",
-                    what,
-                    REJECTION_FORMAT_HINT,
-                    rejection_preview(raw)
-                ),
+                reason,
                 raw_text: raw.to_string(),
             },
         ));
@@ -1251,8 +1309,8 @@ fn try_parse_deepseek_tools(
         let parsed_args = if stripped.is_empty() {
             Ok(serde_json::json!({}))
         } else if let Some((json_str, _)) = extract_json_balanced(body) {
-            serde_json::from_str::<serde_json::Value>(json_str).or_else(|_| {
-                serde_json::from_str::<serde_json::Value>(stripped).map_err(|e| {
+            parse_json_lenient(json_str).or_else(|_| {
+                parse_json_lenient(stripped).map_err(|e| {
                     anyhow::anyhow!(
                         "Invalid JSON arguments in DeepSeek tool call '{}': {}",
                         tool_name,
@@ -1261,7 +1319,7 @@ fn try_parse_deepseek_tools(
                 })
             })
         } else {
-            serde_json::from_str::<serde_json::Value>(stripped).map_err(|e| {
+            parse_json_lenient(stripped).map_err(|e| {
                 anyhow::anyhow!(
                     "Invalid JSON arguments in DeepSeek tool call '{}': {}",
                     tool_name,
@@ -1295,7 +1353,7 @@ fn try_parse_deepseek_tools(
             let val_str = p_cap[3].trim();
 
             let json_val = if !is_string_hint {
-                serde_json::from_str::<serde_json::Value>(val_str)
+                parse_json_lenient(val_str)
                     .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()))
             } else {
                 serde_json::Value::String(val_str.to_string())
@@ -1309,7 +1367,7 @@ fn try_parse_deepseek_tools(
         } else if trimmed_body.is_empty() {
             Ok(serde_json::json!({}))
         } else if let Some((json_str, _)) = extract_json_balanced(trimmed_body) {
-            serde_json::from_str::<serde_json::Value>(json_str).map_err(|e| {
+            parse_json_lenient(json_str).map_err(|e| {
                 anyhow::anyhow!(
                     "Invalid JSON arguments in DeepSeek DSML tool call '{}': {}",
                     tool_name,
@@ -1317,7 +1375,7 @@ fn try_parse_deepseek_tools(
                 )
             })
         } else {
-            serde_json::from_str::<serde_json::Value>(trimmed_body).map_err(|e| {
+            parse_json_lenient(trimmed_body).map_err(|e| {
                 anyhow::anyhow!(
                     "Invalid arguments in DeepSeek DSML tool call '{}': {}",
                     tool_name,
@@ -1392,7 +1450,7 @@ fn try_parse_kimi_tools(
                 } else if (val_str.starts_with('{') && val_str.ends_with('}'))
                     || (val_str.starts_with('[') && val_str.ends_with(']'))
                 {
-                    serde_json::from_str::<serde_json::Value>(val_str)
+                    parse_json_lenient(val_str)
                         .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()))
                 } else {
                     serde_json::Value::String(val_str.to_string())
@@ -1407,7 +1465,7 @@ fn try_parse_kimi_tools(
             } else if trimmed_body.is_empty() {
                 Ok(serde_json::json!({}))
             } else {
-                serde_json::from_str::<serde_json::Value>(trimmed_body).map_err(|e| {
+                parse_json_lenient(trimmed_body).map_err(|e| {
                     anyhow::anyhow!("Invalid arguments in Kimi tool call '{}': {}", tool_name, e)
                 })
             };
@@ -1513,7 +1571,7 @@ fn parse_qwen3_parameters(captured_name: &str, params_str: &str) -> Result<serde
         let value = cap[4].trim();
 
         // Try to parse value as JSON (for booleans, numbers, arrays, objects)
-        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(value) {
+        let json_value = if let Ok(v) = parse_json_lenient(value) {
             v
         } else {
             // Treat as string
@@ -1575,6 +1633,99 @@ fn extract_json_balanced(s: &str) -> Option<(&str, usize)> {
     None
 }
 
+/// Escape unescaped RFC 8259 control characters (`\n`, `\r`, `\t`, `< 0x20`)
+/// inside JSON string literals (`"..."`). Also escapes a trailing backslash
+/// before a literal newline/carriage-return/tab (shell line continuation inside
+/// a raw multi-line JSON string). Returns `None` if no raw control characters
+/// were present inside any string literal.
+fn escape_raw_control_chars_in_json_strings(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len() + 32);
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for ch in s.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                match ch {
+                    '\n' => {
+                        // A backslash followed by a raw newline in a multi-line
+                        // string (e.g. shell line continuation `\` + newline):
+                        // escape both the backslash and the newline.
+                        out.push_str("\\\n");
+                        // Replace the raw newline we just pushed with `\n`:
+                        out.pop();
+                        out.push_str("\\n");
+                        changed = true;
+                    }
+                    '\r' => {
+                        out.push_str("\\\\r");
+                        changed = true;
+                    }
+                    '\t' => {
+                        out.push_str("\\\\t");
+                        changed = true;
+                    }
+                    _ => out.push(ch),
+                }
+            } else {
+                match ch {
+                    '\\' => {
+                        escaped = true;
+                        out.push('\\');
+                    }
+                    '"' => {
+                        in_string = false;
+                        out.push('"');
+                    }
+                    '\n' => {
+                        out.push_str("\\n");
+                        changed = true;
+                    }
+                    '\r' => {
+                        out.push_str("\\r");
+                        changed = true;
+                    }
+                    '\t' => {
+                        out.push_str("\\t");
+                        changed = true;
+                    }
+                    c if (c as u32) < 0x20 => {
+                        out.push_str(&format!("\\u{:04x}", c as u32));
+                        changed = true;
+                    }
+                    c => out.push(c),
+                }
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+
+    changed.then_some(out)
+}
+
+/// Parse JSON, falling back to escaping raw multi-line control characters
+/// (`\n`, `\r`, `\t`) inside JSON string literals when strict RFC 8259 parsing
+/// fails.
+fn parse_json_lenient(s: &str) -> serde_json::Result<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(v) => Ok(v),
+        Err(first_err) => {
+            if let Some(normalized) = escape_raw_control_chars_in_json_strings(s) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&normalized) {
+                    return Ok(v);
+                }
+            }
+            Err(first_err)
+        }
+    }
+}
+
 /// Parse arguments from XML format (can be JSON or XML elements)
 fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
     let trimmed = args_str.trim();
@@ -1582,18 +1733,32 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
     // First try: extract a balanced JSON object via brace counting, then parse.
     // This handles cases where HTML tags inside JSON string values would confuse
     // the regex-based capture (e.g., `{"content":"<div>hello</div>"}`).
-    if let Some((json_str, _end)) = extract_json_balanced(trimmed) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
-            return Ok(json);
+    // Skip when `trimmed` opens with `<` (XML elements or `<parameter=...>` tags),
+    // so braces inside an XML `<content>{...}</content>` child are not mistaken
+    // for the top-level arguments object.
+    if !trimmed.starts_with('<') {
+        if let Some((json_str, _end)) = extract_json_balanced(trimmed) {
+            if let Ok(json) = parse_json_lenient(json_str) {
+                return Ok(json);
+            }
         }
     }
 
     // Second try: parse as JSON directly (handles the simple/clean case)
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+    if let Ok(json) = parse_json_lenient(trimmed) {
         return Ok(json);
     }
 
-    // Third try: parse as XML elements and convert to JSON
+    // Third try: Qwen3-style `<parameter=key>value</parameter>` tags inside `<arguments>`
+    if has_qwen3_parameter_tag(trimmed) {
+        if let Ok(json) = parse_qwen3_parameters("", trimmed) {
+            if json.as_object().is_some_and(|m| !m.is_empty()) {
+                return Ok(json);
+            }
+        }
+    }
+
+    // Fourth try: parse as XML elements and convert to JSON
     let mut args = serde_json::Map::new();
 
     // XML element parser: <key>value</key>. The value runs to the matching
@@ -1626,7 +1791,7 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
         }
         let value = raw.trim();
         // Try to parse value as JSON (for booleans, numbers, etc.)
-        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(value) {
+        let json_value = if let Ok(v) = parse_json_lenient(value) {
             v
         } else {
             serde_json::Value::String(value.to_string())
@@ -1637,8 +1802,8 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
 
     if args.is_empty() {
         if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            let err = serde_json::from_str::<serde_json::Value>(trimmed)
-                .expect_err("valid JSON would have returned early");
+            let err =
+                parse_json_lenient(trimmed).expect_err("valid JSON would have returned early");
             anyhow::bail!("Invalid JSON in <arguments>: {}", err);
         }
         // Last resort: treat the whole thing as a string argument
@@ -1665,7 +1830,7 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<SpannedCall>> {
             let json_str = &cap[1];
 
             // Try to parse as a tool call structure
-            match serde_json::from_str::<serde_json::Value>(json_str) {
+            match parse_json_lenient(json_str) {
                 Ok(json) => {
                     // Check if it looks like a tool call
                     if let Some(name) = json
@@ -1846,7 +2011,7 @@ fn try_parse_plain_function_calls(
         // 3. If it's multiple quoted strings: file_edit("path", "old", "new")
         let arguments = if args_raw.starts_with('{') {
             // Direct JSON
-            match serde_json::from_str::<serde_json::Value>(args_raw) {
+            match parse_json_lenient(args_raw) {
                 Ok(v) => v,
                 Err(e) => {
                     results.push((

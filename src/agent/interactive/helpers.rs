@@ -396,12 +396,21 @@ impl ListenerInputState {
         event: &crossterm::event::Event,
         prompt_owns_input: bool,
     ) -> ListenerAction {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
         match event {
             Event::Key(KeyEvent {
-                code, modifiers, ..
+                code,
+                modifiers,
+                kind,
+                ..
             }) => {
+                // Windows console backend emits both Press and Release for every
+                // keystroke; ignoring Release prevents every typed character and
+                // cancel/enter key from firing twice.
+                if *kind == KeyEventKind::Release {
+                    return ListenerAction::None;
+                }
                 // Explicit cancels are honoured even mid-handoff — never
                 // swallow the user's abort.
                 if *code == KeyCode::Esc {
@@ -825,6 +834,7 @@ fn is_up_arrow(event: &crossterm::event::Event) -> bool {
         event,
         crossterm::event::Event::Key(crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::Up,
+            kind: crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat,
             ..
         })
     )
@@ -1081,5 +1091,27 @@ mod tests {
     #[test]
     fn coalesce_empty_input_gives_empty_output() {
         assert!(coalesce_pending_messages(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn windows_key_release_events_do_not_double_buffer_input() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+        let mut state = ListenerInputState::default();
+        for ch in ['h', 'i'] {
+            let press = Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            ));
+            let release = Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ));
+            assert_eq!(state.on_event(&press, false), ListenerAction::RenderPrompt);
+            assert_eq!(state.on_event(&release, false), ListenerAction::None);
+        }
+        assert_eq!(state.buffer(), "hi");
     }
 }

@@ -51,7 +51,7 @@ impl Default for LongRunningConfig {
             max_concurrent: 1, // Sequential by default for system tests
             max_tokens: 16384,
             temperature: 0.6,
-            context_length: 262144,
+            context_length: 1_048_576,
             extra_body: serde_json::json!({
                 "chat_template_kwargs": {"enable_thinking": false}
             }),
@@ -64,11 +64,22 @@ impl Default for LongRunningConfig {
 impl LongRunningConfig {
     /// Create a config targeting a specific endpoint and model.
     pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            endpoint: endpoint.into(),
-            model: model.into(),
+        let endpoint = endpoint.into();
+        let model = model.into();
+        let mut cfg = Self {
+            endpoint,
+            model: model.clone(),
             ..Default::default()
+        };
+        if let Some(profile) = crate::config::model_profiles::match_profile(&model) {
+            if let Some(ctx) = profile.context_length {
+                cfg.context_length = ctx;
+            }
+            if let Some(max_tok) = profile.max_tokens {
+                cfg.max_tokens = max_tok;
+            }
         }
+        cfg
     }
 
     /// Set the maximum duration.
@@ -104,6 +115,26 @@ impl LongRunningConfig {
     /// Set output directory.
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
+        self
+    }
+
+    /// Enable or disable thinking mode in `extra_body.chat_template_kwargs.enable_thinking`.
+    pub fn with_thinking(mut self, enable_thinking: bool) -> Self {
+        if let Some(obj) = self.extra_body.as_object_mut() {
+            let kwargs = obj
+                .entry("chat_template_kwargs")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(kwargs_obj) = kwargs.as_object_mut() {
+                kwargs_obj.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enable_thinking),
+                );
+            }
+        } else {
+            self.extra_body = serde_json::json!({
+                "chat_template_kwargs": {"enable_thinking": enable_thinking}
+            });
+        }
         self
     }
 

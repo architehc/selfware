@@ -68,6 +68,14 @@ impl BootCheck {
 pub fn check_model_file(dir: &Path) -> BootCheck {
     let path = model::model_path_in(dir);
     if !path.is_file() {
+        if dir == model::boot_dir() {
+            if let Some(bundled) = model::find_bundled_model() {
+                return BootCheck::pass(
+                    "boot model file",
+                    format!("{} (sha256 ok)", bundled.display()),
+                );
+            }
+        }
         return BootCheck::skip(
             "boot model file",
             "not downloaded (optional — fetched on first `selfware boot --chat`)",
@@ -86,7 +94,7 @@ pub fn check_model_file(dir: &Path) -> BootCheck {
     }
 }
 
-/// Check 2: llama-server discoverable via LLAMA_SERVER or PATH.
+/// Check 2: llama-server discoverable via LLAMA_SERVER, bundled bin/, or PATH.
 pub fn check_llama_server() -> BootCheck {
     match model::find_llama_server() {
         Some(path) => BootCheck::pass("llama-server", path.display().to_string()),
@@ -108,9 +116,15 @@ pub fn plan_round_trip(model_check: &BootCheck, server_check: &BootCheck) -> Rou
     if server_check.status != BootCheckStatus::Pass {
         return RoundTripPlan::Skip("no llama-server");
     }
+    let default_model = model::model_path_in(&model::boot_dir());
+    let model = if default_model.is_file() {
+        default_model
+    } else {
+        model::find_bundled_model().unwrap_or(default_model)
+    };
     RoundTripPlan::Run {
         server: PathBuf::from(&server_check.detail),
-        model: model::model_path_in(&model::boot_dir()),
+        model,
     }
 }
 

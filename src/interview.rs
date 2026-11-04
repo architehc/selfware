@@ -507,6 +507,10 @@ fn handle_raw_key(
     buf: &mut String,
     out: &mut impl io::Write,
 ) -> Result<Option<LineInput>> {
+    // Windows console backend emits both Press and Release for every keystroke.
+    if key.kind == crossterm::event::KeyEventKind::Release {
+        return Ok(None);
+    }
     // Terminal abort chords: Ctrl+C (universal interrupt) and Ctrl+D (typed
     // EOF) cancel the prompt. Recognised before the plain-char match so they
     // can never be appended to the buffer as literal 'c'/'d'.

@@ -107,8 +107,11 @@ pub fn interview(
     io.say("");
     io.say("What do you have to run models with?");
     io.say("  [1] An OpenRouter API key");
-    io.say("  [2] A local server (Ollama / vLLM / SGLang / LM Studio)");
+    io.say("  [2] A local server (Ollama / vLLM / SGLang / LM Studio / Bundled)");
     io.say("  [3] Nothing yet");
+    io.say(
+        "  [4] Selfware Cloud (https://llm.selfware.design/v1 — deepseek-v4.1-flash, 1M context)",
+    );
     let choice = io.ask("  > ")?;
 
     let (card, model_override, context_override, api_key) = match choice.trim() {
@@ -133,40 +136,54 @@ pub fn interview(
             io.say("  [1] Ollama (http://localhost:11434/v1)");
             io.say("  [2] vLLM / SGLang (http://localhost:8000/v1)");
             io.say("  [3] LM Studio (http://localhost:1234/v1)");
+            io.say("  [4] Bundled local engine (llama-server + Qwen3-0.6B-Q8_0.gguf on http://127.0.0.1:8787/v1)");
+            io.say("  [5] LFM3-1.7B GSQ 1GB CPU runner (LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf on http://127.0.0.1:8787/v1)");
+            io.say("  [6] LFM3-1.7B GSQ+SLQ 1.58GB CPU runner (LFM3-1.7B-GSQ-Q6_K_SLQ.gguf on http://127.0.0.1:8787/v1)");
             let pick = io.ask("  > ")?;
-            let card = match pick.trim() {
-                "2" => find_card("vllm").unwrap(),
-                "3" => find_card("lmstudio").unwrap(),
-                _ => find_card("ollama").unwrap(),
-            };
-            if card.needs_model_detection() {
-                match detect(card) {
-                    Some(detected) => {
-                        io.say(&format!("  Detected served model: {}", detected.id));
-                        (card, Some(detected.id), detected.context_length, None)
-                    }
-                    None => {
-                        io.say("  Could not query /v1/models — is the server running?");
-                        let mut model = String::new();
-                        for _ in 0..3 {
-                            model = io.ask("  Model id to use (exactly as served): ")?;
-                            if !model.is_empty() {
-                                break;
+            match pick.trim() {
+                "4" => (find_card("local-bundled").unwrap(), None, None, None),
+                "5" => (find_card("local-lfm3-1gb").unwrap(), None, None, None),
+                "6" => (find_card("local-lfm3-slq").unwrap(), None, None, None),
+                _ => {
+                    let card = match pick.trim() {
+                        "2" => find_card("vllm").unwrap(),
+                        "3" => find_card("lmstudio").unwrap(),
+                        _ => find_card("ollama").unwrap(),
+                    };
+                    if card.needs_model_detection() {
+                        match detect(card) {
+                            Some(detected) => {
+                                io.say(&format!("  Detected served model: {}", detected.id));
+                                (card, Some(detected.id), detected.context_length, None)
                             }
-                            io.say("  A model id is required for this card.");
+                            None => {
+                                io.say("  Could not query /v1/models — is the server running?");
+                                let mut model = String::new();
+                                for _ in 0..3 {
+                                    model = io.ask("  Model id to use (exactly as served): ")?;
+                                    if !model.is_empty() {
+                                        break;
+                                    }
+                                    io.say("  A model id is required for this card.");
+                                }
+                                if model.is_empty() {
+                                    bail!(
+                                        "card '{}' needs a model id and none was given",
+                                        card.name
+                                    );
+                                }
+                                (card, Some(model), None, None)
+                            }
                         }
-                        if model.is_empty() {
-                            bail!("card '{}' needs a model id and none was given", card.name);
-                        }
-                        (card, Some(model), None, None)
+                    } else {
+                        let answer = io.ask(&format!("  Model tag to use [{}]: ", card.model))?;
+                        let model_override = (!answer.is_empty()).then_some(answer);
+                        (card, model_override, None, None)
                     }
                 }
-            } else {
-                let answer = io.ask(&format!("  Model tag to use [{}]: ", card.model))?;
-                let model_override = (!answer.is_empty()).then_some(answer);
-                (card, model_override, None, None)
             }
         }
+        "4" => (find_card("selfware-design").unwrap(), None, None, None),
         _ => {
             io.say("");
             io.say("No server and no key: the cheapest working setup is OpenRouter's free tier —");
@@ -365,6 +382,16 @@ where
 async fn doctor_for_path(path: &Path) -> Result<DoctorOutcome> {
     let config = crate::config::Config::load(Some(path.to_string_lossy().as_ref()))
         .context("loading the config boot just wrote")?;
+    if crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
+        if let Err(e) =
+            crate::boot::model::ensure_background_boot_server_for_model(Some(&config.model)).await
+        {
+            return Ok(DoctorOutcome {
+                ok: false,
+                failing_checks: vec![format!("local-bundled server: {:#}", e)],
+            });
+        }
+    }
     match crate::llm_doctor::run_llm_doctor_report(&config).await {
         Ok(report) => {
             let connection_failed = matches!(

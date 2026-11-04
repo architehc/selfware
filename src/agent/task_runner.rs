@@ -621,6 +621,9 @@ pub struct RunSummary {
     /// thinking off, max_tokens 8192"), then any profile quota an explicit
     /// setting overrode ("! ..."). Empty when no workload quota is set.
     pub workloads: Vec<String>,
+    /// OpenRouter-equivalent dollar value saved breakdown and average token speed
+    /// (`tok/s`) when tokens were consumed.
+    pub openrouter_savings: Option<String>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -708,6 +711,9 @@ impl Agent {
             done_check: self.done_check.summary_line(),
             review_coverage: self.review_coverage(),
             workloads: self.workload_summary_lines(),
+            openrouter_savings: self
+                .current_openrouter_savings(&task_usage)
+                .map(|s| s.summary_line()),
         }
     }
 
@@ -782,6 +788,52 @@ impl Agent {
     pub(crate) fn session_usage(&self) -> super::session_usage::SessionUsage {
         self.session_usage_prior
             .with_task(&self.current_task_usage())
+    }
+
+    /// OpenRouter-equivalent dollar value saved and token speed (`tok/s`) for
+    /// the current task, or `None` when no tokens were consumed.
+    pub(crate) fn current_openrouter_savings(
+        &self,
+        task_usage: &super::session_usage::TaskUsage,
+    ) -> Option<super::session_usage::OpenRouterSavings> {
+        if task_usage.prompt_tokens == 0 && task_usage.completion_tokens == 0 {
+            return None;
+        }
+        let shapes = self.client.call_shapes();
+        let attempts = self.client.usage_attempts();
+        let (cached, tok_per_sec) =
+            super::session_usage::measure_cache_and_speed(&shapes, &attempts);
+        Some(super::session_usage::OpenRouterSavings::compute(
+            &self.config.model,
+            task_usage.prompt_tokens,
+            cached,
+            task_usage.completion_tokens,
+            task_usage.cost_usd,
+            tok_per_sec,
+        ))
+    }
+
+    /// OpenRouter-equivalent dollar value saved and token speed (`tok/s`) across
+    /// the interactive session, or `None` when no tokens were consumed.
+    pub(crate) fn session_openrouter_savings(
+        &self,
+    ) -> Option<super::session_usage::OpenRouterSavings> {
+        let usage = self.session_usage();
+        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+            return None;
+        }
+        let shapes = self.client.call_shapes();
+        let attempts = self.client.usage_attempts();
+        let (cached, tok_per_sec) =
+            super::session_usage::measure_cache_and_speed(&shapes, &attempts);
+        Some(super::session_usage::OpenRouterSavings::compute(
+            &self.config.model,
+            usage.prompt_tokens,
+            cached,
+            usage.completion_tokens,
+            usage.cost_usd,
+            tok_per_sec,
+        ))
     }
 
     /// Main-loop share of `session_usage` (provider-reported).
@@ -2465,6 +2517,11 @@ impl Agent {
         // MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES. Reset with the generic
         // counter on every successful continuation.
         let mut consecutive_context_overflow_recoveries = 0u32;
+        // Tighter bound for proxy/tunnel gateway timeouts (ERR_NGROK_3004):
+        // `request_step_completion_with_reasoning_recovery` already retries
+        // once with streaming + stepped-down thinking inside the turn, so
+        // looping 4×300s in ErrorRecovery burns 20 minutes of wall budget.
+        let mut consecutive_gateway_timeout_recoveries = 0u32;
 
         // Bounded guard: track consecutive planning turns that make no progress
         // (no tool calls / no state transition). Planning does not consume the
@@ -2650,19 +2707,41 @@ impl Agent {
                         // reasoning, never re-armed.
                         let mut planning_step_down: Option<crate::api::client::ReasoningStepDown> =
                             None;
+                        let mut planning_gateway_step_down = false;
                         loop {
-                            let thinking = if planning_step_down.is_some() {
-                                crate::api::ThinkingMode::StepDown(Some(
-                                    crate::config::TurnWorkload::Planning,
-                                ))
-                            } else {
-                                crate::api::ThinkingMode::Workload(
-                                    crate::config::TurnWorkload::Planning,
-                                )
-                            };
+                            let thinking =
+                                if planning_step_down.is_some() || planning_gateway_step_down {
+                                    crate::api::ThinkingMode::StepDown(Some(
+                                        crate::config::TurnWorkload::Planning,
+                                    ))
+                                } else {
+                                    crate::api::ThinkingMode::Workload(
+                                        crate::config::TurnWorkload::Planning,
+                                    )
+                                };
                             match self.plan_with_thinking(thinking).await {
                                 Ok(has_tool_calls) => break has_tool_calls,
                                 Err(e) => {
+                                    if (crate::errors::is_gateway_timeout_error(&e)
+                                        || crate::errors::is_stream_truncated_error(&e))
+                                        && !self.is_cancelled()
+                                        && !planning_gateway_step_down
+                                    {
+                                        planning_gateway_step_down = true;
+                                        self.force_non_streaming = false;
+                                        let detail = format!(
+                                            "{e} — retrying planning turn once over streaming with stepped-down reasoning"
+                                        );
+                                        warn!("{detail}");
+                                        cli_println!("{} {}", "⚠".yellow(), detail);
+                                        self.emit_progress(
+                                            super::progress::ProgressEvent::TurnDecision {
+                                                decision: "gateway_timeout_retry".to_string(),
+                                                detail,
+                                            },
+                                        );
+                                        continue;
+                                    }
                                     // Reasoning-budget exhaustion is not a
                                     // transient failure: re-sending the same
                                     // request burns the budget again. Retry
@@ -2712,10 +2791,14 @@ impl Agent {
                                     // request that is going to fail again.
                                     let terminal_client_error =
                                         super::assistant_response::is_terminal_api_client_error(&e);
+                                    let gateway_exhausted = planning_gateway_step_down
+                                        && (crate::errors::is_gateway_timeout_error(&e)
+                                            || crate::errors::is_stream_truncated_error(&e));
                                     if self.is_cancelled()
                                         || planning_attempt >= MAX_PLANNING_RETRIES
                                         || terminal_client_error
                                         || reasoning_exhausted
+                                        || gateway_exhausted
                                         || is_fatal_loop_error(&e)
                                     {
                                         if mode == LoopMode::NewTask {
@@ -2863,6 +2946,7 @@ impl Agent {
                             }
                             error_recoveries.note_progress();
                             consecutive_context_overflow_recoveries = 0;
+                            consecutive_gateway_timeout_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
                         }
@@ -3111,6 +3195,7 @@ impl Agent {
                             }
                             error_recoveries.note_progress();
                             consecutive_context_overflow_recoveries = 0;
+                            consecutive_gateway_timeout_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
                             // A billable step just ran; a crossed cap must stop the run rather than
@@ -3266,6 +3351,48 @@ impl Agent {
                                     "Context overflow recovery exhausted after {} compress-and-retry passes: {}",
                                     MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES, error
                                 ),
+                            })?;
+                            continue;
+                        }
+                    }
+
+                    // Bounded gateway-timeout / stream-truncation / long-cooldown recovery:
+                    // - If an operator queue-purge cooldown exceeds 180s, fail immediately
+                    //   rather than sleeping and retrying into a multi-minute hold.
+                    // - If a proxy/tunnel cut the request at 300s (`ERR_NGROK_3004`) or
+                    //   truncated the stream mid-response, allow at most one ErrorRecovery
+                    //   pass (with `force_non_streaming` cleared) instead of looping 4 × 300s.
+                    if crate::api::client::parse_retry_after_secs_unclamped(&error)
+                        .is_some_and(|secs| secs > 180)
+                    {
+                        warn!(
+                            "Provider reported long cooldown ({}) — failing fast so checkpoint can be resumed after cooldown",
+                            error
+                        );
+                        record_state_transition("ErrorRecovery", "Failed");
+                        if let Some(ref mut checkpoint) = self.current_checkpoint {
+                            checkpoint.log_error(0, error.to_string(), false);
+                        }
+                        self.set_loop_state(AgentState::Failed {
+                            reason: format!("Provider cooldown active: {}", error),
+                        })?;
+                        continue;
+                    }
+                    if error.to_lowercase().contains("gateway timeout:")
+                        || error.contains("stream ended before an accepted terminal indication")
+                    {
+                        self.force_non_streaming = false;
+                        consecutive_gateway_timeout_recoveries += 1;
+                        if consecutive_gateway_timeout_recoveries > 1 {
+                            warn!(
+                                "Gateway timeout or stream truncation persisted after stepped-down retry and recovery — failing task"
+                            );
+                            record_state_transition("ErrorRecovery", "Failed");
+                            if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                checkpoint.log_error(0, error.to_string(), false);
+                            }
+                            self.set_loop_state(AgentState::Failed {
+                                reason: format!("Auto-recovery exhausted: {}", error),
                             })?;
                             continue;
                         }

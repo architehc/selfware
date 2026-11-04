@@ -2,7 +2,9 @@
 
 use super::config::LongRunningConfig;
 use super::project::{ProjectResult, ProjectStatus, ProjectType};
-use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
+use crate::bench_harness::subprocess::{
+    apply_env_allowlist, run_with_activity_aware_group_timeout,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -104,9 +106,11 @@ impl LongRunningRunner {
         cmd.arg("-c")
             .arg(work_dir.join("selfware.toml"))
             .arg("-C")
-            .arg(work_dir)
-            .arg("--yolo")
-            .arg("--ascii")
+            .arg(work_dir);
+        if self.config.yolo_mode {
+            cmd.arg("--yolo");
+        }
+        cmd.arg("--ascii")
             .arg("--no-color")
             .arg("-p")
             .arg(&task.prompt)
@@ -126,7 +130,12 @@ impl LongRunningRunner {
         // thread so the async scheduler isn't stalled.
         let timeout_secs = self.config.timeout_per_project_secs;
         let outcome = match tokio::task::spawn_blocking(move || {
-            run_with_group_timeout(cmd, Duration::from_secs(timeout_secs))
+            run_with_activity_aware_group_timeout(
+                cmd,
+                Duration::from_secs(timeout_secs),
+                Duration::from_secs(120),
+                Duration::from_secs(timeout_secs.saturating_mul(3)),
+            )
         })
         .await
         {
@@ -138,11 +147,7 @@ impl LongRunningRunner {
                 return self.create_error_result(&task.name, "task panicked");
             }
         };
-        if outcome.timed_out {
-            return self.create_error_result(&task.name, "timeout");
-        }
-
-        // Save log
+        // Save log even on timeout so telemetry is retained (AGENTS.md Rule 3)
         let _ = crate::session::checkpoint::write_bytes_atomically(
             &log_path,
             outcome.stdout.as_bytes(),
@@ -152,12 +157,20 @@ impl LongRunningRunner {
         // Evaluate results
         let duration = task_start.elapsed().as_secs();
         let steps = count_steps(outcome.stdout.as_bytes());
-        let outcome_label = extract_outcome(outcome.stdout.as_bytes());
+        let outcome_label = if outcome.timed_out {
+            "timeout".to_string()
+        } else {
+            extract_outcome(outcome.stdout.as_bytes())
+        };
 
         let (compiles, tests_passed, tests_failed, src_lines) =
             self.evaluate_project(&task.project_type, work_dir);
 
-        let status = ProjectStatus::from_results(compiles, tests_passed, tests_failed, src_lines);
+        let status = if outcome.timed_out {
+            ProjectStatus::Fail
+        } else {
+            ProjectStatus::from_results(compiles, tests_passed, tests_failed, src_lines)
+        };
 
         ProjectResult {
             name: task.name.clone(),
@@ -347,8 +360,16 @@ pub(crate) fn check_output_succeeded(
 
 /// Find the selfware binary.
 fn find_selfware_binary() -> Result<PathBuf, String> {
+    // Prefer the currently running selfware executable when invoked via `selfware long-test`.
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.file_name().and_then(|n| n.to_str()) == Some("selfware") && exe.exists() {
+            return Ok(exe);
+        }
+    }
+
     // Check common locations
     let candidates = [
+        "./target/release-fast/selfware",
         "./target/release/selfware",
         "./target/debug/selfware",
         "/usr/local/bin/selfware",
@@ -381,7 +402,12 @@ fn find_selfware_binary() -> Result<PathBuf, String> {
 fn count_steps(output: &[u8]) -> usize {
     let text = String::from_utf8_lossy(output);
     text.lines()
-        .filter(|l| l.contains("Step") && l.contains("Executing"))
+        .filter(|l| {
+            let trimmed = l.trim_start();
+            (trimmed.starts_with("[Step ") && trimmed.contains("] "))
+                || trimmed.contains("📝 Step ")
+                || (trimmed.contains("Step") && trimmed.contains("Executing"))
+        })
         .count()
 }
 
@@ -389,13 +415,19 @@ fn count_steps(output: &[u8]) -> usize {
 fn extract_outcome(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output);
     text.lines()
-        .rfind(|l| l.contains("Outcome:"))
-        .map(|l| {
-            l.split("Outcome:")
-                .nth(1)
-                .unwrap_or("unknown")
-                .trim()
-                .to_string()
+        .rev()
+        .find_map(|l| {
+            let trimmed = l.trim();
+            trimmed
+                .strip_prefix("outcome:")
+                .or_else(|| trimmed.strip_prefix("Outcome:"))
+                .or_else(|| {
+                    l.split_once("Outcome:")
+                        .or_else(|| l.split_once("outcome:"))
+                        .map(|(_, rhs)| rhs)
+                })
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| "none".to_string())
 }

@@ -427,3 +427,40 @@ async fn self_healing_recovery_preserves_in_progress_messages_and_resets_loop_re
         "empty messages should be restored from the self-healing checkpoint"
     );
 }
+
+#[tokio::test]
+async fn repair_dangling_assistant_tool_calls_and_fail_checkpoint_sync_messages() {
+    let (mut agent, _dir) = w8a_agent_with_cadence("w8a-dangling-fix").await;
+    agent
+        .messages
+        .push(crate::api::types::Message::assistant(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"bash verify_guide.sh\"}</arguments>\n</tool>",
+        ));
+    let mut call = w8a_call(
+        "shell_exec",
+        serde_json::json!({"command": "bash verify_guide.sh"}),
+        true,
+    );
+    call.result = Some(r#"{"exit_code":0,"stdout":"passed=14 failed=0\n"}"#.to_string());
+    w8a_log(&mut agent, call.clone());
+
+    // 1. `repair_dangling_assistant_tool_calls` reconstructs the missing <tool_result>
+    //    when a checkpoint's messages end on an assistant tool call whose result is in `logs`.
+    let mut dangling_msgs = agent.messages.clone();
+    crate::agent::Agent::repair_dangling_assistant_tool_calls(&mut dangling_msgs, &[call]);
+    assert_eq!(dangling_msgs.len(), agent.messages.len() + 1);
+    let repaired_last = dangling_msgs.last().unwrap();
+    assert_eq!(repaired_last.role, "user");
+    assert!(
+        repaired_last.content.text().contains("passed=14 failed=0"),
+        "repaired tool_result must contain the logged output: {}",
+        repaired_last.content.text()
+    );
+
+    // 2. `fail_checkpoint` syncs `self.messages` into the persisted checkpoint.
+    agent.messages = dangling_msgs.clone();
+    agent.fail_checkpoint("gateway timeout").unwrap();
+    let loaded = w8a_loaded(&agent, "w8a-dangling-fix");
+    assert_eq!(loaded.messages.len(), dangling_msgs.len());
+    assert_eq!(loaded.messages.last().unwrap().role, "user");
+}

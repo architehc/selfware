@@ -107,3 +107,27 @@ fn context_override_replaces_card_default() {
     assert_eq!(cfg.model, "qwen3:8b");
     assert_eq!(cfg.context_length, 131_072);
 }
+
+#[test]
+fn selfware_design_and_local_bundled_cards_pass_validation() {
+    let cloud = find_card("selfware-design").expect("selfware-design card exists");
+    assert_eq!(cloud.endpoint, "https://llm.selfware.design/v1");
+    assert_eq!(cloud.model, "deepseek-v4.1-flash");
+    assert_eq!(cloud.context_length, 1_048_576);
+    let cloud_toml = cloud.render_config(None, None).unwrap();
+    crate::config::Config::validate_generated_toml(&cloud_toml).unwrap();
+
+    let bundled = find_card("local-bundled").expect("local-bundled card exists");
+    assert_eq!(bundled.endpoint, "http://127.0.0.1:8787/v1");
+    assert_eq!(bundled.model, "boot-assistant");
+    assert_eq!(bundled.context_length, 8_192);
+    let bundled_toml = bundled.render_config(None, None).unwrap();
+    crate::config::Config::validate_generated_toml(&bundled_toml).unwrap();
+
+    for card_name in ["local-lfm3-1gb", "local-lfm3-slq"] {
+        let card = find_card(card_name).expect(card_name);
+        assert_eq!(card.endpoint, "http://127.0.0.1:8787/v1");
+        let toml = card.render_config(None, None).unwrap();
+        crate::config::Config::validate_generated_toml(&toml).unwrap();
+    }
+}

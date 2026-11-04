@@ -126,6 +126,29 @@ fn local_lmstudio_branch_detects() {
 }
 
 #[test]
+fn local_bundled_and_selfware_design_branches_select_expected_cards() {
+    let mut io = ScriptedIo::new(["2", "4"]);
+    let plan = interview(&mut io, &no_detect()).unwrap().unwrap();
+    assert_eq!(plan.card.name, "local-bundled");
+    assert_eq!(plan.card.endpoint, "http://127.0.0.1:8787/v1");
+
+    let mut io_cloud = ScriptedIo::new(["4"]);
+    let plan_cloud = interview(&mut io_cloud, &no_detect()).unwrap().unwrap();
+    assert_eq!(plan_cloud.card.name, "selfware-design");
+    assert_eq!(plan_cloud.card.endpoint, "https://llm.selfware.design/v1");
+
+    let mut io_lfm3_1gb = ScriptedIo::new(["2", "5"]);
+    let plan_1gb = interview(&mut io_lfm3_1gb, &no_detect()).unwrap().unwrap();
+    assert_eq!(plan_1gb.card.name, "local-lfm3-1gb");
+    assert_eq!(plan_1gb.card.model, "lfm3-1.7b-gsq-1gb");
+
+    let mut io_lfm3_slq = ScriptedIo::new(["2", "6"]);
+    let plan_slq = interview(&mut io_lfm3_slq, &no_detect()).unwrap().unwrap();
+    assert_eq!(plan_slq.card.name, "local-lfm3-slq");
+    assert_eq!(plan_slq.card.model, "lfm3-1.7b-gsq-slq");
+}
+
+#[test]
 fn nothing_branch_decline_aborts_cleanly() {
     let mut io = ScriptedIo::new(["3", "n"]);
     assert!(interview(&mut io, &no_detect()).unwrap().is_none());

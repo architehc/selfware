@@ -1510,3 +1510,87 @@ fn test_checkpoint_timestamps() {
     cp2.set_step(1);
     assert!(cp2.updated_at >= created);
 }
+
+#[test]
+fn test_repair_dangling_assistant_tool_calls_does_not_alias_prior_turn_log() {
+    use crate::agent::Agent;
+    use crate::api::types::{ToolCall, ToolFunction};
+
+    let call_turn1 = ToolCall {
+        id: "call_1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/a.rs"}"#.to_string(),
+        },
+    };
+    let mut msg_turn1 = Message::assistant("");
+    msg_turn1.tool_calls = Some(vec![call_turn1]);
+
+    // Case 1: Turn 2 calls the same tool with different arguments and crashes before logging.
+    let call_turn2_diff_args = ToolCall {
+        id: "call_2".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/b.rs"}"#.to_string(),
+        },
+    };
+    let mut msg_turn2_diff = Message::assistant("");
+    msg_turn2_diff.tool_calls = Some(vec![call_turn2_diff_args]);
+
+    let logs = vec![ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_read".to_string(),
+        arguments: r#"{"path":"src/a.rs"}"#.to_string(),
+        result: Some("contents of a.rs".to_string()),
+        success: true,
+        duration_ms: Some(5),
+    }];
+
+    let mut messages = vec![
+        Message::user("read a and b"),
+        msg_turn1.clone(),
+        Message::tool("contents of a.rs", "call_1"),
+        msg_turn2_diff,
+    ];
+    Agent::repair_dangling_assistant_tool_calls(&mut messages, &logs);
+    assert_eq!(messages.len(), 5);
+    assert!(
+        messages[4]
+            .content
+            .text_all()
+            .contains("interrupted before completion"),
+        "different-args dangling call must not alias prior log: {}",
+        messages[4].content.text_all()
+    );
+
+    // Case 2: Turn 2 calls the exact same tool+args as Turn 1 and crashes before logging.
+    let call_turn2_same_args = ToolCall {
+        id: "call_2".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/a.rs"}"#.to_string(),
+        },
+    };
+    let mut msg_turn2_same = Message::assistant("");
+    msg_turn2_same.tool_calls = Some(vec![call_turn2_same_args]);
+
+    let mut messages_same = vec![
+        Message::user("read a twice"),
+        msg_turn1,
+        Message::tool("contents of a.rs", "call_1"),
+        msg_turn2_same,
+    ];
+    Agent::repair_dangling_assistant_tool_calls(&mut messages_same, &logs);
+    assert_eq!(messages_same.len(), 5);
+    assert!(
+        messages_same[4]
+            .content
+            .text_all()
+            .contains("interrupted before completion"),
+        "second identical call without a second log entry must not alias Turn 1's log: {}",
+        messages_same[4].content.text_all()
+    );
+}

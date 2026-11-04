@@ -355,8 +355,30 @@ impl Agent {
                 .or_else(|| rest.find(';'))
                 .unwrap_or(rest.len());
             let cd_arg = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'');
-            if !cd_arg.is_empty() {
-                let p = std::path::Path::new(cd_arg);
+            let resolved_arg = if let Some(inner) = cd_arg
+                .strip_prefix("$(dirname ")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                let target = inner.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !target.contains('$') && !target.contains('`') {
+                    std::path::Path::new(target)
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            } else if cd_arg.contains('$')
+                || cd_arg.contains('`')
+                || cd_arg == "."
+                || cd_arg == "./"
+            {
+                String::new()
+            } else {
+                cd_arg.to_string()
+            };
+            if !resolved_arg.is_empty() && resolved_arg != "." {
+                let p = std::path::Path::new(&resolved_arg);
                 if p.is_absolute() {
                     dir = p.to_path_buf();
                 } else {
@@ -3006,6 +3028,8 @@ impl Agent {
             );
         }
 
+        self.persist_checkpoint_after_mutation();
+
         Ok(())
     }
 
@@ -3333,6 +3357,11 @@ impl Agent {
 
         self.push_tool_result_message(use_native_fc, &call_id, &name, &args_str, success, &result)
             .await;
+
+        // Persist the checkpoint AFTER `push_tool_result_message` so that
+        // `checkpoint.messages` always contains the `<tool_result>` matching
+        // the `checkpoint.tool_calls` entry logged during execution.
+        self.persist_checkpoint_after_mutation();
 
         // Reset no-action counter - the model attempted to use a tool
         // (even if it failed, this counts as taking action)

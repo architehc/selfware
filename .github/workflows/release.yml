@@ -170,22 +170,67 @@ jobs:
           cd dist
           zip -r ../${{ matrix.name }}.zip *
 
-      - name: Prepare archive (Windows zip)
+      - name: Prepare archive (Windows zip + hotpatch with bundled engine & model)
         if: matrix.os == 'windows-2022'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          New-Item -ItemType Directory -Force -Path dist/bin
+          New-Item -ItemType Directory -Force -Path dist/models
           Copy-Item "target/${{ matrix.target }}/release/selfware.exe" -Destination "dist/"
           Copy-Item "README.md" -Destination "dist/" -ErrorAction SilentlyContinue
           Copy-Item "LICENSE" -Destination "dist/" -ErrorAction SilentlyContinue
           Copy-Item "selfware.example.toml" -Destination "dist/selfware.toml.example" -ErrorAction SilentlyContinue
-          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}.zip"
+
+          # Bundle llama-server.exe + CPU runtime DLLs (llama.cpp b12110)
+          $llamaUrl = "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-cpu-x64.zip"
+          $llamaSha = "98901e327c252875accaf2d1bf364e10e868843b0b63468baad1aa945cdc5da2"
+          & curl.exe -fSL --retry 3 --retry-delay 2 $llamaUrl -o "llama-win.zip"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download llama.cpp Windows runtime"
+          }
+          $actualLlamaSha = (Get-FileHash -Path "llama-win.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($actualLlamaSha -ne $llamaSha) {
+            throw "llama.cpp SHA256 mismatch: expected $llamaSha, got $actualLlamaSha"
+          }
+          Expand-Archive -Path "llama-win.zip" -DestinationPath "llama-extracted" -Force
+          $runtimePatterns = @(
+            "llama-server.exe",
+            "llama-server-impl.dll",
+            "llama-common.dll",
+            "llama.dll",
+            "mtmd.dll",
+            "ggml*.dll",
+            "libomp.dll",
+            "LICENSE-LLVM-OpenMP"
+          )
+          foreach ($pattern in $runtimePatterns) {
+            Get-ChildItem -Path "llama-extracted" -Filter $pattern -Recurse | Copy-Item -Destination "dist/bin/" -Force
+          }
+
+          # 1. Lightweight Windows hotpatch archive (selfware.exe + bundled llama-server LFM3 GSQ/SLQ CPU runner)
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}-hotpatch.zip" -Force
+
+          # 2. Full Windows release archive (selfware.exe + bundled llama-server + LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf 1GB CPU model)
+          $modelUrl = "https://huggingface.co/kaitchup/LFM3-1.7B-GSQ-GGUF/resolve/main/LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
+          $modelSha = "e606ed8376b95afc09553f424560fb33e47ca95ae0caaedb33073f9b2ad4129f"
+          $modelDest = "dist/models/LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
+          & curl.exe -fSL --retry 3 --retry-delay 2 $modelUrl -o $modelDest
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
+          }
+          $actualModelSha = (Get-FileHash -Path $modelDest -Algorithm SHA256).Hash.ToLower()
+          if ($actualModelSha -ne $modelSha) {
+            throw "Model SHA256 mismatch: expected $modelSha, got $actualModelSha"
+          }
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.${{ matrix.archive }}
+          path: ${{ matrix.name }}*.${{ matrix.archive }}
           retention-days: 30
 
   sbom:
@@ -271,6 +316,7 @@ jobs:
             artifacts/selfware-macos-aarch64/selfware-macos-aarch64.zip
             artifacts/selfware-macos-x86_64/selfware-macos-x86_64.zip
             artifacts/selfware-windows-x86_64/selfware-windows-x86_64.zip
+            artifacts/selfware-windows-x86_64/selfware-windows-x86_64-hotpatch.zip
             artifacts/sbom/selfware-linux-x86_64.sbom.cdx.json
             artifacts/sbom/selfware-linux-aarch64.sbom.cdx.json
             artifacts/sbom/selfware-macos-aarch64.sbom.cdx.json
@@ -304,6 +350,7 @@ jobs:
             selfware-macos-aarch64.zip
             selfware-macos-x86_64.zip
             selfware-windows-x86_64.zip
+            selfware-windows-x86_64-hotpatch.zip
             selfware-linux-x86_64.sbom.cdx.json
             selfware-linux-aarch64.sbom.cdx.json
             selfware-macos-aarch64.sbom.cdx.json

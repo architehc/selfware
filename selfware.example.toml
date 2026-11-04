@@ -13,7 +13,7 @@ endpoint = "https://llm.selfware.design/v1"
 api_key = "EMPTY"
 model = "deepseek-v4.1-flash"
 max_tokens = 65536
-context_length = 262144
+context_length = 1048576
 
 # Optional: override per-workload thinking or completion caps:
 # [workloads.planning]

@@ -1154,7 +1154,7 @@ fn synthesize_local_bot_turn(
         && intent != "check_debt"
         && intent != "check_formal"
         && !citations.is_empty()
-        && (evidence_complete || !declarations.is_empty())
+        && evidence_complete
     {
         "structural"
     } else if intent == "check_formal" {
@@ -1292,17 +1292,17 @@ async fn chat(
                 if let Ok(doc) = server.ide.read_document(&mentioned_path) {
                     let (ev, complete) =
                         build_selection_evidence(&doc.path, &doc.content, &doc.hash, mentioned_sel);
-                    if let Ok(doc_gate) = gate_evidence_trust(&ev) {
-                        trust_gate.sources_scanned += doc_gate.sources_scanned;
-                        trust_gate.findings += doc_gate.findings;
-                        trust_gate.worst_risk_score =
-                            trust_gate.worst_risk_score.max(doc_gate.worst_risk_score);
-                        doc_evidence = ev;
-                        evidence_complete = complete;
-                        doc_snapshot = Some(doc);
-                        effective_selection = mentioned_sel;
-                        resolved_symbol = mentioned_sym;
-                    }
+                    let doc_gate =
+                        gate_evidence_trust(&ev).map_err(|err| unprocessable(err.body()))?;
+                    trust_gate.sources_scanned += doc_gate.sources_scanned;
+                    trust_gate.findings += doc_gate.findings;
+                    trust_gate.worst_risk_score =
+                        trust_gate.worst_risk_score.max(doc_gate.worst_risk_score);
+                    doc_evidence = ev;
+                    evidence_complete = complete;
+                    doc_snapshot = Some(doc);
+                    effective_selection = mentioned_sel;
+                    resolved_symbol = mentioned_sym;
                 }
             }
         }

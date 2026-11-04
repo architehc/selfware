@@ -546,3 +546,43 @@ fn permission_v_pages_the_full_diff_and_never_answers() {
     assert!(!permission_view_key(&mut prompt, KeyCode::Char('v')));
     assert_eq!(permission_key_answer(&prompt, KeyCode::Char('v')), None);
 }
+
+#[test]
+fn windows_key_release_events_are_ignored_by_is_key_and_evaluate_quit_key() {
+    use crossterm::event::{KeyEvent, KeyEventKind};
+
+    let press_q =
+        KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press);
+    let release_q = KeyEvent::new_with_kind(
+        KeyCode::Char('q'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    );
+    assert!(is_key(
+        &Event::Key(press_q),
+        KeyCode::Char('q'),
+        KeyModifiers::NONE
+    ));
+    assert!(!is_key(
+        &Event::Key(release_q),
+        KeyCode::Char('q'),
+        KeyModifiers::NONE
+    ));
+
+    // A single 'q' tap on Windows (Press followed immediately by Release) must
+    // only arm quit, never immediately quit on the Release event.
+    let mut armed_at = None;
+    assert!(matches!(
+        evaluate_quit_key(&press_q, true, &mut armed_at),
+        QuitDecision::Armed
+    ));
+    assert!(armed_at.is_some());
+    assert!(matches!(
+        evaluate_quit_key(&release_q, true, &mut armed_at),
+        QuitDecision::None
+    ));
+    assert!(
+        armed_at.is_some(),
+        "key release must not clear or consume the armed quit state"
+    );
+}

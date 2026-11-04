@@ -421,3 +421,28 @@ fn test_backspace_still_edits() {
     let (_, buf) = raw_line(&keys);
     assert_eq!(buf, "", "backspace pops the typed char");
 }
+
+#[test]
+fn test_windows_key_release_does_not_double_typed_chars() {
+    use crossterm::event::KeyEventKind;
+
+    let keys = [
+        KeyEvent::new_with_kind(KeyCode::Char('h'), KeyModifiers::NONE, KeyEventKind::Press),
+        KeyEvent::new_with_kind(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+        KeyEvent::new_with_kind(KeyCode::Char('i'), KeyModifiers::NONE, KeyEventKind::Press),
+        KeyEvent::new_with_kind(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+    ];
+    let (_, buf) = raw_line(&keys);
+    assert_eq!(
+        buf, "hi",
+        "Windows KeyEventKind::Release must not duplicate input"
+    );
+}

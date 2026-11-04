@@ -668,4 +668,20 @@ fn wrapped_selfware_api_and_agent_errors_unwrap_through_helpers() {
         reasoning_budget_exhaustion(&wrapped_reasoning),
         Some((4096, Some("retried once".into())))
     );
+
+    let wrapped_gateway = anyhow::Error::from(SelfwareError::Api(ApiError::GatewayTimeout {
+        status: 503,
+        elapsed_secs: 300,
+        detail: "ngrok gateway error ERR_NGROK_3004".into(),
+    }))
+    .context("outer layer");
+    assert!(is_gateway_timeout_error(&wrapped_gateway));
+    assert!(!is_gateway_timeout_error(&wrapped_overflow));
+
+    let wrapped_truncated = anyhow::Error::from(SelfwareError::Api(ApiError::Parse(
+        "stream ended before an accepted terminal indication (no [DONE], no finish_reason): truncated after 2 content chars / 910 reasoning chars / 0 tool call(s)".into(),
+    )))
+    .context("outer layer");
+    assert!(is_stream_truncated_error(&wrapped_truncated));
+    assert!(!is_stream_truncated_error(&wrapped_gateway));
 }

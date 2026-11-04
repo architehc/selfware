@@ -675,3 +675,73 @@ fn classify_typed_context_overflow_beats_token_counts_and_tool_words() {
                tokens. However, you requested 4035 tokens (including 200 in the tools).";
     assert_eq!(classify(msg), FailureKind::ContextOverflow);
 }
+
+#[test]
+fn rate_limit_backoff_honors_cooldown_seconds_and_circuit_breaker() {
+    let cooldown_msg = r#"HTTP 429: {"error":{"message":"Queue purged by operator; admission held for 18s cooldown.","code":"queue_purged_cooldown"}}"#;
+    assert_eq!(classify(cooldown_msg), FailureKind::RateLimited);
+    let cb_msg = "Circuit breaker is open - API is unavailable";
+    assert_eq!(classify(cb_msg), FailureKind::RateLimited);
+
+    let resolver = RateLimitBackoff::new(2000, 3);
+    let config = make_config("https://llm.selfware.design/v1");
+    let ctx_cooldown = RecoveryContext {
+        config: &config,
+        message: cooldown_msg,
+    };
+    match resolver.resolve(&ctx_cooldown) {
+        ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
+            delay_ms,
+            ..
+        })) => {
+            assert_eq!(delay_ms, 19_000);
+        }
+        other => panic!("expected Retry(19000), got {other:?}"),
+    }
+
+    let ctx_cb = RecoveryContext {
+        config: &config,
+        message: cb_msg,
+    };
+    match resolver.resolve(&ctx_cb) {
+        ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
+            delay_ms,
+            ..
+        })) => {
+            assert_eq!(delay_ms, 10_000);
+        }
+        other => panic!("expected Retry(10000), got {other:?}"),
+    }
+
+    let long_cooldown_msg = r#"HTTP 429: {"error":{"message":"Queue purged by operator; admission held for 2327s cooldown.","code":"queue_purged_cooldown"}}"#;
+    let ctx_long_cooldown = RecoveryContext {
+        config: &config,
+        message: long_cooldown_msg,
+    };
+    assert!(
+        matches!(
+            resolver.resolve(&ctx_long_cooldown),
+            ResolutionOutcome::Escalate
+        ),
+        "cooldown > 180s must escalate instead of sleeping in a futile loop"
+    );
+
+    // Gateway timeouts ("did not respond for 300s") and millisecond hints ("retry after 250ms")
+    // must NOT be misparsed as multi-minute provider cooldowns.
+    assert_eq!(
+        crate::api::client::parse_retry_after_secs_unclamped(
+            "HTTP 504: upstream server did not respond for 300s"
+        ),
+        None
+    );
+    assert_eq!(
+        crate::api::client::parse_retry_after_secs_unclamped(
+            "HTTP 429: rate limit exceeded, retry after 250ms"
+        ),
+        None
+    );
+    assert_eq!(
+        crate::api::client::parse_retry_after_secs_unclamped(r#"{"retry_after": 45}"#),
+        Some(45)
+    );
+}

@@ -667,6 +667,7 @@ fn tool_call_accumulator_interleaved_deltas_accumulate_by_index() {
 
     assert!(acc.process_delta(&d0_mid).is_none());
     assert!(acc.process_delta(&d1_mid).is_none());
+    assert!(acc.take_progress().is_some());
 
     let d0_end = serde_json::json!({
         "index": 0,
@@ -698,4 +699,7 @@ fn tool_call_accumulator_interleaved_deltas_accumulate_by_index() {
         call1.function.arguments,
         "{\"pattern\":\"ToolCallAccumulator\"}"
     );
+    // Completing deltas emit StreamChunk::ToolCall directly rather than a
+    // redundant ToolCallProgress chunk on the same SSE event.
+    assert_eq!(acc.take_progress(), None);
 }

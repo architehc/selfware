@@ -386,7 +386,7 @@ fn test_load_empty_file_uses_defaults() {
     assert_eq!(config.model, "deepseek-v4.1-flash");
     // The default model matches the built-in deepseek-v4 profile.
     assert_eq!(config.max_tokens, 65_536);
-    assert_eq!(config.context_length, 262_144);
+    assert_eq!(config.context_length, 1_048_576);
     assert_eq!(config.agent.max_call_secs, Some(3_600));
 }
 
@@ -3915,7 +3915,7 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("selfware-llm-selfware-design.toml");
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.model, "deepseek-v4.1-flash");
-    assert_eq!(config.context_length, 262_144, "profile context_length");
+    assert_eq!(config.context_length, 1_048_576, "profile context_length");
     assert_eq!(config.max_tokens, 65_536, "profile max_tokens");
     assert_eq!(config.agent.max_call_secs, Some(3_600), "profile call cap");
     // Long read-only reviews measured 91-136 turns; a pin of 100 cut them off.
@@ -3959,7 +3959,7 @@ fn test_llm_selfware_design_overrides_qwen38_flash_next_to_deepseek_v4() {
     let mut config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.model, "deepseek-v4.1-flash");
     assert_eq!(config.matched_profile.as_deref(), Some("deepseek-v4"));
-    assert_eq!(config.context_length, 262_144);
+    assert_eq!(config.context_length, 1_048_576);
     assert_eq!(config.max_tokens, 65_536);
     assert_eq!(
         config.resolve_model(None).unwrap().model,

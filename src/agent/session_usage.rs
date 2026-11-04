@@ -169,6 +169,188 @@ pub(crate) fn cost_phrase(cost_usd: Option<f64>, complete: bool, unmetered: usiz
     }
 }
 
+/// OpenRouter reference pricing per 1M tokens (USD) for input, prefix/cached
+/// input, and output tokens. Used to surface equivalent OpenRouter dollar
+/// value saved when running against a self-hosted or unmetered endpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenRouterReferencePricing {
+    pub input_per_million: f64,
+    pub cached_input_per_million: f64,
+    pub output_per_million: f64,
+}
+
+impl OpenRouterReferencePricing {
+    pub fn for_model(model: &str) -> Self {
+        let lower = model.trim().to_ascii_lowercase();
+        if lower.contains("deepseek-r1") || lower.ends_with("/r1") {
+            Self {
+                input_per_million: 0.55,
+                cached_input_per_million: 0.14,
+                output_per_million: 2.19,
+            }
+        } else if lower.contains("qwen") {
+            Self {
+                input_per_million: 0.30,
+                cached_input_per_million: 0.075,
+                output_per_million: 1.20,
+            }
+        } else if lower.contains("glm") {
+            Self {
+                input_per_million: 0.50,
+                cached_input_per_million: 0.125,
+                output_per_million: 2.00,
+            }
+        } else if lower.contains("opus") {
+            Self {
+                input_per_million: 15.00,
+                cached_input_per_million: 1.50,
+                output_per_million: 75.00,
+            }
+        } else if lower.contains("sonnet") {
+            Self {
+                input_per_million: 3.00,
+                cached_input_per_million: 0.30,
+                output_per_million: 15.00,
+            }
+        } else {
+            // Default: DeepSeek V3/V4 (`deepseek-v4.1-flash`, `deepseek-chat`, etc.)
+            Self {
+                input_per_million: 0.27,
+                cached_input_per_million: 0.07,
+                output_per_million: 1.10,
+            }
+        }
+    }
+}
+
+/// Breakdown of OpenRouter-equivalent dollar value saved and token speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenRouterSavings {
+    pub uncached_input_tokens: usize,
+    pub cached_input_tokens: usize,
+    pub output_tokens: usize,
+    pub uncached_input_usd: f64,
+    pub cached_input_usd: f64,
+    pub prefix_cache_saved_usd: f64,
+    pub output_usd: f64,
+    pub total_saved_usd: f64,
+    pub tok_per_sec: Option<f64>,
+    pub pricing: OpenRouterReferencePricing,
+}
+
+impl OpenRouterSavings {
+    pub fn compute(
+        model: &str,
+        prompt_tokens: usize,
+        cached_prompt_tokens: usize,
+        completion_tokens: usize,
+        actual_cost_usd: Option<f64>,
+        tok_per_sec: Option<f64>,
+    ) -> Self {
+        let pricing = OpenRouterReferencePricing::for_model(model);
+        let cached = cached_prompt_tokens.min(prompt_tokens);
+        let uncached = prompt_tokens.saturating_sub(cached);
+        let uncached_input_usd = (uncached as f64 / 1_000_000.0) * pricing.input_per_million;
+        let cached_input_usd = (cached as f64 / 1_000_000.0) * pricing.cached_input_per_million;
+        let full_uncached_input_usd =
+            (prompt_tokens as f64 / 1_000_000.0) * pricing.input_per_million;
+        let prefix_cache_saved_usd =
+            (full_uncached_input_usd - (uncached_input_usd + cached_input_usd)).max(0.0);
+        let output_usd = (completion_tokens as f64 / 1_000_000.0) * pricing.output_per_million;
+        let openrouter_equiv_usd = uncached_input_usd + cached_input_usd + output_usd;
+        let total_saved_usd = (openrouter_equiv_usd - actual_cost_usd.unwrap_or(0.0)).max(0.0);
+        Self {
+            uncached_input_tokens: uncached,
+            cached_input_tokens: cached,
+            output_tokens: completion_tokens,
+            uncached_input_usd,
+            cached_input_usd,
+            prefix_cache_saved_usd,
+            output_usd,
+            total_saved_usd,
+            tok_per_sec: tok_per_sec.filter(|v| v.is_finite() && *v >= 0.1),
+            pricing,
+        }
+    }
+
+    /// Detailed line for `RunSummary`, `/cost`, and `/quit`.
+    pub fn summary_line(&self) -> String {
+        let speed_clause = match self.tok_per_sec {
+            Some(tps) => format!(" · speed: {tps:.1} tok/s"),
+            None => String::new(),
+        };
+        format!(
+            "openrouter value saved: ~${:.4} (${:.4} input + ${:.4} prefix-cache [saved ${:.4}] + ${:.4} output @ ${:.2}/${:.2}/${:.2}/1M){}",
+            self.total_saved_usd,
+            self.uncached_input_usd,
+            self.cached_input_usd,
+            self.prefix_cache_saved_usd,
+            self.output_usd,
+            self.pricing.input_per_million,
+            self.pricing.cached_input_per_million,
+            self.pricing.output_per_million,
+            speed_clause,
+        )
+    }
+
+    /// Compact badge for the interactive status bar.
+    pub fn status_bar_badge(&self) -> String {
+        let saved = if self.total_saved_usd >= 0.01 {
+            format!("saved ~${:.2} OR", self.total_saved_usd)
+        } else {
+            format!("saved ~${:.4} OR", self.total_saved_usd)
+        };
+        match self.tok_per_sec {
+            Some(tps) => format!("{saved} · {tps:.1} tok/s"),
+            None => saved,
+        }
+    }
+}
+
+/// Measure prefix-cached prompt tokens and average decode speed (`tok/s`) from
+/// the API client's recorded call shapes and attempts.
+pub(crate) fn measure_cache_and_speed(
+    shapes: &[crate::api::usage::CallShape],
+    attempts: &[crate::api::usage::UsageAttempt],
+) -> (usize, Option<f64>) {
+    let reported_cached: usize = attempts
+        .iter()
+        .filter_map(|a| a.usage.as_ref())
+        .filter_map(|u| u.prompt_tokens_details.as_ref())
+        .filter_map(|d| d.cached_tokens)
+        .sum();
+    let cached_prompt_tokens = if reported_cached > 0 {
+        reported_cached
+    } else {
+        shapes
+            .windows(2)
+            .map(|pair| {
+                let (prev, curr) = (pair[0].prompt_tokens, pair[1].prompt_tokens);
+                if prev > 0 && curr >= prev * 3 / 4 {
+                    prev.min(curr) as usize
+                } else {
+                    0
+                }
+            })
+            .sum()
+    };
+    let (total_comp, total_ms) = shapes
+        .iter()
+        .filter(|s| s.completion_tokens > 0 && s.elapsed_ms > 0)
+        .fold((0u64, 0u64), |(c, ms), s| {
+            (
+                c.saturating_add(s.completion_tokens),
+                ms.saturating_add(s.elapsed_ms),
+            )
+        });
+    let tok_per_sec = if total_comp > 0 && total_ms > 0 {
+        Some(total_comp as f64 / (total_ms as f64 / 1000.0))
+    } else {
+        None
+    };
+    (cached_prompt_tokens, tok_per_sec)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/agent/session_usage/session_usage_test.rs"]
 mod tests;

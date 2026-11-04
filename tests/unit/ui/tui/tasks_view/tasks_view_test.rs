@@ -699,3 +699,43 @@ fn the_agent_list_is_the_agents_projection_with_state_time_tasks_tokens_and_reso
     let mine = rows.iter().find(|r| r.id == "main-0a1b2c3d").unwrap();
     assert_eq!(mine.state, "working (process ended)");
 }
+
+#[test]
+fn windows_key_release_does_not_double_editor_input() {
+    use crossterm::event::KeyEventKind;
+
+    let inputs = inputs();
+    let (control, _) = control_with(inputs.live.clone());
+    let mut pane = TasksPane::default();
+    pane.nav.push(Level::Task {
+        agent: "main".into(),
+        id: "01J9DONETASK0002".into(),
+    });
+    pane.on_key(key(KeyCode::Char('e')), &inputs, &control);
+    pane.on_key(
+        KeyEvent::new_with_kind(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+        &inputs,
+        &control,
+    );
+    for c in ['!', '?'] {
+        pane.on_key(
+            KeyEvent::new_with_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press),
+            &inputs,
+            &control,
+        );
+        pane.on_key(
+            KeyEvent::new_with_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Release),
+            &inputs,
+            &control,
+        );
+    }
+    let action = pane.on_key(key(KeyCode::Enter), &inputs, &control);
+    assert_eq!(
+        action,
+        Some(PaneAction::SubmitTask("fix the parser!?".into()))
+    );
+}

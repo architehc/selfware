@@ -154,6 +154,26 @@ pub(crate) fn escape_controls(text: &str) -> String {
         .join("\n")
 }
 
+/// Single-line variant of [`escape_controls`] for status bars, spinners, step
+/// headers, and tool summaries where a literal `\n` or `\r` would break `\r\x1b[2K`
+/// in-place line clearing and pollute terminal scrollback.
+pub(crate) fn escape_controls_single_line(text: &str) -> String {
+    let collapsed: String = text
+        .chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::safety::confirm_view::sanitize_line(&collapsed, usize::MAX)
+}
+
 /// Remove ANSI CSI sequences and OSC sequences (hyperlinks) — for tests and
 /// link-text comparison.
 pub(crate) fn strip_ansi(s: &str) -> String {
@@ -460,9 +480,85 @@ pub(crate) fn compact_count(n: usize) -> String {
     }
 }
 
+/// High-resolution compact count that preserves one decimal place up to 1M
+/// (`842`, `1.2k`, `12.4k`, `145.8k`, `1.0M`), so live streaming counters
+/// visibly advance every ~100 tokens even past 10k.
+pub(crate) fn compact_count_live(n: usize) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// Extract a clean, single-line tail snippet from a streaming reasoning buffer
+/// so the user can see the latest thought being streamed.
+pub(crate) fn extract_reasoning_tail(reasoning: &str) -> Option<String> {
+    let last_line = reasoning
+        .lines()
+        .rev()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(['#', '*', '-', '>', '`', ' '])
+                .trim()
+        })
+        .find(|l| !l.is_empty())?;
+    let cleaned: String = last_line
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+    const MAX_SNIPPET_CHARS: usize = 48;
+    let char_count = cleaned.chars().count();
+    if char_count <= MAX_SNIPPET_CHARS {
+        Some(cleaned)
+    } else {
+        let mut s: String = cleaned.chars().take(MAX_SNIPPET_CHARS).collect();
+        s = s.trim_end().to_string();
+        s.push('…');
+        Some(s)
+    }
+}
+
 /// The one-line reasoning status shown outside `--verbose`.
 pub(crate) fn reasoning_indicator(chars: usize) -> String {
     format!("Thinking… ({} chars)", compact_count(chars))
+}
+
+/// Live reasoning status with token count, streaming speed (`tok/s`), and
+/// latest reasoning snippet so the user always sees active token reception.
+pub(crate) fn reasoning_live_indicator(
+    chars: usize,
+    tokens: usize,
+    exact_usage: bool,
+    tok_per_sec: Option<f64>,
+    reasoning_tail: Option<&str>,
+) -> String {
+    let mut out = String::from("Thinking…");
+    if tokens > 0 {
+        let approx = if exact_usage { "" } else { "~" };
+        out.push_str(&format!(
+            " · {approx}{} tokens ({} chars)",
+            compact_count_live(tokens),
+            compact_count_live(chars)
+        ));
+    } else {
+        out.push_str(&format!(" ({} chars)", compact_count_live(chars)));
+    }
+    if let Some(tps) = tok_per_sec.filter(|v| v.is_finite() && *v >= 0.1) {
+        out.push_str(&format!(" · {tps:.1} tok/s"));
+    }
+    if let Some(snippet) = reasoning_tail.and_then(extract_reasoning_tail) {
+        out.push_str(&format!(" — {snippet}"));
+    }
+    out
 }
 
 /// One-line summary of a finished reasoning block (non-streaming paths and

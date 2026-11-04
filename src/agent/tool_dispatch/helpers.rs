@@ -761,8 +761,35 @@ pub(crate) fn bounded_lines(lines: &[String], max: usize) -> Vec<String> {
     out
 }
 
+/// True when `haystack` contains `marker`, requiring a non-word boundary before
+/// `marker` whenever `marker` begins with an ASCII alphanumeric character so
+/// command prefixes like `"cp "`, `"mv "`, `"rm "`, `"patch "` do not match
+/// inside longer words like `"mcp "`, `"llvm "`, `"swarm "`, or `"dispatch "`.
+pub(crate) fn contains_shell_command_marker(haystack: &str, marker: &str) -> bool {
+    let requires_word_boundary = marker
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric());
+    if !requires_word_boundary {
+        return haystack.contains(marker);
+    }
+    let bytes = haystack.as_bytes();
+    for (pos, _) in haystack.match_indices(marker) {
+        if pos == 0 {
+            return true;
+        }
+        let prev = bytes[pos - 1];
+        if !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'-') {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn has_file_redirect(command: &str) -> bool {
-    let chars: Vec<char> = command.chars().collect();
+    let stripped =
+        crate::safety::checker::validation::strip_non_shell_redirect_heredoc_bodies(command);
+    let chars: Vec<char> = stripped.chars().collect();
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
@@ -822,6 +849,8 @@ pub(crate) fn has_file_redirect(command: &str) -> bool {
 /// command ends and the next begins — they did, and the observer's naive
 /// `split('|')` reintroduced the very bug this function was written to fix.
 pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
+    let (stripped, _) = crate::safety::checker::validation::strip_non_shell_heredoc_bodies(command);
+    let command = stripped.as_ref();
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -987,7 +1016,7 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
     ];
     if mutating_markers
         .iter()
-        .any(|marker| normalized.contains(marker))
+        .any(|marker| contains_shell_command_marker(&normalized, marker))
     {
         return false;
     }
@@ -1042,6 +1071,17 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
             .iter()
             .any(|word| word.starts_with("-l") || *word == "-d" || *word == "-m");
         return has_query && !has_mutating;
+    }
+
+    if words.first().copied() == Some("selfware")
+        && words[1..].iter().any(|word| {
+            matches!(
+                *word,
+                "--help" | "-h" | "--version" | "-V" | "--validate-config" | "help"
+            )
+        })
+    {
+        return true;
     }
 
     let read_only_prefixes = [
@@ -1134,6 +1174,8 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "swift test",
         "lake test",
         "which",
+        "command -v",
+        "type",
         "echo",
         "env",
         "printenv",
@@ -1683,7 +1725,8 @@ fn segment_is_output_neutral(segment: &str) -> bool {
         | "sleep" => true,
         "echo" => {
             let lower = trimmed.to_lowercase();
-            !lower.contains('$')
+            let without_exit_status = lower.replace("$?", "").replace("${?}", "");
+            !without_exit_status.contains('$')
                 && !lower.contains('`')
                 && !lower.contains('\\')
                 && !["ok", "pass", "fail", "result", "error", "success"]
@@ -1806,6 +1849,18 @@ fn failed_count_before(lower: &str, abs: usize) -> Option<u64> {
     if start == abs - 1 {
         return None;
     }
+    // The digits must start at a token boundary (start of string, whitespace,
+    // or punctuation like `(`, `[`, `,`, `;`). If preceded by `=` or an
+    // identifier character (e.g. `passed=14 failed=0`), `14` belongs to
+    // `passed=14`, not `failed`.
+    if start > 0
+        && !matches!(
+            bytes[start - 1],
+            b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b',' | b';'
+        )
+    {
+        return None;
+    }
     lower[start..abs - 1].parse().ok()
 }
 
@@ -1823,6 +1878,60 @@ fn tallies_before(lower: &str, word: &str) -> Vec<u64> {
     counts
 }
 
+fn strip_ansi_escapes(text: &str) -> String {
+    if !text.contains('\x1b') {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && bytes.get(i + 1) == Some(&b'[') {
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn kv_tally_positive(lower: &str, key_prefix: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find(key_prefix) {
+        let abs = from + rel;
+        let boundary_ok = abs == 0
+            || matches!(
+                bytes[abs - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b',' | b';'
+            );
+        if boundary_ok {
+            let val_start = abs + key_prefix.len();
+            let mut val_end = val_start;
+            while val_end < bytes.len() && bytes[val_end].is_ascii_digit() {
+                val_end += 1;
+            }
+            if val_end > val_start
+                && lower[val_start..val_end]
+                    .parse::<u64>()
+                    .is_ok_and(|n| n > 0)
+            {
+                return true;
+            }
+        }
+        from = abs + 1;
+    }
+    false
+}
+
 /// The runner's captured output inside a tool result: the `stdout`,
 /// `stderr` and `output` strings of a JSON-object result, joined by
 /// newlines. Line-anchored markers (unittest's lone `OK`, go's `ok  \tpkg`)
@@ -1830,16 +1939,20 @@ fn tallies_before(lower: &str, word: &str) -> Vec<u64> {
 /// and unittest prints its summary on STDERR, so both streams are read. A
 /// result that is not such an object is read as raw text.
 fn captured_runner_output(result: &str) -> String {
-    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(result) {
+    let raw = if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(result) {
         let streams: Vec<&str> = ["stdout", "stderr", "output"]
             .iter()
             .filter_map(|key| map.get(*key).and_then(Value::as_str))
             .collect();
         if !streams.is_empty() {
-            return streams.join("\n");
+            streams.join("\n")
+        } else {
+            result.to_string()
         }
-    }
-    result.to_string()
+    } else {
+        result.to_string()
+    };
+    strip_ansi_escapes(&raw)
 }
 
 /// The `N` in a Python unittest `Ran N test(s) in …` summary line.
@@ -1918,6 +2031,9 @@ pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
     if ["failed", "failing"]
         .iter()
         .any(|word| tallies_before(&lower, word).iter().any(|&n| n > 0))
+        || ["failed=", "failures="]
+            .iter()
+            .any(|kv| kv_tally_positive(&lower, kv))
     {
         return true;
     }
@@ -2263,14 +2379,30 @@ fn runner_status_is_authoritative(segments: &[(String, String)], runner_idx: usi
 /// scanning the whole command credited prose like `echo python3 -c 'assert
 /// …'` — the echo prints the text, nothing executes (external review
 /// finding).
+fn segment_is_pre_runner_setup(segment: &str) -> bool {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    match words.first().copied() {
+        Some(
+            "cd" | "pushd" | "popd" | "export" | "set" | "unset" | "chmod" | "echo" | "printf"
+            | "true" | ":",
+        ) => true,
+        Some("bash" | "sh" | "zsh") => words.get(1).copied() == Some("-n"),
+        _ => false,
+    }
+}
+
 fn script_runner_status_is_authoritative(segments: &[(String, String)]) -> bool {
-    let all_authoritative = segments
-        .iter()
-        .all(|(op, _)| op.is_empty() || op.trim() == "&&");
-    all_authoritative
-        && segments
-            .iter()
-            .any(|(_, segment)| segment_runs_test_script(segment))
+    segments.iter().enumerate().any(|(i, (_, segment))| {
+        segment_runs_test_script(segment)
+            && runner_status_is_authoritative(segments, i)
+            && segments[..=i].iter().enumerate().all(|(j, (op, _))| {
+                op.is_empty()
+                    || op.trim() == "&&"
+                    || (op.trim() == ";"
+                        && j > 0
+                        && segment_is_pre_runner_setup(&segments[j - 1].1))
+            })
+    })
 }
 
 /// Does this single segment execute a test script, with the interpreter (or
@@ -2298,7 +2430,7 @@ fn segment_runs_test_script(segment: &str) -> bool {
         return shell_command_runs_test_script(segment)
             || segment_runs_inline_assert(segment, basename);
     }
-    (word.starts_with("./") || word.starts_with('/')) && Agent::gate_path_is_test(word)
+    (word.starts_with("./") || word.starts_with('/')) && path_is_test_or_verify_script(word)
 }
 
 /// Inline-code fallback for VERIFICATION credit only: an interpreter in
@@ -2388,16 +2520,20 @@ fn deliverable_check_status_is_authoritative(segments: &[(String, String)]) -> b
 /// All-`&&` deliverable chain WITHOUT any real check: the run exited 0 but
 /// nothing about its output was asserted → smoke tier.
 fn deliverable_smoke_status_is_authoritative(segments: &[(String, String)]) -> bool {
-    let all_authoritative = segments
+    !segments
         .iter()
-        .all(|(op, _)| op.is_empty() || op.trim() == "&&");
-    all_authoritative
-        && segments
-            .iter()
-            .any(|(_, segment)| segment_runs_deliverable_script(segment))
-        && !segments
-            .iter()
-            .any(|(_, segment)| segment_is_expected_result_checker(segment))
+        .any(|(_, segment)| segment_is_expected_result_checker(segment))
+        && segments.iter().enumerate().any(|(i, (_, segment))| {
+            segment_runs_deliverable_script(segment)
+                && runner_status_is_authoritative(segments, i)
+                && segments[..=i].iter().enumerate().all(|(j, (op, _))| {
+                    op.is_empty()
+                        || op.trim() == "&&"
+                        || (op.trim() == ";"
+                            && j > 0
+                            && segment_is_pre_runner_setup(&segments[j - 1].1))
+                })
+        })
 }
 
 /// Is this pipeline segment a real check construct — a predicate over the
@@ -2446,7 +2582,7 @@ fn shell_path_is_deliverable_script(path: &str) -> bool {
         .rsplit_once('.')
         .map(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext))
         .unwrap_or(false);
-    has_script_ext && !Agent::gate_path_is_test(path)
+    has_script_ext && !path_is_test_or_verify_script(path)
 }
 
 /// Interpreter-in-command-position scan for a DELIVERABLE script: the first
@@ -2741,18 +2877,35 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
                         .rsplit_once('.')
                         .map(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext))
                         .unwrap_or(false);
-                if looks_like_path && Agent::gate_path_is_test(arg) {
+                if looks_like_path && path_is_test_or_verify_script(arg) {
                     return true;
                 }
                 break;
             }
         } else if (token.starts_with("./") || token.starts_with('/'))
-            && Agent::gate_path_is_test(token)
+            && path_is_test_or_verify_script(token)
         {
             return true;
         }
     }
     false
+}
+
+fn path_is_test_or_verify_script(path: &str) -> bool {
+    if Agent::gate_path_is_test(path) {
+        return true;
+    }
+    let lower = path.trim_matches('"').to_ascii_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    let stem = basename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(basename);
+    stem == "verify"
+        || stem.starts_with("verify_")
+        || stem.starts_with("verify-")
+        || stem.ends_with("_verify")
+        || stem.ends_with("-verify")
 }
 
 pub(crate) fn command_contains_at_boundary(command: &str, prefix: &str) -> bool {

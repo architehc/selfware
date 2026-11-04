@@ -250,9 +250,10 @@ impl DiskManager {
                 }
                 let path = entry.path();
 
-                // Skip already compressed files, advisory locks, and temp files
+                // Only compress primary checkpoint JSON files (never .hmac_key,
+                // .bak, .jsonl delta logs, .lock, .tmp, or already compressed .zst).
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext == "zst" || ext == "lock" || ext == "tmp" {
+                if ext != "json" {
                     continue;
                 }
 

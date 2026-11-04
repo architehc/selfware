@@ -1103,7 +1103,10 @@ impl Agent {
                             .iter()
                             .find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
                     })
-                    .map(|s| s.chars().take(56).collect::<String>());
+                    .map(|s| {
+                        let flat = crate::output::live::escape_controls_single_line(&s);
+                        flat.chars().take(56).collect::<String>()
+                    });
                 let extra = if tool_calls.len() > 1 {
                     format!(" (+{} more)", tool_calls.len() - 1)
                 } else {
@@ -1230,7 +1233,7 @@ impl Agent {
                     )
                 );
             }
-            if self.config.agent.streaming && !self.force_non_streaming {
+            if self.config.agent.streaming && !self.force_non_streaming && reasoning_chars == 0 {
                 self.force_non_streaming = true;
                 info!(
                     "Empty response — retrying the next turn with streaming disabled \
@@ -1246,6 +1249,7 @@ impl Agent {
         // Any response that delivered content or a tool call ends the empty
         // streak — progress happened even if the next turn is empty again.
         self.consecutive_empty_responses = 0;
+        self.force_non_streaming = false;
 
         // Every tool call in the response was malformed (no parser accepted
         // it): the turn is neither a final answer nor a no-action turn. Answer
@@ -2177,7 +2181,12 @@ impl Agent {
                 .filter(|m| m.role == "assistant")
                 .filter_map(|m| m.tool_calls.as_ref())
                 .flatten()
-                .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name));
+                .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name))
+            || self.current_checkpoint.as_ref().is_some_and(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    tc.success && super::tool_dispatch::tool_call_writes_file(&tc.tool_name)
+                })
+            });
 
         let terminal_threshold = if has_any_file_write { 20 } else { 8 };
         let warning_threshold = if has_any_file_write { 15 } else { 4 };
@@ -2690,7 +2699,7 @@ fn shell_command_is_file_write_intent(command: &str) -> bool {
     ];
     content_write_markers
         .iter()
-        .any(|marker| normalized.contains(marker))
+        .any(|marker| super::tool_dispatch::contains_shell_command_marker(&normalized, marker))
 }
 
 #[cfg(test)]

@@ -997,6 +997,13 @@ pub async fn run() -> Result<()> {
     }
 
     apply_session_model_overrides(&cli, &mut config)?;
+    if crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
+        if let Err(e) =
+            crate::boot::model::ensure_background_boot_server_for_model(Some(&config.model)).await
+        {
+            tracing::warn!("Failed to start bundled local boot server: {e:#}");
+        }
+    }
     config.discover_sglang_capabilities().await;
 
     // Tell the tokenizer which model is configured so it can pick a matching
@@ -2752,7 +2759,14 @@ async fn handle_command(
 
             preflight_llm_endpoint(&config).await?;
             let mut agent = Agent::new(config).await?;
-            agent.analyze(&path).await?;
+            let run_result = agent.analyze(&path).await;
+            if !quiet {
+                println!(
+                    "{}",
+                    render_text_run_summary(&agent.run_summary(), &run_result)
+                );
+            }
+            run_result?;
         }
 
         Commands::Review { path, scope, json } => {
@@ -4361,28 +4375,57 @@ fn without_task_failed_prefix(error: &str) -> &str {
 /// lines a user actually reads after a run — outcome, iterations, files
 /// changed, verification, tokens/cost. Printed for completed AND failed
 /// runs (a bare `✗ Task failed: MAX_ITERATIONS` explained nothing).
+/// CLI flag suffix to preserve the active execution mode on a copy-pasteable
+/// `selfware resume <id>` / `selfware --continue` command line.
+pub(crate) fn resume_mode_flag(mode: crate::config::ExecutionMode) -> &'static str {
+    use crate::config::ExecutionMode;
+    match mode {
+        ExecutionMode::Normal => "",
+        ExecutionMode::AutoEdit => " --mode auto-edit",
+        ExecutionMode::Yolo => " --yolo",
+        ExecutionMode::Daemon => " --daemon",
+    }
+}
+
 /// The line(s) a text-mode `run` / `-p` / resume prints on stderr after the
 /// run summary when the run returned an error: `✗ Task failed: …` for a
 /// failure, or — for a user interrupt / SIGTERM — a plain note plus the
 /// resume hint the REPL prints on `/quit` (a saved checkpoint is what makes
 /// the run resumable). The caller then marks the failure reported so the
 /// process edge (`src/main.rs`) does not print it again as `Error: …`.
+#[cfg(test)]
 fn render_run_end_notice(
     end: crate::errors::RunEnd,
     error: &str,
     resume_id: Option<&str>,
 ) -> String {
+    render_run_end_notice_with_mode(end, error, resume_id, crate::config::ExecutionMode::Normal)
+}
+
+fn render_run_end_notice_with_mode(
+    end: crate::errors::RunEnd,
+    error: &str,
+    resume_id: Option<&str>,
+    mode: crate::config::ExecutionMode,
+) -> String {
     use crate::errors::RunEnd;
+    let flag = resume_mode_flag(mode);
     let what = match end {
         RunEnd::Interrupted => "Task interrupted",
         RunEnd::Terminated => "Task terminated (SIGTERM)",
         RunEnd::Failed | RunEnd::Completed => {
-            return format!("✗ Task failed: {}", without_task_failed_prefix(error))
+            let base = format!("✗ Task failed: {}", without_task_failed_prefix(error));
+            return match resume_id {
+                Some(id) if !flag.is_empty() => format!(
+                    "{base}\nResume later with:\n  selfware resume {id}{flag}\n  selfware --continue{flag}"
+                ),
+                _ => base,
+            };
         }
     };
     match resume_id {
         Some(id) => {
-            format!("{what}. Resume later with:\n  selfware resume {id}\n  selfware --continue")
+            format!("{what}. Resume later with:\n  selfware resume {id}{flag}\n  selfware --continue{flag}")
         }
         None => format!("{what}."),
     }
@@ -4489,6 +4532,7 @@ fn render_text_run_summary(summary: &crate::agent::RunSummary, run_result: &Resu
 /// [`render_run_end_notice`]) and mark it reported.
 fn report_text_run_error(agent: &Agent, e: &anyhow::Error) {
     let end = crate::errors::RunEnd::classify_error(e);
+    let mode = agent.execution_mode();
     let resume_id = agent
         .current_checkpoint
         .as_ref()
@@ -4497,13 +4541,16 @@ fn report_text_run_error(agent: &Agent, e: &anyhow::Error) {
             matches!(
                 end,
                 crate::errors::RunEnd::Interrupted | crate::errors::RunEnd::Terminated
-            )
+            ) || mode != crate::config::ExecutionMode::Normal
         });
     // Defense-in-depth: upstream error bodies can echo the API key
     // (redacted at the source in http_status_error) — scrub again before
     // printing. `{e:#}` keeps the cause chain `main` used to print.
     let error = crate::observability::telemetry::redact_secrets(&format!("{e:#}"));
-    eprintln!("{}", render_run_end_notice(end, &error, resume_id));
+    eprintln!(
+        "{}",
+        render_run_end_notice_with_mode(end, &error, resume_id, mode)
+    );
     crate::mark_failure_reported();
 }
 
@@ -4837,6 +4884,9 @@ fn render_run_summary_for(
         lines.push("cost: not reported by this endpoint".to_string());
     } else if !summary.cost_complete {
         lines.push(format!("billing incomplete: {} attempts without reported cost; restored or estimated usage may also lack billing provenance", summary.unmetered_attempts));
+    }
+    if let Some(ref savings) = summary.openrouter_savings {
+        lines.push(savings.clone());
     }
     if let Some(latency) = &summary.call_latency {
         let slowest = latency

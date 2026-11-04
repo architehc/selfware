@@ -15,6 +15,14 @@ fn test_project_type_detect_go() {
 }
 
 #[test]
+fn test_python_check_command_compiles_directory() {
+    assert_eq!(
+        ProjectType::Python.check_command(),
+        vec!["python3", "-m", "compileall", "-q", "."]
+    );
+}
+
+#[test]
 fn test_project_status_from_results() {
     assert_eq!(
         ProjectStatus::from_results(true, 10, 0, 100),

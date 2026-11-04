@@ -618,6 +618,45 @@ async fn test_plan_empty_response_latches_non_streaming_then_breaks() {
     server.stop().await;
 }
 
+/// When a streamed response delivers reasoning tokens (`reasoning_chars > 0`)
+/// but empty visible content (as in Turn 5 of `55216ebe-efea-4524-af0d-ac0eedc6737c`),
+/// SSE streaming is working and `force_non_streaming` must NOT be latched —
+/// otherwise the retry sends a non-streaming request that proxy tunnels
+/// (e.g. ngrok) cut at 300s with `ERR_NGROK_3004`.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_empty_content_with_reasoning_does_not_latch_non_streaming() {
+    let server = MockLlmServer::builder()
+        .with_reasoning_response("", "ages： CHAR:, ,")
+        .with_response("Recovered on next streamed call.")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), true);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages.push(Message::user("Hello"));
+
+    let first = agent.plan().await;
+    assert!(first.is_ok());
+    assert!(!first.unwrap());
+    assert_eq!(agent.consecutive_empty_responses, 1);
+    assert!(
+        !agent.force_non_streaming,
+        "when SSE delivered reasoning tokens, force_non_streaming must remain false"
+    );
+
+    // Next turn succeeds and resets consecutive_empty_responses.
+    let second = agent.plan().await;
+    assert!(second.is_ok());
+    assert_eq!(agent.consecutive_empty_responses, 0);
+    assert!(!agent.force_non_streaming);
+
+    server.stop().await;
+}
+
 /// `plan` with a 503 error returns an error whose message contains the
 /// status or error context.  We queue many errors to exhaust retries.
 #[tokio::test]

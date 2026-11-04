@@ -138,6 +138,9 @@ impl PhiArenaPane {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Option<PhiArenaAction> {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return None;
+        }
         if key.code == KeyCode::Esc
             || key.code == KeyCode::Char('q')
             || key.code == KeyCode::Char('Q')
@@ -742,5 +745,14 @@ mod tests {
         tiny_term
             .draw(|frame| render_phi_arena_modal(frame, frame.area(), &mut pane))
             .unwrap();
+
+        // Windows KeyEventKind::Release is ignored
+        assert!(pane
+            .on_key(KeyEvent::new_with_kind(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Release,
+            ))
+            .is_none());
     }
 }

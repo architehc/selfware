@@ -2825,7 +2825,31 @@ impl CheckpointManager {
 
     /// Attempt to load and verify a checkpoint from a specific path.
     fn try_load_from_path(&self, path: &std::path::Path) -> Result<TaskCheckpoint> {
-        let json = read_regular_checkpoint_file(path, "checkpoint")?;
+        let json = if path.extension().and_then(|s| s.to_str()) == Some("zst") {
+            let file = open_regular_checkpoint_file(path, "compressed checkpoint")?;
+            let mut compressed = Vec::new();
+            file.take(MAX_CHECKPOINT_FILE_BYTES + 1)
+                .read_to_end(&mut compressed)
+                .with_context(|| format!("Failed to read compressed checkpoint {:?}", path))?;
+            if compressed.len() as u64 > MAX_CHECKPOINT_FILE_BYTES {
+                bail!(
+                    "Compressed checkpoint {:?} exceeds maximum size limit",
+                    path
+                );
+            }
+            let decompressed = zstd::decode_all(&compressed[..])
+                .with_context(|| format!("Failed to decompress checkpoint {:?}", path))?;
+            String::from_utf8(decompressed)
+                .with_context(|| format!("Decompressed checkpoint {:?} is not valid UTF-8", path))?
+        } else if !path.exists() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let zst_path = path.with_extension("chk.zst");
+            if zst_path.exists() {
+                return self.try_load_from_path(&zst_path);
+            }
+            read_regular_checkpoint_file(path, "checkpoint")?
+        } else {
+            read_regular_checkpoint_file(path, "checkpoint")?
+        };
 
         // Try to parse as an envelope first (new format with integrity check)
         if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(&json) {
@@ -2979,18 +3003,22 @@ impl CheckpointManager {
         for entry in fs::read_dir(&self.checkpoints_dir)? {
             let entry = entry?;
             let path = entry.path();
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let task_id_opt = file_name.strip_suffix(".json").or_else(|| {
+                file_name
+                    .strip_suffix(".chk.zst")
+                    .filter(|&id| !self.checkpoints_dir.join(format!("{id}.json")).exists())
+            });
 
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Some(task_id) = task_id_opt {
                 if let Ok(mut checkpoint) = self.try_load_from_path(&path) {
-                    if let Some(task_id) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Err(e) = self.apply_deltas(task_id, &mut checkpoint) {
-                            tracing::warn!(
-                                "Skipping checkpoint {:?} due to invalid deltas: {}",
-                                path,
-                                e
-                            );
-                            continue;
-                        }
+                    if let Err(e) = self.apply_deltas(task_id, &mut checkpoint) {
+                        tracing::warn!(
+                            "Skipping checkpoint {:?} due to invalid deltas: {}",
+                            path,
+                            e
+                        );
+                        continue;
                     }
                     summaries.push(checkpoint.to_summary());
                 }

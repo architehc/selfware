@@ -568,6 +568,28 @@ pub fn is_context_overflow_error(e: &anyhow::Error) -> bool {
     })
 }
 
+/// True when the error chain carries a proxy/tunnel gateway timeout
+/// ([`ApiError::GatewayTimeout`], e.g. ngrok `ERR_NGROK_3004` cutting a silent
+/// connection after 300s).
+pub fn is_gateway_timeout_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| matches!(as_api_error(cause), Some(ApiError::GatewayTimeout { .. })))
+}
+
+/// True when a streamed response produced SSE chunks (`content`, `reasoning`,
+/// or `tool_calls`) and was then cut mid-stream before reaching `[DONE]` or
+/// `finish_reason`. Because SSE streaming already worked on this call, falling
+/// back to a non-streaming request is counterproductive (and on proxy tunnels
+/// like ngrok will sit silent until the 300s gateway cut).
+pub fn is_stream_truncated_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| match as_api_error(cause) {
+        Some(ApiError::Parse(msg)) => {
+            msg.contains("stream ended before an accepted terminal indication")
+        }
+        _ => false,
+    })
+}
+
 /// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
 pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
     // Walk the whole cause chain: anyhow::Context-wrapped errors hide the

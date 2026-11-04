@@ -2181,3 +2181,94 @@ fn malformed_deepseek_and_kimi_arguments_produce_rejections_not_empty_args() {
         Some("file_write")
     );
 }
+
+#[test]
+fn multiline_json_string_arguments_parse_across_all_syntax_families() {
+    let xml_call = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"HARNESS_OPERATOR_GUIDE.md\", \"content\": \"# Guide\nLine 2\twith tab\n<tool>\n<name>example</name>\nLine 3\"}</arguments>\n</tool>";
+    let res = parse_tool_calls(xml_call);
+    assert!(res.rejections.is_empty(), "{res:?}");
+    assert_eq!(res.tool_calls.len(), 1, "{res:?}");
+    assert_eq!(res.tool_calls[0].tool_name, "file_write");
+    assert_eq!(
+        res.tool_calls[0].arguments["path"],
+        "HARNESS_OPERATOR_GUIDE.md"
+    );
+    assert_eq!(
+        res.tool_calls[0].arguments["content"],
+        "# Guide\nLine 2\twith tab\n<tool>\n<name>example</name>\nLine 3"
+    );
+
+    // Multi-line shell heredoc with literal newlines and shell line continuation `\` + newline
+    let shell_call = "<tool>\n<name>shell_exec</name>\n<arguments>{\n  \"command\": \"cat <<'EOF' > guide.md\nhello \\\nworld\nEOF\"\n}</arguments>\n</tool>";
+    let res_shell = parse_tool_calls(shell_call);
+    assert!(res_shell.rejections.is_empty(), "{res_shell:?}");
+    assert_eq!(res_shell.tool_calls.len(), 1, "{res_shell:?}");
+    assert_eq!(
+        res_shell.tool_calls[0].arguments["command"],
+        "cat <<'EOF' > guide.md\nhello \\\nworld\nEOF"
+    );
+
+    // <tool_call>{JSON}</tool_call> and <function=name>{JSON}</function> with raw newlines
+    let tc_call =
+        "<tool_call>\n{\"name\": \"file_write\", \"arguments\": {\"path\": \"a.md\", \"content\": \"alpha\nbeta\"}}\n</tool_call>";
+    let res_tc = parse_tool_calls(tc_call);
+    assert!(res_tc.rejections.is_empty(), "{res_tc:?}");
+    assert_eq!(res_tc.tool_calls.len(), 1);
+    assert_eq!(res_tc.tool_calls[0].arguments["content"], "alpha\nbeta");
+
+    let fn_call =
+        "<function=file_write>{\"path\": \"a.md\", \"content\": \"alpha\nbeta\"}</function>";
+    let res_fn = parse_tool_calls(fn_call);
+    assert!(res_fn.rejections.is_empty(), "{res_fn:?}");
+    assert_eq!(res_fn.tool_calls.len(), 1);
+    assert_eq!(res_fn.tool_calls[0].arguments["content"], "alpha\nbeta");
+}
+
+#[test]
+fn multiline_xml_elements_and_parameter_tags_inside_arguments_parse() {
+    // XML child elements where <content> holds a JSON object: <path> must not be lost!
+    let xml_elem = "<tool>\n<name>file_write</name>\n<arguments>\n<path>config.json</path>\n<content>\n{\n  \"hello\": \"world\"\n}\n</content>\n</arguments>\n</tool>";
+    let res = parse_tool_calls(xml_elem);
+    assert!(res.rejections.is_empty(), "{res:?}");
+    assert_eq!(res.tool_calls.len(), 1, "{res:?}");
+    assert_eq!(res.tool_calls[0].arguments["path"], "config.json");
+    assert_eq!(
+        res.tool_calls[0].arguments["content"],
+        serde_json::json!({"hello": "world"})
+    );
+
+    // <parameter=...> tags inside <arguments>...</arguments>
+    let xml_param = "<tool>\n<name>file_write</name>\n<arguments>\n<parameter=path>guide.md</parameter>\n<parameter=content>\nLine 1\nLine 2\n</parameter>\n</arguments>\n</tool>";
+    let res_param = parse_tool_calls(xml_param);
+    assert!(res_param.rejections.is_empty(), "{res_param:?}");
+    assert_eq!(res_param.tool_calls.len(), 1, "{res_param:?}");
+    assert_eq!(res_param.tool_calls[0].arguments["path"], "guide.md");
+    assert_eq!(
+        res_param.tool_calls[0].arguments["content"],
+        "Line 1\nLine 2"
+    );
+}
+
+#[test]
+fn truncated_xml_tool_call_reports_mid_stream_truncation_and_box_drawing_hint() {
+    // Exact shape from turn_0018.json where 48 '─' box-drawing chars triggered upstream stop
+    let truncated = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"HARNESS_OPERATOR_GUIDE.md\", \"content\": \"# SELFWARE HARNESS\\n┌──────────────────────────────────────────────────────────┐\\n│  1. CONFIGURE     ~/.config/selfware/config.toml         │\\n└────────────────────────────────────────────────";
+    let res = parse_tool_calls(truncated);
+    assert!(res.tool_calls.is_empty(), "{res:?}");
+    assert_eq!(res.rejections.len(), 1, "{res:?}");
+    assert_eq!(res.rejections[0].tool_name.as_deref(), Some("file_write"));
+    assert!(
+        res.rejections[0]
+            .reason
+            .contains("truncated mid-stream before its closing tag"),
+        "expected truncation diagnostic, got: {}",
+        res.rejections[0].reason
+    );
+    assert!(
+        res.rejections[0]
+            .reason
+            .contains("repeated box-drawing characters"),
+        "expected box-drawing hint, got: {}",
+        res.rejections[0].reason
+    );
+}

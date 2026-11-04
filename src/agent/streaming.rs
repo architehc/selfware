@@ -88,6 +88,15 @@ const SUPPRESSED_TAGS: &[(&str, &str)] = &[
     // Kimi/Moonshot tool section and bare call.
     ("<|open|>tools", "<|close|>tools"),
     ("<|open|>call ", "<|close|>call"),
+    // DeepSeek V4 DSML and tool_calls wrappers.
+    ("<｜DSML｜function_calls>", "</｜DSML｜function_calls>"),
+    ("<|DSML|function_calls>", "</|DSML|function_calls>"),
+    ("<｜DSML｜invoke", "</｜DSML｜invoke>"),
+    ("<|DSML|invoke", "</|DSML|invoke>"),
+    ("<｜tool▁calls▁begin｜>", "<｜tool▁calls▁end｜>"),
+    ("<|tool_calls_begin|>", "<|tool_calls_end|>"),
+    ("<｜tool▁call▁begin｜>", "<｜tool▁call▁end｜>"),
+    ("<|tool_call_begin|>", "<|tool_call_end|>"),
 ];
 
 /// Whether a [`SUPPRESSED_TAGS`] index is a reasoning region (its inner text
@@ -114,6 +123,14 @@ const STRAY_MARKUP: &[&str] = &[
     "<|close|>message",
     "<|close|>argument",
     "<|sep|>",
+    "</｜DSML｜function_calls>",
+    "</|DSML|function_calls>",
+    "</｜DSML｜invoke>",
+    "</|DSML|invoke>",
+    "<｜tool▁calls▁end｜>",
+    "<|tool_calls_end|>",
+    "<｜tool▁call▁end｜>",
+    "<|tool_call_end|>",
 ];
 
 /// Find the earliest opening tag from `SUPPRESSED_TAGS` in `buf`.
@@ -162,6 +179,9 @@ fn partial_markup_start(buf: &str) -> Option<usize> {
         for prefix_len in (1..tok.len()).rev() {
             if prefix_len <= longest {
                 break;
+            }
+            if !tok.is_char_boundary(prefix_len) {
+                continue;
             }
             if buf.ends_with(&tok[..prefix_len]) {
                 longest = prefix_len;
@@ -244,6 +264,30 @@ fn extract_display_name(xml: &str) -> Option<String> {
             }
         }
     }
+    // DeepSeek DSML: <｜DSML｜invoke name="tool_name"> or <|DSML|invoke name="tool_name">
+    if let Some(start) = xml.find("invoke name=\"") {
+        let rest = &xml[start + "invoke name=\"".len()..];
+        if let Some(end) = rest.find('"') {
+            let name = rest[..end].trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    // DeepSeek tool_call_begin: <｜tool▁call▁begin｜>function<｜tool▁sep｜>tool_name
+    for sep in ["<｜tool▁sep｜>", "<|tool_sep|>"] {
+        if let Some(pos) = xml.find(sep) {
+            let after = &xml[pos + sep.len()..];
+            let candidate = after
+                .trim_start()
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            if !candidate.is_empty() && candidate != "function" {
+                return Some(candidate.to_string());
+            }
+        }
+    }
     Agent::extract_tool_name(xml)
 }
 
@@ -287,6 +331,24 @@ impl StreamDisplayFilter {
     /// Whether the stream is currently inside a tool-call region.
     pub(crate) fn inside_tool_call(&self) -> bool {
         self.inside.is_some_and(|i| !is_think_tag(i))
+    }
+
+    /// Peek at the tool name inside an open tool-call region (`Some(name)`
+    /// once the `<function=name>` / `<name>` tag has streamed, or `Some("")`
+    /// while the tag header is still arriving).
+    pub(crate) fn current_tool_name(&self) -> Option<String> {
+        if self.inside_tool_call() {
+            Some(extract_display_name(&self.buf).unwrap_or_default())
+        } else {
+            None
+        }
+    }
+
+    /// Peek at the inner text of an open inline reasoning region (`<think>…</think>`).
+    pub(crate) fn current_think_text(&self) -> Option<&str> {
+        let idx = self.inside.filter(|&i| is_think_tag(i))?;
+        let (open, _) = SUPPRESSED_TAGS[idx];
+        self.buf.strip_prefix(open)
     }
 
     /// Feed one chunk; returns the pieces that are ready to display.
@@ -941,6 +1003,12 @@ impl Agent {
         // Headers can arrive before the prefill ends: the "Sending prompt"
         // label stays until the first chunk of the response.
         let mut first_byte_seen = false;
+        let mut first_token_at: Option<std::time::Instant> = None;
+        let mut last_speed_update = std::time::Instant::now();
+        let mut last_measured_tps: Option<f64> = None;
+        let mut reasoning_ended_at: Option<std::time::Instant> = None;
+        let mut native_tool_text = String::new();
+        let mut active_native_tool_name: Option<String> = None;
 
         loop {
             // Use select to check cancellation even when recv is waiting
@@ -972,13 +1040,14 @@ impl Agent {
                             let phase = super::llm_wait::LlmWaitPhase::classify(
                                 &content,
                                 &reasoning,
-                                tool_calls.len(),
+                                tool_calls.len() + usize::from(!native_tool_text.is_empty()),
                                 in_reasoning || display_filter.inside_think(),
                             );
-                            let (tokens, source) = super::llm_wait::tokens_so_far(
+                            let (tokens, source) = super::llm_wait::tokens_so_far_with_tools(
                                 captured_completion_tokens,
                                 &content,
                                 &reasoning,
+                                &native_tool_text,
                             );
                             let event = wait_ticker.fire(phase, tokens, source);
                             if first_byte_seen {
@@ -986,7 +1055,9 @@ impl Agent {
                                     event,
                                     initial_phrase,
                                     tui_active && tui_spinner_active,
-                                    spinner.as_ref().filter(|_| !reasoning_indicator_live),
+                                    spinner.as_ref().filter(|_| {
+                                        !reasoning_indicator_live && reasoning_ended_at.is_none()
+                                    }),
                                 );
                             } else {
                                 // Nothing back yet: keep "Sending prompt".
@@ -1004,12 +1075,56 @@ impl Agent {
                     });
                     continue;
                 }
+                _ = tokio::time::sleep(TUI_PREFILL_REFRESH),
+                    if first_byte_seen
+                        && !in_reasoning
+                        && reasoning_ended_at.is_some()
+                        && content.trim().is_empty()
+                        && tool_calls.is_empty()
+                        && native_tool_text.is_empty()
+                        && !display_filter.inside_tool_call()
+                        && (tui_spinner_active || spinner.is_some()) =>
+                {
+                    let (tokens, source) = super::llm_wait::tokens_so_far_with_tools(
+                        captured_completion_tokens,
+                        &content,
+                        &reasoning,
+                        &native_tool_text,
+                    );
+                    let buf_secs = reasoning_ended_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    let tool_hint = format!("buffering {}s", buf_secs);
+                    let text = super::llm_wait::live_spinner_status_detailed(
+                        super::llm_wait::LlmWaitPhase::Streaming,
+                        tokens,
+                        source,
+                        last_measured_tps,
+                        Some(&tool_hint),
+                        None,
+                    );
+                    if tui_active && tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerUpdate { message: text });
+                    } else if let Some(s) = spinner.as_ref() {
+                        s.set_message(&text);
+                    }
+                    continue;
+                }
             };
 
             let chunk = chunk_result?;
             // First byte: the "Sending prompt" label is replaced right away
             // by the live status below.
             let first_chunk = !std::mem::replace(&mut first_byte_seen, true);
+            if first_token_at.is_none()
+                && matches!(
+                    &chunk,
+                    StreamChunk::Content(_)
+                        | StreamChunk::Reasoning(_)
+                        | StreamChunk::ToolCall(_)
+                        | StreamChunk::ToolCallProgress { .. }
+                )
+            {
+                first_token_at = Some(std::time::Instant::now());
+            }
 
             // Runaway-monologue cutoff: checked per chunk, before processing.
             if is_runaway_monologue(
@@ -1018,7 +1133,9 @@ impl Agent {
                 // `contains("<tool")` missed Kimi `<|open|>call` and bare
                 // Qwen `<function=`, so a long file_write in those formats
                 // was cut mid-call and lost (review, 0.9.1).
-                !tool_calls.is_empty() || crate::tool_parser::text_opens_tool_call(&content),
+                !tool_calls.is_empty()
+                    || !native_tool_text.is_empty()
+                    || crate::tool_parser::text_opens_tool_call(&content),
                 self.task_requires_mutation_now(),
             ) {
                 let streamed = content.len() + reasoning.len();
@@ -1028,38 +1145,6 @@ impl Agent {
                 break;
             }
 
-            // Refresh the spinner every 2 seconds while it is active with what
-            // was actually observed (phase + tokens so far) — e.g. a long
-            // reasoning block shows "Model reasoning · ~1.2K tokens".
-            let spinner_live = if tui_active {
-                tui_spinner_active
-            } else {
-                spinner.is_some()
-            };
-            if spinner_live
-                && (first_chunk || phrase_rotation.elapsed() > tokio::time::Duration::from_secs(2))
-            {
-                let phase = super::llm_wait::LlmWaitPhase::classify(
-                    &content,
-                    &reasoning,
-                    tool_calls.len(),
-                    in_reasoning || display_filter.inside_think(),
-                );
-                let (tokens, source) = super::llm_wait::tokens_so_far(
-                    captured_completion_tokens,
-                    &content,
-                    &reasoning,
-                );
-                let text = super::llm_wait::live_spinner_status(phase, tokens, source);
-                if tui_active {
-                    self.emit_event(AgentEvent::SpinnerUpdate { message: text });
-                } else if let Some(s) = spinner.as_ref().filter(|_| !reasoning_indicator_live) {
-                    // The "Thinking… (N chars)" indicator owns the line while live.
-                    s.set_message(&text);
-                }
-                phrase_rotation = tokio::time::Instant::now();
-            }
-
             // NOTE: Do not call bar.update() during streaming — cursor
             // save/restore doesn't work reliably while stdout is actively
             // printing content and causes the bar to spam every line.
@@ -1067,14 +1152,6 @@ impl Agent {
 
             match chunk {
                 StreamChunk::Content(text) => {
-                    // The TUI spinner stops on first content. The terminal
-                    // spinner stays until there is a rendered line to print
-                    // (below): a response that opens with a tool call keeps
-                    // its sign of life instead of going blank.
-                    if tui_active && tui_spinner_active {
-                        self.emit_event(AgentEvent::SpinnerStop);
-                        tui_spinner_active = false;
-                    }
                     if in_reasoning {
                         in_reasoning = false;
                         sticky_state
@@ -1093,6 +1170,7 @@ impl Agent {
                             self.end_reasoning_indicator(&reasoning[reasoning_block_start..]);
                         }
                         reasoning_indicator_live = false;
+                        reasoning_ended_at = Some(std::time::Instant::now());
                         if let Some(s) = spinner.as_ref() {
                             s.set_message(initial_phrase);
                         }
@@ -1104,6 +1182,13 @@ impl Agent {
                     // Filter tool-call / reasoning markup from the display;
                     // `content` above keeps every byte for the parser.
                     let pieces = display_filter.push(&text);
+                    let has_visible_text = pieces
+                        .iter()
+                        .any(|p| matches!(p, DisplayPiece::Text(t) if !t.is_empty()));
+                    if tui_active && tui_spinner_active && has_visible_text {
+                        self.emit_event(AgentEvent::SpinnerStop);
+                        tui_spinner_active = false;
+                    }
                     let rendered =
                         self.show_display_pieces(pieces, &mut reasoning, text_prose.as_mut());
                     if !rendered.is_empty() {
@@ -1114,25 +1199,28 @@ impl Agent {
                             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
                         }
                         print_prose(&rendered);
-                    } else if spinner.is_none()
-                        && text_prose.is_some()
-                        && display_filter.inside_tool_call()
-                    {
-                        // A long tool call (a file_write body) streams with
-                        // nothing to print: show a sign of life, not silence.
-                        spinner = Some(crate::ui::spinner::TerminalSpinner::start(
-                            "Composing tool call…",
-                        ));
+                    }
+                    if display_filter.inside_tool_call() || display_filter.inside_think() {
+                        // A long tool call (a file_write body) or inline <think>
+                        // streams with nothing to print: show live streaming
+                        // progress (tool name / tokens / tok/s), never silence.
+                        if tui_active && !tui_spinner_active {
+                            self.emit_event(AgentEvent::SpinnerStart {
+                                message: "Streaming tool call…".to_string(),
+                            });
+                            tui_spinner_active = true;
+                        } else if spinner.is_none() && text_prose.is_some() {
+                            spinner = Some(crate::ui::spinner::TerminalSpinner::start(
+                                "Composing tool call…",
+                            ));
+                        }
                     }
                 }
                 StreamChunk::Reasoning(text) => {
                     // TUI: the reasoning pane gets every delta. Text mode:
                     // under --verbose the full reasoning streams (blank runs
-                    // collapsed); by default only a one-line indicator —
-                    // the spinner reads "Thinking… (1.2k chars)", updated in
-                    // place and cleared when the answer starts (a model's
-                    // whole self-debate filled screens, 0.9.1). Compact:
-                    // nothing (unchanged).
+                    // collapsed); by default a live one-line indicator shows
+                    // tokens, chars, live tok/s, and the latest reasoning snippet.
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
                         tui_spinner_active = false;
@@ -1144,10 +1232,12 @@ impl Agent {
                     if !in_reasoning {
                         reasoning_block_start = reasoning.len();
                     }
+                    reasoning_ended_at = None;
                     reasoning_chars += text.chars().count();
+                    reasoning.push_str(&text);
                     if tui_active {
                         in_reasoning = true;
-                        self.emit_event(AgentEvent::ThinkingDelta { text: text.clone() });
+                        self.emit_event(AgentEvent::ThinkingDelta { text });
                     } else if output::is_compact() {
                         // Not shown; the spinner keeps the waiting heartbeat.
                     } else if suppress_stream_stdout {
@@ -1171,18 +1261,73 @@ impl Agent {
                     } else {
                         in_reasoning = true;
                         reasoning_indicator_live = true;
-                        let label = output::live::reasoning_indicator(reasoning_chars);
-                        match spinner.as_ref() {
-                            Some(s) => s.set_message(&label),
-                            None => {
-                                spinner = Some(crate::ui::spinner::TerminalSpinner::start(&label));
-                            }
+                        if spinner.is_none() {
+                            let label = output::live::reasoning_indicator(reasoning_chars);
+                            spinner = Some(crate::ui::spinner::TerminalSpinner::start(&label));
                         }
                     }
-                    reasoning.push_str(&text);
+                }
+                StreamChunk::ToolCallProgress { name, delta } => {
+                    if in_reasoning {
+                        in_reasoning = false;
+                        sticky_state
+                            .is_thinking
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        sticky_state.thinking_secs.store(
+                            sticky_state.started.elapsed().as_secs(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if tui_active {
+                            self.emit_event(AgentEvent::ThinkingEnd);
+                        } else if !suppress_stream_stdout {
+                            output::close_stream_line();
+                            self.end_reasoning_indicator(&reasoning[reasoning_block_start..]);
+                        }
+                        reasoning_indicator_live = false;
+                    }
+                    sticky_state.set_activity("Composing tool call...");
+                    native_tool_text.push_str(&delta);
+                    if !name.is_empty() {
+                        active_native_tool_name = Some(name);
+                    }
+                    if tui_active && !tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerStart {
+                            message: "Streaming tool call…".to_string(),
+                        });
+                        tui_spinner_active = true;
+                    } else if spinner.is_none() && text_prose.is_some() {
+                        spinner = Some(crate::ui::spinner::TerminalSpinner::start(
+                            "Composing tool call…",
+                        ));
+                    }
                 }
                 StreamChunk::ToolCall(call) => {
+                    if in_reasoning {
+                        in_reasoning = false;
+                        sticky_state
+                            .is_thinking
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        sticky_state.thinking_secs.store(
+                            sticky_state.started.elapsed().as_secs(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if tui_active {
+                            self.emit_event(AgentEvent::ThinkingEnd);
+                        } else if !suppress_stream_stdout {
+                            output::close_stream_line();
+                            self.end_reasoning_indicator(&reasoning[reasoning_block_start..]);
+                        }
+                        reasoning_indicator_live = false;
+                    }
+                    if !call.function.name.is_empty() {
+                        active_native_tool_name = Some(call.function.name.clone());
+                    }
                     tool_calls.push(call);
+                    native_tool_text.clear();
+                    for tc in &tool_calls {
+                        native_tool_text.push_str(&tc.function.name);
+                        native_tool_text.push_str(&tc.function.arguments);
+                    }
                 }
                 StreamChunk::Usage(u, coverage) => {
                     debug!(
@@ -1241,6 +1386,109 @@ impl Agent {
                     break;
                 }
             }
+
+            // Refresh the live streaming status every 150ms while a spinner is
+            // active so the user sees tokens, live tok/s speed, active tool name,
+            // and reasoning snippets flowing in real time. Also continuously
+            // feed measured decode speed into the client's speed tracker so
+            // adaptive timeouts stay aligned with real endpoint speed.
+            let spinner_live = if tui_active {
+                tui_spinner_active
+            } else {
+                spinner.is_some()
+            };
+            if first_chunk || phrase_rotation.elapsed() >= tokio::time::Duration::from_millis(150) {
+                let (tokens, source) = super::llm_wait::tokens_so_far_with_tools(
+                    captured_completion_tokens,
+                    &content,
+                    &reasoning,
+                    &native_tool_text,
+                );
+                let live_tps = first_token_at.and_then(|started| {
+                    let secs = started.elapsed().as_secs_f64();
+                    (secs >= 0.15 && tokens > 0).then(|| tokens as f64 / secs)
+                });
+                if let Some(tps) = live_tps {
+                    last_measured_tps = Some(tps);
+                    if tokens >= 16
+                        && last_speed_update.elapsed() >= std::time::Duration::from_secs(2)
+                    {
+                        self.client
+                            .speed_tracker
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record(tps);
+                        last_speed_update = std::time::Instant::now();
+                    }
+                }
+                if spinner_live {
+                    let post_reasoning_buffer = !in_reasoning
+                        && reasoning_ended_at.is_some()
+                        && content.trim().is_empty()
+                        && tool_calls.is_empty()
+                        && native_tool_text.is_empty();
+                    let phase = if post_reasoning_buffer {
+                        super::llm_wait::LlmWaitPhase::Streaming
+                    } else {
+                        super::llm_wait::LlmWaitPhase::classify(
+                            &content,
+                            &reasoning,
+                            tool_calls.len() + usize::from(!native_tool_text.is_empty()),
+                            in_reasoning || display_filter.inside_think(),
+                        )
+                    };
+                    let active_tool = display_filter
+                        .current_tool_name()
+                        .or_else(|| active_native_tool_name.clone())
+                        .or_else(|| post_reasoning_buffer.then(|| "buffering…".to_string()));
+                    let active_reasoning = if !reasoning.is_empty() {
+                        Some(reasoning.as_str())
+                    } else {
+                        display_filter.current_think_text()
+                    };
+                    if tui_active {
+                        let text = super::llm_wait::live_spinner_status_detailed(
+                            phase,
+                            tokens,
+                            source,
+                            live_tps,
+                            active_tool.as_deref(),
+                            active_reasoning,
+                        );
+                        self.emit_event(AgentEvent::SpinnerUpdate { message: text });
+                    } else if let Some(s) = spinner.as_ref() {
+                        let text = if reasoning_indicator_live || display_filter.inside_think() {
+                            let think_chars = if reasoning_chars > 0 {
+                                reasoning_chars
+                            } else {
+                                active_reasoning.map(|r| r.chars().count()).unwrap_or(0)
+                            };
+                            output::live::reasoning_live_indicator(
+                                think_chars,
+                                tokens,
+                                source == super::llm_wait::LlmWaitTokenSource::Usage,
+                                live_tps,
+                                active_reasoning,
+                            )
+                        } else {
+                            super::llm_wait::live_spinner_status_detailed(
+                                phase,
+                                tokens,
+                                source,
+                                live_tps,
+                                active_tool.as_deref(),
+                                active_reasoning,
+                            )
+                        };
+                        s.set_message(&text);
+                    }
+                }
+                phrase_rotation = tokio::time::Instant::now();
+            }
+        }
+
+        if tui_active && tui_spinner_active {
+            self.emit_event(AgentEvent::SpinnerStop);
         }
 
         // Flush the display filter: a held partial token that never became

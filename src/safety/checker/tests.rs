@@ -5124,3 +5124,96 @@ fn shell_operands_resolve_from_the_call_cwd_and_each_cd() {
         assert!(verdict.is_ok(), "`{command}` (cwd {cwd:?}): {verdict:?}");
     }
 }
+
+#[test]
+fn test_multiline_heredoc_body_with_slashes_pipes_and_arrows_is_allowed() {
+    let (_ws, checker) = workspace_shell_checker();
+    // Exact multi-line heredoc shape from turn_0023.json containing `run / chat`,
+    // `401 / 403`, markdown tables `| Symptom | Cause |`, `->`, and `./src`.
+    let turn_0023_cmd = r#"cat >> HARNESS_OPERATOR_GUIDE.md <<'EOF'
+
+## 1. THE INFOGRAPHIC
+
+```
+   doctor             config.toml        run / chat      journal
+   Every action is JOURNALED -> replayable -> auditable
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `401 / 403` | bad API key | `selfware config set-key` |
+
+```toml
+allowed_paths = ["./src", "./tests", "./docs"]
+```
+EOF
+"#;
+    let verdict = shell_verdict(&checker, turn_0023_cmd);
+    assert!(
+        verdict.is_ok(),
+        "multi-line cat heredoc with slashes/pipes/arrows must be allowed: {verdict:?}"
+    );
+
+    // Denied paths inside a heredoc body or on the command line stay refused.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > /tmp/instructions.txt << 'EOF'\nls -la /app/.env\nEOF"
+        )
+        .is_err(),
+        "denied .env reference inside heredoc must stay refused"
+    );
+    // Heredoc fed into a shell interpreter still validates body commands/paths.
+    assert!(
+        shell_verdict(&checker, "sh << 'EOF'\ncat /etc/passwd\nEOF").is_err(),
+        "heredoc fed into sh reading /etc/passwd must stay refused"
+    );
+    // Parser-differential bypass 1: commented-out heredoc `# <<'EOF'` must not
+    // strip subsequent top-level shell commands.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > safe.txt # <<'EOF'\ncat /etc/passwd > .env\nEOF"
+        )
+        .is_err(),
+        "commented-out heredoc must not strip subsequent commands"
+    );
+    // Parser-differential bypass 2: same-line `&& sh <<'EOF'` piggybacked on `cat > safe.txt`.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > safe.txt && sh <<'EOF'\ncat /etc/passwd\nEOF"
+        )
+        .is_err(),
+        "chained sh heredoc after cat > safe.txt must stay refused"
+    );
+    // Parser-differential bypass 3: double-quoted backslash delimiter `<<"E\\OF"`
+    // closes early on `E\OF` in POSIX sh.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > safe.txt <<\"E\\\\OF\"\nhello\nE\\OF\ncat /etc/passwd\nE\\\\OF"
+        )
+        .is_err(),
+        "double-quoted backslash delimiter must unescape like POSIX sh"
+    );
+    // Parser-differential bypass 4: multiline command substitution opened on
+    // the heredoc header line.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > safe.txt <<'EOF' $(\ncat /etc/passwd\n)\nEOF"
+        )
+        .is_err(),
+        "command substitution on heredoc header line must not strip body"
+    );
+    // Hardcoded secrets inside a workspace heredoc write must also be refused.
+    assert!(
+        shell_verdict(
+            &checker,
+            "cat > safe.txt <<'EOF'\nOPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\nEOF"
+        )
+        .is_err(),
+        "secret inside workspace heredoc body must be refused"
+    );
+}

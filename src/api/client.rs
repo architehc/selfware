@@ -1169,6 +1169,18 @@ impl ApiClient {
         secs
     }
 
+    /// Header-wait and prefill timeout (secs) scaled with the outgoing prompt
+    /// size so large 1M-context prompts have enough prefill headroom before
+    /// the first SSE token arrives.
+    pub(crate) fn stream_header_timeout_secs_for_prompt(&self, prompt_tokens: usize) -> u64 {
+        let mut secs = self.stream_header_timeout_secs();
+        if prompt_tokens > 0 {
+            let prefill_allowance = 120u64.saturating_add((prompt_tokens as u64) / 500);
+            secs = secs.max(prefill_allowance.min(self.adaptive_response_timeout_secs()));
+        }
+        secs
+    }
+
     /// Response-wait timeout (secs) for one non-streaming call: the
     /// speed-adaptive budget raised to the given profile's
     /// `response_timeout_floor_secs` when configured.
@@ -1340,9 +1352,24 @@ impl ApiClient {
                 Ok(response) => {
                     let status = response.status();
                     attempt_usage.status(status.as_u16());
-                    let retry_after = Self::parse_retry_after(response.headers());
+                    let header_retry_after = Self::parse_retry_after(response.headers());
                     let text = self.read_error_body_bounded(response).await;
+                    let body_cooldown_secs = parse_retry_after_secs_unclamped(&text);
+                    let retry_after =
+                        header_retry_after.or_else(|| body_cooldown_secs.map(|s| s.min(300)));
                     let _ = attempt_usage.record_json(&text);
+                    if body_cooldown_secs.is_some_and(|secs| secs > 180) {
+                        warn!(
+                            "completion received {} with long cooldown ({:?}s > 180s); failing fast",
+                            status, body_cooldown_secs
+                        );
+                        return Err(Self::http_status_error(
+                            &self.base_url,
+                            status,
+                            text,
+                            self.config.api_key.as_ref(),
+                        ));
+                    }
                     if Self::is_retryable_status(status) && attempt < max_attempts {
                         let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
                         warn!(
@@ -1961,10 +1988,15 @@ impl ApiClient {
             // the connection then stalls before sending headers would hang
             // forever.  We use a header timeout of at least 120 s (or the
             // agent step timeout if larger, or the active profile's
-            // response-timeout floor) so slow-but-healthy models are
-            // unaffected.  The body is then streamed as before (per-chunk
-            // timeout only — NO total timeout on the body).
-            let mut hdr_timeout_secs = self.stream_header_timeout_secs();
+            // response-timeout floor, scaled with prompt size for large
+            // 1M-context prefills) so slow-but-healthy models are unaffected.
+            let body_prompt_tokens = body
+                .get("messages")
+                .and_then(|m| serde_json::to_string(m).ok())
+                .map(|s| crate::token_count::estimate_content_tokens(&s))
+                .unwrap_or(0);
+            let mut hdr_timeout_secs =
+                self.stream_header_timeout_secs_for_prompt(body_prompt_tokens);
             // agent.max_call_secs (or a side call's own cap) tightens the
             // header wait too; the timeout branch below names it with a
             // typed CallTimeBudgetExceeded.
@@ -2041,6 +2073,20 @@ impl ApiClient {
                                     stream_chunk_timeout_secs =
                                         stream_chunk_timeout_secs.min(wall.max(1));
                                 }
+                                let request_max_tokens = body
+                                    .get("max_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|v| v as usize)
+                                    .unwrap_or(self.config.max_tokens);
+                                let adaptive_budget =
+                                    (!opts.side_call).then_some(request_max_tokens);
+                                let first_chunk_wait = (!opts.side_call
+                                    && call_cap_secs.is_none_or(|c| c >= 120))
+                                .then(|| {
+                                    Duration::from_secs(
+                                        hdr_timeout_secs.max(stream_chunk_timeout_secs),
+                                    )
+                                });
                                 return Ok((
                                     StreamingResponse::new(
                                         response,
@@ -2065,13 +2111,19 @@ impl ApiClient {
                                         // the deadline it came from.
                                         self.config.agent.max_wall_secs.map(|s| s.max(1)),
                                     )
-                                    .with_response_byte_limit(opts.response_byte_limit),
+                                    .with_response_byte_limit(opts.response_byte_limit)
+                                    .with_first_chunk_timeout(first_chunk_wait)
+                                    .with_adaptive_token_budget(adaptive_budget)
+                                    .with_speed_tracker(self.speed_tracker.clone()),
                                     body,
                                 ));
                             }
 
-                            let retry_after = Self::parse_retry_after(response.headers());
+                            let header_retry_after = Self::parse_retry_after(response.headers());
                             let text = self.read_error_body_bounded(response).await;
+                            let body_cooldown_secs = parse_retry_after_secs_unclamped(&text);
+                            let retry_after = header_retry_after
+                                .or_else(|| body_cooldown_secs.map(|s| s.min(300)));
                             let _ = attempt_usage.record_json(&text);
                             // Provider rejects the native tool-call payload:
                             // latch XML mode for the session and retry — the
@@ -2120,6 +2172,18 @@ impl ApiClient {
                                     &self.base_url,
                                     status,
                                     hinted,
+                                    self.config.api_key.as_ref(),
+                                ));
+                            }
+                            if body_cooldown_secs.is_some_and(|secs| secs > 180) {
+                                warn!(
+                                    "Streaming request received {} with long cooldown ({:?}s > 180s); failing fast",
+                                    status, body_cooldown_secs
+                                );
+                                return Err(Self::http_status_error(
+                                    &self.base_url,
+                                    status,
+                                    text,
                                     self.config.api_key.as_ref(),
                                 ));
                             }
@@ -2854,7 +2918,7 @@ impl ApiClient {
                         .retryable_status_codes
                         .contains(&status.as_u16())
                     {
-                        let retry_after_secs = response
+                        let header_retry_after = response
                             .headers()
                             .get("retry-after")
                             .and_then(|v| v.to_str().ok())
@@ -2862,6 +2926,9 @@ impl ApiClient {
                             .map(|s| s.min(300));
 
                         let error_text = self.read_error_body_bounded(response).await;
+                        let body_cooldown_secs = parse_retry_after_secs_unclamped(&error_text);
+                        let retry_after_secs =
+                            header_retry_after.or_else(|| body_cooldown_secs.map(|s| s.min(300)));
                         let _ = attempt_usage.record_json(&error_text);
                         // Some OpenAI-compatible gateways echo the offending
                         // API key back in error bodies — and 429/5xx bodies are
@@ -2906,6 +2973,15 @@ impl ApiClient {
                                 return Err(gateway.into());
                             }
                             gateway_retries += 1;
+                        }
+                        if body_cooldown_secs.is_some_and(|secs| secs > 180) {
+                            warn!(
+                                "Non-streaming request received {} with long cooldown ({:?}s > 180s); failing fast",
+                                status, body_cooldown_secs
+                            );
+                            return Err(Self::http_status_error(
+                                endpoint, status, error_text, api_key,
+                            ));
                         }
                         warn!("Retryable error ({}): {}", status, error_text);
                         last_error = Some(
@@ -3350,6 +3426,35 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
         .map(str::trim)
         .filter(|r| !r.is_empty())?;
     Some(reasoning.len())
+}
+
+/// Extract a provider cooldown / retry-after window (in seconds, unclamped)
+/// from an error body or message.
+pub(crate) fn parse_retry_after_secs_unclamped(body: &str) -> Option<u64> {
+    use std::sync::LazyLock;
+    static COOLDOWN_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?i)(?:held\s+for\s*(\d+)\s*(?:s(?:ec(?:ond)?s?)?\b|cooldown\b)|for\s*(\d+)\s*(?:s(?:ec(?:ond)?s?)?\s+)?cooldown\b|(?:retry\s+after|retry\s+in|wait(?:\s+for)?)\s*(\d+)\s*(?:s(?:ec(?:ond)?s?)?\b|cooldown\b)|"retry_after"\s*:\s*(\d+)\b)"#,
+        )
+        .expect("cooldown regex must compile")
+    });
+    COOLDOWN_RE
+        .captures(body)
+        .and_then(|cap| {
+            cap.get(1)
+                .or_else(|| cap.get(2))
+                .or_else(|| cap.get(3))
+                .or_else(|| cap.get(4))
+        })
+        .and_then(|m| m.as_str().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+}
+
+/// Extract a provider cooldown / retry-after window (in seconds) from an error
+/// body or message (e.g. `"Queue purged by operator; admission held for 115s cooldown."`,
+/// `"retry after 30s"`, `"retry_after": 15`), clamped to 300s.
+pub(crate) fn parse_retry_after_from_body(body: &str) -> Option<u64> {
+    parse_retry_after_secs_unclamped(body).map(|secs| secs.min(300))
 }
 
 /// Whether a failure should count toward opening the circuit breaker.

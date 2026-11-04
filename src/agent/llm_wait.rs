@@ -102,19 +102,32 @@ impl LlmWaitTokenSource {
 
 /// Count completion tokens seen so far: provider-reported usage when the
 /// stream has sent one, otherwise the shared estimator over streamed text.
+#[cfg(test)]
 pub(crate) fn tokens_so_far(
     reported_completion: Option<u32>,
     content: &str,
     reasoning: &str,
 ) -> (usize, LlmWaitTokenSource) {
+    tokens_so_far_with_tools(reported_completion, content, reasoning, "")
+}
+
+/// Count completion tokens seen so far including native tool-call deltas
+/// streamed outside `content`.
+pub(crate) fn tokens_so_far_with_tools(
+    reported_completion: Option<u32>,
+    content: &str,
+    reasoning: &str,
+    tool_text: &str,
+) -> (usize, LlmWaitTokenSource) {
     if let Some(n) = reported_completion {
         return (n as usize, LlmWaitTokenSource::Usage);
     }
-    if content.is_empty() && reasoning.is_empty() {
+    if content.is_empty() && reasoning.is_empty() && tool_text.is_empty() {
         return (0, LlmWaitTokenSource::Estimate);
     }
     let n = crate::token_count::estimate_content_tokens(content)
-        + crate::token_count::estimate_content_tokens(reasoning);
+        + crate::token_count::estimate_content_tokens(reasoning)
+        + crate::token_count::estimate_content_tokens(tool_text);
     (n, LlmWaitTokenSource::Estimate)
 }
 
@@ -211,6 +224,17 @@ pub(crate) fn spinner_status(
     event: &ProgressEvent,
     include_elapsed: bool,
 ) -> Option<String> {
+    spinner_status_with_rate(base, event, include_elapsed, None)
+}
+
+/// Like [`spinner_status`], with optional live streaming speed (`tok/s`)
+/// appended when tokens are actively arriving.
+pub(crate) fn spinner_status_with_rate(
+    base: &str,
+    event: &ProgressEvent,
+    include_elapsed: bool,
+    tok_per_sec: Option<f64>,
+) -> Option<String> {
     match event {
         ProgressEvent::LlmWaiting {
             elapsed_secs,
@@ -228,6 +252,9 @@ pub(crate) fn spinner_status(
                 // provider-reported usage figure is shown bare.
                 let approx = if tokens_source == "usage" { "" } else { "~" };
                 text.push_str(&format!(", {}{} tokens", approx, tokens_so_far));
+                if let Some(tps) = tok_per_sec.filter(|v| v.is_finite() && *v >= 0.1) {
+                    text.push_str(&format!(" ({tps:.1} tok/s)"));
+                }
             }
             Some(text)
         }
@@ -245,22 +272,45 @@ pub(crate) fn spinner_status(
 /// - streaming: `"Model responding · 340 tokens"`
 ///
 /// Estimated counts carry a `~`; provider-reported usage is shown bare.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn live_spinner_status(
     phase: LlmWaitPhase,
     tokens_so_far: usize,
     source: LlmWaitTokenSource,
 ) -> String {
-    let head = match phase {
-        LlmWaitPhase::Prefill | LlmWaitPhase::AwaitingResponse => {
-            crate::ui::loading_phrases::WAITING_LABEL.to_string()
+    live_spinner_status_detailed(phase, tokens_so_far, source, None, None, None)
+}
+
+/// Rich live spinner status that surfaces streaming token reception in real time:
+/// phase (or active tool-call name), token count, live `tok/s` streaming speed,
+/// and optional reasoning snippet.
+pub(crate) fn live_spinner_status_detailed(
+    phase: LlmWaitPhase,
+    tokens_so_far: usize,
+    source: LlmWaitTokenSource,
+    tok_per_sec: Option<f64>,
+    active_tool: Option<&str>,
+    reasoning_snippet: Option<&str>,
+) -> String {
+    let head = if let Some(tool) = active_tool {
+        if tool.is_empty() {
+            "Streaming tool call".to_string()
+        } else {
+            format!("Streaming tool call ({tool})")
         }
-        LlmWaitPhase::Reasoning => "Model reasoning".to_string(),
-        LlmWaitPhase::Streaming => "Model responding".to_string(),
-        LlmWaitPhase::SideCall(purpose) => format!(
-            "{} ({})",
-            crate::ui::loading_phrases::WAITING_LABEL,
-            purpose
-        ),
+    } else {
+        match phase {
+            LlmWaitPhase::Prefill | LlmWaitPhase::AwaitingResponse => {
+                crate::ui::loading_phrases::WAITING_LABEL.to_string()
+            }
+            LlmWaitPhase::Reasoning => "Model reasoning".to_string(),
+            LlmWaitPhase::Streaming => "Model responding".to_string(),
+            LlmWaitPhase::SideCall(purpose) => format!(
+                "{} ({})",
+                crate::ui::loading_phrases::WAITING_LABEL,
+                purpose
+            ),
+        }
     };
     if tokens_so_far == 0 || source == LlmWaitTokenSource::None {
         return head;
@@ -270,10 +320,21 @@ pub(crate) fn live_spinner_status(
     } else {
         "~"
     };
-    format!(
+    let mut out = format!(
         "{head} · {approx}{} tokens",
         crate::ui::task_display::format_tokens(tokens_so_far as u64)
-    )
+    );
+    if let Some(tps) = tok_per_sec.filter(|v| v.is_finite() && *v >= 0.1) {
+        out.push_str(&format!(" · {tps:.1} tok/s"));
+    }
+    if phase == LlmWaitPhase::Reasoning {
+        if let Some(snippet) =
+            reasoning_snippet.and_then(crate::output::live::extract_reasoning_tail)
+        {
+            out.push_str(&format!(" — {snippet}"));
+        }
+    }
+    out
 }
 
 /// Spinner text from the moment a streaming request is sent until the first

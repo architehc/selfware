@@ -169,7 +169,10 @@ impl Agent {
             bar.bright_green()
         };
 
-        let cost = self.session_usage().status_bar_cost();
+        let cost = self.session_usage().status_bar_cost().or_else(|| {
+            self.session_openrouter_savings()
+                .map(|s| s.status_bar_badge())
+        });
         let label = self.context_usage_text();
         let middle = match &cost {
             Some(c) => format!("{label} {c}"),

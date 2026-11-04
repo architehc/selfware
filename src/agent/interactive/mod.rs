@@ -253,10 +253,13 @@ impl Agent {
                 // Session-exit usage summary (claude prints usage on quit) —
                 // the same session fold as /cost, not the process-global
                 // main-loop counter (which disagreed with /cost).
-                if let Some(line) = self
+                if let Some(mut line) = self
                     .session_usage()
                     .render_quit_line(self.session_main_loop_tokens())
                 {
+                    if let Some(savings) = self.session_openrouter_savings() {
+                        line.push_str(&format!(" · {}", savings.summary_line()));
+                    }
                     println!("{line}");
                 }
                 break;
@@ -533,9 +536,12 @@ impl Agent {
                 // reported it — never from hard-coded per-token prices
                 // (UX field test, 0.9.0) nor from a second counter that
                 // disagreed with the total (0.9.1).
-                let lines = self
+                let mut lines = self
                     .session_usage()
                     .render_cost_lines(self.session_main_loop_tokens());
+                if let Some(savings) = self.session_openrouter_savings() {
+                    lines.push(savings.summary_line());
+                }
                 println!();
                 for (i, line) in lines.iter().enumerate() {
                     if i == 0 {
@@ -1786,7 +1792,16 @@ impl Agent {
 
             match self.run_task_with_queue(&expanded_input).await {
                 Ok(_) => {}
-                Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
+                Err(e) => {
+                    println!("{} Error: {}", "❌".bright_red(), e);
+                    if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                        let flag = crate::cli::resume_mode_flag(self.config.execution_mode);
+                        println!(
+                            "Resume later with:\n  selfware resume {}{}\n  selfware --continue{}",
+                            checkpoint.task_id, flag, flag
+                        );
+                    }
+                }
             }
         }
 
@@ -1801,9 +1816,10 @@ impl Agent {
             if let Err(e) = self.save_checkpoint_forced(&task_desc) {
                 warn!("Failed to auto-save session on exit: {}", e);
             } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                let flag = crate::cli::resume_mode_flag(self.config.execution_mode);
                 println!(
-                    "\nSession saved. Resume later with:\n  selfware resume {}\n  selfware --continue",
-                    checkpoint.task_id
+                    "\nSession saved. Resume later with:\n  selfware resume {}{}\n  selfware --continue{}",
+                    checkpoint.task_id, flag, flag
                 );
             }
         }
@@ -2722,6 +2738,15 @@ impl Agent {
             }
 
             if is_exit_command(input) {
+                if let Some(mut line) = self
+                    .session_usage()
+                    .render_quit_line(self.session_main_loop_tokens())
+                {
+                    if let Some(savings) = self.session_openrouter_savings() {
+                        line.push_str(&format!(" · {}", savings.summary_line()));
+                    }
+                    println!("{line}");
+                }
                 break;
             }
 
@@ -3222,6 +3247,9 @@ impl Agent {
                 {
                     println!("{line}");
                 }
+                if let Some(savings) = self.session_openrouter_savings() {
+                    println!("OpenRouter:      {}", savings.summary_line());
+                }
                 continue;
             }
             if input == "/model" {
@@ -3440,7 +3468,16 @@ impl Agent {
 
             match self.run_task_with_queue(task).await {
                 Ok(_) => {}
-                Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
+                Err(e) => {
+                    println!("{} Error: {}", "❌".bright_red(), e);
+                    if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                        let flag = crate::cli::resume_mode_flag(self.config.execution_mode);
+                        println!(
+                            "Resume later with:\n  selfware resume {}{}\n  selfware --continue{}",
+                            checkpoint.task_id, flag, flag
+                        );
+                    }
+                }
             }
         }
 
@@ -3457,9 +3494,10 @@ impl Agent {
             if let Err(e) = self.save_checkpoint_forced(&task_desc) {
                 warn!("Failed to auto-save session on exit: {}", e);
             } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                let flag = crate::cli::resume_mode_flag(self.config.execution_mode);
                 println!(
-                    "\nSession saved. Resume later with:\n  selfware resume {}\n  selfware --continue",
-                    checkpoint.task_id
+                    "\nSession saved. Resume later with:\n  selfware resume {}{}\n  selfware --continue{}",
+                    checkpoint.task_id, flag, flag
                 );
             }
         }

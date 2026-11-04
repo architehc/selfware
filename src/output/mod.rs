@@ -143,7 +143,7 @@ pub(crate) fn should_suppress_output() -> bool {
 static TOTAL_PROMPT_TOKENS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_COMPLETION_TOKENS: AtomicU64 = AtomicU64::new(0);
 
-const SHELL_SUMMARY_PREVIEW_CHARS: usize = 120;
+const SHELL_SUMMARY_PREVIEW_CHARS: usize = 72;
 
 /// Initialize output modes from config
 pub(crate) fn init(compact: bool, verbose: bool, show_tokens: bool) {
@@ -378,7 +378,7 @@ pub(crate) fn semantic_summary(
     success: bool,
     duration_ms: u64,
 ) -> String {
-    live::escape_controls(&semantic_summary_text(
+    live::escape_controls_single_line(&semantic_summary_text(
         tool_name,
         args,
         result,
@@ -438,14 +438,15 @@ fn semantic_summary_text(
         // === Shell ===
         "shell_exec" => {
             let cmd = extract_command(args).unwrap_or("?");
-            let short_cmd = if cmd.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
-                &cmd[..cmd
+            let flat_cmd = live::escape_controls_single_line(cmd);
+            let short_cmd = if flat_cmd.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
+                &flat_cmd[..flat_cmd
                     .char_indices()
                     .nth(SHELL_SUMMARY_PREVIEW_CHARS)
                     .map(|(i, _)| i)
-                    .unwrap_or(cmd.len())]
+                    .unwrap_or(flat_cmd.len())]
             } else {
-                cmd
+                flat_cmd.as_str()
             };
             let parsed = result_json(result);
             let exit_code = parsed
@@ -815,9 +816,10 @@ fn format_number(n: u64) -> String {
 }
 
 /// Generate the activity message for a running tool (tool name and
-/// arguments are model-authored: control characters are escaped).
+/// arguments are model-authored: control characters and newlines are collapsed
+/// so the live spinner always stays on a single terminal line).
 pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> String {
-    live::escape_controls(&tool_activity_text(name, args))
+    live::escape_controls_single_line(&tool_activity_text(name, args))
 }
 
 fn tool_activity_text(name: &str, args: &serde_json::Value) -> String {
@@ -832,12 +834,13 @@ fn tool_activity_text(name: &str, args: &serde_json::Value) -> String {
             "Running {}...",
             extract_command(args)
                 .map(|c| {
-                    if c.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
-                        c.chars()
+                    let flat = live::escape_controls_single_line(c);
+                    if flat.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
+                        flat.chars()
                             .take(SHELL_SUMMARY_PREVIEW_CHARS)
                             .collect::<String>()
                     } else {
-                        c.to_string()
+                        flat
                     }
                 })
                 .unwrap_or_else(|| "command".to_string())
@@ -1840,7 +1843,7 @@ pub(crate) fn step_start(step: usize, name: &str) {
     if should_suppress_output() {
         return;
     }
-    let name = &live::escape_controls(name);
+    let name = &live::escape_controls_single_line(name);
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_plain_mode() {
         println!("[Step {}] {}...", step, name);

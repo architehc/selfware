@@ -4385,3 +4385,37 @@ async fn bounded_confirmation_read_never_hangs_and_always_unpauses() {
         "esc_pause_ack must be cleared"
     );
 }
+
+#[test]
+fn test_shell_command_file_write_intent_and_observational_word_boundaries() {
+    // Regression for turn_0017.json: `mcp ` must not match `cp `, `swarm ` must
+    // not match `rm `, and `dispatch ` must not match `patch `.
+    let turn_0017_loop = r#"for c in init boot unpack auto-config trust skill mcp dashboard garden graph analyze review self-evolve; do echo "===== $c ====="; selfware $c --help 2>&1 | head -18; done"#;
+    assert!(
+        !shell_command_is_file_write_intent(turn_0017_loop),
+        "read-only --help loop containing 'mcp ' must not be classified as file-write intent"
+    );
+    assert!(
+        crate::agent::tool_dispatch::shell_command_is_observational("selfware mcp --help"),
+        "`selfware mcp --help` must be observational"
+    );
+    assert!(
+        crate::agent::tool_dispatch::shell_command_is_observational("selfware swarm --help"),
+        "`selfware swarm --help` must be observational"
+    );
+    assert!(
+        !shell_command_is_file_write_intent("python3 - <<'EOF'\nif a > b:\n    print(1)\nEOF"),
+        "`>` inside a python heredoc body must not be classified as a file redirect"
+    );
+
+    // Real file-write commands still match.
+    assert!(shell_command_is_file_write_intent("cp a.txt b.txt"));
+    assert!(shell_command_is_file_write_intent("/bin/cp a.txt b.txt"));
+    assert!(shell_command_is_file_write_intent(
+        "echo hi && mv a.txt b.txt"
+    ));
+    assert!(shell_command_is_file_write_intent("patch -p1 < fix.diff"));
+    assert!(shell_command_is_file_write_intent(
+        "cat >> HARNESS_OPERATOR_GUIDE.md <<'EOF'\nhello\nEOF"
+    ));
+}

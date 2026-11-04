@@ -74,8 +74,68 @@ fn build_server_args_cpu_safe_and_aliased() {
     assert!(joined.contains("--port 8787"));
     assert!(joined.contains("--host 127.0.0.1"));
     assert!(joined.contains("--alias boot-assistant"));
+    assert!(joined.contains("-c 8192"));
     // No GPU assumption in the recovery path.
     assert!(!args.iter().any(|a| a == "-ngl"));
+}
+
+#[test]
+fn bundled_llama_server_and_model_candidates_prioritize_exe_dir() {
+    use super::{
+        bundled_llama_server_candidates, bundled_model_candidates, find_llama_server_in_path,
+        is_boot_server_endpoint, MODEL_FILE_NAME,
+    };
+
+    let exe_dir = PathBuf::from("/opt/selfware-dist");
+    let boot = PathBuf::from("/home/user/.local/share/selfware/boot");
+    let server_candidates = bundled_llama_server_candidates(Some(&exe_dir), &boot);
+    assert!(server_candidates[0].starts_with(&exe_dir));
+    assert!(server_candidates.iter().any(|p| p.starts_with(&boot)));
+
+    let model_candidates = bundled_model_candidates(Some(&exe_dir), Some(" /custom/model.gguf "));
+    assert_eq!(model_candidates[0], PathBuf::from("/custom/model.gguf"));
+    assert_eq!(
+        model_candidates[1],
+        exe_dir.join("models").join(MODEL_FILE_NAME)
+    );
+    assert_eq!(model_candidates[2], exe_dir.join(MODEL_FILE_NAME));
+
+    let temp = tempfile::tempdir().unwrap();
+    let bin_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
+    let fake_bin = temp.path().join(bin_name);
+    std::fs::write(&fake_bin, b"#!/bin/sh\n").unwrap();
+    assert_eq!(
+        find_llama_server_in_path(Some(temp.path().as_os_str())),
+        Some(fake_bin)
+    );
+
+    assert!(is_boot_server_endpoint("http://127.0.0.1:8787/v1"));
+    assert!(is_boot_server_endpoint("http://localhost:8787/v1/"));
+    assert!(!is_boot_server_endpoint("https://llm.selfware.design/v1"));
+
+    let lfm3_1gb = super::find_boot_model_spec("lfm3-1.7b-gsq-1gb").expect("1GB LFM3 spec");
+    assert_eq!(lfm3_1gb.file_name, "LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf");
+    assert_eq!(lfm3_1gb.size_bytes, 999_984_736);
+    assert!(lfm3_1gb.url.contains("kaitchup/LFM3-1.7B-GSQ-GGUF"));
+
+    let lfm3_slq = super::find_boot_model_spec("lfm3-1.7b-gsq-slq").expect("SLQ LFM3 spec");
+    assert_eq!(lfm3_slq.file_name, "LFM3-1.7B-GSQ-Q6_K_SLQ.gguf");
+    assert_eq!(lfm3_slq.size_bytes, 1_587_721_664);
+    assert!(lfm3_slq.url.contains("kaitchup/LFM3-1.7B-GSQ-GGUF"));
+
+    assert_eq!(super::pick_boot_model_for_memory(1024).id, "boot-assistant");
+    assert_eq!(
+        super::pick_boot_model_for_memory(2048).id,
+        "lfm3-1.7b-gsq-1gb"
+    );
+    assert_eq!(
+        super::pick_boot_model_for_memory(4096).id,
+        "lfm3-1.7b-gsq-slq"
+    );
 }
 
 #[test]

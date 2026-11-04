@@ -89,7 +89,19 @@ pub struct ProcOutcome {
 /// `stderr` to an unread pipe (`Stdio::piped()`) — nothing drains it, so a
 /// chatty child fills the pipe buffer and blocks, then gets killed and falsely
 /// reported as timed out. Send stderr to a file, `Stdio::null()`, or inherit.
-pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<ProcOutcome> {
+pub fn run_with_group_timeout(cmd: Command, timeout: Duration) -> Result<ProcOutcome> {
+    run_with_activity_aware_group_timeout(cmd, timeout, Duration::ZERO, timeout)
+}
+
+/// Like [`run_with_group_timeout`], but extends the deadline by `idle_extension`
+/// (up to `max_timeout` from start) whenever the child process actively writes
+/// streamed output to stdout.
+pub fn run_with_activity_aware_group_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    idle_extension: Duration,
+    max_timeout: Duration,
+) -> Result<ProcOutcome> {
     cmd.stdout(Stdio::piped());
 
     // New process group so a timeout can kill the agent AND everything it
@@ -129,7 +141,8 @@ pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<Pro
         }
     });
 
-    let deadline = started + timeout;
+    let mut deadline = started + timeout;
+    let max_deadline = started + max_timeout.max(timeout);
     let poll_interval = Duration::from_millis(50);
     let mut stdout_bytes = Vec::new();
     let mut stdout_done = false;
@@ -141,7 +154,15 @@ pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<Pro
     loop {
         while !stdout_done {
             match stdout_rx.try_recv() {
-                Ok(Some(chunk)) => stdout_bytes.extend_from_slice(&chunk),
+                Ok(Some(chunk)) => {
+                    stdout_bytes.extend_from_slice(&chunk);
+                    if !idle_extension.is_zero() {
+                        let extended = (Instant::now() + idle_extension).min(max_deadline);
+                        if extended > deadline {
+                            deadline = extended;
+                        }
+                    }
+                }
                 Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     stdout_done = true;
                 }
@@ -236,7 +257,15 @@ pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<Pro
         if !stdout_done {
             let wait = deadline.saturating_duration_since(now).min(poll_interval);
             match stdout_rx.recv_timeout(wait) {
-                Ok(Some(chunk)) => stdout_bytes.extend_from_slice(&chunk),
+                Ok(Some(chunk)) => {
+                    stdout_bytes.extend_from_slice(&chunk);
+                    if !idle_extension.is_zero() {
+                        let extended = (Instant::now() + idle_extension).min(max_deadline);
+                        if extended > deadline {
+                            deadline = extended;
+                        }
+                    }
+                }
                 Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     stdout_done = true;
                 }

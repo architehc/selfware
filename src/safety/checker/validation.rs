@@ -2387,7 +2387,18 @@ impl SafetyChecker {
     /// command substitution `$(…)`, nested `sh -c '…'`, and remote
     /// `host:path` operands are not extracted.
     fn check_shell_command_paths(&self, cmd: &str, base: &std::path::Path) -> Result<()> {
+        let (stripped_cmd, heredoc_bodies) = strip_non_shell_heredoc_bodies(cmd);
+        let cmd = stripped_cmd.as_ref();
         let mut cwd = base.to_path_buf();
+        for body in &heredoc_bodies {
+            if body.contains(":_authToken") {
+                return Err(SelfwareError::Safety(SafetyError::SecretDetected {
+                    finding: "NPM registry _authToken in heredoc body".to_string(),
+                }));
+            }
+            self.check_content_for_secrets(body)?;
+            self.check_file_content_evasions("", body)?;
+        }
         // Pipeline stages and backgrounded commands run in subshells: a `cd`
         // there moves nothing after it. The list separators keep them apart.
         let segments: Vec<(&str, bool)> = split_shell_commands(cmd)
@@ -4513,6 +4524,8 @@ pub(crate) fn extract_nested_shell_command<T: AsRef<str>>(
 
 /// Extract all command substitutions `$(...)` and backtick expressions `...` from a shell command.
 pub(crate) fn extract_command_substitutions(cmd: &str) -> Vec<String> {
+    let (stripped_cmd, _) = strip_non_shell_heredoc_bodies(cmd);
+    let cmd = stripped_cmd.as_ref();
     let mut results = Vec::new();
     let chars: Vec<char> = cmd.chars().collect();
     let len = chars.len();
@@ -5030,6 +5043,8 @@ fn is_shell_metachar_token(tok: &str) -> bool {
 /// shell plumbing tokens. Everything else after the command word is a file
 /// by the tools' own syntax.
 pub fn shell_tee_write_targets(cmd: &str) -> Vec<String> {
+    let (stripped_cmd, _) = strip_non_shell_heredoc_bodies(cmd);
+    let cmd = stripped_cmd.as_ref();
     let mut targets = Vec::new();
     for segment in split_shell_pipeline(cmd) {
         let Some(tokens) = shlex::split(segment) else {
@@ -5474,6 +5489,336 @@ fn shell_treats_backslash_as_escape() -> bool {
     !cfg!(target_os = "windows")
 }
 
+fn heredoc_line_matches_delim(line: &str, delim: &str, strip_tabs: bool) -> bool {
+    let clean = line.trim_end_matches('\r');
+    let candidate = if strip_tabs {
+        clean.trim_start_matches('\t')
+    } else {
+        clean
+    };
+    candidate == delim
+}
+
+fn extract_line_heredoc_delim(line: &str) -> Option<(String, bool, bool)> {
+    let trimmed_end = line.trim_end_matches('\r');
+    if shell_treats_backslash_as_escape() && trimmed_end.ends_with('\\') {
+        return None;
+    }
+    let chars: Vec<char> = trimmed_end.chars().collect();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut found: Option<(String, bool, bool)> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && !in_single && shell_treats_backslash_as_escape() {
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double {
+            // An unquoted `#` at the start of a shell word begins a comment:
+            // anything after it (including `# <<'EOF'`) is ignored by `sh`.
+            if c == '#'
+                && (i == 0
+                    || chars[i - 1].is_whitespace()
+                    || matches!(chars[i - 1], ';' | '|' | '&' | '(' | ')' | '<' | '>'))
+            {
+                break;
+            }
+            // Fail closed if the header line opens command substitution (`$(` or `` ` ``).
+            if c == '`' || (c == '$' && chars.get(i + 1) == Some(&'(')) {
+                return None;
+            }
+        }
+        if !in_single && !in_double && c == '<' && i + 1 < chars.len() && chars[i + 1] == '<' {
+            if i + 2 < chars.len() && chars[i + 2] == '<' {
+                // `<<<` here-string, not a multi-line heredoc
+                i += 3;
+                continue;
+            }
+            // Multiple heredocs on the same line: fail closed rather than
+            // guessing where one body ends and the next begins.
+            if found.is_some() {
+                return None;
+            }
+            let mut j = i + 2;
+            let strip_tabs = if j < chars.len() && chars[j] == '-' {
+                j += 1;
+                true
+            } else {
+                false
+            };
+            while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                j += 1;
+            }
+            let mut delim = String::new();
+            let mut quote: Option<char> = None;
+            let mut is_quoted = false;
+            while j < chars.len() {
+                let t = chars[j];
+                if let Some(q) = quote {
+                    if t == q {
+                        quote = None;
+                    } else if q == '"'
+                        && t == '\\'
+                        && j + 1 < chars.len()
+                        && shell_treats_backslash_as_escape()
+                        && matches!(chars[j + 1], '$' | '`' | '"' | '\\')
+                    {
+                        delim.push(chars[j + 1]);
+                        j += 2;
+                        continue;
+                    } else {
+                        delim.push(t);
+                    }
+                    j += 1;
+                    continue;
+                }
+                if t.is_whitespace() || matches!(t, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                    break;
+                }
+                if t == '\'' || t == '"' {
+                    quote = Some(t);
+                    is_quoted = true;
+                    j += 1;
+                    continue;
+                }
+                if t == '\\' && j + 1 < chars.len() && shell_treats_backslash_as_escape() {
+                    delim.push(chars[j + 1]);
+                    is_quoted = true;
+                    j += 2;
+                    continue;
+                }
+                delim.push(t);
+                j += 1;
+            }
+            if quote.is_some() || delim.is_empty() {
+                return None;
+            }
+            found = Some((delim, strip_tabs, is_quoted));
+            i = j.max(i + 2);
+            continue;
+        }
+        i += 1;
+    }
+    if in_single || in_double {
+        return None;
+    }
+    found
+}
+
+fn line_is_safe_file_write_heredoc_header(line: &str) -> bool {
+    let commands = split_shell_commands(line);
+    if commands.is_empty() {
+        return false;
+    }
+    // If the header line chains multiple commands (`mkdir -p d && cat > d/f <<'EOF'`),
+    // only the final command may carry the heredoc, and any preceding command
+    // must be a benign directory/setup verb (never a shell or interpreter).
+    for prefix_cmd in &commands[..commands.len() - 1] {
+        if prefix_cmd.contains("<<") {
+            return false;
+        }
+        let stages = split_shell_pipeline(prefix_cmd);
+        if stages.len() != 1 {
+            return false;
+        }
+        let Some(tokens) = shlex::split(stages[0]) else {
+            return false;
+        };
+        let Some(cmd_idx) = command_word_index(&tokens) else {
+            return false;
+        };
+        let verb = command_basename(&tokens[cmd_idx]);
+        if !matches!(verb, "mkdir" | "cd" | "chmod" | "touch" | "true" | ":") {
+            return false;
+        }
+    }
+    let stages = split_shell_pipeline(commands[commands.len() - 1]);
+    if stages.is_empty() {
+        return false;
+    }
+    let mut has_safe_target = false;
+    for stage in stages {
+        let Some(tokens) = shlex::split(stage) else {
+            return false;
+        };
+        let Some(cmd_idx) = command_word_index(&tokens) else {
+            return false;
+        };
+        let verb = command_basename(&tokens[cmd_idx]);
+        if !matches!(verb, "cat" | "tee") {
+            return false;
+        }
+        let mut i = cmd_idx + 1;
+        while i < tokens.len() {
+            let tok = &tokens[i];
+            let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+            if matches!(stripped, ">" | ">>" | ">|") {
+                if let Some(target) = tokens.get(i + 1) {
+                    if target.starts_with('/')
+                        || target.starts_with('~')
+                        || target.starts_with("..")
+                        || target.contains("/../")
+                    {
+                        return false;
+                    }
+                    has_safe_target = true;
+                }
+                i += 2;
+                continue;
+            }
+            if let Some(target) = stripped
+                .strip_prefix(">>")
+                .or_else(|| stripped.strip_prefix(">|"))
+                .or_else(|| stripped.strip_prefix('>'))
+            {
+                if !target.is_empty() && !target.starts_with('&') {
+                    if target.starts_with('/')
+                        || target.starts_with('~')
+                        || target.starts_with("..")
+                        || target.contains("/../")
+                    {
+                        return false;
+                    }
+                    has_safe_target = true;
+                }
+                i += 1;
+                continue;
+            }
+            if verb == "tee" && !tok.starts_with('-') && !tok.starts_with('<') {
+                if tok.starts_with('/')
+                    || tok.starts_with('~')
+                    || tok.starts_with("..")
+                    || tok.contains("/../")
+                {
+                    return false;
+                }
+                has_safe_target = true;
+            }
+            i += 1;
+        }
+    }
+    has_safe_target
+}
+
+/// Strip closed multi-line heredoc bodies (`<<[-]'DELIM'\n...\nDELIM`) when the
+/// header line is a `cat`/`tee` write to a relative workspace path with a
+/// quoted heredoc delimiter (so no shell command substitution occurs).
+pub(crate) fn strip_non_shell_heredoc_bodies(
+    cmd: &str,
+) -> (std::borrow::Cow<'_, str>, Vec<String>) {
+    if !cmd.contains("<<") || !cmd.contains('\n') {
+        return (std::borrow::Cow::Borrowed(cmd), Vec::new());
+    }
+    let lines: Vec<&str> = cmd.split('\n').collect();
+    let mut kept_lines: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut bodies: Vec<String> = Vec::new();
+    let mut idx = 0;
+    let mut stripped_any = false;
+
+    while idx < lines.len() {
+        let line = lines[idx];
+        kept_lines.push(line);
+        if let Some((delim, strip_tabs, is_quoted)) = extract_line_heredoc_delim(line) {
+            if is_quoted && line_is_safe_file_write_heredoc_header(line) {
+                if let Some(rel_close) = lines[idx + 1..]
+                    .iter()
+                    .position(|l| heredoc_line_matches_delim(l, &delim, strip_tabs))
+                {
+                    let body_start = idx + 1;
+                    let body_end = body_start + rel_close;
+                    if body_start < body_end {
+                        bodies.push(lines[body_start..body_end].join("\n"));
+                    }
+                    stripped_any = true;
+                    idx = body_end + 1;
+                    continue;
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    if !stripped_any {
+        (std::borrow::Cow::Borrowed(cmd), Vec::new())
+    } else {
+        (std::borrow::Cow::Owned(kept_lines.join("\n")), bodies)
+    }
+}
+
+fn line_is_shell_heredoc_header(line: &str) -> bool {
+    const SHELL_HEREDOC_VERBS: &[&str] = &[
+        "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "eval", "exec", "source", ".",
+    ];
+    let commands = split_shell_commands(line);
+    if commands.is_empty() {
+        return true;
+    }
+    for cmd_part in commands {
+        for stage in split_shell_pipeline(cmd_part) {
+            let Some(tokens) = shlex::split(stage) else {
+                return true;
+            };
+            if let Some(cmd_idx) = command_word_index(&tokens) {
+                let verb = command_basename(&tokens[cmd_idx]);
+                if SHELL_HEREDOC_VERBS.contains(&verb) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Strip closed multi-line heredoc bodies (`<<[-]'DELIM'\n...\nDELIM`) for
+/// non-shell commands when scanning for top-level file redirects (`>`), so `>`
+/// inside a heredoc payload (e.g. `python3 <<'EOF'\nprint(x > y)\nEOF`) is not
+/// mistaken for a shell output redirection.
+pub(crate) fn strip_non_shell_redirect_heredoc_bodies(cmd: &str) -> std::borrow::Cow<'_, str> {
+    if !cmd.contains("<<") || !cmd.contains('\n') {
+        return std::borrow::Cow::Borrowed(cmd);
+    }
+    let lines: Vec<&str> = cmd.split('\n').collect();
+    let mut kept_lines: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut idx = 0;
+    let mut stripped_any = false;
+
+    while idx < lines.len() {
+        let line = lines[idx];
+        kept_lines.push(line);
+        if let Some((delim, strip_tabs, _is_quoted)) = extract_line_heredoc_delim(line) {
+            if !line_is_shell_heredoc_header(line) {
+                if let Some(rel_close) = lines[idx + 1..]
+                    .iter()
+                    .position(|l| heredoc_line_matches_delim(l, &delim, strip_tabs))
+                {
+                    stripped_any = true;
+                    idx = idx + 1 + rel_close + 1;
+                    continue;
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    if !stripped_any {
+        std::borrow::Cow::Borrowed(cmd)
+    } else {
+        std::borrow::Cow::Owned(kept_lines.join("\n"))
+    }
+}
+
 /// Extract the file targets of output redirections (`>`, `>>`) from a shell
 /// command. `>` inside single/double quotes is ignored, as is descriptor
 /// duplication that writes no file (`2>&1`, `>&2`) and process substitution
@@ -5482,7 +5827,8 @@ fn shell_treats_backslash_as_escape() -> bool {
 /// stripped. Input redirects (`<`) and here-docs (`<<`) are not writes and
 /// are ignored.
 pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
-    let chars: Vec<char> = cmd.chars().collect();
+    let (stripped_cmd, _) = strip_non_shell_heredoc_bodies(cmd);
+    let chars: Vec<char> = stripped_cmd.chars().collect();
     let mut targets = Vec::new();
     let mut in_single = false;
     let mut in_double = false;

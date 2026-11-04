@@ -4,12 +4,26 @@ use super::*;
 fn test_count_steps() {
     let output = b"Step 1 Executing...\nStep 2 Executing...\n";
     assert_eq!(count_steps(output), 2);
+
+    // Current piped/plain and TTY step_start formats:
+    let modern_output = b"[Planning \xc2\xb7 0s elapsed]\n\
+                          [Step 1] \xe2\x86\x92 file_read Cargo.toml...\n\
+                          [Step 2 \xc2\xb7 5s elapsed]\n\
+                          [Step 2] \xe2\x86\x92 cargo_test...\n\
+                          \xf0\x9f\x93\x9d Step 3 \xe2\x86\x92 final answer...\n";
+    assert_eq!(count_steps(modern_output), 3);
 }
 
 #[test]
 fn test_extract_outcome() {
     let output = b"Some log\nOutcome: task_completed\nMore log\n";
     assert_eq!(extract_outcome(output), "task_completed");
+
+    // Current `── Run summary ──` lowercase format:
+    let summary_output = b"\xe2\x94\x80\xe2\x94\x80 Run summary \xe2\x94\x80\xe2\x94\x80\n\
+                           outcome: completed\n\
+                           iterations: 4/80 \xc2\xb7 turns: 5\n";
+    assert_eq!(extract_outcome(summary_output), "completed");
 }
 
 #[test]

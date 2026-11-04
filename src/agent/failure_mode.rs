@@ -602,7 +602,23 @@ impl FailureMode {
                         advice: "increase --max-budget-tokens or shrink the task scope".to_string(),
                     };
                 }
-                if reason.to_lowercase().contains("timeout") || reason.contains("wall-clock") {
+                let lower_reason = reason.to_lowercase();
+                if lower_reason.contains("gateway timeout")
+                    || lower_reason.contains("stream truncated")
+                    || lower_reason.contains("response stream truncated")
+                {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::Timeout,
+                        evidence: format!(
+                            "{} ({} mutating tool calls completed)",
+                            truncate(&reason, 200),
+                            mutating
+                        ),
+                        advice: "upstream proxy/tunnel cut the LLM request — keep streaming enabled (`streaming = true`), lower `max_tokens` or reasoning effort, or resume the checkpoint".to_string(),
+                    };
+                }
+                if reason.contains("wall-clock") {
                     return FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::Timeout,
@@ -611,6 +627,18 @@ impl FailureMode {
                             mutating
                         ),
                         advice: "increase --max-wall-secs or shrink the task scope".to_string(),
+                    };
+                }
+                if lower_reason.contains("timeout") || lower_reason.contains("timed out") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::Timeout,
+                        evidence: format!(
+                            "{} ({} mutating tool calls completed)",
+                            truncate(&reason, 200),
+                            mutating
+                        ),
+                        advice: "increase `agent.step_timeout_secs` / `agent.stream_stall_timeout_secs` or resume the checkpoint".to_string(),
                     };
                 }
                 if reason.contains("panic")

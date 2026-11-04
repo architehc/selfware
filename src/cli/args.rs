@@ -71,7 +71,7 @@ pub(crate) struct Cli {
     pub(crate) yolo: bool,
 
     /// Shortcut for --mode=daemon (run forever)
-    #[arg(long, help_heading = "Mode & safety")]
+    #[arg(long, global = true, help_heading = "Mode & safety")]
     pub(crate) daemon: bool,
 
     /// Disable colored output

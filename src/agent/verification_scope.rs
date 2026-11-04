@@ -100,8 +100,88 @@ impl VerificationScope {
     }
 }
 
+fn strip_unexpanded_command_substitutions(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(') {
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'\\' => {
+                        i = (i + 2).min(bytes.len());
+                        continue;
+                    }
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'`' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == b'`' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        let ch = raw[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn normalise(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    let raw = path.to_string_lossy();
+    let stripped = if raw.contains("$(") || raw.contains('`') {
+        strip_unexpanded_command_substitutions(&raw)
+    } else {
+        raw.into_owned()
+    };
+    let cleaned: PathBuf = Path::new(&stripped)
+        .components()
+        .filter(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            !s.contains("$(") && !s.contains('`')
+        })
+        .collect();
+    let target = if cleaned.as_os_str().is_empty() {
+        path
+    } else {
+        cleaned.as_path()
+    };
+    if let Ok(canon) = target.canonicalize() {
+        return canon;
+    }
+    let mut cur = Some(target);
+    let mut tail = Vec::new();
+    while let Some(p) = cur {
+        if let Ok(canon) = p.canonicalize() {
+            let mut out = canon;
+            for part in tail.into_iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        if let Some(name) = p.file_name() {
+            tail.push(name.to_os_string());
+        }
+        cur = p.parent();
+    }
+    target.to_path_buf()
 }
 
 /// Resolve the project a cargo invocation will actually operate on, by the same
@@ -317,6 +397,23 @@ impl VerificationRecord {
         }
         if theirs.starts_with(&format!("{mine} ")) {
             return true;
+        }
+        // A full script execution clears a syntax-only failure (`bash -n s.sh`
+        // or `node --check app.js`), whereas a syntax-only pass never clears a
+        // runtime script failure.
+        for shell in ["bash -n ", "sh -n ", "zsh -n ", "dash -n "] {
+            if let Some(script) = theirs.strip_prefix(shell) {
+                let script = script.strip_prefix("./").unwrap_or(script);
+                if mine == script || theirs.starts_with(&format!("{shell}{mine} ")) {
+                    return true;
+                }
+            }
+        }
+        if let Some(script) = theirs.strip_prefix("node --check ") {
+            let script = script.strip_prefix("./").unwrap_or(script);
+            if mine == format!("node {script}") {
+                return true;
+            }
         }
         false
     }
@@ -896,6 +993,134 @@ mod tests {
         ledger.record(record("cargo test", Some(&parent), &parent, true, 1));
         assert!(ledger.is_empty(), "the full-suite pass clears it");
     }
+
+    #[test]
+    fn compound_shell_command_splits_attached_semicolons_and_prefers_runner() {
+        let (_tmp, parent, _py) = nested();
+        let compound = r#"bash -n verify_guide.sh; echo "syntax exit: $?"; echo "=== RUN ==="; ./verify_guide.sh; echo "EXIT CODE: $?""#;
+        assert_eq!(check_id_for("shell_exec", compound), "verify_guide.sh");
+
+        let fail_compound = record(compound, Some(&parent), &parent, false, 1);
+        let pass_direct = record("./verify_guide.sh", Some(&parent), &parent, true, 1);
+        let pass_bash = record("bash verify_guide.sh", Some(&parent), &parent, true, 1);
+        assert!(
+            pass_direct.clears(&fail_compound),
+            "direct script invocation must clear compound script failure"
+        );
+        assert!(
+            pass_bash.clears(&fail_compound),
+            "bash <script>.sh must clear ./<script>.sh failure"
+        );
+
+        // Pre-0.9.9 checkpointed check_id where `-n` had already been stripped:
+        let pre_099_check_id = r#"bash verify_guide.sh echo "syntax exit: $?"; echo "=== RUN ==="; ./verify_guide.sh; echo "EXIT CODE: $?""#;
+        assert_eq!(
+            check_id_for("shell_exec", pre_099_check_id),
+            "verify_guide.sh"
+        );
+        let mut ledger = VerificationLedger::default();
+        let mut stale_fail = record("verify_guide.sh", Some(&parent), &parent, false, 57);
+        stale_fail.check_id = pre_099_check_id.to_string();
+        stale_fail.command = compound.to_string();
+        ledger.record(stale_fail);
+        let tool_calls = vec![crate::checkpoint::ToolCallLog {
+            timestamp: chrono::Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: r#"{"command":"cd /Users/ivo/first && ./verify_guide.sh"}"#.to_string(),
+            result: Some("passed=14 failed=0".to_string()),
+            success: true,
+            duration_ms: Some(100),
+        }];
+        ledger.normalize_restored(&tool_calls, 58);
+        assert!(
+            ledger.is_empty(),
+            "restored pre-0.9.9 garbled check_id must normalize and discharge against later passing tool call"
+        );
+    }
+
+    #[test]
+    fn unexpanded_dirname_in_scope_and_dot_slash_script_clear_deliverable_failure() {
+        let (_tmp, _parent, py) = nested();
+        let bogus_dir = py.join("$(dirname hello.py)");
+        let fail = record(
+            r#"cd "$(dirname hello.py)" && python3 hello.py && cat -A hello.py"#,
+            Some(&bogus_dir),
+            &bogus_dir,
+            false,
+            4,
+        );
+        let pass_bare = record("python3 hello.py", Some(&py), &py, true, 5);
+        let pass_dot_slash = record("python3 ./hello.py", Some(&py), &py, true, 5);
+        assert!(
+            pass_bare.clears(&fail),
+            "python3 hello.py in real working dir must clear failure with unexpanded $(dirname hello.py)"
+        );
+        assert!(
+            pass_dot_slash.clears(&fail),
+            "python3 ./hello.py must also clear python3 hello.py failure"
+        );
+
+        let multi_slash_sub = py.join(r#"$(cd "$(dirname "$0")/.." && pwd)"#);
+        let fail_multi = record(
+            "python3 hello.py",
+            Some(&multi_slash_sub),
+            &multi_slash_sub,
+            false,
+            4,
+        );
+        assert!(
+            pass_bare.clears(&fail_multi),
+            "multi-slash $(...) command substitution in scope path must be stripped cleanly"
+        );
+    }
+
+    #[test]
+    fn syntax_only_pass_does_not_clear_runtime_failure_but_full_run_clears_syntax_failure() {
+        let (_tmp, parent, _py) = nested();
+        let runtime_sh_fail = record("./verify_guide.sh", Some(&parent), &parent, false, 1);
+        let syntax_sh_pass = record("bash -n verify_guide.sh", Some(&parent), &parent, true, 2);
+        assert!(
+            !syntax_sh_pass.clears(&runtime_sh_fail),
+            "syntax-only `bash -n` pass must NOT clear a runtime script failure"
+        );
+        let syntax_sh_fail = record("bash -n verify_guide.sh", Some(&parent), &parent, false, 1);
+        let runtime_sh_pass = record("./verify_guide.sh", Some(&parent), &parent, true, 2);
+        assert!(
+            runtime_sh_pass.clears(&syntax_sh_fail),
+            "full script execution must clear a syntax-only `bash -n` failure"
+        );
+
+        let runtime_node_fail = record("node app.js", Some(&parent), &parent, false, 1);
+        let syntax_node_pass = record("node --check app.js", Some(&parent), &parent, true, 2);
+        assert!(
+            !syntax_node_pass.clears(&runtime_node_fail),
+            "syntax-only `node --check` pass must NOT clear a runtime script failure"
+        );
+        let syntax_node_fail = record("node --check app.js", Some(&parent), &parent, false, 1);
+        let runtime_node_pass = record("node app.js", Some(&parent), &parent, true, 2);
+        assert!(
+            runtime_node_pass.clears(&syntax_node_fail),
+            "full `node app.js` execution must clear a `node --check app.js` failure"
+        );
+    }
+
+    #[test]
+    fn ansi_and_kv_failure_tallies_are_detected_by_runner_output_proves_failure() {
+        assert!(
+            super::super::tool_dispatch::runner_output_proves_failure(
+                "\x1b[32m5 passed\x1b[0m, \x1b[31m2 failed\x1b[0m"
+            ),
+            "ANSI-colored `2 failed` tally must be recognized as failure"
+        );
+        assert!(
+            super::super::tool_dispatch::runner_output_proves_failure("passed=12 failed=2"),
+            "`failed=2` key-value tally must be recognized as failure"
+        );
+        assert!(
+            !super::super::tool_dispatch::runner_output_proves_failure("passed=14 failed=0"),
+            "`failed=0` key-value tally must NOT be recognized as failure"
+        );
+    }
 }
 
 /// Boolean flags of non-cargo runners that select a SUBSET of the suite
@@ -912,6 +1137,8 @@ const SUBSET_BOOL_FLAGS: &[&str] = &[
     "--onlychanged",
     "--only-changed",
     "--changed",
+    "-n",
+    "--check",
 ];
 
 /// Is `word` a bare redirection operator whose TARGET is the next word
@@ -923,36 +1150,123 @@ fn is_bare_redirect_operator(word: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, '&' | '>' | '<'))
 }
 
-/// The words of the segment that actually runs the check: leading setup
-/// segments (`cd sub && …`, `export X=1; …`) are skipped, as are leading
-/// `sudo`/`env` wrappers, and a path prefix on the program is removed.
-/// Leading `NAME=value` assignments are returned separately. Redirections and
-/// their targets are removed (`2>&1`, `> out.log`).
-fn check_segment_words(text: &str) -> (Vec<&str>, Vec<&str>) {
-    let all: Vec<&str> = text.split_whitespace().collect();
-    let segments = all.split(|w| matches!(*w, "&&" | "||" | ";" | "|"));
-    let mut chosen: &[&str] = &[];
-    for segment in segments {
-        let first = segment.first().copied().unwrap_or("");
-        if segment.is_empty()
-            || matches!(
-                first,
-                "cd" | "pushd"
-                    | "popd"
-                    | "export"
-                    | "source"
-                    | "."
-                    | "set"
-                    | "unset"
-                    | "true"
-                    | ":"
-            )
-        {
-            continue;
+/// Split a shell command into top-level segments separated by unquoted
+/// `&&`, `||`, `;`, or `|` (even when `;` or `|` is attached to a word,
+/// as in `bash -n verify_guide.sh; echo done`). Redirections like `2>&1`,
+/// `1>&2`, `&>file` stay inside their segment.
+fn split_unquoted_check_segments(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' if !in_single => {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                i += 1;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            }
+            b';' if !in_single && !in_double => {
+                let seg = text[start..i].trim();
+                if !seg.is_empty() {
+                    segments.push(seg);
+                }
+                i += 1;
+                start = i;
+            }
+            b'|' if !in_single && !in_double => {
+                let seg = text[start..i].trim();
+                if !seg.is_empty() {
+                    segments.push(seg);
+                }
+                if bytes.get(i + 1) == Some(&b'|') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                start = i;
+            }
+            b'&' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'&') => {
+                let seg = text[start..i].trim();
+                if !seg.is_empty() {
+                    segments.push(seg);
+                }
+                i += 2;
+                start = i;
+            }
+            _ => {
+                i += 1;
+            }
         }
-        chosen = segment;
-        break;
     }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        segments.push(tail);
+    }
+    segments
+}
+
+/// The words of the segment that actually runs the check: leading setup
+/// segments (`cd sub && …`, `export X=1; …`, `chmod +x …`, banner `echo …`)
+/// are skipped, as are leading `sudo`/`env` wrappers, and a path prefix on
+/// the program is removed. When a compound command pairs a shell syntax
+/// pre-check (`bash -n s.sh`) with an actual run (`./s.sh`), the actual run
+/// segment is selected. Leading `NAME=value` assignments are returned
+/// separately. Redirections and their targets are removed (`2>&1`, `> out.log`).
+fn check_segment_words(text: &str) -> (Vec<&str>, Vec<&str>) {
+    let raw_segments: Vec<Vec<&str>> = split_unquoted_check_segments(text)
+        .into_iter()
+        .map(|seg| seg.split_whitespace().collect::<Vec<&str>>())
+        .filter(|seg| !seg.is_empty())
+        .collect();
+    let is_setup_or_banner = |segment: &[&str]| -> bool {
+        let first = segment.first().copied().unwrap_or("");
+        matches!(
+            first,
+            "cd" | "pushd"
+                | "popd"
+                | "export"
+                | "source"
+                | "."
+                | "set"
+                | "unset"
+                | "true"
+                | ":"
+                | "chmod"
+                | "mkdir"
+                | "rm"
+                | "echo"
+                | "printf"
+        )
+    };
+    let is_shell_syntax_precheck = |segment: &[&str]| -> bool {
+        matches!(segment.first().copied(), Some("bash" | "sh" | "zsh"))
+            && (segment.get(1).copied() == Some("-n")
+                || (segment.get(2).copied() == Some("echo")
+                    && segment.iter().any(|w| w.contains("syntax"))))
+    };
+    let candidates: Vec<&[&str]> = raw_segments
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|seg| !is_setup_or_banner(seg))
+        .collect();
+    let chosen: &[&str] = candidates
+        .iter()
+        .copied()
+        .find(|seg| !is_shell_syntax_precheck(seg))
+        .or_else(|| candidates.first().copied())
+        .or_else(|| raw_segments.first().map(Vec::as_slice))
+        .unwrap_or(&[]);
     let mut assignments = Vec::new();
     let mut words = Vec::new();
     let mut skip_next = false;
@@ -1246,10 +1560,35 @@ fn cargo_shape(check: &str) -> Option<CargoCheckShape> {
 /// check. The rendered id keeps `-m` because it is shown to the model as a
 /// command, and `python3 pytest` is not one (it runs a FILE named `pytest`).
 fn comparable_id(id: &str) -> std::borrow::Cow<'_, str> {
+    if id.contains([';', '|', '&']) {
+        let normalized = check_id_for("shell_exec", id);
+        if !normalized.is_empty() && normalized != id {
+            return std::borrow::Cow::Owned(comparable_id(&normalized).into_owned());
+        }
+    }
     let mut words = id.split_whitespace();
     let interp = words.next().unwrap_or("");
     if (interp.starts_with("python") || interp == "node") && id.contains(" -m ") {
         std::borrow::Cow::Owned(id.replacen(" -m ", " ", 1))
+    } else if interp.starts_with("python") || interp == "node" {
+        let rest: Vec<&str> = words.map(|w| w.strip_prefix("./").unwrap_or(w)).collect();
+        if rest.is_empty() {
+            std::borrow::Cow::Borrowed(id)
+        } else {
+            std::borrow::Cow::Owned(format!("{interp} {}", rest.join(" ")))
+        }
+    } else if matches!(interp, "bash" | "sh" | "zsh" | "dash") {
+        let rest: Vec<&str> = words.map(|w| w.strip_prefix("./").unwrap_or(w)).collect();
+        if let Some(first) = rest.first() {
+            if !first.starts_with('-') && (first.ends_with(".sh") || first.ends_with(".bash")) {
+                return std::borrow::Cow::Owned(rest.join(" "));
+            }
+        }
+        if rest.is_empty() {
+            std::borrow::Cow::Borrowed(id)
+        } else {
+            std::borrow::Cow::Owned(format!("{interp} {}", rest.join(" ")))
+        }
     } else {
         std::borrow::Cow::Borrowed(id)
     }
@@ -1455,5 +1794,90 @@ impl VerificationLedger {
 
     pub fn clear(&mut self) {
         self.outstanding.clear();
+    }
+
+    /// Normalize pre-0.9.9 compound `check_id`s and false-positive masked
+    /// failure records restored from a checkpoint, and discharge any record
+    /// that a later passing verification tool call in the checkpoint's tool
+    /// log already covered. Returns true if any record was discharged.
+    pub fn normalize_restored(
+        &mut self,
+        tool_calls: &[crate::checkpoint::ToolCallLog],
+        last_successful_verification_mutation_sequence: usize,
+    ) -> bool {
+        let before_len = self.outstanding.len();
+        self.outstanding.retain(|record| {
+            if record.summary.contains(
+                "(read from runner output; the pipeline/connector masked the exit status):",
+            ) {
+                super::tool_dispatch::runner_output_proves_failure(&record.summary)
+            } else {
+                true
+            }
+        });
+        let mut had_compound_id = false;
+        for record in &mut self.outstanding {
+            if record.check_id.contains([';', '|', '&']) {
+                had_compound_id = true;
+                let rerun_cmd = match &record.rerun {
+                    Some(super::preexisting_failure::RerunSpec::Tool { args, .. }) => {
+                        serde_json::from_str::<serde_json::Value>(args)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(str::to_string)
+                            })
+                    }
+                    _ => None,
+                };
+                let source = if let Some(cmd) = rerun_cmd.as_deref() {
+                    cmd
+                } else if !record.command.trim().is_empty()
+                    && !matches!(record.command.as_str(), "shell_exec" | "pty_shell")
+                {
+                    &record.command
+                } else {
+                    &record.check_id
+                };
+                let normalized = check_id_for("shell_exec", source);
+                if !normalized.is_empty() {
+                    record.check_id = normalized;
+                }
+            }
+        }
+        if !had_compound_id || self.outstanding.is_empty() {
+            return self.outstanding.len() < before_len;
+        }
+        for call in tool_calls.iter().rev() {
+            if !call.success
+                || !super::tool_dispatch::tool_call_is_verification(
+                    &call.tool_name,
+                    &call.arguments,
+                )
+                || call
+                    .result
+                    .as_deref()
+                    .is_some_and(super::tool_dispatch::runner_output_proves_failure)
+            {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                continue;
+            };
+            let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let pass_id = check_id_for(&call.tool_name, cmd);
+            let pass_comp = comparable_id(&pass_id);
+            self.outstanding.retain(|failed| {
+                !(last_successful_verification_mutation_sequence >= failed.mutation_sequence
+                    && comparable_id(&failed.check_id) == pass_comp)
+            });
+            if self.outstanding.is_empty() {
+                break;
+            }
+        }
+        self.outstanding.len() < before_len
     }
 }

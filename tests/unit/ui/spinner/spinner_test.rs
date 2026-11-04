@@ -140,3 +140,28 @@ fn test_spinner_stop_info_and_warn_no_panic() {
     mk().stop_info("Nothing to check");
     mk().stop_warn("Not run");
 }
+
+#[test]
+fn test_fit_spinner_line_collapses_newlines_and_clamps_width() {
+    // 1. Multi-line command in `Running ...` must be collapsed onto a single line
+    // with zero `\n` or `\r` so `\r\x1b[2K` never leaves orphan lines in scrollback.
+    let multiline_msg = "Running cat << 'EOF' > verify_guide.sh\n#!/usr/bin/env bash\nset -euo pipefail\necho PASS\nEOF...";
+    let rendered = fit_spinner_line("⠋", multiline_msg, 1.4, 79);
+    assert!(
+        !rendered.contains('\n') && !rendered.contains('\r'),
+        "spinner line must never contain newlines: {rendered:?}"
+    );
+    assert!(
+        rendered.chars().count() <= 79,
+        "spinner line must fit within max_cols (79), got {}: {rendered:?}",
+        rendered.chars().count()
+    );
+    assert!(
+        rendered.ends_with(" (1.4s)"),
+        "spinner line must preserve elapsed suffix: {rendered:?}"
+    );
+
+    // 2. Short message stays intact.
+    let short = fit_spinner_line("⠙", "Sending prompt · ~5.3k tokens", 0.8, 79);
+    assert_eq!(short, "  ⠙ Sending prompt · ~5.3k tokens (0.8s)");
+}

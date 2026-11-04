@@ -539,17 +539,27 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         }
         Err(e) => {
             let safe_endpoint = crate::config::redact_endpoint(&endpoint);
+            let err_str = e.to_string();
+            let fix_hint = if err_str.contains("401")
+                || err_str.contains("403")
+                || err_str.to_lowercase().contains("unauthorized")
+                || err_str.to_lowercase().contains("invalid_api_key")
+            {
+                "Set `SELFWARE_API_KEY` or configure `api_key` in `selfware.toml` for this endpoint."
+            } else {
+                "Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."
+            };
             print_unified_check(
                 "endpoint reachable",
                 DoctorCheckStatus::Missing,
                 &format!("could not reach `{}`: {}", safe_endpoint, e),
-                Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."),
+                Some(fix_hint),
             );
             report.endpoint_reachable = Some(DoctorCheckResult {
                 name: "endpoint reachable".to_string(),
                 status: CheckOutcome::Fail,
                 detail: format!("could not reach `{}`: {}", safe_endpoint, e),
-                fix_hint: Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml.".to_string()),
+                fix_hint: Some(fix_hint.to_string()),
             });
             report.had_failures = true;
             println!();
@@ -1175,8 +1185,9 @@ async fn probe_thinking_support(endpoint: &str, model: &str, config: &Config) ->
                 Some(true)
             }
         }
+        Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => None,
         Ok(_) => Some(false),
-        Err(_) => Some(false),
+        Err(_) => None,
     }
 }
 
@@ -1235,8 +1246,9 @@ async fn probe_capabilities(
             // Look for SSE chunk markers without an embedded error event.
             Some(text.contains("data:") && text.contains("\n") && !has_sse_error)
         }
+        Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => None,
         Ok(_) => Some(false),
-        Err(_) => Some(false),
+        Err(_) => None,
     };
 
     // ── behavioral vision conditioning probe ──

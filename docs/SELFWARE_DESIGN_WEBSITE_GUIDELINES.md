@@ -385,7 +385,7 @@ Combine the measured benchmark results (`SAB` + `live_eval` + `quant_bench`) wit
 | **Single GPU Sweet Spot** | 24 GB (`RTX 4090` / `RTX 3090`) | `Qwen3.5-27B` (`Q4` / `AWQ`) or `LFM2-24B-A2B` | `32K–64K` | `native_function_calling = true` |
 | **Entry GPU / Laptop** | 8–16 GB (`RTX 4060 Ti` / `Mac 16–24 GB`) | `Qwen3.5-9B` (`Q4`) or `Qwen3.5-4B` (`Q8`) | `16K–32K` | `TierMeasurer` auto-adapts to `Compact` / `Lite` |
 | **Apple Silicon Unified** | 64–128 GB (`Mac Studio / M3-M4 Max`) | `Qwen3.5-35B-A3B` (`MLX 4-bit / Q8`) | `64K–128K` | `mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit` |
-| **Built-In Fast Profiles** | Local or LAN SGLang/vLLM endpoint | `qwen38-flash-next` / `deepseek-v4.1-flash` | `163,840` (`160K`) | Auto-applied: `max_tokens = 24576`, `max_call_secs = 1628`, `max_streams = 8` |
+| **Built-In Fast Profiles** | Local or LAN SGLang/vLLM endpoint | `qwen38-flash-next` / `deepseek-v4.1-flash` | `163,840` (`qwen38`) / `1,048,576` (`deepseek-v4`) | Auto-applied: `max_tokens = 24576` (`qwen38`) / `65536` (`deepseek-v4`), `max_streams = 8` |
 
 ---
 
@@ -489,7 +489,7 @@ Before publishing any update to `selfware.design`, verify:
 
 | Profile Key | `model_glob` | `native_function_calling` | `temperature` | `max_tokens` | `context_length` | `max_streams` / `max_global` | `max_call_secs` | Workload Quotas & Extra Body |
 |---|---|---|---:|---:|---:|---|---:|---|
-| `deepseek-v4` | `deepseek-v4*` | `false` *(15-family XML/DSML parser)* | `0.6` | `65,536` | `262,144` | `8` / `16` | `3,600s` | `DEEPSEEK_V4_WORKLOAD_QUOTAS` (`planning`: `16,384` tok; `synthesis`: `49,152` tok; `enable_thinking: true`) |
+| `deepseek-v4` | `deepseek-v4*` | `false` *(15-family XML/DSML parser)* | `0.6` | `65,536` | `1,048,576` | `8` / `16` | `3,600s` | `DEEPSEEK_V4_WORKLOAD_QUOTAS` (`planning`: `16,384` tok; `synthesis`: `49,152` tok; `enable_thinking: true`) |
 | `qwen3.8` / `qwen38` | `qwen3.8-*` / `qwen38-flash-*` | `false` *(15-family XML parser)* | `0.7` | `24,576` | `163,840` | `8` / `16` | `1,628s` | `QWEN38_WORKLOAD_QUOTAS` (`planning`: thinking=`false`, `12,288` tok; `synthesis`: thinking=`true`, `16,384` tok) |
 | `qwen3.6` | `qwen3.6-*` | `true` | `0.7` | `32,768` | Server default | Default | Default | `top_p: 0.8, top_k: 20, presence_penalty: 1.5, enable_thinking: true, preserve_thinking: true` |
 | `qwen3.5` | `qwen3.5-*` | `true` | `0.6` | `32,768` | Server default | Default | Default | `top_p: 0.95, top_k: 20, presence_penalty: 0.0` |

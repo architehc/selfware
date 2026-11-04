@@ -62,7 +62,7 @@ impl ProjectType {
     pub fn check_command(&self) -> Vec<&'static str> {
         match self {
             Self::Rust => vec!["cargo", "check"],
-            Self::Python => vec!["python3", "-m", "py_compile"],
+            Self::Python => vec!["python3", "-m", "compileall", "-q", "."],
             Self::Go => vec!["go", "build", "./..."],
             Self::Template => vec!["cargo", "check"],
         }

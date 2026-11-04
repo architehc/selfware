@@ -63,12 +63,7 @@ impl LongRunningReport {
         let successful = self
             .results
             .iter()
-            .filter(|r| {
-                matches!(
-                    r.status,
-                    ProjectStatus::Green | ProjectStatus::Partial | ProjectStatus::Compiles
-                )
-            })
+            .filter(|r| matches!(r.status, ProjectStatus::Green | ProjectStatus::Partial))
             .count();
 
         successful as f64 / self.results.len() as f64

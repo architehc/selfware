@@ -14,6 +14,7 @@ pub enum ExecutionMode {
     #[default]
     Normal,
     /// Auto-approve file edits, ask for other operations
+    #[serde(alias = "auto-edit", alias = "auto_edit")]
     AutoEdit,
     /// Auto-approve all operations for this session
     Yolo,

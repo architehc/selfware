@@ -211,7 +211,13 @@ impl SelfEditOrchestrator {
 
     /// Introspect past performance to identify systemic weaknesses
     pub fn introspect_performance(&self) -> Vec<ImprovementTarget> {
-        let snapshots = MetricsStore::new().trend(12).unwrap_or_default();
+        let project_metrics = self.project_root.join(".selfware").join("metrics.jsonl");
+        let mut snapshots = MetricsStore::with_path(project_metrics)
+            .trend(12)
+            .unwrap_or_default();
+        if snapshots.is_empty() {
+            snapshots = MetricsStore::new().trend(12).unwrap_or_default();
+        }
         self.introspect_performance_from_snapshots(&snapshots)
     }
 
@@ -359,6 +365,13 @@ impl SelfEditOrchestrator {
         if self.project_root.join("src").exists() {
             targets.extend(self.introspect_performance());
         }
+
+        // Filter out targets whose file does not exist in this project root
+        targets.retain(|t| {
+            t.file
+                .as_ref()
+                .is_none_or(|f| self.project_root.join(f).exists())
+        });
 
         // Filter out targets in denied files
         targets.retain(|t| !self.is_denied(t));

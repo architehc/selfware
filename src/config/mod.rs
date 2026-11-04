@@ -263,8 +263,8 @@ pub struct Config {
     #[serde(default)]
     pub review: ReviewConfig,
 
-    /// Runtime execution mode (set via CLI, not persisted)
-    #[serde(skip)]
+    /// Runtime execution mode (set via CLI or trusted config, not serialized by wizards)
+    #[serde(default, skip_serializing)]
     pub execution_mode: ExecutionMode,
 
     /// Compact output mode (less visual chrome) - CLI override

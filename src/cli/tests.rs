@@ -1408,6 +1408,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         done_check: None,
         review_coverage: None,
         workloads: Vec::new(),
+        openrouter_savings: None,
     }
 }
 
@@ -3101,6 +3102,37 @@ fn interrupted_run_reads_interrupted_with_resume_hint() {
         render_run_end_notice(RunEnd::Failed, "boom", Some("t")),
         "✗ Task failed: boom"
     );
+    // In --yolo mode, both Interrupted and Failed notices include `--yolo` on
+    // the copy-pasteable resume lines.
+    assert_eq!(
+        render_run_end_notice_with_mode(
+            RunEnd::Interrupted,
+            "Task cancelled by user",
+            Some("53d989cc-d1db-40aa-a444-478aa2d25407"),
+            crate::config::ExecutionMode::Yolo,
+        ),
+        "Task interrupted. Resume later with:\n  selfware resume 53d989cc-d1db-40aa-a444-478aa2d25407 --yolo\n  selfware --continue --yolo"
+    );
+    assert_eq!(
+        render_run_end_notice_with_mode(
+            RunEnd::Failed,
+            "boom",
+            Some("53d989cc-d1db-40aa-a444-478aa2d25407"),
+            crate::config::ExecutionMode::Yolo,
+        ),
+        "✗ Task failed: boom\nResume later with:\n  selfware resume 53d989cc-d1db-40aa-a444-478aa2d25407 --yolo\n  selfware --continue --yolo"
+    );
+    let cli_resume_yolo = Cli::try_parse_from([
+        "selfware",
+        "resume",
+        "53d989cc-d1db-40aa-a444-478aa2d25407",
+        "--yolo",
+    ])
+    .expect("`selfware resume <id> --yolo` must parse");
+    assert!(cli_resume_yolo.yolo);
+    let cli_continue_yolo = Cli::try_parse_from(["selfware", "--continue", "--yolo"])
+        .expect("`selfware --continue --yolo` must parse");
+    assert!(cli_continue_yolo.continue_flag && cli_continue_yolo.yolo);
     // The legacy entry point is unchanged for failures.
     let failed = render_run_summary(&summary, Some("boom"));
     assert!(

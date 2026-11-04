@@ -268,6 +268,163 @@ fn replace_restored_message_content(message: &mut Message, replacement: &str, xm
 }
 
 impl Agent {
+    /// Reconstruct any missing `<tool_result>` / `role="tool"` message when a
+    /// checkpoint's `messages` ends on an `assistant` tool-call message whose
+    /// execution was already recorded in `logs` (or interrupted before result
+    /// persistence). Prevents a resumed session from sending a dangling
+    /// assistant tool call without its result on the next turn.
+    pub(super) fn repair_dangling_assistant_tool_calls(
+        messages: &mut Vec<Message>,
+        logs: &[crate::checkpoint::ToolCallLog],
+    ) {
+        fn json_args_match(a: &str, b: &str) -> bool {
+            let a = a.trim();
+            let b = b.trim();
+            a == b
+                || serde_json::from_str::<serde_json::Value>(a)
+                    .ok()
+                    .zip(serde_json::from_str::<serde_json::Value>(b).ok())
+                    .is_some_and(|(va, vb)| va == vb)
+        }
+
+        fn count_matching_calls_in_messages(
+            messages: &[Message],
+            tool_name: &str,
+            arguments: &str,
+        ) -> usize {
+            let mut count = 0usize;
+            for msg in messages {
+                if msg.role != "assistant" {
+                    continue;
+                }
+                if let Some(calls) = &msg.tool_calls {
+                    if !calls.is_empty() {
+                        count += calls
+                            .iter()
+                            .filter(|c| {
+                                c.function.name == tool_name
+                                    && json_args_match(&c.function.arguments, arguments)
+                            })
+                            .count();
+                        continue;
+                    }
+                }
+                let parsed =
+                    crate::tool_parser::parse_tool_calls(&msg.content.text_all()).tool_calls;
+                count += parsed
+                    .iter()
+                    .filter(|c| {
+                        c.tool_name == tool_name
+                            && json_args_match(&c.arguments.to_string(), arguments)
+                    })
+                    .count();
+            }
+            count
+        }
+
+        fn count_matching_logs(
+            logs: &[crate::checkpoint::ToolCallLog],
+            tool_name: &str,
+            arguments: &str,
+        ) -> usize {
+            logs.iter()
+                .filter(|log| {
+                    log.tool_name == tool_name && json_args_match(&log.arguments, arguments)
+                })
+                .count()
+        }
+
+        let Some(last) = messages.last() else {
+            return;
+        };
+        if last.role != "assistant" {
+            return;
+        }
+        if let Some(calls) = last.tool_calls.clone() {
+            if !calls.is_empty() {
+                let tail_matches = logs.len() >= calls.len()
+                    && logs[logs.len() - calls.len()..]
+                        .iter()
+                        .zip(calls.iter())
+                        .all(|(log, call)| {
+                            log.tool_name == call.function.name
+                                && json_args_match(&log.arguments, &call.function.arguments)
+                                && count_matching_logs(
+                                    logs,
+                                    &call.function.name,
+                                    &call.function.arguments,
+                                ) >= count_matching_calls_in_messages(
+                                    messages,
+                                    &call.function.name,
+                                    &call.function.arguments,
+                                )
+                        });
+                if tail_matches {
+                    for (call, log) in calls.iter().zip(&logs[logs.len() - calls.len()..]) {
+                        let raw = log.result.as_deref().unwrap_or(if log.success {
+                            r#"{"status":"ok"}"#
+                        } else {
+                            r#"{"error":"Tool call failed"}"#
+                        });
+                        messages.push(Message::tool(raw, &call.id));
+                    }
+                } else {
+                    for call in &calls {
+                        messages.push(Message::tool(
+                            format!(
+                                r#"{{"error":"Tool '{}' was interrupted before completion; re-run if needed."}}"#,
+                                call.function.name
+                            ),
+                            &call.id,
+                        ));
+                    }
+                }
+                return;
+            }
+        }
+        let parsed = crate::tool_parser::parse_tool_calls(&last.content.text_all()).tool_calls;
+        if parsed.is_empty() {
+            return;
+        }
+        let tail_matches = logs.len() >= parsed.len()
+            && logs[logs.len() - parsed.len()..]
+                .iter()
+                .zip(parsed.iter())
+                .all(|(log, call)| {
+                    let call_args = call.arguments.to_string();
+                    log.tool_name == call.tool_name
+                        && json_args_match(&log.arguments, &call_args)
+                        && count_matching_logs(logs, &call.tool_name, &call_args)
+                            >= count_matching_calls_in_messages(
+                                messages,
+                                &call.tool_name,
+                                &call_args,
+                            )
+                });
+        if tail_matches {
+            for log in &logs[logs.len() - parsed.len()..] {
+                let raw = log.result.as_deref().unwrap_or(if log.success {
+                    r#"{"status":"ok"}"#
+                } else {
+                    "Tool call failed"
+                });
+                let wrapped = super::result_envelope::wrap(raw, log.success);
+                messages.push(Message::user(wrapped));
+            }
+        } else {
+            for call in &parsed {
+                let wrapped = super::result_envelope::wrap(
+                    &format!(
+                        "Tool '{}' was interrupted before completion; re-run if needed.",
+                        call.tool_name
+                    ),
+                    false,
+                );
+                messages.push(Message::user(wrapped));
+            }
+        }
+    }
+
     /// Re-apply today's source policy to persisted tool data. User-authored
     /// instructions are not a sanitization target: legacy XML results require
     /// an adjacent assistant call or an exact execution-log match as provenance.
@@ -633,11 +790,40 @@ impl Agent {
 
         // Create the agent and commit all restored state at once
         let mut agent = Self::new(config).await?;
+        while restored_messages.len() > 2 {
+            let should_strip = restored_messages.last().is_some_and(|m| {
+                let text = m.content.text();
+                let trimmed = text.trim();
+                (m.role == "user" || m.role == "system")
+                    && (trimmed == "[Task interrupted by user]"
+                        || trimmed.starts_with("[CAREFUL MODE]")
+                        || trimmed
+                            .starts_with("<selfware_system_directive>\nResumed from a checkpoint."))
+            });
+            if should_strip {
+                restored_messages.pop();
+            } else {
+                break;
+            }
+        }
+        Self::repair_dangling_assistant_tool_calls(&mut restored_messages, &checkpoint.tool_calls);
         agent.sanitize_restored_tool_messages(&mut restored_messages, &checkpoint.tool_calls);
+        let mut checkpoint = checkpoint;
+        if checkpoint.messages.len() != restored_messages.len() {
+            checkpoint.set_messages(restored_messages.clone());
+        }
         agent.messages = restored_messages;
         agent.loop_control = restored_loop;
         agent.current_checkpoint = Some(checkpoint.clone());
         agent.checkpoint_manager = Some(checkpoint_manager);
+        if agent.messages.len() > 80 {
+            let metrics = agent.compact_micro();
+            info!(
+                "Compacted large restored history on resume ({} msgs): {}",
+                agent.messages.len(),
+                metrics.summary()
+            );
+        }
         // Restore the cumulative budget so the wall-clock / token caps continue
         // accumulating across resume instead of restarting from zero.
         // Outstanding obligations survive a restart. A resume that dropped them
@@ -691,6 +877,12 @@ impl Agent {
             .last_failed_verification_summary
             .clone();
         agent.verification_failures = checkpoint.guard_counters.verification_failures.clone();
+        let discharged_false_positive = agent.verification_failures.normalize_restored(
+            &checkpoint.tool_calls,
+            checkpoint
+                .guard_counters
+                .last_successful_verification_mutation_sequence,
+        );
         // The rest of the per-run guard state (review finding: the D9
         // not-run waiver was lost, so a resume on a host without the
         // toolchain was refused with a bogus StaleVerification; Rule-5
@@ -699,26 +891,41 @@ impl Agent {
         let guards = &checkpoint.guard_counters;
         agent.last_not_run_verification_mutation_sequence =
             guards.last_not_run_verification_mutation_sequence;
-        agent.mutating_tool_call_count = guards.mutating_tool_call_count.unwrap_or_else(|| {
-            // Older checkpoint: count the persisted tool log.
-            checkpoint
-                .tool_calls
-                .iter()
-                .filter(|call| {
-                    call.success && {
-                        let args = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                            .unwrap_or(serde_json::Value::Null);
-                        super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args)
-                    }
-                })
-                .count()
-        });
+        let actual_mutating = checkpoint
+            .tool_calls
+            .iter()
+            .filter(|call| {
+                call.success && {
+                    let args = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args)
+                }
+            })
+            .count();
+        agent.mutating_tool_call_count =
+            if !checkpoint.tool_calls.is_empty() && actual_mutating == 0 {
+                0
+            } else {
+                guards.mutating_tool_call_count.unwrap_or(actual_mutating)
+            };
+        if !checkpoint.tool_calls.is_empty() && actual_mutating == 0 {
+            agent.mutation_sequence = 0;
+        }
         agent.total_tool_call_count = guards
             .total_tool_call_count
             .unwrap_or(checkpoint.tool_calls.len());
         agent.consecutive_stale_verification = guards.consecutive_stale_verification;
         agent.progress_guard_fire_count = guards.progress_guard_fire_count;
-        agent.rigor_mode = guards.rigor_mode;
+        agent.rigor_mode = if agent.mutation_sequence == 0 {
+            false
+        } else {
+            guards.rigor_mode
+        };
+        if discharged_false_positive && agent.verification_failures.is_empty() {
+            agent.last_failed_verification_mutation_sequence = 0;
+            agent.last_failed_verification_summary = None;
+            agent.consecutive_stale_verification = 0;
+        }
         agent
             .citation_gate
             .lock()
@@ -745,6 +952,14 @@ impl Agent {
         for path in &prior_written {
             agent.file_tracker.mark_written(path);
         }
+        if !prior_written.is_empty()
+            || checkpoint
+                .tool_calls
+                .iter()
+                .any(|tc| tc.success && super::tool_dispatch::tool_call_writes_file(&tc.tool_name))
+        {
+            agent.has_written_any_file = true;
+        }
         // Workspace refresh (W8a): the restored conversation may end before
         // the last persisted edits were discussed, or have compressed them
         // away — a resumed e2e run did not know `src/entry.rs` already
@@ -757,11 +972,45 @@ impl Agent {
         // Another process may have changed them while the task was paused;
         // a credit restored verbatim let the completion gate accept a tree
         // no check ever ran against.
-        if let Some(note) = agent.revalidate_restored_verification_credit(
+        let credit_revoked = if let Some(note) = agent.revalidate_restored_verification_credit(
             checkpoint.guard_counters.verification_fingerprint.as_ref(),
             &prior_written,
         ) {
             agent.messages.push(Message::user(note));
+            true
+        } else {
+            false
+        };
+        if !credit_revoked
+            && agent.verification_failures.is_empty()
+            && agent.last_successful_verification_mutation_sequence < agent.mutation_sequence
+        {
+            let has_passing_trailing_check = checkpoint
+                .tool_calls
+                .iter()
+                .rev()
+                .take(4)
+                .take_while(|call| {
+                    !super::tool_dispatch::tool_call_counts_as_state_change(
+                        &call.tool_name,
+                        &call.arguments,
+                    )
+                })
+                .any(|call| {
+                    call.success
+                        && super::tool_dispatch::tool_call_is_verification(
+                            &call.tool_name,
+                            &call.arguments,
+                        )
+                        && !call
+                            .result
+                            .as_deref()
+                            .is_some_and(super::tool_dispatch::runner_output_proves_failure)
+                });
+            if has_passing_trailing_check {
+                agent.last_successful_verification_mutation_sequence = agent.mutation_sequence;
+                agent.rigor_mode = false;
+            }
         }
         // Turn artifacts are append-only across resume: continue numbering
         // after the highest sequence any earlier segment reserved, so the
@@ -1742,11 +1991,14 @@ impl Agent {
             .fail_operational_step(self.loop_control.current_step() + 1, reason);
         let final_step = self.loop_control.current_step();
         let final_iter = self.loop_control.current_iteration();
+        let final_tokens = self.memory.total_tokens();
         self.refresh_persisted_evidence();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Failed);
             checkpoint.set_step(final_step);
             checkpoint.set_iteration(final_iter);
+            checkpoint.set_messages(self.messages.clone());
+            checkpoint.set_estimated_tokens(final_tokens);
             checkpoint.log_error(final_step, reason.to_string(), false);
             if let Some(ref manager) = self.checkpoint_manager {
                 // Full write so the base reflects the terminal Failed/step.
@@ -1796,6 +2048,7 @@ impl Agent {
                 serde_json::from_value::<Vec<crate::checkpoint::ToolCallLog>>(value).ok()
             })
             .unwrap_or_default();
+        Self::repair_dangling_assistant_tool_calls(&mut messages, &logs);
         self.sanitize_restored_tool_messages(&mut messages, &logs);
         self.messages = messages;
 

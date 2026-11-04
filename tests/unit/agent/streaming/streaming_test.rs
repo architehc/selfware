@@ -249,6 +249,15 @@ fn extract_display_name_from_think_block() {
 }
 
 #[test]
+fn extract_display_name_from_deepseek_dsml_and_tool_sep() {
+    let dsml = "<｜DSML｜function_calls><｜DSML｜invoke name=\"file_write\"><｜DSML｜parameter name=\"path\">src/lib.rs</｜DSML｜parameter>";
+    assert_eq!(extract_display_name(dsml), Some("file_write".to_string()));
+
+    let sep = "<｜tool▁call▁begin｜>function<｜tool▁sep｜>cargo_test\n{\"package\":\"foo\"}<｜tool▁call▁end｜>";
+    assert_eq!(extract_display_name(sep), Some("cargo_test".to_string()));
+}
+
+#[test]
 fn suppressed_tags_covers_all_local_model_formats() {
     // Ensure all common local model XML formats are covered
     let formats = [
@@ -259,6 +268,14 @@ fn suppressed_tags_covers_all_local_model_formats() {
         "<function=",
         "<|open|>tools",
         "<|open|>call ",
+        "<｜DSML｜function_calls>",
+        "<|DSML|function_calls>",
+        "<｜DSML｜invoke",
+        "<|DSML|invoke",
+        "<｜tool▁calls▁begin｜>",
+        "<|tool_calls_begin|>",
+        "<｜tool▁call▁begin｜>",
+        "<|tool_call_begin|>",
     ];
     for fmt in &formats {
         assert!(

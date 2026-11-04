@@ -118,3 +118,48 @@ fn main_loop_share_never_exceeds_the_total() {
     let lines = session.render_cost_lines(100).join("\n");
     assert!(lines.contains("main loop:          15"), "{lines}");
 }
+
+#[test]
+fn openrouter_savings_computes_input_prefix_and_output_with_speed() {
+    let shapes = vec![
+        crate::api::usage::CallShape {
+            prompt_tokens: 40_000,
+            completion_tokens: 1_000,
+            elapsed_ms: 20_000,
+        },
+        crate::api::usage::CallShape {
+            prompt_tokens: 60_000,
+            completion_tokens: 1_000,
+            elapsed_ms: 20_000,
+        },
+    ];
+    let (cached, tok_per_sec) = measure_cache_and_speed(&shapes, &[]);
+    assert_eq!(cached, 40_000);
+    assert!((tok_per_sec.unwrap() - 50.0).abs() < 1e-6);
+
+    let savings = OpenRouterSavings::compute(
+        "deepseek-v4.1-flash",
+        100_000,
+        cached,
+        2_000,
+        None,
+        tok_per_sec,
+    );
+    assert_eq!(savings.uncached_input_tokens, 60_000);
+    assert_eq!(savings.cached_input_tokens, 40_000);
+    assert_eq!(savings.output_tokens, 2_000);
+    assert!((savings.uncached_input_usd - 0.0162).abs() < 1e-6);
+    assert!((savings.cached_input_usd - 0.0028).abs() < 1e-6);
+    assert!((savings.prefix_cache_saved_usd - 0.0080).abs() < 1e-6);
+    assert!((savings.output_usd - 0.0022).abs() < 1e-6);
+    assert!((savings.total_saved_usd - 0.0212).abs() < 1e-6);
+
+    let summary_line = savings.summary_line();
+    assert!(
+        summary_line.contains(
+            "openrouter value saved: ~$0.0212 ($0.0162 input + $0.0028 prefix-cache [saved $0.0080] + $0.0022 output @ $0.27/$0.07/$1.10/1M) · speed: 50.0 tok/s"
+        ),
+        "{summary_line}"
+    );
+    assert_eq!(savings.status_bar_badge(), "saved ~$0.02 OR · 50.0 tok/s");
+}

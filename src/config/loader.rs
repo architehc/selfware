@@ -1278,6 +1278,12 @@ impl Config {
                 keys.join(", ")
             ));
         }
+        // When `[yolo] enabled = true` survives restriction (home config,
+        // trusted repo, or explicit `--config`), activate Yolo execution mode
+        // unless a more specific mode (e.g. Daemon/AutoEdit) is already set.
+        if config.yolo.enabled && config.execution_mode == ExecutionMode::Normal {
+            config.execution_mode = ExecutionMode::Yolo;
+        }
 
         // Denylist semantics for `safety.denied_paths`: an explicit key in a
         // config file can only ADD restrictions, never remove the built-in

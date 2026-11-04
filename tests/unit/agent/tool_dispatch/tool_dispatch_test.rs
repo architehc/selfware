@@ -9550,3 +9550,25 @@ async fn w2_native_fc_includes_context_tools_and_parallel_dispatch_updates_last_
 
     server.stop().await;
 }
+
+#[test]
+fn test_output_indicates_verification_failure_key_value_counters() {
+    use crate::agent::tool_dispatch::helpers::runner_output_proves_failure;
+
+    // `passed=14 failed=0` must NOT misparse `14` from `passed=14` as `14 failed`.
+    let passing = serde_json::json!({
+        "exit_code": 0,
+        "stdout": "PASS: H1 title\n=== SUMMARY: passed=14 failed=0 ===\n",
+        "stderr": ""
+    })
+    .to_string();
+    assert!(!runner_output_proves_failure(&passing));
+
+    let failing_prefix = serde_json::json!({
+        "exit_code": 0,
+        "stdout": "test result: 14 passed, 2 failed\n",
+        "stderr": ""
+    })
+    .to_string();
+    assert!(runner_output_proves_failure(&failing_prefix));
+}

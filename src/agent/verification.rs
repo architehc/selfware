@@ -3503,7 +3503,12 @@ impl Agent {
                     .filter(|m| m.role == "assistant")
                     .filter_map(|m| m.tool_calls.as_ref())
                     .flatten()
-                    .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name));
+                    .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name))
+                || self.current_checkpoint.as_ref().is_some_and(|cp| {
+                    cp.tool_calls.iter().any(|tc| {
+                        tc.success && super::tool_dispatch::tool_call_writes_file(&tc.tool_name)
+                    })
+                });
 
             if !has_any_file_write {
                 let task_desc = self
@@ -4200,15 +4205,11 @@ impl Agent {
         tool_name: &str,
         args: &Value,
     ) -> Option<String> {
-        // Checkpoint-on-mutation hook (W8a). The dispatcher calls this for
-        // every successful sequentially-dispatched tool call — every mutating
-        // tool is sequential (the parallel batch is read-only tools only) —
-        // AFTER the call is appended to the checkpoint log and its lifecycle
-        // accounting ran. Persisting here, before the post-edit check, puts
-        // the mutation on disk even when the check below is slow or the
-        // process dies during it. A no-op for read-only calls; runs before
-        // the file-writer early return so shell/git mutations count too.
-        self.persist_checkpoint_after_mutation();
+        // Note: `persist_checkpoint_after_mutation` runs in
+        // `execute_single_tool_in_batch` right AFTER `push_tool_result_message`
+        // so that the persisted `checkpoint.messages` always includes the
+        // `<tool_result>` message matching the newly logged `checkpoint.tool_calls`
+        // entry (preventing a dangling assistant tool-call message on resume).
 
         // Rule-5 sweep (2026-09-22): every file-writing tool arms the
         // post-edit verification, not just file_edit/file_write —

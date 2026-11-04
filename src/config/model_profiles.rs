@@ -549,7 +549,7 @@ fn deepseek_v4_defaults_profile(name: &'static str, pattern: &'static str) -> Mo
         streaming: Some(true),
         temperature: Some(0.6),
         max_tokens: Some(65_536),
-        context_length: Some(262_144),
+        context_length: Some(1_048_576),
         max_streams: Some(8),
         max_global: Some(16),
         max_call_secs: Some(3_600),
@@ -600,8 +600,8 @@ pub const DEEPSEEK_V4_WORKLOAD_QUOTAS: WorkloadQuotas = WorkloadQuotas {
 pub const DEEPSEEK_V4_MEASURED: &[MeasuredQuota] = &[
     MeasuredQuota {
         name: "context_length",
-        value: "262144",
-        basis: "256k operational context window within 1M backend limit on llm.selfware.design",
+        value: "1048576",
+        basis: "1M (1,048,576) full backend context window on llm.selfware.design",
     },
     MeasuredQuota {
         name: "max_tokens",

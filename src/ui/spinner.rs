@@ -73,6 +73,46 @@ pub fn stop_icon(kind: StopKind, color: bool) -> String {
     }
 }
 
+/// Query current terminal column budget for a single-line live spinner.
+/// Leaves a 1-column safety margin so terminals with auto-wrap at the right
+/// margin never wrap the spinner onto a second physical row (where `\r\x1b[2K`
+/// would only clear the bottom row and leave wrapped lines in scrollback).
+pub fn terminal_max_cols() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .filter(|(w, _)| *w > 0)
+        .map(|(w, _)| (w as usize).saturating_sub(2))
+        .unwrap_or(78)
+        .max(24)
+}
+
+/// Format and clamp a spinner line (`  {frame} {msg} ({elapsed:.1}s)`) so it
+/// never contains newlines and never exceeds `max_cols` visible characters.
+pub fn fit_spinner_line(frame: &str, msg: &str, elapsed_secs: f64, max_cols: usize) -> String {
+    let clean_msg = output::live::escape_controls_single_line(msg);
+    let prefix = format!("  {} ", frame);
+    let suffix = format!(" ({:.1}s)", elapsed_secs);
+    let prefix_chars = output::live::strip_ansi(&prefix).chars().count();
+    let suffix_chars = suffix.chars().count();
+    let msg_chars = clean_msg.chars().count();
+
+    let budget = max_cols.max(prefix_chars + suffix_chars + 4);
+    let max_msg_chars = budget.saturating_sub(prefix_chars + suffix_chars);
+
+    let fitted_msg = if msg_chars <= max_msg_chars {
+        clean_msg
+    } else if max_msg_chars <= 1 {
+        "…".to_string()
+    } else {
+        let mut s: String = clean_msg.chars().take(max_msg_chars - 1).collect();
+        s = s.trim_end().to_string();
+        s.push('…');
+        s
+    };
+
+    format!("{}{}{}", prefix, fitted_msg, suffix)
+}
+
 /// A terminal spinner that animates on a single line.
 ///
 /// Messages may quote model-authored text (a tool's arguments, a safety
@@ -105,7 +145,8 @@ impl TerminalSpinner {
         }
 
         let stop_signal = Arc::new(AtomicBool::new(false));
-        let (message_tx, message_rx) = watch::channel(output::live::escape_controls(message));
+        let (message_tx, message_rx) =
+            watch::channel(output::live::escape_controls_single_line(message));
         let stop = stop_signal.clone();
         let start = Instant::now();
 
@@ -122,10 +163,15 @@ impl TerminalSpinner {
                 let msg = message_rx.borrow().clone();
                 let elapsed = start.elapsed().as_secs_f64();
 
-                // Clear line and print spinner
-                let line = format!("  {} {} ({:.1}s)", frame, msg, elapsed);
-                print!("\r\x1b[2K{}", line);
-                io::stdout().flush().ok();
+                // Clear line and print width-clamped single-line spinner
+                let line = fit_spinner_line(frame, &msg, elapsed, terminal_max_cols());
+                {
+                    let _lock = output::OUTPUT_LOCK
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    print!("\r\x1b[2K{}", line);
+                    io::stdout().flush().ok();
+                }
 
                 tick += 1;
                 tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
@@ -142,7 +188,9 @@ impl TerminalSpinner {
 
     /// Update the spinner message
     pub fn set_message(&self, msg: &str) {
-        let _ = self.message_tx.send(output::live::escape_controls(msg));
+        let _ = self
+            .message_tx
+            .send(output::live::escape_controls_single_line(msg));
     }
 
     /// Stop the spinner with the icon for `kind`.
@@ -189,11 +237,14 @@ impl TerminalSpinner {
         if !output::should_suppress_output() && !output::is_compact() && io::stdout().is_terminal()
         {
             let elapsed = self.start_time.elapsed().as_secs_f64();
+            let _lock = output::OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             print!("\r\x1b[2K");
             println!(
                 "  {} {} ({:.1}s)",
                 icon,
-                output::live::escape_controls(message),
+                output::live::escape_controls_single_line(message),
                 elapsed
             );
             io::stdout().flush().ok();
@@ -215,6 +266,9 @@ impl Drop for TerminalSpinner {
         // Clear the spinner line on drop
         if !output::should_suppress_output() && !output::is_compact() && io::stdout().is_terminal()
         {
+            let _lock = output::OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             print!("\r\x1b[2K");
             io::stdout().flush().ok();
         }

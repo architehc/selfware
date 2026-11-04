@@ -110,6 +110,9 @@ pub(super) fn looks_like_malformed_tool_xml(content: &str) -> bool {
         || trimmed.contains("<parameter=")
         || trimmed.contains("<|open|>tools")
         || trimmed.contains("<|open|>call")
+        || trimmed.contains("<｜DSML｜")
+        || trimmed.contains("<|DSML|")
+        || trimmed.contains("<｜tool▁call")
         || trimmed.contains("<tool_call>")
         || trimmed.contains("</tool_call>")
     {

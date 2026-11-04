@@ -322,12 +322,21 @@ pub fn split_layout(area: Rect, left_percent: u16) -> (Rect, Rect) {
     (chunks[0], chunks[1])
 }
 
-/// Read next terminal event with timeout
+/// Read next terminal event with timeout, ignoring key-release events emitted
+/// by the Windows console backend (where crossterm reports both `Press` and
+/// `Release` for every keystroke).
 pub fn read_event(timeout_ms: u64) -> Result<Option<Event>> {
-    if event::poll(std::time::Duration::from_millis(timeout_ms))? {
-        Ok(Some(event::read()?))
-    } else {
-        Ok(None)
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !event::poll(remaining)? {
+            return Ok(None);
+        }
+        let ev = event::read()?;
+        if matches!(&ev, Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Release) {
+            continue;
+        }
+        return Ok(Some(ev));
     }
 }
 
@@ -335,7 +344,10 @@ pub fn read_event(timeout_ms: u64) -> Result<Option<Event>> {
 pub fn is_key(event: &Event, key: KeyCode, modifiers: KeyModifiers) -> bool {
     matches!(
         event,
-        Event::Key(k) if k.code == key && k.modifiers == modifiers
+        Event::Key(k)
+            if k.kind != crossterm::event::KeyEventKind::Release
+                && k.code == key
+                && k.modifiers == modifiers
     )
 }
 
@@ -358,6 +370,9 @@ fn evaluate_quit_key(
     allow_q: bool,
     quit_armed_at: &mut Option<Instant>,
 ) -> QuitDecision {
+    if key.kind == crossterm::event::KeyEventKind::Release {
+        return QuitDecision::None;
+    }
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
         return QuitDecision::Quit;
     }
@@ -829,6 +844,9 @@ pub fn run_tui_dashboard_with_events(
 
         // Handle events (same logic as run_tui_dashboard)
         if let Some(Event::Key(key)) = read_event(100)? {
+            if key.kind == crossterm::event::KeyEventKind::Release {
+                continue;
+            }
             needs_redraw = true;
 
             // A permission modal takes over all key input until answered --

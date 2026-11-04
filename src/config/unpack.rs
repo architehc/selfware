@@ -41,7 +41,7 @@ pub async fn scan_local_endpoints() -> Vec<DiscoveredEndpoint> {
     if let Some(ep) = probe_ollama().await {
         results.push(ep);
     }
-    for port in [8000u16, 8080, 3000, 5000] {
+    for port in [8000u16, 8080, 8787, 3000, 5000] {
         if let Some(ep) = probe_generic(port).await {
             results.push(ep);
         }
@@ -465,6 +465,27 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
         if provider.is_available() {
             let model = pick_ollama_model_for_hardware();
             if ollama_pull(model).await.unwrap_or(false) {
+                endpoints = scan_local_endpoints().await;
+            }
+        }
+    }
+
+    // ── Step 3b: if no external server is running, start bundled llama-server ─
+    if !scan_only && endpoints.is_empty() && crate::boot::model::find_llama_server().is_some() {
+        let has_verified_model = crate::boot::model::verify_model_file(
+            &crate::boot::model::model_path_in(&crate::boot::model::boot_dir()),
+        )
+        .unwrap_or(false)
+            || crate::boot::model::find_bundled_model().is_some();
+        if has_verified_model {
+            println!(
+                "  {} Starting bundled local inference engine (llama-server + Qwen3-0.6B)...",
+                "⟳".cyan()
+            );
+            if crate::boot::model::ensure_background_boot_server()
+                .await
+                .is_ok()
+            {
                 endpoints = scan_local_endpoints().await;
             }
         }

@@ -1088,3 +1088,29 @@ async fn unrecognized_failed_reason_is_unknown_not_max_iterations() {
         mode.advice
     );
 }
+
+#[tokio::test]
+async fn classify_gateway_timeout_gives_proxy_tunnel_advice_not_wall_clock() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(2);
+    agent.test_set_total_tool_calls(5);
+
+    let reason = "Auto-recovery exhausted: gateway timeout: HTTP 503 after 300s — a proxy/tunnel cut the request (the backend may still be generating it): ngrok gateway error ERR_NGROK_3004 (invalid or incomplete upstream response)".to_string();
+    let mode = FailureMode::classify(&agent, RunOutcome::Failed { reason });
+    assert_eq!(mode.kind, FailureKind::Timeout);
+    assert!(
+        mode.evidence.contains("ERR_NGROK_3004"),
+        "evidence should retain the actual gateway timeout details: {}",
+        mode.evidence
+    );
+    assert!(
+        !mode.evidence.contains("wall-clock time budget exhausted"),
+        "evidence must not falsely claim wall-clock time budget exhausted: {}",
+        mode.evidence
+    );
+    assert!(
+        mode.advice.contains("proxy/tunnel") && !mode.advice.contains("--max-wall-secs"),
+        "advice should point to proxy/tunnel streaming rather than --max-wall-secs: {}",
+        mode.advice
+    );
+}

@@ -2534,8 +2534,14 @@ To call a tool, use this EXACT XML structure:
                         "Recovery tree applying retry backoff: sleeping {}ms",
                         delay_ms
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
-                    Ok(true)
+                    tokio::select! {
+                        biased;
+                        _ = crate::shutdown_requested() => {
+                            return Ok(false);
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)) => {}
+                    }
+                    Ok(!crate::is_shutdown_requested())
                 }
                 _ => Ok(false),
             },

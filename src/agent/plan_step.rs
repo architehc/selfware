@@ -122,6 +122,10 @@ impl Agent {
                     // because this arm returned the error directly while the
                     // identical guard in assistant_response.rs fell back.
                     if super::assistant_response::is_terminal_api_client_error(&e)
+                        || super::assistant_response::is_provider_cooldown_or_circuit_open(&e)
+                        || crate::errors::is_gateway_timeout_error(&e)
+                        || crate::errors::is_stream_truncated_error(&e)
+                        || crate::errors::is_context_overflow_error(&e)
                         || self.is_cancelled()
                     {
                         self.log_turn_end_event(
@@ -195,6 +199,9 @@ impl Agent {
                     response
                 }
                 Err(e) => {
+                    if crate::errors::is_gateway_timeout_error(&e) {
+                        self.force_non_streaming = false;
+                    }
                     self.log_turn_end_event(
                         "planning",
                         false,
@@ -276,6 +283,7 @@ impl Agent {
                 self.effective_native_fc(),
             )
             .is_empty()
+            && self.wrap_up_issued().is_none()
             && !self.is_cancelled()
         {
             let escalate_to = crate::config::TurnWorkload::Synthesis;
@@ -469,16 +477,16 @@ impl Agent {
                     }),
                 );
 
+                let reasoning_chars = assistant_msg
+                    .reasoning_content
+                    .as_deref()
+                    .map(|r| r.trim().len())
+                    .unwrap_or(0)
+                    + content.text().trim().len();
                 self.consecutive_empty_responses += 1;
                 if self.consecutive_empty_responses
                     >= super::recovery::MAX_CONSECUTIVE_EMPTY_RESPONSES
                 {
-                    let reasoning_chars = assistant_msg
-                        .reasoning_content
-                        .as_deref()
-                        .map(|r| r.trim().len())
-                        .unwrap_or(0)
-                        + content.text().trim().len();
                     bail!(
                         "{}",
                         super::recovery::empty_response_loop_message(
@@ -487,7 +495,8 @@ impl Agent {
                         )
                     );
                 }
-                if self.config.agent.streaming && !self.force_non_streaming {
+                if self.config.agent.streaming && !self.force_non_streaming && reasoning_chars == 0
+                {
                     self.force_non_streaming = true;
                     info!(
                         "Empty planning response — retrying the next turn with streaming \
@@ -504,9 +513,10 @@ impl Agent {
                 ));
                 return Ok(false);
             }
-            // Any non-empty planning response ends the empty streak.
-            self.consecutive_empty_responses = 0;
         }
+        // Any non-empty planning response (with or without tool calls) ends the empty streak.
+        self.consecutive_empty_responses = 0;
+        self.force_non_streaming = false;
         // Snapshot reasoning_content before the message-push moves it, so the
         // turn artifact can capture the model's <think> output too.
         let reasoning_for_artifact = assistant_msg.reasoning_content.clone();

@@ -7,7 +7,7 @@ api_key = "EMPTY"
 model = "deepseek-v4.1-flash"
 # max_tokens and context_length are deliberately NOT set here: the built-in
 # deepseek-v4 profile supplies the values calibrated against this endpoint
-# (context_length 262,144, max_tokens 65,536, agent.max_call_secs 3,600; see
+# (context_length 1,048,576, max_tokens 65,536, agent.max_call_secs 3,600; see
 # docs/model-playbook.md). Explicit values here override the profile.
 
 # Thinking is NOT pinned here either: the deepseek-v4 profile sends

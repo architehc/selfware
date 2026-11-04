@@ -252,3 +252,29 @@ fn prefill_status_omits_an_unknown_prompt_size() {
     // Never the old unmeasured "Waiting for the model" copy.
     assert!(!prefill_spinner_status(1, LlmWaitTokenSource::Estimate, None).contains("Waiting"));
 }
+
+#[test]
+fn live_spinner_status_detailed_includes_speed_tool_and_reasoning() {
+    assert_eq!(
+        live_spinner_status_detailed(
+            LlmWaitPhase::Streaming,
+            1_200,
+            LlmWaitTokenSource::Estimate,
+            Some(52.4),
+            Some("file_edit"),
+            None,
+        ),
+        "Streaming tool call (file_edit) · ~1.2K tokens · 52.4 tok/s"
+    );
+    assert_eq!(
+        live_spinner_status_detailed(
+            LlmWaitPhase::Reasoning,
+            850,
+            LlmWaitTokenSource::Estimate,
+            Some(41.0),
+            None,
+            Some("step 1\nverifying stream deadline alignment"),
+        ),
+        "Model reasoning · ~850 tokens · 41.0 tok/s — verifying stream deadline alignment"
+    );
+}
