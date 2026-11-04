@@ -96,6 +96,7 @@ async fn async_main() -> ExitCode {
                     selfware::ShutdownReason::SignalTerminate => 143, // 128 + SIGTERM
                     _ => 130, // 128 + SIGINT
                 };
+                selfware::boot::model::shutdown_background_boot_server();
                 selfware::output::restore_terminal_before_exit();
                 std::process::exit(code);
             }
@@ -105,6 +106,7 @@ async fn async_main() -> ExitCode {
                     selfware::ShutdownReason::SignalTerminate => 143,
                     _ => 1,
                 };
+                selfware::boot::model::shutdown_background_boot_server();
                 selfware::output::restore_terminal_before_exit();
                 std::process::exit(code);
             }

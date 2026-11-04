@@ -15,14 +15,19 @@ pub use cards::{find_card, RecipeCard, CARDS};
 pub use chat::{retrieve_bundled_snippet, retrieve_snippet};
 pub use check::{BootCheck, BootCheckStatus};
 pub use model::{
-    boot_dir, bundled_llama_server_candidates, bundled_model_candidates,
-    ensure_background_boot_server, ensure_background_boot_server_for_model, ensure_model_spec,
-    find_boot_model_spec, find_bundled_model, find_llama_server, find_llama_server_in_path,
-    is_boot_server_endpoint, is_boot_server_healthy, model_path_in, pick_boot_model_for_memory,
-    sha256_file, shutdown_background_boot_server, verify_any_boot_model_file, verify_model_file,
-    verify_model_file_spec, BootModelSpec, BOOT_MODELS, LFM3_1GB_MODEL_FILE_NAME,
-    LFM3_1GB_MODEL_SHA256, LFM3_1GB_MODEL_SIZE_BYTES, LFM3_1GB_MODEL_URL, LFM3_SLQ_MODEL_FILE_NAME,
-    LFM3_SLQ_MODEL_SHA256, LFM3_SLQ_MODEL_SIZE_BYTES, LFM3_SLQ_MODEL_URL, LLAMA_SERVER_BIN_NAME,
-    MODEL_FILE_NAME, MODEL_SHA256, MODEL_SIZE_BYTES, MODEL_URL, SERVER_ALIAS, SERVER_PORT,
+    boot_dir, build_server_args_with_context, bundled_llama_server_candidates,
+    bundled_model_candidates, current_platform_llama_runtime_spec, ensure_background_boot_server,
+    ensure_background_boot_server_for_model, ensure_background_boot_server_for_model_with_context,
+    ensure_llama_server, ensure_model_spec, find_boot_model_spec, find_bundled_model,
+    find_llama_server, find_llama_server_in_path, is_boot_server_endpoint, is_boot_server_healthy,
+    llama_runtime_spec_for, measure_memory_snapshot, model_path_in, pick_boot_model_for_memory,
+    resolve_boot_model_context, sha256_file, shipped_boot_model_spec,
+    shutdown_background_boot_server, spawn_server_with_context, verify_any_boot_model_file,
+    verify_model_file, verify_model_file_spec, BootMemorySnapshot, BootModelSpec,
+    LlamaServerRuntimeSpec, BOOT_MODELS, LFM3_1GB_MODEL_FILE_NAME, LFM3_1GB_MODEL_SHA256,
+    LFM3_1GB_MODEL_SIZE_BYTES, LFM3_1GB_MODEL_URL, LFM3_CTX_128K, LFM3_CTX_256K, LFM3_CTX_64K,
+    LFM3_SLQ_MODEL_FILE_NAME, LFM3_SLQ_MODEL_SHA256, LFM3_SLQ_MODEL_SIZE_BYTES, LFM3_SLQ_MODEL_URL,
+    LFM3_SUPPORTED_CONTEXTS, LLAMA_SERVER_BIN_NAME, LLAMA_SERVER_RUNTIMES, MODEL_FILE_NAME,
+    MODEL_SHA256, MODEL_SIZE_BYTES, MODEL_URL, SERVER_ALIAS, SERVER_PORT, SHIPPED_BOOT_MODEL_ID,
 };
 pub use wizard::{BootIo, DetectedModel, ScriptedIo, StdinIo, WizardPlan};

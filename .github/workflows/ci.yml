@@ -103,6 +103,38 @@ jobs:
       - name: Build release
         run: cargo build --release --verbose
 
+  windows-smoke:
+    name: Windows smoke (input, boot, binary)
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run Windows input and boot unit tests
+        run: |
+          cargo test --lib boot::
+          cargo test --lib interview::
+          cargo test --lib ui::spinner::
+          cargo test --lib ui::tui::
+
+      - name: Build and smoke-test Windows binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --bin selfware
+          .\target\debug\selfware.exe --version
+          .\target\debug\selfware.exe boot --cards
+
   # Red-team corpus gate (tests/redteam_gate_test.rs, ~250k-line corpus).
   # It used to run inside every `cargo test` pass (7 times per CI run, 4-8m
   # each). It now runs here once per OS -- path_validator has linux- and

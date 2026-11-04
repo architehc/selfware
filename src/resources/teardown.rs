@@ -543,6 +543,7 @@ pub fn signal_drain_budget(grace: Duration) -> Duration {
 /// driver and the configured deadline; the summary line, `None` when the
 /// session owned nothing.
 pub async fn end_process_session_within(budget: Duration) -> Option<String> {
+    crate::boot::model::shutdown_background_boot_server();
     teardown_session_within(
         ResourceRegistry::global(),
         &super::SystemDriver::default(),
@@ -590,6 +591,7 @@ pub async fn end_session(
 /// the configured deadline. Called on every non-forced process exit
 /// (headless runs, subcommands, REPL/TUI errors).
 pub async fn end_process_session() -> Option<String> {
+    crate::boot::model::shutdown_background_boot_server();
     end_session(
         ResourceRegistry::global(),
         &super::SystemDriver::default(),

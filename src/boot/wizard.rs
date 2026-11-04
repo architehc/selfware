@@ -132,18 +132,55 @@ pub fn interview(
             (card, None, None, api_key)
         }
         "2" => {
+            let readiness = crate::boot::model::check_model_resource_readiness(
+                Some(crate::boot::model::SHIPPED_BOOT_MODEL_ID),
+                None,
+                &crate::boot::model::boot_dir(),
+            );
             io.say("Which local server?");
+            io.say(&format!(
+                "  Host resources: {} MiB free RAM, {} MiB free disk — recommended local fit: {} (ctx {})",
+                readiness.available_ram_mb,
+                readiness.available_disk_mb,
+                readiness.recommended_model_id,
+                readiness.recommended_context_length
+            ));
+            for tip in &readiness.tips {
+                io.say(&format!("  {}", tip));
+            }
             io.say("  [1] Ollama (http://localhost:11434/v1)");
             io.say("  [2] vLLM / SGLang (http://localhost:8000/v1)");
             io.say("  [3] LM Studio (http://localhost:1234/v1)");
-            io.say("  [4] Bundled local engine (llama-server + Qwen3-0.6B-Q8_0.gguf on http://127.0.0.1:8787/v1)");
-            io.say("  [5] LFM3-1.7B GSQ 1GB CPU runner (LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf on http://127.0.0.1:8787/v1)");
-            io.say("  [6] LFM3-1.7B GSQ+SLQ 1.58GB CPU runner (LFM3-1.7B-GSQ-Q6_K_SLQ.gguf on http://127.0.0.1:8787/v1)");
+            io.say("  [4] Bundled local engine (llama-server + functiongemma-270m-it-UD-Q6_K_XL.gguf on http://127.0.0.1:8787/v1 — 273 MB, ~476 MiB RAM, 32k ctx)");
+            io.say("  [5] LFM3-1.7B GSQ 1GB CPU runner (LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf on http://127.0.0.1:8787/v1 — 64k/128k/256k ctx)");
+            io.say("  [6] LFM3-1.7B GSQ+SLQ 1.58GB CPU runner (LFM3-1.7B-GSQ-Q6_K_SLQ.gguf on http://127.0.0.1:8787/v1 — 64k/128k/256k ctx)");
+            io.say("  [7] LFM3-1.7B GSQ 64k  (65,536 ctx, ~1.49 GiB RAM)");
+            io.say("  [8] LFM3-1.7B GSQ 128k (131,072 ctx, ~1.89 GiB RAM)");
+            io.say("  [9] LFM3-1.7B GSQ 256k (262,144 ctx, ~1.95 GiB RAM)");
             let pick = io.ask("  > ")?;
             match pick.trim() {
                 "4" => (find_card("local-bundled").unwrap(), None, None, None),
-                "5" => (find_card("local-lfm3-1gb").unwrap(), None, None, None),
-                "6" => (find_card("local-lfm3-slq").unwrap(), None, None, None),
+                "5" | "6" => {
+                    let card = if pick.trim() == "6" {
+                        find_card("local-lfm3-slq").unwrap()
+                    } else {
+                        find_card("local-lfm3-1gb").unwrap()
+                    };
+                    io.say("  Which context window for LFM3-1.7B-GSQ?");
+                    io.say("    [1] 64k  (65,536 tokens, ~1.49 GiB RAM — default)");
+                    io.say("    [2] 128k (131,072 tokens, ~1.89 GiB RAM)");
+                    io.say("    [3] 256k (262,144 tokens, ~1.95 GiB RAM)");
+                    let ctx_pick = io.ask("  > ")?;
+                    let ctx_override = match ctx_pick.trim() {
+                        "2" | "128k" | "131072" => Some(crate::boot::model::LFM3_CTX_128K),
+                        "3" | "256k" | "262144" => Some(crate::boot::model::LFM3_CTX_256K),
+                        _ => None,
+                    };
+                    (card, None, ctx_override, None)
+                }
+                "7" => (find_card("local-lfm3-64k").unwrap(), None, None, None),
+                "8" => (find_card("local-lfm3-128k").unwrap(), None, None, None),
+                "9" => (find_card("local-lfm3-256k").unwrap(), None, None, None),
                 _ => {
                     let card = match pick.trim() {
                         "2" => find_card("vllm").unwrap(),
@@ -355,6 +392,11 @@ fn detect_model_at(endpoint: &str) -> Option<DetectedModel> {
         context_length: model
             .get("max_model_len")
             .or_else(|| model.get("context_length"))
+            .or_else(|| {
+                model
+                    .get("meta")
+                    .and_then(|m| m.get("n_ctx").or_else(|| m.get("n_ctx_train")))
+            })
             .and_then(|value| value.as_u64())
             .and_then(|value| usize::try_from(value).ok())
             .filter(|value| *value > 0),
@@ -380,16 +422,24 @@ where
 /// unreachable endpoint surfaces as an `Err` from the doctor inner loop —
 /// fold that into a failed outcome (the wizard reports, it doesn't crash).
 async fn doctor_for_path(path: &Path) -> Result<DoctorOutcome> {
-    let config = crate::config::Config::load(Some(path.to_string_lossy().as_ref()))
+    let mut config = crate::config::Config::load(Some(path.to_string_lossy().as_ref()))
         .context("loading the config boot just wrote")?;
     if crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
-        if let Err(e) =
-            crate::boot::model::ensure_background_boot_server_for_model(Some(&config.model)).await
+        match crate::boot::model::ensure_background_boot_server_for_model_with_context(
+            Some(&config.model),
+            Some(config.context_length),
+        )
+        .await
         {
-            return Ok(DoctorOutcome {
-                ok: false,
-                failing_checks: vec![format!("local-bundled server: {:#}", e)],
-            });
+            Ok(base_url) => {
+                config.endpoint = base_url;
+            }
+            Err(e) => {
+                return Ok(DoctorOutcome {
+                    ok: false,
+                    failing_checks: vec![format!("local-bundled server: {:#}", e)],
+                });
+            }
         }
     }
     match crate::llm_doctor::run_llm_doctor_report(&config).await {

@@ -153,22 +153,50 @@ jobs:
       - name: Prepare archive (Linux tar.gz)
         if: matrix.archive == 'tar.gz'
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp target/${{ matrix.target }}/release/selfware dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
           cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            mkdir -p dist/bin
+            LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz"
+            LLAMA_SHA="368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55"
+            curl -fSL --retry 3 --retry-delay 2 "$LLAMA_URL" -o llama-linux.tar.gz
+            echo "${LLAMA_SHA}  llama-linux.tar.gz" | sha256sum -c -
+            tar -xzf llama-linux.tar.gz --strip-components=1 -C dist/bin
+            ./dist/selfware --version
+            ./dist/selfware boot --cards >/dev/null
+            ./dist/bin/llama-server --version
+          fi
           cd dist
           tar -czvf ../${{ matrix.name }}.tar.gz *
 
-      - name: Prepare archive (macOS/Windows zip)
+      - name: Prepare archive (macOS zip)
         if: matrix.archive == 'zip' && matrix.os != 'windows-2022'
         run: |
-          mkdir -p dist
+          set -euo pipefail
+          mkdir -p dist/bin
           cp target/${{ matrix.target }}/release/selfware dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
           cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-macos-arm64.tar.gz"
+            LLAMA_SHA="4f5b8de12e0b9516658ca6a5764c6ffb3d7c659c3dd538556b1413c7b4050662"
+          else
+            LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-macos-x64.tar.gz"
+            LLAMA_SHA="c8094268b6bf62f4998f0e45656fd9f5e2d4afb6b1cd0044d761db64be1dd47d"
+          fi
+          curl -fSL --retry 3 --retry-delay 2 "$LLAMA_URL" -o llama-macos.tar.gz
+          echo "${LLAMA_SHA}  llama-macos.tar.gz" | shasum -a 256 -c -
+          tar -xzf llama-macos.tar.gz --strip-components=1 -C dist/bin
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            ./dist/selfware --version
+            ./dist/selfware boot --cards >/dev/null
+            ./dist/bin/llama-server --version
+          fi
           cd dist
-          zip -r ../${{ matrix.name }}.zip *
+          zip -ry ../${{ matrix.name }}.zip *
 
       - name: Prepare archive (Windows zip + hotpatch with bundled engine & model)
         if: matrix.os == 'windows-2022'
@@ -209,16 +237,24 @@ jobs:
             Get-ChildItem -Path "llama-extracted" -Filter $pattern -Recurse | Copy-Item -Destination "dist/bin/" -Force
           }
 
+          # Smoke-test packaged Windows executables and DLL linkage on windows-2022 before archiving
+          & .\dist\selfware.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "selfware.exe --version failed" }
+          & .\dist\selfware.exe boot --cards | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "selfware.exe boot --cards failed" }
+          & .\dist\bin\llama-server.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "llama-server.exe --version failed (missing DLL or bad binary)" }
+
           # 1. Lightweight Windows hotpatch archive (selfware.exe + bundled llama-server LFM3 GSQ/SLQ CPU runner)
           Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}-hotpatch.zip" -Force
 
-          # 2. Full Windows release archive (selfware.exe + bundled llama-server + LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf 1GB CPU model)
-          $modelUrl = "https://huggingface.co/kaitchup/LFM3-1.7B-GSQ-GGUF/resolve/main/LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
-          $modelSha = "e606ed8376b95afc09553f424560fb33e47ca95ae0caaedb33073f9b2ad4129f"
-          $modelDest = "dist/models/LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
+          # 2. Full Windows release archive (selfware.exe + bundled llama-server + functiongemma-270m-it-UD-Q6_K_XL.gguf support system model)
+          $modelUrl = "https://huggingface.co/unsloth/functiongemma-270m-it-GGUF/resolve/main/functiongemma-270m-it-UD-Q6_K_XL.gguf"
+          $modelSha = "906f29fc5343b33a8d7d5ccd7433a82d8d3cefe61893825ca0e504c402add759"
+          $modelDest = "dist/models/functiongemma-270m-it-UD-Q6_K_XL.gguf"
           & curl.exe -fSL --retry 3 --retry-delay 2 $modelUrl -o $modelDest
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to download LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf"
+            throw "Failed to download functiongemma-270m-it-UD-Q6_K_XL.gguf"
           }
           $actualModelSha = (Get-FileHash -Path $modelDest -Algorithm SHA256).Hash.ToLower()
           if ($actualModelSha -ne $modelSha) {

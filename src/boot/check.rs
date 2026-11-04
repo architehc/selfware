@@ -66,8 +66,16 @@ impl BootCheck {
 /// Check 1: model file present and sha256-verified. SKIP (with a note) when
 /// the model was never downloaded — it's optional.
 pub fn check_model_file(dir: &Path) -> BootCheck {
-    let path = model::model_path_in(dir);
-    if !path.is_file() {
+    let default_path = model::model_path_in(dir);
+    let candidate = if default_path.is_file() {
+        Some(default_path)
+    } else {
+        model::BOOT_MODELS
+            .iter()
+            .map(|spec| dir.join(spec.file_name))
+            .find(|p| p.is_file())
+    };
+    let Some(path) = candidate else {
         if dir == model::boot_dir() {
             if let Some(bundled) = model::find_bundled_model() {
                 return BootCheck::pass(
@@ -80,7 +88,7 @@ pub fn check_model_file(dir: &Path) -> BootCheck {
             "boot model file",
             "not downloaded (optional — fetched on first `selfware boot --chat`)",
         );
-    }
+    };
     match model::verify_model_file(&path) {
         Ok(true) => BootCheck::pass("boot model file", format!("{} (sha256 ok)", path.display())),
         Ok(false) => BootCheck::fail(
@@ -102,6 +110,29 @@ pub fn check_llama_server() -> BootCheck {
     }
 }
 
+/// Check 2b: host RAM and disk-space readiness for the configured or shipped
+/// local model (`LFM3-1.7B-GSQ` 64k/128k/256k or `FunctionGemma 270M` 32k),
+/// plus an actionable optimization tip.
+pub fn check_resource_readiness(dir: &Path, config: Option<&Config>) -> BootCheck {
+    let (model_id, ctx_size) = match config {
+        Some(cfg) if model::find_boot_model_spec(&cfg.model).is_some() => {
+            (Some(cfg.model.as_str()), Some(cfg.context_length))
+        }
+        _ => (Some(model::SHIPPED_BOOT_MODEL_ID), None),
+    };
+    let readiness = model::check_model_resource_readiness(model_id, ctx_size, dir);
+    let mut detail = readiness.summary_line();
+    if let Some(tip) = readiness.tips.first() {
+        detail.push_str(" | ");
+        detail.push_str(tip);
+    }
+    if readiness.is_ready() {
+        BootCheck::pass("host RAM & disk readiness", detail)
+    } else {
+        BootCheck::fail("host RAM & disk readiness", detail)
+    }
+}
+
 /// What the round-trip check should do, decided from the earlier results so
 /// the planner is testable without touching the machine.
 pub enum RoundTripPlan {
@@ -116,11 +147,17 @@ pub fn plan_round_trip(model_check: &BootCheck, server_check: &BootCheck) -> Rou
     if server_check.status != BootCheckStatus::Pass {
         return RoundTripPlan::Skip("no llama-server");
     }
-    let default_model = model::model_path_in(&model::boot_dir());
+    let boot = model::boot_dir();
+    let default_model = model::model_path_in(&boot);
     let model = if default_model.is_file() {
         default_model
     } else {
-        model::find_bundled_model().unwrap_or(default_model)
+        model::BOOT_MODELS
+            .iter()
+            .map(|spec| boot.join(spec.file_name))
+            .find(|p| p.is_file())
+            .or_else(model::find_bundled_model)
+            .unwrap_or(default_model)
     };
     RoundTripPlan::Run {
         server: PathBuf::from(&server_check.detail),
@@ -136,13 +173,23 @@ async fn check_round_trip(plan: RoundTripPlan) -> BootCheck {
         RoundTripPlan::Run { server, model } => (server, model),
     };
     let result = async {
-        let guard = model::spawn_server(&server, &model, model::SERVER_PORT).await?;
+        let base_url = if model::is_boot_server_healthy(model::SERVER_PORT).await {
+            format!("http://127.0.0.1:{}/v1", model::SERVER_PORT)
+        } else {
+            let guard = model::spawn_server(&server, &model, model::SERVER_PORT).await?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?;
+            let body = chat::build_messages("Reply with exactly: boot-ok", None);
+            return chat::ask_once(&client, &guard.base_url(), &body).await;
+        };
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
         let body = chat::build_messages("Reply with exactly: boot-ok", None);
-        chat::ask_once(&client, &guard.base_url(), &body).await
+        chat::ask_once(&client, &base_url, &body).await
     }
     .await;
     match result {
@@ -158,7 +205,23 @@ async fn check_round_trip(plan: RoundTripPlan) -> BootCheck {
 /// Check 4: the CURRENT config (the one this invocation loaded) passes
 /// llm-doctor.
 async fn check_current_config(config: &Config) -> BootCheck {
-    match crate::llm_doctor::run_llm_doctor_report(config).await {
+    let mut effective_config = config.clone();
+    if model::is_boot_server_endpoint(&effective_config.endpoint) {
+        match model::ensure_background_boot_server_for_model_with_context(
+            Some(&effective_config.model),
+            Some(effective_config.context_length),
+        )
+        .await
+        {
+            Ok(base_url) => {
+                effective_config.endpoint = base_url;
+            }
+            Err(e) => {
+                return BootCheck::fail("current config llm-doctor", format!("{:#}", e));
+            }
+        }
+    }
+    match crate::llm_doctor::run_llm_doctor_report(&effective_config).await {
         Ok(report) if !report.had_failures => {
             BootCheck::pass("current config llm-doctor", "no failures")
         }
@@ -179,8 +242,10 @@ pub async fn run_boot_check(config: &Config) -> (Vec<BootCheck>, bool) {
 /// Configuration load errors are diagnostic results, so the remaining
 /// recovery checks are still available when the current TOML is broken.
 pub async fn run_boot_check_with_config(config: Result<&Config, &str>) -> (Vec<BootCheck>, bool) {
-    let model_check = check_model_file(&model::boot_dir());
+    let boot_dir = model::boot_dir();
+    let model_check = check_model_file(&boot_dir);
     let server_check = check_llama_server();
+    let resource_check = check_resource_readiness(&boot_dir, config.ok());
     let round_trip = check_round_trip(plan_round_trip(&model_check, &server_check)).await;
     let doctor = match config {
         Ok(config) => check_current_config(config).await,
@@ -190,7 +255,13 @@ pub async fn run_boot_check_with_config(config: Result<&Config, &str>) -> (Vec<B
         ),
     };
 
-    let checks = vec![model_check, server_check, round_trip, doctor];
+    let checks = vec![
+        model_check,
+        server_check,
+        resource_check,
+        round_trip,
+        doctor,
+    ];
     let ok = checks.iter().all(|c| c.status != BootCheckStatus::Fail);
     (checks, ok)
 }

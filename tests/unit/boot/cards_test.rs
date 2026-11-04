@@ -124,10 +124,25 @@ fn selfware_design_and_local_bundled_cards_pass_validation() {
     let bundled_toml = bundled.render_config(None, None).unwrap();
     crate::config::Config::validate_generated_toml(&bundled_toml).unwrap();
 
-    for card_name in ["local-lfm3-1gb", "local-lfm3-slq"] {
+    for card_name in [
+        "local-lfm3-1gb",
+        "local-lfm3-slq",
+        "local-lfm3-64k",
+        "local-lfm3-128k",
+        "local-lfm3-256k",
+    ] {
         let card = find_card(card_name).expect(card_name);
         assert_eq!(card.endpoint, "http://127.0.0.1:8787/v1");
         let toml = card.render_config(None, None).unwrap();
         crate::config::Config::validate_generated_toml(&toml).unwrap();
     }
+    assert_eq!(find_card("local-lfm3-64k").unwrap().context_length, 65_536);
+    assert_eq!(
+        find_card("local-lfm3-128k").unwrap().context_length,
+        131_072
+    );
+    assert_eq!(
+        find_card("local-lfm3-256k").unwrap().context_length,
+        262_144
+    );
 }

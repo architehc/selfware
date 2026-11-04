@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use super::model;
 
 /// Grounding system prompt. The last rule is the safety-critical one: a raw
-/// Qwen3-0.6B hallucinates configs (wrong endpoints, invalid TOML, wildcard
+/// tiny model hallucinates configs (wrong endpoints, invalid TOML, wildcard
 /// allowed_paths), so it must defer to the deterministic card path.
 pub const GROUNDING_PROMPT: &str = "You are the selfware boot assistant, helping a user set up and recover their selfware installation.\n\
 Topics you answer: choosing an LLM backend (OpenRouter, Ollama, vLLM, SGLang, LM Studio), API keys, endpoints, context sizes, and common setup errors.\n\

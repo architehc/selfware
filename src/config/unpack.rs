@@ -155,6 +155,12 @@ async fn probe_generic(port: u16) -> Option<DiscoveredEndpoint> {
         .get("max_model_len")
         .and_then(|v| v.as_u64())
         .or_else(|| first.get("context_length").and_then(|v| v.as_u64()))
+        .or_else(|| {
+            first
+                .get("meta")
+                .and_then(|m| m.get("n_ctx").or_else(|| m.get("n_ctx_train")))
+                .and_then(|v| v.as_u64())
+        })
         .filter(|&n| n > 0)
         .unwrap_or_else(|| infer_context_length(&model)) as usize;
 
@@ -479,7 +485,7 @@ pub async fn auto_calibrate_with_options(config: &mut Config, scan_only: bool) -
             || crate::boot::model::find_bundled_model().is_some();
         if has_verified_model {
             println!(
-                "  {} Starting bundled local inference engine (llama-server + Qwen3-0.6B)...",
+                "  {} Starting bundled local inference engine (llama-server + LFM3-1.7B-GSQ / FunctionGemma 270M)...",
                 "⟳".cyan()
             );
             if crate::boot::model::ensure_background_boot_server()

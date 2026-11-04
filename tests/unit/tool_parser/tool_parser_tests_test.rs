@@ -2272,3 +2272,24 @@ fn truncated_xml_tool_call_reports_mid_stream_truncation_and_box_drawing_hint() 
         res.rejections[0].reason
     );
 }
+
+#[test]
+fn functiongemma_tool_call_format_parses_and_deduplicates() {
+    let raw = "<start_function_call>call:file_read{path:<escape>src/main.rs<escape>}<end_function_call><start_function_call>call:file_read{path:<escape>src/main.rs<escape>}<end_function_call>";
+    let res = parse_tool_calls(raw);
+    assert!(res.rejections.is_empty(), "{res:?}");
+    assert_eq!(res.tool_calls.len(), 1, "{res:?}");
+    assert_eq!(res.tool_calls[0].tool_name, "file_read");
+    assert_eq!(res.tool_calls[0].arguments["path"], "src/main.rs");
+
+    let weather = "<start_function_call>call:get_current_temperature{location:<escape>London<escape>,limit:5,verbose:true}<end_function_call>";
+    let res_weather = parse_tool_calls(weather);
+    assert_eq!(res_weather.tool_calls.len(), 1);
+    assert_eq!(
+        res_weather.tool_calls[0].tool_name,
+        "get_current_temperature"
+    );
+    assert_eq!(res_weather.tool_calls[0].arguments["location"], "London");
+    assert_eq!(res_weather.tool_calls[0].arguments["limit"], 5);
+    assert_eq!(res_weather.tool_calls[0].arguments["verbose"], true);
+}

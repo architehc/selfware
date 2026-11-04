@@ -631,6 +631,42 @@ pub const DEEPSEEK_V4_MEASURED: &[MeasuredQuota] = &[
     },
 ];
 
+pub const LFM3_MEASURED: &[MeasuredQuota] = &[
+    MeasuredQuota {
+        name: "context_length",
+        value: "65536 (supports 65536 / 131072 / 262144)",
+        basis: "native n_ctx_train=262144 (6 full GQA + 5 SWA-512 + 13 shortconv layers); measured on llama-server b12110 (-np 1 --no-repack): 64k q8_0 KV = 1524.7 MiB RSS, 128k q8_0 KV = 1933.9 MiB RSS, 256k q4_0 KV = 1992.5 MiB RSS (<2 GiB)",
+    },
+    MeasuredQuota {
+        name: "max_tokens",
+        value: "8192",
+        basis: "8k completion budget leaving full headroom across 64k/128k/256k local context windows",
+    },
+    MeasuredQuota {
+        name: "concurrency.max_streams",
+        value: "1",
+        basis: "single-slot (-np 1) local llama-server keeps KV cache within <2 GiB RAM across 64k/128k/256k",
+    },
+];
+
+pub const FUNCTIONGEMMA_MEASURED: &[MeasuredQuota] = &[
+    MeasuredQuota {
+        name: "context_length",
+        value: "32768",
+        basis: "native 32K input/output context (Gemma 3 270M architecture); measured on llama-server b12110 (-np 1 --no-repack -ctk q8_0 -ctv q8_0): 469.7 MiB idle RSS, 475.8 MiB peak RSS, 238.4 tok/s decode",
+    },
+    MeasuredQuota {
+        name: "max_tokens",
+        value: "4096",
+        basis: "4k completion budget for `<start_function_call>call:name{...}<end_function_call>` tool invocations and setup Q&A",
+    },
+    MeasuredQuota {
+        name: "concurrency.max_streams",
+        value: "1",
+        basis: "single-slot (-np 1) local llama-server keeps total RSS under 500 MiB",
+    },
+];
+
 /// Where a resolved `workloads.<kind>.<field>` value came from, for display.
 fn workload_field_origin(config: &crate::config::Config, key: &str, set: bool) -> &'static str {
     use crate::config::ConfigSource;
@@ -859,6 +895,53 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             extra_body: Value::Null,
             workload_quotas: None,
             measured: &[],
+        },
+        // LiquidAI LFM3-1.7B-GSQ (`kaitchup/LFM3-1.7B-GSQ-GGUF`, `lfm3-1.7b-gsq-*`):
+        // native 256k (`n_ctx_train = 262144`) hybrid Liquid model with 6 full GQA
+        // layers, 5 SWA-512 layers, and 13 shortconv layers. Supports 64k (65536),
+        // 128k (131072), and 256k (262144) context windows under <2 GiB RAM via
+        // `llama-server` (`b12110`) with native tool calling (`--jinja`).
+        ModelDefaultsProfile {
+            name: "lfm3",
+            pattern: "*lfm3*",
+            native_function_calling: Some(true),
+            streaming: Some(true),
+            temperature: Some(0.1),
+            max_tokens: Some(8_192),
+            context_length: Some(65_536),
+            max_streams: Some(1),
+            max_global: Some(8),
+            max_call_secs: Some(600),
+            context_content_ratio: None,
+            context_growth_p99_tokens: None,
+            reasoning_effort_honored: false,
+            extra_body: json!({
+                "top_k": 50,
+            }),
+            workload_quotas: None,
+            measured: LFM3_MEASURED,
+        },
+        // Google FunctionGemma 270M IT (`google/functiongemma-270m-it` /
+        // `unsloth/functiongemma-270m-it-GGUF` `functiongemma-270m-it-UD-Q6_K_XL.gguf`):
+        // ultra-lightweight 273 MB GGUF (~476 MiB RSS at 32k context) trained for
+        // function calling (`<start_function_call>call:func{k:<escape>v<escape>}<end_function_call>`).
+        ModelDefaultsProfile {
+            name: "functiongemma",
+            pattern: "*functiongemma*",
+            native_function_calling: Some(false),
+            streaming: Some(true),
+            temperature: Some(0.1),
+            max_tokens: Some(4_096),
+            context_length: Some(32_768),
+            max_streams: Some(1),
+            max_global: Some(4),
+            max_call_secs: Some(300),
+            context_content_ratio: None,
+            context_growth_p99_tokens: None,
+            reasoning_effort_honored: false,
+            extra_body: Value::Null,
+            workload_quotas: None,
+            measured: FUNCTIONGEMMA_MEASURED,
         },
     ]
 }

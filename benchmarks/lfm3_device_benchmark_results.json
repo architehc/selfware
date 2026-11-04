@@ -1,0 +1,189 @@
+{
+  "device": "macOS-26.5.1-arm64-arm-64bit",
+  "lfm3_windows": [
+    {
+      "window": "64k",
+      "alias": "lfm3-1.7b-gsq-64k",
+      "ctx_size": 65536,
+      "kv_type": "q8_0",
+      "startup_ms": 529.9,
+      "idle_rss_mib": 1521.3,
+      "peak_rss_mib": 1567.9,
+      "avg_prefill_tps": 1028.7,
+      "avg_decode_tps": 114.7,
+      "doctor_passed": true,
+      "doctor_memory_line": ">> Memory footprint (measured): selfware 46 MiB + llama-server 1524 MiB (PID 7730, ctx 65536) = 1570 MiB RSS (host avail: 82556 / 98304 MiB)",
+      "zero_leak_after_exit": true,
+      "scenarios": [
+        {
+          "name": "1. Grounded Setup & Endpoint Q&A",
+          "passed": true,
+          "prefill_tps": 890.7,
+          "decode_tps": 140.9,
+          "detail": "To set up selfware for **OpenRouter** or a **local Ollama server**, you need to point the recipe car"
+        },
+        {
+          "name": "2. Native Tool Calling (JSON Schema)",
+          "passed": true,
+          "prefill_tps": 852.6,
+          "decode_tps": 124.4,
+          "detail": "{\"name\": \"calculator\", \"arguments\": \"{\\\"expression\\\":\\\"4096 * 64\\\"}\"}"
+        },
+        {
+          "name": "3. Streaming SSE Tool Call (file_read)",
+          "passed": true,
+          "ttft_ms": 93.2,
+          "detail": "SSE chunks=11, TTFT=93.2ms, assembled=file_read{\"path\":\"Cargo.toml\"}"
+        },
+        {
+          "name": "4. Multi-Step Tool Result Synthesis",
+          "passed": true,
+          "prefill_tps": 1010.9,
+          "decode_tps": 120.3,
+          "detail": "The binary name is `selfware` and the version in `Cargo.toml` is `0.9.10`."
+        },
+        {
+          "name": "5. Endpoint Error & Auth Diagnostics",
+          "passed": true,
+          "prefill_tps": 764.3,
+          "decode_tps": 100.5,
+          "detail": "When you get a 401 response from `selfware llm-doctor`, it means the API key is missing or invalid. "
+        },
+        {
+          "name": "6. Long-Context Needle + KV Prefix Reuse",
+          "passed": true,
+          "cold_ms": 7589.5,
+          "warm_ms": 7323.8,
+          "detail": "needle_found=True, cold=7590ms -> warm=7324ms"
+        }
+      ]
+    },
+    {
+      "window": "128k",
+      "alias": "lfm3-1.7b-gsq-128k",
+      "ctx_size": 131072,
+      "kv_type": "q8_0",
+      "startup_ms": 529.2,
+      "idle_rss_mib": 1926.4,
+      "peak_rss_mib": 1972.2,
+      "avg_prefill_tps": 1047.0,
+      "avg_decode_tps": 115.8,
+      "doctor_passed": true,
+      "doctor_memory_line": ">> Memory footprint (measured): selfware 46 MiB + llama-server 1933 MiB (PID 8324, ctx 131072) = 1979 MiB RSS (host avail: 82033 / 98304 MiB)",
+      "zero_leak_after_exit": true,
+      "scenarios": [
+        {
+          "name": "1. Grounded Setup & Endpoint Q&A",
+          "passed": true,
+          "prefill_tps": 1010.4,
+          "decode_tps": 160.6,
+          "detail": "To set up selfware for **OpenRouter** or a **local Ollama server**, you need to point the recipe car"
+        },
+        {
+          "name": "2. Native Tool Calling (JSON Schema)",
+          "passed": true,
+          "prefill_tps": 977.2,
+          "decode_tps": 137.4,
+          "detail": "{\"name\": \"calculator\", \"arguments\": \"{\\\"expression\\\":\\\"4096 * 64\\\"}\"}"
+        },
+        {
+          "name": "3. Streaming SSE Tool Call (file_read)",
+          "passed": true,
+          "ttft_ms": 82.6,
+          "detail": "SSE chunks=11, TTFT=82.6ms, assembled=file_read{\"path\":\"Cargo.toml\"}"
+        },
+        {
+          "name": "4. Multi-Step Tool Result Synthesis",
+          "passed": true,
+          "prefill_tps": 1190.9,
+          "decode_tps": 121.5,
+          "detail": "The binary name is `selfware` and the version in `Cargo.toml` is `0.9.10`."
+        },
+        {
+          "name": "5. Endpoint Error & Auth Diagnostics",
+          "passed": true,
+          "prefill_tps": 836.1,
+          "decode_tps": 92.0,
+          "detail": "When your endpoint returns a 401, the API key is missing or invalid. Set `SELFWARE_API_KEY` to your "
+        },
+        {
+          "name": "6. Long-Context Needle + KV Prefix Reuse",
+          "passed": true,
+          "cold_ms": 8962.2,
+          "warm_ms": 8461.7,
+          "detail": "needle_found=True, cold=8962ms -> warm=8462ms"
+        }
+      ]
+    },
+    {
+      "window": "256k",
+      "alias": "lfm3-1.7b-gsq-256k",
+      "ctx_size": 262144,
+      "kv_type": "q4_0",
+      "startup_ms": 536.6,
+      "idle_rss_mib": 1985.1,
+      "peak_rss_mib": 2024.7,
+      "avg_prefill_tps": 1099.8,
+      "avg_decode_tps": 124.0,
+      "doctor_passed": true,
+      "doctor_memory_line": ">> Memory footprint (measured): selfware 46 MiB + llama-server 1992 MiB (PID 8418, ctx 262144) = 2038 MiB RSS (host avail: 81777 / 98304 MiB)",
+      "zero_leak_after_exit": true,
+      "scenarios": [
+        {
+          "name": "1. Grounded Setup & Endpoint Q&A",
+          "passed": true,
+          "prefill_tps": 938.3,
+          "decode_tps": 156.6,
+          "detail": "To set up selfware for **OpenRouter** or a **local Ollama server**, you need to follow the verified "
+        },
+        {
+          "name": "2. Native Tool Calling (JSON Schema)",
+          "passed": true,
+          "prefill_tps": 1034.0,
+          "decode_tps": 140.6,
+          "detail": "{\"name\": \"calculator\", \"arguments\": \"{\\\"expression\\\":\\\"4096 * 64\\\"}\"}"
+        },
+        {
+          "name": "3. Streaming SSE Tool Call (file_read)",
+          "passed": true,
+          "ttft_ms": 78.9,
+          "detail": "SSE chunks=11, TTFT=78.9ms, assembled=file_read{\"path\":\"Cargo.toml\"}"
+        },
+        {
+          "name": "4. Multi-Step Tool Result Synthesis",
+          "passed": true,
+          "prefill_tps": 1272.0,
+          "decode_tps": 139.2,
+          "detail": "The binary name is `selfware` and the version in `Cargo.toml` is `0.9.10`."
+        },
+        {
+          "name": "5. Endpoint Error & Auth Diagnostics",
+          "passed": true,
+          "prefill_tps": 895.5,
+          "decode_tps": 107.2,
+          "detail": "When your selfware API call gets a `401 Unauthorized`, it means the server requires authentication b"
+        },
+        {
+          "name": "6. Long-Context Needle + KV Prefix Reuse",
+          "passed": true,
+          "cold_ms": 8327.6,
+          "warm_ms": 7659.7,
+          "detail": "needle_found=True, cold=8328ms -> warm=7660ms"
+        }
+      ]
+    }
+  ],
+  "functiongemma_base": {
+    "window": "32k (FunctionGemma 270M base)",
+    "alias": "functiongemma-270m-it",
+    "ctx_size": 32768,
+    "kv_type": "q8_0",
+    "startup_ms": 424.1,
+    "idle_rss_mib": 467.0,
+    "peak_rss_mib": 473.8,
+    "avg_prefill_tps": 2437.3,
+    "avg_decode_tps": 249.4,
+    "function_call_passed": true,
+    "sample_output": "<start_function_call>call:file_read{path:<escape>Cargo.toml<escape>}<end_function_call>call:file_read{path:<escape>Cargo"
+  }
+}

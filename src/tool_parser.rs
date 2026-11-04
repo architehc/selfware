@@ -70,6 +70,24 @@ static KIMI_ARG_REGEX: OnceLock<Regex> = OnceLock::new();
 static DEEPSEEK_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DEEPSEEK_DSML_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DEEPSEEK_DSML_PARAM_REGEX: OnceLock<Regex> = OnceLock::new();
+static FUNCTIONGEMMA_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static FUNCTIONGEMMA_ARG_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn functiongemma_call_regex() -> &'static Regex {
+    FUNCTIONGEMMA_CALL_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<start_function_call>\s*)?call:([a-zA-Z_][a-zA-Z0-9_]*)\{([\s\S]*?)\}\s*<end_function_call>",
+        )
+        .expect("Invalid FunctionGemma call regex")
+    })
+}
+
+fn functiongemma_arg_regex() -> &'static Regex {
+    FUNCTIONGEMMA_ARG_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(?:<escape>([\s\S]*?)<escape>|([^,}]+))")
+            .expect("Invalid FunctionGemma arg regex")
+    })
+}
 
 fn kimi_call_regex() -> &'static Regex {
     KIMI_CALL_REGEX.get_or_init(|| {
@@ -692,11 +710,12 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
     for (family, found) in [
         (11, try_parse_kimi_tools(content, &code)),
         (12, try_parse_deepseek_tools(content, &code)),
+        (13, try_parse_functiongemma_tools(content, &code)),
         // Fenced JSON blocks are code by construction (not filtered by
         // `code`): `[^`]*` already stops a match at the next fence, so one
         // block cannot swallow another.
-        (13, try_parse_json_blocks(content)),
-        (14, try_parse_plain_function_calls(content, &code)),
+        (14, try_parse_json_blocks(content)),
+        (15, try_parse_plain_function_calls(content, &code)),
     ] {
         for (result, span) in found.unwrap_or_default() {
             all.push(Candidate {
@@ -915,6 +934,7 @@ const TOOL_CALL_OPENERS: &[&str] = &[
     "<|tool_call_begin|>",
     "<｜DSML｜invoke",
     "<|DSML|invoke",
+    "<start_function_call>",
 ];
 
 /// Whether streamed text has started a tool call in ANY supported syntax
@@ -1480,6 +1500,78 @@ fn try_parse_kimi_tools(
             (call_res, span)
         })
         .collect();
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
+/// Try to parse Google FunctionGemma (`google/functiongemma-270m-it` / `unsloth/functiongemma-270m-it-GGUF`)
+/// delimiter-style tool calls:
+/// `<start_function_call>call:func_name{key:<escape>val<escape>,num:42}<end_function_call>`
+fn try_parse_functiongemma_tools(
+    content: &str,
+    code: &[std::ops::Range<usize>],
+) -> Option<Vec<SpannedCall>> {
+    if !content.contains("<end_function_call>") && !content.contains("<start_function_call>") {
+        return None;
+    }
+    let regex = functiongemma_call_regex();
+    let arg_regex = functiongemma_arg_regex();
+    let mut results = Vec::new();
+    let mut seen_fg: Vec<(String, serde_json::Value)> = Vec::new();
+
+    for cap in live_matches(content, regex, code) {
+        let whole = cap.get(0).expect("regex group 0 always matches");
+        let raw = whole.as_str().to_string();
+        let span = whole.range();
+        let tool_name = cap[1].trim().to_string();
+        let body = cap[2].trim();
+
+        let parsed_args = if body.is_empty() {
+            Ok(serde_json::json!({}))
+        } else if let Ok(json_obj @ serde_json::Value::Object(_)) =
+            parse_json_lenient(&format!("{{{body}}}"))
+        {
+            Ok(json_obj)
+        } else {
+            let mut map = serde_json::Map::new();
+            for acap in arg_regex.captures_iter(body) {
+                let key = acap[1].trim().to_string();
+                let val = if let Some(escaped) = acap.get(2) {
+                    serde_json::Value::String(escaped.as_str().to_string())
+                } else if let Some(primitive) = acap.get(3) {
+                    let p = primitive.as_str().trim();
+                    parse_json_lenient(p)
+                        .unwrap_or_else(|_| serde_json::Value::String(p.to_string()))
+                } else {
+                    serde_json::Value::Null
+                };
+                map.insert(key, val);
+            }
+            Ok(serde_json::Value::Object(map))
+        };
+
+        if let Ok(ref args) = parsed_args {
+            if seen_fg
+                .iter()
+                .any(|(prev_name, prev_args)| *prev_name == tool_name && prev_args == args)
+            {
+                continue;
+            }
+            seen_fg.push((tool_name.clone(), args.clone()));
+        }
+
+        let call_res = parsed_args.map(|arguments| ParsedToolCall {
+            tool_name,
+            arguments,
+            raw_text: raw,
+            parse_method: ParseMethod::Xml,
+        });
+        results.push((call_res, span));
+    }
 
     if results.is_empty() {
         None

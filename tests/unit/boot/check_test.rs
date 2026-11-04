@@ -12,10 +12,23 @@ fn model_check_skips_when_not_downloaded() {
 #[test]
 fn model_check_fails_on_corrupt_file() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("Qwen3-0.6B-Q8_0.gguf"), b"garbage").unwrap();
+    std::fs::write(
+        dir.path().join(crate::boot::model::MODEL_FILE_NAME),
+        b"garbage",
+    )
+    .unwrap();
     let check = check_model_file(dir.path());
     assert_eq!(check.status, BootCheckStatus::Fail);
     assert!(check.detail.contains("mismatch"));
+}
+
+#[test]
+fn resource_readiness_check_reports_ram_disk_and_optimal_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = super::check_resource_readiness(dir.path(), None);
+    assert_eq!(check.name, "host RAM & disk readiness");
+    assert!(check.detail.contains("boot-assistant"));
+    assert!(check.detail.contains("optimal for host:"));
 }
 
 #[test]

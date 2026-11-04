@@ -257,7 +257,7 @@ pub(crate) enum Commands {
         /// Ask what to build, then scaffold it into the current directory
         #[arg(long)]
         scaffold: bool,
-        /// Also download the boot-assistant model (Qwen3-0.6B GGUF) so
+        /// Also download the boot-assistant model (FunctionGemma 270M GGUF) so
         /// `selfware boot --chat` works offline afterwards
         #[arg(long)]
         with_boot_assistant: bool,
@@ -313,7 +313,7 @@ pub(crate) enum Commands {
     #[command(display_order = 8)]
     Boot {
         /// Freeform setup Q&A with the local boot-assistant model
-        /// (downloads Qwen3-0.6B GGUF on first use, needs llama-server)
+        /// (downloads FunctionGemma 270M or LFM3-1.7B-GSQ GGUF on first use)
         #[arg(long)]
         chat: bool,
         /// Self-test: model file integrity, llama-server, round-trip, config doctor

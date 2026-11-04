@@ -141,11 +141,37 @@ fn local_bundled_and_selfware_design_branches_select_expected_cards() {
     let plan_1gb = interview(&mut io_lfm3_1gb, &no_detect()).unwrap().unwrap();
     assert_eq!(plan_1gb.card.name, "local-lfm3-1gb");
     assert_eq!(plan_1gb.card.model, "lfm3-1.7b-gsq-1gb");
+    assert_eq!(plan_1gb.context_override, None);
+
+    let mut io_lfm3_128k_override = ScriptedIo::new(["2", "5", "2"]);
+    let plan_128k_override = interview(&mut io_lfm3_128k_override, &no_detect())
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan_128k_override.card.name, "local-lfm3-1gb");
+    assert_eq!(plan_128k_override.context_override, Some(131_072));
+
+    let mut io_lfm3_256k_override = ScriptedIo::new(["2", "5", "3"]);
+    let plan_256k_override = interview(&mut io_lfm3_256k_override, &no_detect())
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan_256k_override.card.name, "local-lfm3-1gb");
+    assert_eq!(plan_256k_override.context_override, Some(262_144));
 
     let mut io_lfm3_slq = ScriptedIo::new(["2", "6"]);
     let plan_slq = interview(&mut io_lfm3_slq, &no_detect()).unwrap().unwrap();
     assert_eq!(plan_slq.card.name, "local-lfm3-slq");
     assert_eq!(plan_slq.card.model, "lfm3-1.7b-gsq-slq");
+
+    for (choice, card_name, expected_ctx) in [
+        ("7", "local-lfm3-64k", 65_536),
+        ("8", "local-lfm3-128k", 131_072),
+        ("9", "local-lfm3-256k", 262_144),
+    ] {
+        let mut io_ctx = ScriptedIo::new(["2", choice]);
+        let plan_ctx = interview(&mut io_ctx, &no_detect()).unwrap().unwrap();
+        assert_eq!(plan_ctx.card.name, card_name);
+        assert_eq!(plan_ctx.card.context_length, expected_ctx);
+    }
 }
 
 #[test]

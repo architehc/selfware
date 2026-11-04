@@ -1927,7 +1927,7 @@ async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<Detecti
     let body: Value = resp.json().await?;
 
     // Parse model list
-    let models = parse_models(&body);
+    let mut models = parse_models(&body);
 
     // Header-first detection (cheap), falling back to active probes.
     let backend = match detect_backend_from_headers(&header_blob, &body) {
@@ -1935,11 +1935,47 @@ async fn detect_backend(endpoint: &str, api_key: Option<&str>) -> Result<Detecti
         None => identify_backend(&client, base_no_v1, &body, api_key).await,
     };
 
+    // For llama.cpp, `/v1/models` exposes `meta.n_ctx_train` (the training window,
+    // e.g. 262144 for LFM3) whereas `/props` exposes `default_generation_settings.n_ctx`
+    // (the active `-c` server window, e.g. 65536 / 131072 / 262144). Prefer `/props`
+    // when available so Step 1/2/6 report the active server KV allocation.
+    if backend == Backend::LlamaCpp {
+        if let Some(active_ctx) = fetch_llama_props_n_ctx(&client, base_no_v1, api_key).await {
+            for m in &mut models {
+                m.max_model_len = Some(active_ctx);
+            }
+        }
+    }
+
     Ok(DetectionResult {
         backend,
         models,
         endpoint: endpoint.to_string(),
     })
+}
+
+async fn fetch_llama_props_n_ctx(
+    client: &Client,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Option<u64> {
+    let props_url = format!("{}/props", base_url.trim_end_matches('/'));
+    let mut req = client.get(&props_url).timeout(HTTP_TIMEOUT);
+    if let Some(key) = api_key {
+        if crate::config::api_key::assert_credential_endpoint_safe(&props_url, true).is_ok() {
+            req = req.bearer_auth(key);
+        }
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json = resp.json::<Value>().await.ok()?;
+    json.get("default_generation_settings")
+        .and_then(|s| s.get("n_ctx"))
+        .or_else(|| json.get("n_ctx"))
+        .and_then(|v| v.as_u64())
+        .filter(|&v| v > 0)
 }
 
 /// Try to identify the backend purely from response headers / body contents,
@@ -1999,11 +2035,16 @@ fn parse_models(body: &Value) -> Vec<ModelInfo> {
                 .unwrap_or("unknown")
                 .to_string();
 
-            // Try various fields for context length
+            // Try various fields for context length (including llama.cpp /v1/models meta.n_ctx)
             let max_model_len = item
                 .get("max_model_len")
                 .and_then(|v| v.as_u64())
                 .or_else(|| item.get("context_length").and_then(|v| v.as_u64()))
+                .or_else(|| {
+                    item.get("meta")
+                        .and_then(|m| m.get("n_ctx").or_else(|| m.get("n_ctx_train")))
+                        .and_then(|v| v.as_u64())
+                })
                 .or_else(|| item.get("max_tokens").and_then(|v| v.as_u64()));
 
             models.push(ModelInfo {
@@ -2162,6 +2203,34 @@ fn analyse_model(det: &DetectionResult, config: &Config) {
             ">>".green(),
             config.context_length.to_string().bright_white()
         );
+        let mem = crate::boot::model::measure_memory_snapshot();
+        println!(
+            "  {} Memory footprint (measured): {}",
+            ">>".green(),
+            mem.summary_line().bright_white()
+        );
+        if crate::boot::model::is_boot_server_endpoint(&config.endpoint)
+            || crate::boot::model::find_boot_model_spec(configured_model).is_some()
+        {
+            let readiness = crate::boot::model::check_model_resource_readiness(
+                Some(configured_model),
+                Some(config.context_length),
+                &crate::boot::model::boot_dir(),
+            );
+            let badge = if readiness.is_ready() {
+                "ok".green().bold()
+            } else {
+                "!!".yellow().bold()
+            };
+            println!(
+                "  {} Resource readiness (RAM & disk): {}",
+                badge,
+                readiness.summary_line().bright_white()
+            );
+            for tip in &readiness.tips {
+                println!("     {}", tip.cyan());
+            }
+        }
 
         if let Some(ctx) = model.max_model_len {
             println!(

@@ -998,10 +998,18 @@ pub async fn run() -> Result<()> {
 
     apply_session_model_overrides(&cli, &mut config)?;
     if crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
-        if let Err(e) =
-            crate::boot::model::ensure_background_boot_server_for_model(Some(&config.model)).await
+        match crate::boot::model::ensure_background_boot_server_for_model_with_context(
+            Some(&config.model),
+            Some(config.context_length),
+        )
+        .await
         {
-            tracing::warn!("Failed to start bundled local boot server: {e:#}");
+            Ok(base_url) => {
+                config.endpoint = base_url;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start bundled local boot server: {e:#}");
+            }
         }
     }
     config.discover_sglang_capabilities().await;

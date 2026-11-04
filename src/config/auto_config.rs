@@ -130,7 +130,15 @@ impl AutoConfigurator {
                     .unwrap_or(m["id"].as_str().unwrap_or("unknown"))
                     .to_string(),
                 owned_by: m["owned_by"].as_str().unwrap_or("unknown").to_string(),
-                max_model_len: m["max_model_len"].as_u64().unwrap_or(0) as usize,
+                max_model_len: m["max_model_len"]
+                    .as_u64()
+                    .or_else(|| m.get("context_length").and_then(|v| v.as_u64()))
+                    .or_else(|| {
+                        m.get("meta")
+                            .and_then(|meta| meta.get("n_ctx").or_else(|| meta.get("n_ctx_train")))
+                            .and_then(|v| v.as_u64())
+                    })
+                    .unwrap_or(0) as usize,
             })
             .collect();
 

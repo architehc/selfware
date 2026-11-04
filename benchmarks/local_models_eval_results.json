@@ -1,0 +1,282 @@
+{
+  "device": "macOS-26.5.1-arm64-arm-64bit",
+  "tier1_support_functiongemma_270m": {
+    "model": "functiongemma-270m-it",
+    "file": "functiongemma-270m-it-UD-Q6_K_XL.gguf",
+    "ctx_size": 32768,
+    "startup_ms": 520.5,
+    "idle_rss_mib": 464.7,
+    "peak_rss_mib": 490.0,
+    "avg_decode_tps": 238.3,
+    "bfcl_function_calling": {
+      "passed": 6,
+      "total": 6,
+      "accuracy_pct": 100.0,
+      "details": [
+        {
+          "id": "bfcl_1_file_read",
+          "passed": true,
+          "called": "file_read",
+          "args": {
+            "path": "src/boot/model.rs"
+          }
+        },
+        {
+          "id": "bfcl_2_grep_search",
+          "passed": true,
+          "called": "grep_search",
+          "args": {
+            "path": "src/boot",
+            "pattern": "ensure_model"
+          }
+        },
+        {
+          "id": "bfcl_3_multi_tool_select",
+          "passed": true,
+          "called": "check_endpoint",
+          "args": {
+            "endpoint": "http://127.0.0.1:8787/v1"
+          }
+        },
+        {
+          "id": "bfcl_4_select_recipe_card",
+          "passed": true,
+          "called": "apply_recipe_card",
+          "args": {
+            "card_name": "local-lfm3-64k"
+          }
+        },
+        {
+          "id": "bfcl_5_git_status",
+          "passed": true,
+          "called": "git_status",
+          "args": {
+            "repo_path": "/Users/ivo/selfware"
+          }
+        },
+        {
+          "id": "bfcl_6_cargo_test",
+          "passed": true,
+          "called": "run_cargo_test",
+          "args": {
+            "test_filter": "boot::model::tests"
+          }
+        }
+      ]
+    }
+  },
+  "tier2_coding_lfm3_1_7b_gsq": {
+    "model": "lfm3-1.7b-gsq-64k",
+    "file": "LFM3-1.7B-GSQ-1GB-IQ4_XS_RCO.gguf",
+    "ctx_size": 65536,
+    "startup_ms": 525.1,
+    "idle_rss_mib": 1521.1,
+    "peak_rss_mib": 1668.2,
+    "avg_decode_tps": 125.2,
+    "gsm8k": {
+      "passed": 9,
+      "total": 10,
+      "accuracy_pct": 90.0,
+      "details": [
+        {
+          "id": "gsm8k_1",
+          "expected": 72,
+          "predicted": 72,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_2",
+          "expected": 10,
+          "predicted": 10,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_3",
+          "expected": 5,
+          "predicted": 5,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_4",
+          "expected": 42,
+          "predicted": 42,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_5",
+          "expected": 624,
+          "predicted": 3,
+          "passed": false
+        },
+        {
+          "id": "gsm8k_6",
+          "expected": 35,
+          "predicted": 35,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_7",
+          "expected": 48,
+          "predicted": 48,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_8",
+          "expected": 16,
+          "predicted": 16,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_9",
+          "expected": 41,
+          "predicted": 41,
+          "passed": true
+        },
+        {
+          "id": "gsm8k_10",
+          "expected": 990,
+          "predicted": 990,
+          "passed": true
+        }
+      ]
+    },
+    "humaneval_coding": {
+      "passed": 8,
+      "total": 8,
+      "accuracy_pct": 100.0,
+      "details": [
+        {
+          "id": "HumanEval/0",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/2",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/4",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/23",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/31",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/45",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/53",
+          "passed": true
+        },
+        {
+          "id": "HumanEval/55",
+          "passed": true
+        }
+      ]
+    },
+    "bfcl_function_calling": {
+      "passed": 6,
+      "total": 6,
+      "accuracy_pct": 100.0,
+      "details": [
+        {
+          "id": "bfcl_1_file_read",
+          "passed": true,
+          "called": "file_read",
+          "args": {
+            "path": "src/boot/model.rs"
+          }
+        },
+        {
+          "id": "bfcl_2_grep_search",
+          "passed": true,
+          "called": "grep_search",
+          "args": {
+            "pattern": "ensure_model",
+            "path": "src/boot"
+          }
+        },
+        {
+          "id": "bfcl_3_multi_tool_select",
+          "passed": true,
+          "called": "check_endpoint",
+          "args": {
+            "endpoint": "http://127.0.0.1:8787/v1"
+          }
+        },
+        {
+          "id": "bfcl_4_select_recipe_card",
+          "passed": true,
+          "called": "apply_recipe_card",
+          "args": {
+            "card_name": "local-lfm3-64k"
+          }
+        },
+        {
+          "id": "bfcl_5_git_status",
+          "passed": true,
+          "called": "git_status",
+          "args": {
+            "repo_path": "/Users/ivo/selfware"
+          }
+        },
+        {
+          "id": "bfcl_6_cargo_test",
+          "passed": true,
+          "called": "run_cargo_test",
+          "args": {
+            "test_filter": "boot::model::tests"
+          }
+        }
+      ]
+    },
+    "mmlu_cs": {
+      "passed": 6,
+      "total": 6,
+      "accuracy_pct": 100.0,
+      "details": [
+        {
+          "id": "mmlu_1_tcp",
+          "expected": "B",
+          "predicted": "B",
+          "passed": true
+        },
+        {
+          "id": "mmlu_2_http_401",
+          "expected": "C",
+          "predicted": "C",
+          "passed": true
+        },
+        {
+          "id": "mmlu_3_sha256",
+          "expected": "C",
+          "predicted": "C",
+          "passed": true
+        },
+        {
+          "id": "mmlu_4_rust_ownership",
+          "expected": "A",
+          "predicted": "A",
+          "passed": true
+        },
+        {
+          "id": "mmlu_5_kv_cache",
+          "expected": "B",
+          "predicted": "B",
+          "passed": true
+        },
+        {
+          "id": "mmlu_6_complexity",
+          "expected": "C",
+          "predicted": "C",
+          "passed": true
+        }
+      ]
+    }
+  }
+}

@@ -655,3 +655,24 @@ fn match_profile_picks_deepseek_v4_for_all_colibri_aliases() {
         assert_eq!(quotas.synthesis.max_tokens, Some(49_152));
     }
 }
+
+#[test]
+fn match_profile_picks_lfm3_for_64k_128k_256k_and_gsq_aliases() {
+    for alias in [
+        "lfm3-1.7b-gsq-1gb",
+        "lfm3-1.7b-gsq-slq",
+        "lfm3-1.7b-gsq-64k",
+        "lfm3-1.7b-gsq-128k",
+        "lfm3-1.7b-gsq-256k",
+        "kaitchup/LFM3-1.7B-GSQ-GGUF",
+    ] {
+        let p = match_profile(alias).unwrap_or_else(|| panic!("should match {alias}"));
+        assert_eq!(p.name, "lfm3", "alias {alias}");
+        assert_eq!(p.native_function_calling, Some(true));
+        assert_eq!(p.streaming, Some(true));
+        assert_eq!(p.context_length, Some(65_536));
+        assert_eq!(p.max_tokens, Some(8_192));
+        assert_eq!(p.max_streams, Some(1));
+        assert!(!p.measured.is_empty());
+    }
+}
