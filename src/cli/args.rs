@@ -319,6 +319,9 @@ pub(crate) enum Commands {
         /// Self-test: model file integrity, llama-server, round-trip, config doctor
         #[arg(long)]
         check: bool,
+        /// List all verified recipe cards (name, endpoint, model, context window)
+        #[arg(long)]
+        cards: bool,
     },
 
     /// Trust this repository's selfware.toml (activates its privileged settings)

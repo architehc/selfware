@@ -942,7 +942,24 @@ pub async fn run() -> Result<()> {
 
     // Recovery must remain reachable even when the selected configuration
     // cannot be parsed or trusted. Load it only for the diagnostic branch.
-    if let Some(Commands::Boot { chat, check }) = &cli.command {
+    if let Some(Commands::Boot { chat, check, cards }) = &cli.command {
+        if *cards {
+            for card in crate::boot::cards::CARDS {
+                println!(
+                    "{:<24} {:<32} model={:<38} ctx={:<8} — {}",
+                    card.name,
+                    card.endpoint,
+                    if card.model.is_empty() {
+                        "<auto-detect>"
+                    } else {
+                        card.model
+                    },
+                    card.context_length,
+                    card.notes
+                );
+            }
+            return Ok(());
+        }
         if *check {
             let loaded = match load_async_config_with_provenance(&cli, &config_path).await {
                 Ok(mut config) => apply_session_model_overrides(&cli, &mut config).map(|_| config),
