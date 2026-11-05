@@ -559,3 +559,37 @@ fn stray_tool_markup_is_not_a_chat_message() {
     app.add_assistant_message("Done.\n</tool_call>");
     assert_eq!(app.messages.last().unwrap().content, "Done.");
 }
+
+#[test]
+fn input_is_editable_and_paste_works_while_running_task() {
+    let mut app = App::new("qwen3.8-27b");
+    app.set_progress(TaskProgress {
+        description: "Processing...".into(),
+        current_step: 2,
+        total_steps: None,
+        current_action: "Thinking".into(),
+        elapsed_secs: 10,
+    });
+    assert_eq!(app.state, AppState::RunningTask);
+    assert!(app.is_input_editable());
+
+    // Typing while RunningTask must not be blocked.
+    app.on_char('h');
+    app.on_char('i');
+    app.on_char('!');
+    app.on_backspace();
+    assert_eq!(app.input, "hi");
+
+    // Multi-line bracketed paste normalizes newlines and inserts at cursor.
+    app.on_char(' ');
+    let pasted = app.on_paste("line 1\r\nline 2\tindented");
+    assert!(pasted > 0);
+    assert_eq!(app.input, "hi line 1  line 2 indented");
+
+    // Pressing Enter returns the queued prompt and clears input without
+    // losing RunningTask state.
+    let submitted = app.on_enter();
+    assert_eq!(submitted.as_deref(), Some("hi line 1  line 2 indented"));
+    assert!(app.input.is_empty());
+    assert_eq!(app.cursor, 0);
+}

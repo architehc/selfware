@@ -84,8 +84,8 @@ pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> 
     if has_credential && (endpoint_has_userinfo(endpoint) || insecure_remote) {
         anyhow::bail!(
             "Refusing to send the API key to endpoint '{}': it would go over plaintext HTTP to a \
-             remote host or via an embedded-credential URL. Use https:// or a local endpoint \
-             (localhost / 127.0.0.1).",
+             remote host or via an embedded-credential URL. Use https://, a local endpoint \
+             (localhost / 127.0.0.1), or set SELFWARE_ALLOW_PLAINTEXT_REMOTE=1 for a trusted LAN server.",
             redact_endpoint(endpoint)
         );
     }

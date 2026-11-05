@@ -12,6 +12,41 @@ use std::time::Duration;
 
 pub mod prompt;
 
+static CONTAINER_SANDBOX_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Enable or disable isolated container execution for `shell_exec`.
+pub fn set_container_sandbox_enabled(enabled: bool) {
+    CONTAINER_SANDBOX_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check whether `shell_exec` should run inside an isolated container (`docker`/`podman`).
+pub fn is_container_sandbox_enabled() -> bool {
+    CONTAINER_SANDBOX_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+        || std::env::var("SELFWARE_SANDBOX").ok().is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+/// Detect an available container runtime (`docker` or `podman`) on PATH.
+pub fn detect_container_runtime() -> Option<&'static str> {
+    ["docker", "podman"].into_iter().find(|&candidate| {
+        let mut cmd = std::process::Command::new(candidate);
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            crate::safety::process_env::CONTAINER_RUNTIME_ENV,
+        );
+        cmd.arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
 /// A `sed -i 's/old/new/[g]' file` invocation simple enough to intercept.
 struct SedSubstitution {
     file: String,
@@ -491,33 +526,82 @@ impl Tool for ShellExec {
             }
         }
 
-        let (shell, flag) = default_shell();
-        let mut cmd = tokio::process::Command::new(shell);
+        let mut cmd = if is_container_sandbox_enabled() {
+            let runtime = detect_container_runtime().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Container sandbox mode is enabled (/sandbox on or SELFWARE_SANDBOX=1), \
+                     but neither docker nor podman was found on PATH"
+                )
+            })?;
+            let mount_dir = args
+                .cwd
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crate::tools::workspace_root::current_path);
+            let image = std::env::var("SELFWARE_SANDBOX_IMAGE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "alpine:latest".to_string());
+            let mut c = tokio::process::Command::new(runtime);
+            crate::safety::process_env::sanitize_command_env_preserve(
+                &mut c,
+                crate::safety::process_env::CONTAINER_RUNTIME_ENV,
+            );
+            c.args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--memory",
+                "4g",
+                "--cpus",
+                "2",
+                "--pids-limit",
+                "256",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "-v",
+                &format!("{}:/workspace:rw", mount_dir.display()),
+                "-w",
+                "/workspace",
+            ]);
+            for (k, v) in &args.env {
+                c.arg("-e").arg(format!("{k}={v}"));
+            }
+            c.arg(&image).arg("sh").arg("-c").arg(&args.command);
+            c
+        } else {
+            let (shell, flag) = default_shell();
+            let mut c = tokio::process::Command::new(shell);
+            c.arg(flag).arg(&args.command);
+
+            // Run in the agent's workspace root (an explicit `cwd` overrides it).
+            crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut c);
+            if let Some(cwd) = &args.cwd {
+                c.current_dir(cwd);
+            }
+
+            // Clear inherited environment to prevent secret leakage, then re-add
+            // the shared non-sensitive allowlist (see safety::process_env) so a
+            // lone shell never inherits credentials; task-specific env vars are
+            // layered on afterwards and survive the clear.
+            crate::safety::process_env::sanitize_command_env(&mut c);
+            c.envs(&args.env);
+            // Every git this shell runs (directly or from a script) must not
+            // execute what an untrusted repository configured (fsmonitor,
+            // textconv, external diff, filters, hooks, pager).
+            let git_dir = args
+                .cwd
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crate::tools::workspace_root::current_path);
+            crate::safety::git_exec::apply_shell_git_env(&mut c, &git_dir);
+            c
+        };
+
         cmd.kill_on_drop(true);
-        cmd.arg(flag).arg(&args.command);
-
-        // Run in the agent's workspace root (an explicit `cwd` overrides it).
-        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
-        if let Some(cwd) = &args.cwd {
-            cmd.current_dir(cwd);
-        }
-
-        // Clear inherited environment to prevent secret leakage, then re-add
-        // the shared non-sensitive allowlist (see safety::process_env) so a
-        // lone shell never inherits credentials; task-specific env vars are
-        // layered on afterwards and survive the clear.
-        crate::safety::process_env::sanitize_command_env(&mut cmd);
-        cmd.envs(&args.env);
-        // Every git this shell runs (directly or from a script) must not
-        // execute what an untrusted repository configured (fsmonitor,
-        // textconv, external diff, filters, hooks, pager).
-        let git_dir = args
-            .cwd
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(crate::tools::workspace_root::current_path);
-        crate::safety::git_exec::apply_shell_git_env(&mut cmd, &git_dir);
-
         // Run the child in its own process group so a timeout can reap the
         // ENTIRE process tree (grandchildren included, e.g. cargo -> rustc), not
         // just the direct shell — `kill_on_drop`/`child.kill()` only signal the

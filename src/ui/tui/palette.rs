@@ -139,6 +139,58 @@ impl CommandPalette {
                 shortcut: None,
             },
             PaletteCommand {
+                name: "Toggle YOLO mode".into(),
+                description: "Auto-approve all tool calls for this session (`/yolo [on|off]`)"
+                    .into(),
+                command: "/yolo".into(),
+                category: CommandCategory::Settings,
+                shortcut: Some("Ctrl+Y".into()),
+            },
+            PaletteCommand {
+                name: "Cycle execution mode".into(),
+                description: "Switch between normal, auto-edit, yolo, and daemon (`/mode`)".into(),
+                command: "/mode".into(),
+                category: CommandCategory::Settings,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Unstuck running task".into(),
+                description: "Nudge or reset a stalled task (`/unstuck [nudge|reset]`)".into(),
+                command: "/unstuck".into(),
+                category: CommandCategory::Tool,
+                shortcut: Some("Ctrl+U".into()),
+            },
+            PaletteCommand {
+                name: "Rollback / Undo".into(),
+                description: "Revert last file edit or stash working tree (`/rollback`)".into(),
+                command: "/rollback".into(),
+                category: CommandCategory::Git,
+                shortcut: Some("Ctrl+Z".into()),
+            },
+            PaletteCommand {
+                name: "Toggle container sandbox".into(),
+                description: "Isolate command execution in a safe container (`/sandbox`)".into(),
+                command: "/sandbox".into(),
+                category: CommandCategory::Settings,
+                shortcut: Some("Ctrl+K".into()),
+            },
+            PaletteCommand {
+                name: "View message queue".into(),
+                description: "Inspect or clear messages queued while processing (`/queue`)".into(),
+                command: "/queue".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Agentic workflows".into(),
+                description:
+                    "List SWL/YAML workflows, queue presets (tdd/bugfix/contained-dev), or scaffold (`/workflow`)"
+                        .into(),
+                command: "/workflow".into(),
+                category: CommandCategory::Tool,
+                shortcut: None,
+            },
+            PaletteCommand {
                 name: "Quit".into(),
                 description: "Leave the session".into(),
                 command: "/quit".into(),

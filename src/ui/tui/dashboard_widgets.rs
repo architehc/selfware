@@ -110,16 +110,33 @@ pub struct DashboardState {
     pub connected: bool,
     /// Current status message
     pub status_message: String,
+    /// Current tool-approval execution mode (`Normal`, `AutoEdit`, `Yolo`, `Daemon`)
+    pub execution_mode: crate::config::ExecutionMode,
+    /// Measured process RSS in MiB (0 until first sample)
+    pub process_rss_mb: u64,
+    /// Measured system RAM usage percentage (0..=100)
+    pub system_mem_pct: u8,
+    /// Measured system RAM used in GiB
+    pub system_mem_used_gb: f64,
+    /// Measured system RAM total in GiB
+    pub system_mem_total_gb: f64,
+    /// Number of queued operator messages waiting to be injected
+    pub queued_count: usize,
+    /// Whether container sandbox isolation is enabled
+    pub sandbox_enabled: bool,
+    /// Last observed agent activity timestamp (for stall / unstuck hints)
+    pub last_activity: Instant,
     /// Coordinator mode status
     pub coordinator_status: CoordinatorUiStatus,
 }
 
 impl Default for DashboardState {
     fn default() -> Self {
+        let now = Instant::now();
         Self {
             model: "Unknown".to_string(),
             tokens_used: 0,
-            session_start: Instant::now(),
+            session_start: now,
             garden_health: 1.0,
             garden_health_measured: false,
             active_tools: Vec::new(),
@@ -129,12 +146,50 @@ impl Default for DashboardState {
             // first response bytes/completion, false on an agent error.
             connected: false,
             status_message: "Ready".to_string(),
+            execution_mode: crate::config::ExecutionMode::Yolo,
+            process_rss_mb: 0,
+            system_mem_pct: 0,
+            system_mem_used_gb: 0.0,
+            system_mem_total_gb: 0.0,
+            queued_count: 0,
+            sandbox_enabled: false,
+            last_activity: now,
             coordinator_status: CoordinatorUiStatus::default(),
         }
     }
 }
 
 impl DashboardState {
+    /// Sample current process RSS and system RAM footprint via `sysinfo`.
+    pub fn refresh_memory_stats(&mut self) {
+        use sysinfo::{
+            MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System,
+        };
+        let pid = Pid::from_u32(std::process::id());
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+        );
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let total = sys.total_memory();
+        let used = sys.used_memory();
+        self.system_mem_total_gb = total as f64 / (1024.0 * 1024.0 * 1024.0);
+        self.system_mem_used_gb = used as f64 / (1024.0 * 1024.0 * 1024.0);
+        self.system_mem_pct = if total > 0 {
+            ((used as f64 / total as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u8
+        } else {
+            0
+        };
+        if let Some(proc_info) = sys.process(pid) {
+            self.process_rss_mb = proc_info.memory() / (1024 * 1024);
+        }
+    }
+
     /// Create a new dashboard state with the given model
     pub fn new(model: &str) -> Self {
         Self {
@@ -193,6 +248,7 @@ impl DashboardState {
 
     /// Process a TUI event and update state accordingly
     pub fn process_event(&mut self, event: TuiEvent) {
+        self.last_activity = Instant::now();
         match event {
             TuiEvent::AgentStarted => {
                 self.status_message = "Agent working...".to_string();
@@ -307,11 +363,15 @@ impl DashboardState {
                 }
             }
             TuiEvent::ModeChangeRequested { mode } => {
-                self.status_message = format!("Mode change: {:?}", mode);
-                self.log(
-                    LogLevel::Info,
-                    &format!("Mode change requested: {:?}", mode),
-                );
+                self.execution_mode = mode;
+                self.status_message = format!("Mode: {}", mode);
+                let level = match mode {
+                    crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon => {
+                        LogLevel::Warning
+                    }
+                    _ => LogLevel::Info,
+                };
+                self.log(level, &format!("Execution mode: {}", mode.description()));
             }
         }
     }
@@ -421,6 +481,30 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
         vec![]
     };
 
+    let (mode_badge, mode_style) = match state.execution_mode {
+        crate::config::ExecutionMode::Normal => {
+            ("🟢 NORMAL", Style::default().fg(TuiPalette::BLOOM))
+        }
+        crate::config::ExecutionMode::AutoEdit => (
+            "✏️ AUTO-EDIT",
+            Style::default()
+                .fg(TuiPalette::AMBER)
+                .add_modifier(Modifier::BOLD),
+        ),
+        crate::config::ExecutionMode::Yolo => (
+            "⚡ YOLO",
+            Style::default()
+                .fg(TuiPalette::WILT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        crate::config::ExecutionMode::Daemon => (
+            "🔄 DAEMON",
+            Style::default()
+                .fg(TuiPalette::WILT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+
     let mut spans = vec![
         Span::styled(format!(" {} ", connection_icon), connection_style),
         Span::styled(
@@ -429,6 +513,8 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
                 .fg(TuiPalette::AMBER)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" │ ", TuiPalette::muted_style()),
+        Span::styled(mode_badge, mode_style),
         Span::styled(" │ ", TuiPalette::muted_style()),
         Span::styled("Tokens: ", TuiPalette::muted_style()),
         Span::styled(tokens_display, Style::default().fg(TuiPalette::COPPER)),
@@ -439,6 +525,44 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
             Style::default().fg(TuiPalette::SAGE),
         ),
     ];
+
+    if state.system_mem_total_gb > 0.0 || state.process_rss_mb > 0 {
+        let mem_style = if state.system_mem_pct >= 90 {
+            TuiPalette::error_style()
+        } else if state.system_mem_pct >= 75 {
+            TuiPalette::warning_style()
+        } else {
+            Style::default().fg(TuiPalette::SAGE)
+        };
+        spans.push(Span::styled(" │ ", TuiPalette::muted_style()));
+        spans.push(Span::styled(
+            format!(
+                "🧠 {}MB ({}% RAM)",
+                state.process_rss_mb, state.system_mem_pct
+            ),
+            mem_style,
+        ));
+    }
+
+    if state.sandbox_enabled {
+        spans.push(Span::styled(" │ ", TuiPalette::muted_style()));
+        spans.push(Span::styled(
+            "📦 SANDBOX",
+            Style::default()
+                .fg(TuiPalette::BLOOM)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if state.queued_count > 0 {
+        spans.push(Span::styled(" │ ", TuiPalette::muted_style()));
+        spans.push(Span::styled(
+            format!("📨 {} queued", state.queued_count),
+            Style::default()
+                .fg(TuiPalette::AMBER)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     // Add coordinator indicator if active
     spans.extend(coordinator_spans);
@@ -636,6 +760,11 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let shortcuts = vec![
         ("q / Ctrl+C", "Quit (q twice)"),
         ("?", "Toggle this help"),
+        ("Ctrl+Y", "Toggle YOLO mode (auto-approve tools)"),
+        ("Ctrl+V", "Paste from system clipboard"),
+        ("Ctrl+U", "Unstuck / nudge running task"),
+        ("Ctrl+Z", "Undo / rollback last file edit"),
+        ("Ctrl+K", "Toggle container sandbox isolation"),
         ("Ctrl+D", "Toggle dashboard view"),
         ("Ctrl+G", "Toggle garden view"),
         ("Ctrl+L", "Toggle log view"),
@@ -803,10 +932,12 @@ fn permission_modal_rows(
         None => {}
     }
     if prompt.allow_always {
-        let text = format!(" always allow {} (session)", prompt.tool_name);
+        let text = format!(" always allow {} (session)   ", prompt.tool_name);
         footer.push(Line::from(vec![
             Span::styled("[a]", key_style),
             Span::raw(text),
+            Span::styled("[!]", key_style),
+            Span::raw(" yolo (session)"),
         ]));
     }
     if let Some(rule) = &prompt.shell_rule {

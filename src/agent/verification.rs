@@ -3084,6 +3084,9 @@ impl Agent {
         "git_diff",
         "git_log",
         "git_show",
+        "http_request",
+        "browser_fetch",
+        "browser_links",
     ];
 
     /// Whether a successful call read workspace content: a content-read

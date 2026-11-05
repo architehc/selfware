@@ -374,18 +374,58 @@ impl Agent {
                 continue;
             }
 
-            if input == "/mode" {
+            if input == "/yolo" || input.starts_with("/yolo ") {
                 use crate::config::ExecutionMode;
-                let new_mode = self.cycle_execution_mode();
-                let mode_desc = match new_mode {
-                    ExecutionMode::Normal => {
-                        "Normal - Ask before writes/commands/network; reads & checks run"
-                    }
-                    ExecutionMode::AutoEdit => "Auto-Edit - Auto-approve file operations",
-                    ExecutionMode::Yolo => "YOLO - Execute all tools without confirmation",
-                    ExecutionMode::Daemon => "Daemon - Permanent YOLO mode",
+                let arg = input.strip_prefix("/yolo").map(str::trim).unwrap_or("");
+                let target = match arg.to_ascii_lowercase().as_str() {
+                    "" | "toggle" => match self.execution_mode() {
+                        ExecutionMode::Yolo => Some(ExecutionMode::Normal),
+                        _ => Some(ExecutionMode::Yolo),
+                    },
+                    "on" | "true" | "1" | "enable" => Some(ExecutionMode::Yolo),
+                    "off" | "false" | "0" | "disable" | "normal" => Some(ExecutionMode::Normal),
+                    _ => None,
                 };
-                println!("{} Mode: {}", "🔄".bright_cyan(), mode_desc.bright_yellow());
+                match target {
+                    Some(new_mode) => {
+                        self.set_execution_mode(new_mode);
+                        println!(
+                            "{} Mode: {}",
+                            "⚡".bright_yellow(),
+                            new_mode.description().bright_yellow()
+                        );
+                    }
+                    None => println!(
+                        "{} Usage: /yolo [on|off] — toggle or set YOLO mode",
+                        "ℹ".bright_yellow()
+                    ),
+                }
+                continue;
+            }
+
+            if input == "/mode" || input.starts_with("/mode ") {
+                let arg = input.strip_prefix("/mode").map(str::trim).unwrap_or("");
+                let target = if arg.is_empty() {
+                    Some(self.cycle_execution_mode())
+                } else {
+                    crate::config::ExecutionMode::parse_user_arg(arg).inspect(|&m| {
+                        self.set_execution_mode(m);
+                    })
+                };
+                match target {
+                    Some(new_mode) => {
+                        println!(
+                            "{} Mode: {}",
+                            "🔄".bright_cyan(),
+                            new_mode.description().bright_yellow()
+                        );
+                    }
+                    None => println!(
+                        "{} Unknown mode '{}'. Valid modes: normal, auto-edit, yolo, daemon",
+                        "ℹ".bright_yellow(),
+                        arg
+                    ),
+                }
                 continue;
             }
 
@@ -3291,6 +3331,45 @@ impl Agent {
             }
             if input == "/permissions" {
                 println!("{}", crate::cli::permissions_text(self));
+                continue;
+            }
+            if input == "/yolo" || input.starts_with("/yolo ") {
+                use crate::config::ExecutionMode;
+                let arg = input.strip_prefix("/yolo").map(str::trim).unwrap_or("");
+                let target = match arg.to_ascii_lowercase().as_str() {
+                    "" | "toggle" => match self.execution_mode() {
+                        ExecutionMode::Yolo => Some(ExecutionMode::Normal),
+                        _ => Some(ExecutionMode::Yolo),
+                    },
+                    "on" | "true" | "1" | "enable" => Some(ExecutionMode::Yolo),
+                    "off" | "false" | "0" | "disable" | "normal" => Some(ExecutionMode::Normal),
+                    _ => None,
+                };
+                match target {
+                    Some(new_mode) => {
+                        self.set_execution_mode(new_mode);
+                        println!("Mode: {}", new_mode.description());
+                    }
+                    None => println!("Usage: /yolo [on|off] — toggle or set YOLO mode"),
+                }
+                continue;
+            }
+            if input == "/mode" || input.starts_with("/mode ") {
+                let arg = input.strip_prefix("/mode").map(str::trim).unwrap_or("");
+                let target = if arg.is_empty() {
+                    Some(self.cycle_execution_mode())
+                } else {
+                    crate::config::ExecutionMode::parse_user_arg(arg).inspect(|&m| {
+                        self.set_execution_mode(m);
+                    })
+                };
+                match target {
+                    Some(new_mode) => println!("Mode: {}", new_mode.description()),
+                    None => println!(
+                        "Unknown mode '{}'. Valid modes: normal, auto-edit, yolo, daemon",
+                        arg
+                    ),
+                }
                 continue;
             }
             if input == "/bug" {

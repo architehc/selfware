@@ -479,20 +479,40 @@ fn names_review_target(lower: &str, pasted: bool) -> bool {
     PART_NOUNS.iter().any(|n| contains_word(lower, n))
 }
 
+/// Strip `http://...` and `https://...` URLs before checking for path
+/// separators (`/`, `\`) or file extensions so external web URLs (e.g.
+/// `https://example.com`) are not mistaken for local workspace paths.
+fn strip_urls_for_path_detection(lower: &str) -> String {
+    lower
+        .split_whitespace()
+        .filter(|tok| {
+            let trimmed = tok.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '.'
+                )
+            });
+            !trimmed.starts_with("http://") && !trimmed.starts_with("https://")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn task_references_project_code(task_context: &str, project_name: &str) -> bool {
     let lower = task_context.to_lowercase();
     let project = project_name.trim().to_lowercase();
     if !project.is_empty() && lower.contains(&project) {
         return true;
     }
+    let path_text = strip_urls_for_path_detection(&lower);
     // A path or a file extension names a concrete artifact.
-    if lower.contains('/') || lower.contains('\\') {
+    if path_text.contains('/') || path_text.contains('\\') {
         return true;
     }
     const CODE_EXTENSIONS: &[&str] = &[
         ".rs", ".toml", ".json", ".yaml", ".yml", ".md", ".py", ".js", ".ts", ".sh", ".lock",
     ];
-    if CODE_EXTENSIONS.iter().any(|ext| lower.contains(ext)) {
+    if CODE_EXTENSIONS.iter().any(|ext| path_text.contains(ext)) {
         return true;
     }
     // Vocabulary that only makes sense when the question is about this code.
@@ -537,14 +557,15 @@ pub(crate) fn task_references_workspace_artifact(task_context: &str, project_nam
     if !project.is_empty() && lower.contains(&project) {
         return true;
     }
+    let path_text = strip_urls_for_path_detection(&lower);
     // A path or a file extension names a concrete artifact.
-    if lower.contains('/') || lower.contains('\\') {
+    if path_text.contains('/') || path_text.contains('\\') {
         return true;
     }
     const CODE_EXTENSIONS: &[&str] = &[
         ".rs", ".toml", ".json", ".yaml", ".yml", ".md", ".py", ".js", ".ts", ".sh", ".lock",
     ];
-    if CODE_EXTENSIONS.iter().any(|ext| lower.contains(ext)) {
+    if CODE_EXTENSIONS.iter().any(|ext| path_text.contains(ext)) {
         return true;
     }
     // Self-reference: phrasing that can only mean the workspace this run is in.

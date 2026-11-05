@@ -53,7 +53,10 @@ use crate::safety::git_exec::{GitScope, SanitizedGitExt};
 use anyhow::Result;
 use crossterm::{
     cursor::Show as ShowCursor,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -85,6 +88,7 @@ pub fn restore_terminal_state() {
         io::stdout(),
         LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableBracketedPaste,
         ShowCursor
     );
     crate::output::set_tui_active(false);
@@ -234,7 +238,12 @@ impl TuiTerminal {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(e) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = disable_raw_mode();
             return Err(e.into());
         }
@@ -283,7 +292,8 @@ impl TuiTerminal {
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )?;
         self.terminal.show_cursor()?;
         Ok(())
@@ -509,6 +519,7 @@ pub(crate) fn permission_key_answer(
         KeyCode::Char('a') | KeyCode::Char('A') if prompt.allow_always => {
             Some(PermissionAnswer::AlwaysTool)
         }
+        KeyCode::Char('!') if prompt.allow_always => Some(PermissionAnswer::EnableYolo),
         KeyCode::Char('p') | KeyCode::Char('P') if prompt.shell_rule.is_some() => {
             Some(PermissionAnswer::ShellRule)
         }
@@ -567,6 +578,87 @@ pub(crate) fn permission_view_key(
         }
         _ => false,
     }
+}
+
+/// Read plain text from the OS clipboard as a fallback when the terminal
+/// emulator intercepts or does not emit bracketed paste events (`Ctrl+V`).
+pub(crate) fn read_system_clipboard() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("pbpaste", &[])];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &[&str])] = &[(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
+    )];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let candidates: &[(&str, &[&str])] = &[
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+    ];
+
+    for (bin, args) in candidates {
+        let mut cmd = std::process::Command::new(bin);
+        crate::safety::process_env::sanitize_std_command_env(&mut cmd);
+        if let Ok(output) = cmd.args(*args).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve forgiving slash commands (common typos and natural aliases) so the
+/// TUI does not reject fast operator input with a hard "Unknown command" error.
+/// Returns `(canonical_cmd, Option<correction_note>)`.
+pub(crate) fn resolve_forgiving_slash_command(cmd: &str) -> (&str, Option<&'static str>) {
+    match cmd {
+        "/h" | "/?" | "/halp" | "/hepl" | "/commands" => ("/help", Some("/help")),
+        "/stat" | "/stauts" | "/staus" | "/info" => ("/status", Some("/status")),
+        "/yol" | "/y" | "/ylo" | "/auto" => ("/yolo", Some("/yolo")),
+        "/mod" | "/modes" | "/m" => ("/mode", Some("/mode")),
+        "/cls" | "/clr" | "/reset" => ("/clear", Some("/clear")),
+        "/und" | "/u" => ("/undo", Some("/undo")),
+        "/red" => ("/redo", Some("/redo")),
+        "/rb" | "/revert" | "/rolback" | "/roll" | "/checkpoint" => {
+            ("/rollback", Some("/rollback"))
+        }
+        "/stuck" | "/unstuk" | "/nudge" | "/poke" | "/recover" | "/unblock" => {
+            ("/unstuck", Some("/unstuck"))
+        }
+        "/container" | "/contaner" | "/docker" | "/podman" | "/box" | "/isolate" => {
+            ("/sandbox", Some("/sandbox"))
+        }
+        "/qlist" | "/queued" | "/que" | "/pending" => ("/queue", Some("/queue")),
+        "/wf" | "/flow" | "/pipeline" | "/workflows" | "/swl" => ("/workflow", Some("/workflow")),
+        "/mem" | "/ram" | "/rss" | "/footprint" => ("/memory", Some("/memory")),
+        "/cmp" | "/compress" => ("/compact", Some("/compact")),
+        "/context" => ("/ctx", Some("/ctx")),
+        "/tokens" | "/usage" => ("/cost", Some("/cost")),
+        _ => (cmd, None),
+    }
+}
+
+/// Probe whether `docker` or `podman` is available on the host for container
+/// sandbox isolation.
+pub(crate) fn detect_container_runtime() -> Option<&'static str> {
+    for bin in ["docker", "podman"] {
+        let mut cmd = std::process::Command::new(bin);
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            crate::safety::process_env::CONTAINER_RUNTIME_ENV,
+        );
+        if let Ok(out) = cmd.arg("--version").output() {
+            if out.status.success() {
+                return Some(bin);
+            }
+        }
+    }
+    None
 }
 
 /// Run the TUI dashboard with shared state and event receiver
@@ -649,15 +741,25 @@ pub fn run_tui_dashboard_with_events(
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
     with_dashboard_state(&shared_state, |state| {
+        state.refresh_memory_stats();
+        state.sandbox_enabled = task_control.is_sandbox_enabled();
         state.log(LogLevel::Info, "Dashboard initialized");
         // Honest status: state the configured model rather than asserting a live
         // connection — no request has been sent yet, so "Connected" would be a lie.
         state.log(LogLevel::Info, &format!("Model: {model}"));
+        state.log(
+            LogLevel::Info,
+            &format!(
+                "Execution mode: {} (Ctrl+Y or /yolo to toggle)",
+                state.execution_mode
+            ),
+        );
     });
 
     // Throttle redraws to ~30fps to avoid wasting CPU
     let min_draw_interval = Duration::from_millis(33);
     let mut last_draw = Instant::now() - min_draw_interval;
+    let mut mem_refreshed = Instant::now();
     let mut needs_redraw = true;
 
     loop {
@@ -680,6 +782,29 @@ pub fn run_tui_dashboard_with_events(
         // Drain background git command results (non-blocking)
         while let Ok(msg) = git_cmd_rx.try_recv() {
             app.add_system_message(&msg);
+            needs_redraw = true;
+        }
+
+        // Periodic memory footprint, queue count, sandbox badge, and stall check (~every 2s).
+        if mem_refreshed.elapsed() >= Duration::from_secs(2) {
+            let q_count = task_control.queued_message_count();
+            let sb_on = task_control.is_sandbox_enabled();
+            let running = app.state == AppState::RunningTask;
+            with_dashboard_state(&shared_state, |state| {
+                state.refresh_memory_stats();
+                state.queued_count = q_count;
+                state.sandbox_enabled = sb_on;
+                if running {
+                    let idle_secs = state.last_activity.elapsed().as_secs();
+                    if idle_secs >= 45 {
+                        state.status_message = format!(
+                            "⏳ Step running ({}s) — type to queue next message, Ctrl+U (/unstuck) to nudge, Esc to cancel",
+                            idle_secs
+                        );
+                    }
+                }
+            });
+            mem_refreshed = Instant::now();
             needs_redraw = true;
         }
 
@@ -842,8 +967,24 @@ pub fn run_tui_dashboard_with_events(
             needs_redraw = false;
         } // end redraw throttle
 
-        // Handle events (same logic as run_tui_dashboard)
-        if let Some(Event::Key(key)) = read_event(100)? {
+        // Handle events (bracketed paste + keyboard)
+        let next_event = read_event(100)?;
+        if let Some(Event::Paste(pasted)) = next_event {
+            if !show_help && pending_permission.is_none() {
+                let inserted = app.on_paste(&pasted);
+                if inserted > 0 {
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(
+                            LogLevel::Info,
+                            &format!("📋 Pasted {} char(s) into input", inserted),
+                        );
+                    });
+                    needs_redraw = true;
+                }
+            }
+            continue;
+        }
+        if let Some(Event::Key(key)) = next_event {
             if key.kind == crossterm::event::KeyEventKind::Release {
                 continue;
             }
@@ -870,8 +1011,15 @@ pub fn run_tui_dashboard_with_events(
                             PermissionAnswer::ShellRule => {
                                 (LogLevel::Info, "Shell rule added (session)")
                             }
+                            PermissionAnswer::EnableYolo => {
+                                (LogLevel::Warning, "YOLO mode enabled (session)")
+                            }
                         };
                         with_dashboard_state(&shared_state, |state| {
+                            if answer == PermissionAnswer::EnableYolo {
+                                state.execution_mode = crate::config::ExecutionMode::Yolo;
+                                state.status_message = "Mode: yolo".to_string();
+                            }
                             state.log(level, &format!("{}: {}", verb, prompt.tool_name));
                         });
                     }
@@ -948,7 +1096,7 @@ pub fn run_tui_dashboard_with_events(
             }
 
             let in_input_mode =
-                matches!(app.state, AppState::Chatting | AppState::Palette) && !show_help;
+                (app.is_input_editable() || app.state == AppState::Palette) && !show_help;
             let allow_q_quit =
                 !in_input_mode || (app.state != AppState::Palette && app.input.is_empty());
 
@@ -982,6 +1130,112 @@ pub fn run_tui_dashboard_with_events(
                         || (app.state != AppState::Palette && app.input.is_empty()) =>
                 {
                     show_help = !show_help;
+                }
+                KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+                    if let Some(clip) = read_system_clipboard() {
+                        let inserted = app.on_paste(&clip);
+                        if inserted > 0 {
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "📋 Pasted {} char(s) from system clipboard",
+                                        inserted
+                                    ),
+                                );
+                            });
+                        } else {
+                            app.add_system_message("📋 Clipboard is empty.");
+                        }
+                    } else {
+                        app.add_system_message(
+                            "📋 Could not read system clipboard (try terminal paste Cmd+V / Shift+Insert).",
+                        );
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    let nudge = "STOP repeating the current approach. Diagnose why you are stuck, summarize what failed in 2 lines, and switch to a simpler, direct strategy or ask the user for clarification.";
+                    if app.state == AppState::RunningTask {
+                        let n = task_control.enqueue_user_message(nudge);
+                        with_dashboard_state(&shared_state, |state| {
+                            state.queued_count = n;
+                            state.log(LogLevel::Warning, "⚡ Unstuck nudge queued for next step");
+                        });
+                        app.add_system_message(
+                            "⚡ Unstuck directive queued — will steer the agent at the next step boundary (press Esc to abort current step immediately).",
+                        );
+                    } else {
+                        let _ = user_input_tx.send("/unstuck".to_string());
+                        app.add_system_message(
+                            "⚡ Unstuck recovery: cleared transient stall state. Type your next instruction or use /rollback to revert recent changes.",
+                        );
+                    }
+                }
+                KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
+                    let _ = user_input_tx.send("/undo".to_string());
+                    app.add_system_message(
+                        "⏪ Rollback (/undo) requested — reverting last agent file edit (see Logs panel). Use `/rollback status` or `/rollback stash` for git-level recovery.",
+                    );
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Warning, "Rollback (/undo) triggered via Ctrl+Z");
+                    });
+                }
+                KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
+                    let next_sb = !task_control.is_sandbox_enabled();
+                    task_control.set_sandbox_enabled(next_sb);
+                    let runtime = detect_container_runtime();
+                    with_dashboard_state(&shared_state, |state| {
+                        state.sandbox_enabled = next_sb;
+                        state.log(
+                            LogLevel::Info,
+                            &format!(
+                                "Container sandbox isolation: {} (runtime: {})",
+                                if next_sb { "ON" } else { "OFF" },
+                                runtime.unwrap_or("none detected")
+                            ),
+                        );
+                    });
+                    let _ = user_input_tx
+                        .send(format!("/sandbox {}", if next_sb { "on" } else { "off" }));
+                    let msg = if next_sb {
+                        match runtime {
+                            Some(rt) => format!(
+                                "📦 Container sandbox enabled ({rt}) — `!cmd` and `/sandbox run <cmd>` run isolated (`--rm --network none --memory 4g --cpus 2 --cap-drop ALL --security-opt no-new-privileges`)."
+                            ),
+                            None => "📦 Container sandbox flag enabled, but no `docker` or `podman` binary was found on PATH. Install Docker/Podman to execute isolated container commands.".to_string(),
+                        }
+                    } else {
+                        "📦 Container sandbox disabled — commands run on host workspace."
+                            .to_string()
+                    };
+                    app.add_system_message(&msg);
+                }
+                KeyCode::Char('y') if key.modifiers == KeyModifiers::CONTROL => {
+                    let next_mode = with_dashboard_state(&shared_state, |state| {
+                        let next = match state.execution_mode {
+                            crate::config::ExecutionMode::Yolo => {
+                                crate::config::ExecutionMode::Normal
+                            }
+                            _ => crate::config::ExecutionMode::Yolo,
+                        };
+                        state.execution_mode = next;
+                        state.status_message = format!("Mode: {}", next);
+                        let level = if next == crate::config::ExecutionMode::Yolo {
+                            LogLevel::Warning
+                        } else {
+                            LogLevel::Info
+                        };
+                        state.log(level, &format!("Toggled mode via Ctrl+Y: {}", next));
+                        next
+                    });
+                    let _ = user_input_tx.send(format!("/mode {}", next_mode));
+                    let msg = match next_mode {
+                        crate::config::ExecutionMode::Yolo => {
+                            "⚡ YOLO mode enabled — all tools auto-approved (hard safety floor still active). Press Ctrl+Y or /yolo off to return to normal mode."
+                        }
+                        _ => "🟢 Normal mode restored — mutating tools will ask for confirmation.",
+                    };
+                    app.add_system_message(msg);
                 }
                 KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                     if layout_engine.current_preset() == LayoutPreset::Dashboard {
@@ -1110,10 +1364,24 @@ pub fn run_tui_dashboard_with_events(
                 KeyCode::Enter if !show_help => {
                     if let Some(input) = app.on_enter() {
                         if input.starts_with('/') {
-                            // Handle slash commands locally
+                            // Handle slash commands locally (with forgiving typo/alias resolution)
                             let parts: Vec<&str> = input.splitn(2, ' ').collect();
-                            let cmd = parts[0];
+                            let raw_cmd = parts[0];
                             let arg = parts.get(1).copied().unwrap_or("");
+                            let (cmd, corrected_to) = resolve_forgiving_slash_command(raw_cmd);
+                            if let Some(canon) = corrected_to {
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.log(
+                                        LogLevel::Info,
+                                        &format!("Auto-resolved '{raw_cmd}' → '{canon}'"),
+                                    );
+                                });
+                            }
+                            let forwarded_input = if arg.is_empty() {
+                                cmd.to_string()
+                            } else {
+                                format!("{cmd} {arg}")
+                            };
                             match cmd {
                                 "/clear" => {
                                     app.clear_chat();
@@ -1139,37 +1407,34 @@ pub fn run_tui_dashboard_with_events(
                                     app.add_system_message(
                                             "Available commands:\n\
                                              \n\
-                                             Session:\n  \
-                                               /help           -- Show this help\n  \
-                                               /quit, /exit, /q -- Quit the TUI\n  \
-                                               /clear          -- Clear chat history\n  \
-                                               /status         -- Show agent status\n  \
-                                               /stats          -- Show session statistics\n  \
-                                               /cost           -- Show session token usage\n  \
-                                               /ctx            -- Show context usage\n\
+                                             Session & Queue:\n  \
+                                               /help                    -- Show this help\n  \
+                                               /quit, /exit, /q         -- Quit the TUI\n  \
+                                               /clear                   -- Clear chat history\n  \
+                                               /status                  -- Show agent, memory & sandbox status\n  \
+                                               /stats                   -- Show session & memory statistics\n  \
+                                               /queue [list|clear|drop] -- Manage messages queued while agent is running\n  \
+                                               /cost                    -- Show session token usage\n  \
+                                               /ctx                     -- Show context usage\n\
+                                             \n\
+                                             Recovery, Safety & Isolation:\n  \
+                                               /yolo [on|off]           -- Toggle or set YOLO mode (default: ON; Ctrl+Y)\n  \
+                                               /mode [mode]             -- Cycle or set mode (normal|yolo|auto-edit|daemon)\n  \
+                                               /unstuck [nudge|reset]   -- Nudge or recover a stuck/looping agent (Ctrl+U)\n  \
+                                               /rollback [edit|stash|status] -- Undo last edit or git stash recovery (Ctrl+Z)\n  \
+                                               /sandbox [on|off|status|run <cmd>] -- Safe container isolation for code dev (Ctrl+K)\n\
                                              \n\
                                              Plan Mode:\n  \
-                                               /plan           -- Enter plan mode (read-only tools only)\n  \
-                                               /execute        -- Approve plan and start execution\n  \
-                                               /modify         -- Exit plan mode without executing\n\
+                                               /plan                    -- Enter plan mode (read-only tools only)\n  \
+                                               /execute                 -- Approve plan and start execution\n  \
+                                               /modify                  -- Exit plan mode without executing\n\
                                              \n\
-                                             Coordinator Mode:\n  \
-                                               /workers        -- List active workers\n\
+                                             Git & Skills:\n  \
+                                               /diff                    -- Show git diff --stat\n  \
+                                               /git                     -- Show git status\n  \
+                                               /skills                  -- List available skills (/<skill> to run)\n\
                                              \n\
-                                             Display:\n  \
-                                               /mode [mode]    -- Show or set mode (normal|yolo|auto-edit|daemon)\n  \
-                                               /compact        -- Switch to compact output\n  \
-                                               /verbose        -- Switch to verbose output\n\
-                                             \n\
-                                             Git:\n  \
-                                               /diff           -- Show git diff --stat\n  \
-                                               /git            -- Show git status\n\
-                                             \n\
-                                             Skills:\n  \
-                                               /skills         -- List available skills\n  \
-                                               /<skill>        -- Activate a skill\n\
-                                             \n\
-                                             Keyboard: q (quit), ? (help), Esc (cancel task), Space (hold display), Ctrl+D (dashboard), Ctrl+T (tasks: open/edit/pause/cancel), Tab (cycle panes)"
+                                             Keyboard: Enter (send, or queue while running), Ctrl+V (paste clipboard), Ctrl+Y (YOLO), Ctrl+U (unstuck), Ctrl+Z (rollback), Ctrl+K (container sandbox), Esc (cancel task), Ctrl+T (tasks), Tab (cycle panes)"
                                         );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Displayed help text");
@@ -1177,7 +1442,9 @@ pub fn run_tui_dashboard_with_events(
                                 }
                                 "/status" => {
                                     let status_msg = with_dashboard_state(&shared_state, |state| {
+                                        state.refresh_memory_stats();
                                         let mode = if app.verbose { "verbose" } else { "compact" };
+                                        let exec_mode = state.execution_mode;
                                         let msg_count = app.messages.len();
                                         let tokens = state.tokens_used;
                                         let connected = if state.connected {
@@ -1185,9 +1452,15 @@ pub fn run_tui_dashboard_with_events(
                                         } else {
                                             "disconnected"
                                         };
+                                        let sandbox = if task_control.is_sandbox_enabled() {
+                                            "sandbox: ON"
+                                        } else {
+                                            "sandbox: off"
+                                        };
+                                        let queued = task_control.queued_message_count();
                                         format!(
-                                            "Status: {} output, {} messages, {} tokens used, {}",
-                                            mode, msg_count, tokens, connected
+                                            "Status: {} mode, {} output, {} messages, {} queued, {} tokens used, RSS {}MB ({}% RAM), {}, {}",
+                                            exec_mode, mode, msg_count, queued, tokens, state.process_rss_mb, state.system_mem_pct, sandbox, connected
                                         )
                                     });
                                     app.add_system_message(&status_msg);
@@ -1197,6 +1470,7 @@ pub fn run_tui_dashboard_with_events(
                                 }
                                 "/stats" => {
                                     let stats_msg = with_dashboard_state(&shared_state, |state| {
+                                        state.refresh_memory_stats();
                                         let elapsed = state.elapsed_formatted();
                                         let tokens = state.tokens_used;
                                         let msg_count = app.messages.len();
@@ -1204,11 +1478,29 @@ pub fn run_tui_dashboard_with_events(
                                         format!(
                                             "Session statistics:\n  \
                                                  Elapsed time:  {}\n  \
-                                                 Messages:      {}\n  \
+                                                 Messages:      {} ({} queued)\n  \
                                                  Tokens used:   {}\n  \
                                                  Tool calls:    {}\n  \
+                                                 Memory (RSS):  {} MB (System: {:.1}/{:.1} GB, {}%)\n  \
+                                                 Sandbox:       {}\n  \
+                                                 Mode:          {}\n  \
                                                  Model:         {}",
-                                            elapsed, msg_count, tokens, tool_count, state.model
+                                            elapsed,
+                                            msg_count,
+                                            task_control.queued_message_count(),
+                                            tokens,
+                                            tool_count,
+                                            state.process_rss_mb,
+                                            state.system_mem_used_gb,
+                                            state.system_mem_total_gb,
+                                            state.system_mem_pct,
+                                            if task_control.is_sandbox_enabled() {
+                                                "ON (container isolated)"
+                                            } else {
+                                                "OFF (host workspace)"
+                                            },
+                                            state.execution_mode,
+                                            state.model
                                         )
                                     });
                                     app.add_system_message(&stats_msg);
@@ -1216,30 +1508,487 @@ pub fn run_tui_dashboard_with_events(
                                         state.log(LogLevel::Info, "Displayed session stats");
                                     });
                                 }
-                                "/mode" => {
-                                    if arg.is_empty() {
-                                        let mode = if app.verbose { "verbose" } else { "compact" };
-                                        app.add_system_message(
-                                                &format!("Current output mode: {}. Use /mode <normal|yolo|auto-edit|daemon> to change.", mode),
-                                            );
-                                    } else {
-                                        match arg {
-                                            "normal" | "yolo" | "auto-edit" | "daemon" => {
+                                "/queue" => {
+                                    let sub_parts: Vec<&str> = arg.trim().splitn(2, ' ').collect();
+                                    let sub = sub_parts.first().copied().unwrap_or("");
+                                    let sub_arg = sub_parts.get(1).copied().unwrap_or("").trim();
+                                    match sub {
+                                        "" | "list" | "ls" => {
+                                            let items = task_control.list_queued_messages();
+                                            if items.is_empty() {
                                                 app.add_system_message(
-                                                        &format!("Mode switching to '{}' is not yet supported from the TUI. The agent continues in its current mode.", arg)
-                                                    );
+                                                    "📨 Message queue is empty. Type and press Enter while the agent is processing to queue follow-up requests.",
+                                                );
+                                            } else {
+                                                let mut lines = vec![format!(
+                                                    "📨 Queued messages ({}) — will be injected at the next step:",
+                                                    items.len()
+                                                )];
+                                                for (i, item) in items.iter().enumerate() {
+                                                    lines.push(format!("  {}. {}", i + 1, item));
+                                                }
+                                                lines.push(
+                                                    "Use `/queue drop <n>` or `/queue clear` to remove.".to_string(),
+                                                );
+                                                app.add_system_message(&lines.join("\n"));
                                             }
-                                            _ => {
-                                                app.add_system_message(
-                                                        &format!("Unknown mode '{}'. Valid modes: normal, yolo, auto-edit, daemon", arg)
+                                        }
+                                        "clear" | "flush" => {
+                                            let removed = task_control.clear_queued_messages();
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.queued_count = 0;
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    &format!("Cleared {removed} queued message(s)"),
+                                                );
+                                            });
+                                            app.add_system_message(&format!(
+                                                "🧹 Cleared {removed} queued message(s)."
+                                            ));
+                                        }
+                                        "drop" | "rm" | "del" => {
+                                            if let Ok(idx1) = sub_arg.parse::<usize>() {
+                                                if idx1 >= 1 {
+                                                    if let Some(dropped) =
+                                                        task_control.drop_queued_message(idx1 - 1)
+                                                    {
+                                                        let rem =
+                                                            task_control.queued_message_count();
+                                                        with_dashboard_state(
+                                                            &shared_state,
+                                                            |state| {
+                                                                state.queued_count = rem;
+                                                            },
+                                                        );
+                                                        app.add_system_message(&format!(
+                                                            "🗑️ Dropped queued message #{idx1}: {dropped}"
+                                                        ));
+                                                    } else {
+                                                        app.add_system_message(&format!(
+                                                            "No queued message at index #{idx1}."
+                                                        ));
+                                                    }
+                                                } else {
+                                                    app.add_system_message(
+                                                        "Usage: /queue drop <1-based-index>",
                                                     );
+                                                }
+                                            } else {
+                                                app.add_system_message(
+                                                    "Usage: /queue drop <1-based-index>",
+                                                );
+                                            }
+                                        }
+                                        _ => {
+                                            let msg = arg.trim();
+                                            let count = task_control.enqueue_user_message(msg);
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.queued_count = count;
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    &format!(
+                                                        "Queued message #{count}: {}",
+                                                        truncate_for_display(msg, 48)
+                                                    ),
+                                                );
+                                            });
+                                            app.add_system_message(&format!(
+                                                "📨 Queued (#{count}): {msg}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                "/unstuck" => {
+                                    let sub = arg.trim().to_ascii_lowercase();
+                                    match sub.as_str() {
+                                        "reset" | "abort" | "hard" => {
+                                            cancel_token.store(true, Ordering::Relaxed);
+                                            let _ =
+                                                user_input_tx.send("/unstuck reset".to_string());
+                                            app.clear_streaming();
+                                            app.clear_progress();
+                                            app.state = AppState::Chatting;
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.status_message =
+                                                    "Unstuck (reset)".to_string();
+                                                state.log(
+                                                    LogLevel::Warning,
+                                                    "Hard unstuck reset: cancelled active step and restored input state",
+                                                );
+                                            });
+                                            app.add_system_message(
+                                                "🛠️ Hard unstuck complete — cancelled active step, compacted stale state, and restored chat input.",
+                                            );
+                                        }
+                                        _ => {
+                                            let custom = arg.trim();
+                                            let directive = if custom.is_empty()
+                                                || custom == "nudge"
+                                            {
+                                                "STOP repeating the current approach. Diagnose why you are stuck, summarize what failed in 2 lines, and switch to a simpler, direct strategy or ask the user for clarification."
+                                            } else {
+                                                custom
+                                            };
+                                            if app.state == AppState::RunningTask {
+                                                let count =
+                                                    task_control.enqueue_user_message(directive);
+                                                with_dashboard_state(&shared_state, |state| {
+                                                    state.queued_count = count;
+                                                    state.log(
+                                                        LogLevel::Warning,
+                                                        "Queued unstuck recovery directive",
+                                                    );
+                                                });
+                                                app.add_system_message(
+                                                    "⚡ Unstuck directive queued for the next step boundary. Use `/unstuck reset` (or Esc) to abort the current step immediately.",
+                                                );
+                                            } else {
+                                                let _ = user_input_tx
+                                                    .send(format!("/unstuck {directive}"));
+                                                app.add_system_message(
+                                                    "⚡ Unstuck directive recorded in conversation context and compacted stale turns.",
+                                                );
                                             }
                                         }
                                     }
+                                }
+                                "/rollback" => {
+                                    let sub = arg.trim();
+                                    let cmd_to_send = if sub.is_empty() {
+                                        "/rollback edit".to_string()
+                                    } else {
+                                        format!("/rollback {sub}")
+                                    };
+                                    let _ = user_input_tx.send(cmd_to_send);
+                                    app.add_system_message(
+                                        "⏪ Executing rollback (results in Logs panel). Modes: `/rollback edit` (undo last agent edit), `/rollback stash` (stash uncommitted git changes cleanly), `/rollback status` (inspect working tree & checkpoints).",
+                                    );
                                     with_dashboard_state(&shared_state, |state| {
-                                        state
-                                            .log(LogLevel::Info, &format!("Mode command: {}", arg));
+                                        state.log(
+                                            LogLevel::Warning,
+                                            &format!("Rollback requested: /rollback {sub}"),
+                                        );
                                     });
+                                }
+                                "/sandbox" => {
+                                    let sub = arg.trim();
+                                    let sub_lower = sub.to_ascii_lowercase();
+                                    match sub_lower.as_str() {
+                                        "" | "status" => {
+                                            let enabled = task_control.is_sandbox_enabled();
+                                            let runtime = detect_container_runtime();
+                                            app.add_system_message(&format!(
+                                                "📦 Container Sandbox Status:\n  \
+                                                 Active:   {} (toggle with `/sandbox on|off` or Ctrl+K)\n  \
+                                                 Runtime:  {}\n  \
+                                                 Profile:  `--rm --network none --memory 4g --cpus 2 --cap-drop ALL --security-opt no-new-privileges -v <cwd>:/workspace:rw`\n  \
+                                                 Run cmd:  `/sandbox run <cmd>` (or `!<cmd>` when sandbox is ON)",
+                                                if enabled { "ON" } else { "OFF" },
+                                                runtime.unwrap_or("not detected (install docker or podman)")
+                                            ));
+                                        }
+                                        "on" | "true" | "1" | "enable" => {
+                                            task_control.set_sandbox_enabled(true);
+                                            let runtime = detect_container_runtime();
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.sandbox_enabled = true;
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    "Container sandbox enabled",
+                                                );
+                                            });
+                                            let _ = user_input_tx.send("/sandbox on".to_string());
+                                            app.add_system_message(&format!(
+                                                "📦 Container sandbox ENABLED (runtime: {}). `!cmd` and `/sandbox run <cmd>` will execute inside an isolated container.",
+                                                runtime.unwrap_or("docker/podman not found on PATH")
+                                            ));
+                                        }
+                                        "off" | "false" | "0" | "disable" => {
+                                            task_control.set_sandbox_enabled(false);
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.sandbox_enabled = false;
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    "Container sandbox disabled",
+                                                );
+                                            });
+                                            let _ = user_input_tx.send("/sandbox off".to_string());
+                                            app.add_system_message(
+                                                "📦 Container sandbox DISABLED — commands run on host workspace.",
+                                            );
+                                        }
+                                        _ if sub_lower.starts_with("run ") => {
+                                            let _ = user_input_tx.send(format!("/sandbox {sub}"));
+                                            app.add_system_message(&format!(
+                                                "📦 Running in isolated container sandbox: `{}` (output → Logs panel)",
+                                                sub.strip_prefix("run ").unwrap_or(sub).trim()
+                                            ));
+                                        }
+                                        _ => {
+                                            app.add_system_message(
+                                                "Usage: /sandbox [on|off|status|run <cmd>] (or press Ctrl+K to toggle)",
+                                            );
+                                        }
+                                    }
+                                }
+                                "/workflow" => {
+                                    let sub = arg.trim();
+                                    let (verb, rest) = sub.split_once(' ').unwrap_or((sub, ""));
+                                    let verb_lower = verb.to_ascii_lowercase();
+                                    match verb_lower.as_str() {
+                                        "" | "list" | "status" => {
+                                            let mut swl_files = Vec::new();
+                                            let workflows_dir = cwd.join("workflows");
+                                            if let Ok(entries) = std::fs::read_dir(&workflows_dir) {
+                                                for entry in entries.flatten() {
+                                                    let p = entry.path();
+                                                    if p.extension()
+                                                        .and_then(|e| e.to_str())
+                                                        .is_some_and(|e| {
+                                                            matches!(e, "swl" | "yml" | "yaml")
+                                                        })
+                                                    {
+                                                        if let Some(name) =
+                                                            p.file_name().and_then(|n| n.to_str())
+                                                        {
+                                                            swl_files
+                                                                .push(format!("workflows/{name}"));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            swl_files.sort();
+                                            let files_list = if swl_files.is_empty() {
+                                                "none in workflows/ (create one with `/workflow init <name>`)".to_string()
+                                            } else {
+                                                swl_files.join(", ")
+                                            };
+                                            app.add_system_message(&format!(
+                                                "🔁 Agentic Workflow Manager (`/workflow` | `/wf`):\n  \
+                                                 • Built-in multi-stage presets (auto-queued into live pipeline):\n    \
+                                                   `/workflow tdd <goal>`           — Stage 1: Failing test → Stage 2: Implement → Stage 3: Verify\n    \
+                                                   `/workflow bugfix <goal>`        — Stage 1: Reproduce & root-cause → Stage 2: Fix → Stage 3: Regression test\n    \
+                                                   `/workflow contained-dev <goal>` — Enables 📦 Container Sandbox (`--network none --cap-drop ALL`) + Plan → Code → Verify\n    \
+                                                   `/workflow redteam <goal>`       — Stage 1: Threat surface → Stage 2: Exploit/Safety check → Stage 3: Harden\n    \
+                                                   `/workflow ship <goal>`          — Stage 1: fmt/clippy/test gate → Stage 2: Docs/changelog → Stage 3: Release check\n  \
+                                                 • Workspace SWL/YAML workflows: {}\n  \
+                                                 • Scaffold new SWL workflow: `/workflow init <name>`\n  \
+                                                 • CLI workflow runner: `selfware workflow run <file.swl> [--resume <run_id>]`",
+                                                files_list
+                                            ));
+                                        }
+                                        "init" => {
+                                            let raw_name = rest.trim().trim_end_matches(".swl");
+                                            let safe_name: String = raw_name
+                                                .chars()
+                                                .filter(|c| {
+                                                    c.is_ascii_alphanumeric()
+                                                        || *c == '_'
+                                                        || *c == '-'
+                                                })
+                                                .collect();
+                                            if safe_name.is_empty() {
+                                                app.add_system_message("Usage: `/workflow init <name>` (e.g. `/workflow init ci_audit`)");
+                                            } else {
+                                                let dir = cwd.join("workflows");
+                                                let _ = std::fs::create_dir_all(&dir);
+                                                let target = dir.join(format!("{safe_name}.swl"));
+                                                let template = format!(
+                                                    "version: \"2.0\"\nname: {safe_name}\ndescription: \"Multi-stage agentic workflow generated from TUI\"\n\nagents:\n  planner:\n    model: default\n    role: \"Scope and plan the task\"\n  builder:\n    model: default\n    role: \"Implement and verify changes\"\n\nworkflows:\n  main:\n    type: sequential\n    steps:\n      - name: plan\n        agent: planner\n        prompt: \"Analyze workspace and produce a concise implementation plan.\"\n      - name: implement\n        agent: builder\n        prompt: \"Execute the plan and verify with tests.\"\n"
+                                                );
+                                                match std::fs::write(&target, template) {
+                                                    Ok(()) => {
+                                                        app.add_system_message(&format!(
+                                                            "✨ Scaffolded SWL workflow at `workflows/{safe_name}.swl`. Run with `selfware workflow validate workflows/{safe_name}.swl` or `selfware workflow run workflows/{safe_name}.swl`."
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        app.add_system_message(&format!(
+                                                            "⚠️ Failed to write workflow file: {e}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        "tdd" | "bugfix" | "contained-dev" | "redteam" | "ship"
+                                        | "preset" => {
+                                            let (preset_name, goal) = if verb_lower == "preset" {
+                                                rest.trim()
+                                                    .split_once(' ')
+                                                    .unwrap_or((rest.trim(), ""))
+                                            } else {
+                                                (verb_lower.as_str(), rest.trim())
+                                            };
+                                            if goal.is_empty() {
+                                                app.add_system_message(&format!(
+                                                    "Usage: `/workflow {preset_name} <goal>` — e.g. `/workflow {preset_name} fix timeout handling in client`"
+                                                ));
+                                            } else {
+                                                if preset_name == "contained-dev" {
+                                                    task_control.set_sandbox_enabled(true);
+                                                    with_dashboard_state(&shared_state, |state| {
+                                                        state.sandbox_enabled = true;
+                                                        state.log(LogLevel::Info, "Container sandbox auto-enabled for contained-dev workflow");
+                                                    });
+                                                }
+                                                let stages: Vec<String> = match preset_name {
+                                                    "tdd" => vec![
+                                                        format!("[Workflow: TDD — Stage 1/3 (Red)] Write or identify a focused failing test for: {goal}"),
+                                                        format!("[Workflow: TDD — Stage 2/3 (Green)] Implement the minimal code change to make the test pass for: {goal}"),
+                                                        format!("[Workflow: TDD — Stage 3/3 (Refactor & Verify)] Run tests, check edge cases, and summarize verification for: {goal}"),
+                                                    ],
+                                                    "bugfix" => vec![
+                                                        format!("[Workflow: Bugfix — Stage 1/3 (Diagnose)] Locate the root cause and cite exact file:line for: {goal}"),
+                                                        format!("[Workflow: Bugfix — Stage 2/3 (Fix)] Apply the minimal fix and sweep sibling files for the same bug class: {goal}"),
+                                                        format!("[Workflow: Bugfix — Stage 3/3 (Verify)] Run unit tests and confirm no regressions for: {goal}"),
+                                                    ],
+                                                    "contained-dev" => vec![
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 1/3 (Plan)] Inspect files and design a safe implementation plan for: {goal}"),
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 2/3 (Implement)] Implement changes and run shell verification inside the isolated container for: {goal}"),
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 3/3 (Audit)] Verify git diff and summarize changes (use `/rollback` if needed) for: {goal}"),
+                                                    ],
+                                                    "redteam" => vec![
+                                                        format!("[Workflow: Red-Team — Stage 1/3 (Surface)] Map trust boundaries, inputs, and safety gates for: {goal}"),
+                                                        format!("[Workflow: Red-Team — Stage 2/3 (Probe)] Test boundary conditions, injection vectors, and denied paths for: {goal}"),
+                                                        format!("[Workflow: Red-Team — Stage 3/3 (Harden)] Propose or apply hardening fixes and regression tests for: {goal}"),
+                                                    ],
+                                                    _ => vec![
+                                                        format!("[Workflow: Ship — Stage 1/3 (Gate)] Verify formatting, clippy, and unit tests for: {goal}"),
+                                                        format!("[Workflow: Ship — Stage 2/3 (Polish)] Check docs, config examples, and edge cases for: {goal}"),
+                                                        format!("[Workflow: Ship — Stage 3/3 (Summary)] Provide a concise release readiness summary for: {goal}"),
+                                                    ],
+                                                };
+                                                let mut iter = stages.into_iter();
+                                                if app.state != AppState::RunningTask {
+                                                    if let Some(first) = iter.next() {
+                                                        app.add_user_message(&first);
+                                                        app.state = AppState::RunningTask;
+                                                        let _ = user_input_tx.send(first);
+                                                    }
+                                                }
+                                                let mut queued_total =
+                                                    task_control.queued_message_count();
+                                                for stage in iter {
+                                                    queued_total =
+                                                        task_control.enqueue_user_message(stage);
+                                                }
+                                                with_dashboard_state(&shared_state, |state| {
+                                                    state.queued_count = queued_total;
+                                                    state.log(
+                                                        LogLevel::Info,
+                                                        &format!("Launched 3-stage '{preset_name}' workflow ({queued_total} stage(s) queued)"),
+                                                    );
+                                                });
+                                                app.add_system_message(&format!(
+                                                    "🔁 Started 3-stage `{preset_name}` workflow! Stage 1 is running and remaining stages are queued (`{queued_total}` in `/queue`). Use `/queue` to inspect, `/unstuck` if stalled, or `/rollback` to revert."
+                                                ));
+                                            }
+                                        }
+                                        _ => {
+                                            app.add_system_message(
+                                                "Usage: `/workflow [list | init <name> | tdd <goal> | bugfix <goal> | contained-dev <goal> | redteam <goal> | ship <goal>]`",
+                                            );
+                                        }
+                                    }
+                                }
+                                "/yolo" => {
+                                    let arg_norm = arg.trim().to_ascii_lowercase();
+                                    let target_mode = match arg_norm.as_str() {
+                                        "" | "toggle" => {
+                                            Some(with_dashboard_state(&shared_state, |state| {
+                                                match state.execution_mode {
+                                                    crate::config::ExecutionMode::Yolo => {
+                                                        crate::config::ExecutionMode::Normal
+                                                    }
+                                                    _ => crate::config::ExecutionMode::Yolo,
+                                                }
+                                            }))
+                                        }
+                                        "on" | "true" | "1" | "enable" => {
+                                            Some(crate::config::ExecutionMode::Yolo)
+                                        }
+                                        "off" | "false" | "0" | "disable" | "normal" => {
+                                            Some(crate::config::ExecutionMode::Normal)
+                                        }
+                                        _ => None,
+                                    };
+                                    match target_mode {
+                                        Some(next_mode) => {
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.execution_mode = next_mode;
+                                                state.status_message =
+                                                    format!("Mode: {}", next_mode);
+                                                let level = if next_mode
+                                                    == crate::config::ExecutionMode::Yolo
+                                                {
+                                                    LogLevel::Warning
+                                                } else {
+                                                    LogLevel::Info
+                                                };
+                                                state.log(
+                                                    level,
+                                                    &format!("Execution mode set to {}", next_mode),
+                                                );
+                                            });
+                                            let _ =
+                                                user_input_tx.send(format!("/mode {}", next_mode));
+                                            let msg = match next_mode {
+                                                crate::config::ExecutionMode::Yolo => {
+                                                    "⚡ YOLO mode enabled — all tools auto-approved (hard safety floor still active). Use /yolo off or Ctrl+Y to return to normal mode."
+                                                }
+                                                _ => {
+                                                    "🟢 Normal mode restored — mutating tools will ask for confirmation."
+                                                }
+                                            };
+                                            app.add_system_message(msg);
+                                        }
+                                        None => {
+                                            app.add_system_message(
+                                                "Usage: /yolo [on|off] — toggle or set YOLO mode",
+                                            );
+                                        }
+                                    }
+                                }
+                                "/mode" => {
+                                    let target_mode = if arg.trim().is_empty() {
+                                        Some(with_dashboard_state(&shared_state, |state| {
+                                            state.execution_mode.next_mode()
+                                        }))
+                                    } else {
+                                        crate::config::ExecutionMode::parse_user_arg(arg)
+                                    };
+                                    match target_mode {
+                                        Some(next_mode) => {
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.execution_mode = next_mode;
+                                                state.status_message =
+                                                    format!("Mode: {}", next_mode);
+                                                let level = matches!(
+                                                    next_mode,
+                                                    crate::config::ExecutionMode::Yolo
+                                                        | crate::config::ExecutionMode::Daemon
+                                                )
+                                                .then_some(LogLevel::Warning)
+                                                .unwrap_or(LogLevel::Info);
+                                                state.log(
+                                                    level,
+                                                    &format!("Execution mode set to {}", next_mode),
+                                                );
+                                            });
+                                            let _ =
+                                                user_input_tx.send(format!("/mode {}", next_mode));
+                                            app.add_system_message(&format!(
+                                                "🔄 Mode switched to: {}\n(Use /mode <normal|auto-edit|yolo|daemon> or Ctrl+Y to change)",
+                                                next_mode.description()
+                                            ));
+                                        }
+                                        None => {
+                                            app.add_system_message(&format!(
+                                                "Unknown mode '{}'. Valid modes: normal, auto-edit, yolo, daemon",
+                                                arg.trim()
+                                            ));
+                                        }
+                                    }
                                 }
                                 "/compact" => {
                                     app.verbose = false;
@@ -1484,7 +2233,7 @@ pub fn run_tui_dashboard_with_events(
                                 | "/review" | "/analyze" | "/explain" | "/scan" | "/mcp"
                                 | "/permissions" | "/bug" | "/agents" | "/journal" | "/garden"
                                 | "/memory" | "/tools" => {
-                                    let _ = user_input_tx.send(input.clone());
+                                    let _ = user_input_tx.send(forwarded_input);
                                     app.add_system_message(&format!("{} → log panel", cmd));
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(
@@ -1494,8 +2243,8 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                                 // CLI-only commands that don't apply in TUI
-                                "/queue" | "/swarm" | "/spawn" | "/delegate" | "/pipe"
-                                | "/batch" | "/schedule" | "/cron" | "/webhook" => {
+                                "/swarm" | "/spawn" | "/delegate" | "/pipe" | "/batch"
+                                | "/schedule" | "/cron" | "/webhook" => {
                                     app.add_system_message(
                                             &format!("{}: This command is only available in CLI interactive mode.", cmd)
                                         );
@@ -1562,6 +2311,23 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                             }
+                        } else if app.state == AppState::RunningTask {
+                            // Non-blocking message queue while the agent is processing!
+                            app.add_user_message(&input);
+                            let count = task_control.enqueue_user_message(&input);
+                            app.add_system_message(&format!(
+                                "📨 Queued (#{count}) — will be injected into the active run at the next step (or executed right after). Use `/queue list` or `/queue clear` to manage."
+                            ));
+                            with_dashboard_state(&shared_state, |state| {
+                                state.queued_count = count;
+                                state.log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "Queued message #{count}: {}",
+                                        truncate_for_display(&input, 50)
+                                    ),
+                                );
+                            });
                         } else {
                             app.add_user_message(&input);
                             let _ = user_input_tx.send(input.clone());
@@ -1910,15 +2676,21 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     let messages = List::new(items);
     frame.render_widget(messages, chunks[0]);
 
-    // Render input
+    // Render input — remains editable while RunningTask so the user can type,
+    // paste, run slash commands, or queue follow-up requests at any time.
+    let input_title = if app.state == AppState::RunningTask {
+        " Input (⏳ Running — Enter to queue/steer, Ctrl+V paste, Ctrl+U unstuck, Esc cancel) "
+    } else {
+        " Input (Enter to send, Ctrl+V paste, Ctrl+Y YOLO, /help) "
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if focused && app.state == AppState::Chatting {
+        .border_style(if focused && app.is_input_editable() {
             TuiPalette::title_style()
         } else {
             TuiPalette::muted_style()
         })
-        .title(" Input ");
+        .title(input_title);
 
     let input_inner = input_block.inner(chunks[1]);
     frame.render_widget(input_block, chunks[1]);
@@ -1927,8 +2699,8 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         .style(Style::default().fg(TuiPalette::PARCHMENT));
     frame.render_widget(input_text, input_inner);
 
-    // Show cursor if focused and chatting
-    if focused && app.state == AppState::Chatting {
+    // Show cursor if focused and editable (Chatting or RunningTask)
+    if focused && app.is_input_editable() {
         frame.set_cursor_position((input_inner.x + 2 + app.cursor as u16, input_inner.y));
     }
 }

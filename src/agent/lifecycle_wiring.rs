@@ -459,6 +459,17 @@ impl Agent {
     /// side, and the deadline-based lifecycle `timeout` that follows from
     /// them); see `Agent::exclude_paused_time`.
     pub(super) async fn task_control_safe_point(&mut self) {
+        let queued = self.task_control.take_queued_messages();
+        if !queued.is_empty() {
+            let count = queued.len();
+            let joined = queued.join("\n\n");
+            self.messages.push(crate::api::types::Message::user(format!(
+                "[Live operator update received while running — incorporate this guidance now]:\n{joined}"
+            )));
+            self.emit_event(super::AgentEvent::Status {
+                message: format!("📨 Injected {count} queued operator message(s) into active run"),
+            });
+        }
         self.publish_live_task();
         if !self.task_control.pause_requested() {
             return;

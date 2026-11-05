@@ -169,7 +169,33 @@ fn permission_overlay_offers_only_the_options_the_prompt_allows() {
         .unwrap();
     let screen = all_rows(&terminal);
     assert!(screen.contains("[a] always allow shell_exec (session)"));
+    assert!(screen.contains("[!] yolo (session)"));
     assert!(screen.contains("[p] always allow commands starting with `cargo test` (session)"));
+}
+
+#[test]
+fn status_bar_renders_execution_mode_badge_and_updates_on_mode_change() {
+    let mut state = DashboardState::new("boot-assistant");
+    assert_eq!(state.execution_mode, crate::config::ExecutionMode::Yolo);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 4)).unwrap();
+    terminal
+        .draw(|frame| render_status_bar(frame, frame.area(), &state))
+        .unwrap();
+    let yolo_screen = all_rows(&terminal);
+    assert!(yolo_screen.contains("YOLO"), "{yolo_screen}");
+
+    state.process_event(TuiEvent::ModeChangeRequested {
+        mode: crate::config::ExecutionMode::Normal,
+    });
+    assert_eq!(state.execution_mode, crate::config::ExecutionMode::Normal);
+    assert_eq!(state.status_message, "Mode: normal");
+
+    terminal
+        .draw(|frame| render_status_bar(frame, frame.area(), &state))
+        .unwrap();
+    let normal_screen = all_rows(&terminal);
+    assert!(normal_screen.contains("NORMAL"), "{normal_screen}");
 }
 
 #[test]

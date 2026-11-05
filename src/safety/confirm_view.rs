@@ -626,6 +626,8 @@ pub enum PermissionAnswer {
     AlwaysTool,
     /// Run it and add the offered shell rule for the session.
     ShellRule,
+    /// Run it and enable YOLO mode (no further confirmations) for the session.
+    EnableYolo,
 }
 
 // ---------------------------------------------------------------------------

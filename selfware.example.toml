@@ -15,6 +15,12 @@ max_tokens = 4096
 context_length = 32768
 temperature = 0.1
 
+# ── Execution Mode (Default in TUI: YOLO) ────────────────────────────────────
+# The interactive TUI starts in YOLO mode by default (`⚡ YOLO` — tools are
+# auto-approved while the hard safety floor remains enforced).
+# Toggle anytime in the TUI with `Ctrl+Y`, `/yolo [on|off]`, or `/mode`,
+# or pass `-m normal` / `-m auto-edit` / `--yolo` on the command line.
+
 # ── Tier 2: Local Coding & Long-Context Engine (LiquidAI LFM3-1.7B-GSQ 1GB) ──
 # Switch live in TUI/REPL with `/model lfm3-1.7b-gsq-1gb` (or `-128k` / `-256k`),
 # on the CLI with `selfware -M lfm3-1.7b-gsq-1gb`, or uncomment below:

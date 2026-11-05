@@ -3037,19 +3037,16 @@ To call a tool, use this EXACT XML structure:
             crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon
         ) {
             self.yolo_manager.enable();
+        } else {
+            self.yolo_manager.disable();
         }
     }
 
     /// Cycle to next execution mode (Shift+Tab): normal → auto-edit → yolo → daemon → normal
     pub fn cycle_execution_mode(&mut self) -> crate::config::ExecutionMode {
-        use crate::config::ExecutionMode;
-        self.config.execution_mode = match self.config.execution_mode {
-            ExecutionMode::Normal => ExecutionMode::AutoEdit,
-            ExecutionMode::AutoEdit => ExecutionMode::Yolo,
-            ExecutionMode::Yolo => ExecutionMode::Daemon,
-            ExecutionMode::Daemon => ExecutionMode::Normal,
-        };
-        self.config.execution_mode
+        let next = self.config.execution_mode.next_mode();
+        self.set_execution_mode(next);
+        next
     }
 
     /// Check if tool execution needs confirmation based on current mode and risk level.
@@ -3222,6 +3219,9 @@ To call a tool, use this EXACT XML structure:
         }
         match tool_name {
             "context_bulk_read" => Some(true),
+            "http_request" | "browser_fetch" | "browser_links" => {
+                self.headless_network_read_allowed(tool_name, args)
+            }
             "shell_exec" | "pty_shell" => {
                 let Some(cmd) = args.get("command").and_then(|c| c.as_str()) else {
                     // Unparseable arguments — fail closed, never a silent grant.
@@ -3240,6 +3240,58 @@ To call a tool, use this EXACT XML structure:
             }
             _ => None,
         }
+    }
+
+    /// Whether a headless network call (`http_request`, `browser_fetch`,
+    /// `browser_links`) is a pure read-only fetch that passes the full
+    /// safety checker (no credential-shaped payloads, no SSRF/private IPs,
+    /// no exfiltration sinks) and was not explicitly confirm-gated by the
+    /// operator. Non-GET/HEAD HTTP requests or requests carrying a body
+    /// return `None` so they stay confirm-gated in Normal/AutoEdit.
+    pub(crate) fn headless_network_read_allowed(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<bool> {
+        if self.operator_requires_confirmation(tool_name) {
+            return None;
+        }
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|u| !u.is_empty())?;
+        if tool_name == "http_request" {
+            let method = args
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("GET")
+                .trim();
+            if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
+                return None;
+            }
+            if args
+                .get("body")
+                .and_then(|v| v.as_str())
+                .is_some_and(|b| !b.is_empty())
+            {
+                return None;
+            }
+        }
+        let call = crate::api::types::ToolCall {
+            id: "headless-net-read-check".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: tool_name.to_string(),
+                arguments: args.to_string(),
+            },
+        };
+        if self.safety.check_tool_call(&call).is_err()
+            || crate::safety::checker::validation::contains_outbound_credential_shape(url)
+        {
+            return None;
+        }
+        Some(true)
     }
 
     /// Whether a headless shell call (`shell_exec` / `pty_shell`) may run
@@ -3393,6 +3445,12 @@ To call a tool, use this EXACT XML structure:
             || self.has_tui_renderer()
         {
             return None;
+        }
+        if matches!(
+            tool_name,
+            "http_request" | "browser_fetch" | "browser_links"
+        ) {
+            return self.headless_network_read_allowed(tool_name, args);
         }
         if !matches!(tool_name, "shell_exec" | "pty_shell") {
             return None;

@@ -3837,6 +3837,15 @@ impl Agent {
         // `require_confirmation` and lists the tool wins: both headless
         // approvals return `None` for it (`Agent::operator_requires_confirmation`,
         // 0.9.5 — Rule 2 reversal of the 0.9.4 precedence).
+        // Safe read-only network fetches (GET/HEAD http_request, browser_fetch,
+        // browser_links) that pass the full safety checker (no credential shapes,
+        // no SSRF/private IPs, no exfil sinks) and are not explicitly listed in
+        // safety.require_confirmation run without blocking on a confirmation prompt.
+        if matches!(name, "http_request" | "browser_fetch" | "browser_links")
+            && self.headless_network_read_allowed(name, &args_for_policy()) == Some(true)
+        {
+            return Ok(true);
+        }
         if headless && self.headless_normal_auto_approve(name, &args_for_policy()) == Some(true) {
             return Ok(true);
         }
@@ -3971,6 +3980,7 @@ impl Agent {
                 PermissionAnswer::Once => ConfirmDecision::ExecuteOnce,
                 PermissionAnswer::AlwaysTool => ConfirmDecision::AlwaysAllow,
                 PermissionAnswer::ShellRule => ConfirmDecision::AllowShellRule,
+                PermissionAnswer::EnableYolo => ConfirmDecision::EnableYolo,
                 PermissionAnswer::Deny => ConfirmDecision::Skip,
             };
             if self.apply_confirm_decision(name, decision, standing_answers, shell_rule) {
@@ -4171,6 +4181,9 @@ impl Agent {
             }
             ConfirmDecision::EnableYolo if standing_answers => {
                 self.set_execution_mode(crate::config::ExecutionMode::Yolo);
+                self.emit_event(super::tui_events::AgentEvent::ModeChangeRequested {
+                    mode: crate::config::ExecutionMode::Yolo,
+                });
                 cli_println!(
                     "{} Confirmations disabled for the rest of this session (YOLO)",
                     "⚡".bright_yellow()

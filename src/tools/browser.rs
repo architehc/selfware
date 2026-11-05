@@ -87,6 +87,7 @@ pub enum BrowserType {
     Chrome(String), // Path to chrome/chromium
     Playwright,     // Use playwright CLI
     Curl,           // Fallback to curl for simple fetches
+    NativeHttp,     // Built-in Rust HTTP client (reqwest + rustls + PinnedDnsResolver)
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +106,7 @@ async fn detect_browser() -> Result<BrowserType> {
         return Ok(BrowserType::Playwright);
     }
 
-    // Try Chrome/Chromium first
+    // Try Chrome/Chromium/Edge first
     for browser in chrome_candidates() {
         if Command::new(browser)
             .sanitized_env()
@@ -121,7 +122,7 @@ async fn detect_browser() -> Result<BrowserType> {
         }
     }
 
-    // Fallback to curl
+    // Fallback to curl when available
     if Command::new("curl")
         .sanitized_env()
         .arg("--version")
@@ -135,10 +136,8 @@ async fn detect_browser() -> Result<BrowserType> {
         return Ok(BrowserType::Curl);
     }
 
-    Err(anyhow::anyhow!(
-        "browser automation unavailable: no Playwright/Chrome backend found; \
-         install a browser backend to use browser_* tools"
-    ))
+    // Built-in native Rust HTTP fallback (always available on Windows/macOS/Linux)
+    Ok(BrowserType::NativeHttp)
 }
 
 fn chrome_candidates() -> &'static [&'static str] {
@@ -147,9 +146,17 @@ fn chrome_candidates() -> &'static [&'static str] {
         "google-chrome-stable",
         "chromium",
         "chromium-browser",
+        "chrome",
+        "chrome.exe",
+        "msedge",
+        "msedge.exe",
         "/usr/bin/google-chrome",
         "/usr/bin/chromium",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ]
 }
 
@@ -387,7 +394,8 @@ impl Tool for BrowserFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch a web page and return its HTML content (uses headless browser or curl). \
+        "Fetch a web page and return its HTML and extracted text content (uses headless Chrome/Edge/Playwright, curl, or built-in native HTTP client). \
+         To search the web without a known URL, pass `https://html.duckduckgo.com/html/?q=<url_encoded_query>`. \
          Localhost/loopback URLs are allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
     }
 
@@ -458,6 +466,9 @@ impl Tool for BrowserFetch {
             }
             BrowserType::Curl => {
                 fetch_with_curl(&pinned_target, timeout_secs, user_agent, &proxy).await
+            }
+            BrowserType::NativeHttp => {
+                fetch_with_native_http(&pinned_target, timeout_secs, user_agent).await
             }
         }
     }
@@ -671,13 +682,22 @@ async fn fetch_with_curl(
 
     cmd.arg(&target.url);
 
-    let output = crate::tools::process_guard::run_command_bounded(
+    let output = match crate::tools::process_guard::run_command_bounded(
         cmd,
         std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
         2 * 1024 * 1024,
     )
     .await
-    .context("Failed to run curl")?;
+    {
+        Ok(out) if out.status.success() => out,
+        _ => {
+            // On Windows, C:\Windows\System32\curl.exe uses Schannel TLS which
+            // fails when tunneling HTTPS through the local HTTP GuardedProxy
+            // with --resolve. Fall back to the built-in rustls + PinnedDnsResolver
+            // HTTP client so browser_fetch works reliably out of the box.
+            return fetch_with_native_http(target, timeout_secs, user_agent).await;
+        }
+    };
 
     let html = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -693,6 +713,83 @@ async fn fetch_with_curl(
         "html_length": html.len(),
         "note": "JavaScript not rendered (curl fallback)",
         "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
+    }))
+}
+
+async fn fetch_with_native_http(
+    target: &PinnedTarget,
+    timeout_secs: u64,
+    user_agent: Option<&str>,
+) -> Result<Value> {
+    let parsed_url = reqwest::Url::parse(&target.url).context("Invalid URL")?;
+    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+    let policy = crate::tools::net_policy::validate_url_target(&parsed_url, allow_private)?;
+    let ua = user_agent.unwrap_or("Mozilla/5.0 (compatible; Selfware/1.0)");
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.min(300)))
+        .user_agent(ua)
+        .dns_resolver(std::sync::Arc::new(
+            crate::safety::PinnedDnsResolver::with_localhost(
+                policy.allow_private,
+                policy.allow_localhost,
+            ),
+        ));
+    if !target.host_is_ip {
+        builder = builder.resolve(
+            &target.host,
+            std::net::SocketAddr::new(target.ip, target.port),
+        );
+    }
+
+    let client = builder
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() > 5 {
+                return attempt.error("Too many redirects");
+            }
+            if let Err(err) =
+                crate::tools::net_policy::validate_redirect_target(attempt.url(), &policy)
+            {
+                return attempt.error(err);
+            }
+            attempt.follow()
+        }))
+        .build()
+        .context("Failed to build native HTTP client for browser_fetch")?;
+
+    let mut response = client
+        .get(&target.url)
+        .send()
+        .await
+        .context("Failed to fetch URL via native HTTP client")?;
+    let status_ok = response.status().is_success();
+
+    const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
+    let mut buf = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed reading HTTP response body")?
+    {
+        if buf.len() + chunk.len() > MAX_HTML_BYTES {
+            buf.extend_from_slice(&chunk[..MAX_HTML_BYTES - buf.len()]);
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    let html = String::from_utf8_lossy(&buf).into_owned();
+    let text_content = extract_text_from_html(&html);
+
+    Ok(json!({
+        "success": status_ok,
+        "browser": "native_http",
+        "url": target.url,
+        "resolved_ip": target.ip.to_string(),
+        "html": truncate_output(&html, 10000),
+        "text": truncate_output(&text_content, 5000),
+        "html_length": html.len(),
+        "note": "JavaScript not rendered (native HTTP fallback)"
     }))
 }
 
@@ -902,7 +999,7 @@ impl Tool for BrowserScreenshot {
                     "dimensions": format!("{}x{}", width, height)
                 }))
             }
-            BrowserType::Curl => Err(anyhow::anyhow!(
+            BrowserType::Curl | BrowserType::NativeHttp => Err(anyhow::anyhow!(
                 "browser automation unavailable: no Playwright/Chrome backend found; \
                  install a browser backend to use browser_screenshot"
             )),
@@ -1093,7 +1190,7 @@ impl Tool for BrowserPdf {
                     "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
                 }))
             }
-            BrowserType::Curl => Err(anyhow::anyhow!(
+            BrowserType::Curl | BrowserType::NativeHttp => Err(anyhow::anyhow!(
                 "browser automation unavailable: no Playwright/Chrome backend found; \
                  install a browser backend to use browser_pdf"
             )),
@@ -1235,7 +1332,7 @@ impl Tool for BrowserEval {
                     "JavaScript evaluation requires Playwright. Chrome headless has limited eval support."
                 ))
             }
-            BrowserType::Curl => {
+            BrowserType::Curl | BrowserType::NativeHttp => {
                 Err(anyhow::anyhow!(
                     "browser automation unavailable: no Playwright/Chrome backend found; \
                      install a browser backend to use browser_eval"

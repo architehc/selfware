@@ -434,6 +434,10 @@ fn permission_keys_map_only_to_offered_answers() {
         Some(PermissionAnswer::AlwaysTool)
     );
     assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Char('!')),
+        Some(PermissionAnswer::EnableYolo)
+    );
+    assert_eq!(
         permission_key_answer(&prompt, KeyCode::Char('p')),
         Some(PermissionAnswer::ShellRule)
     );
@@ -449,6 +453,7 @@ fn permission_keys_map_only_to_offered_answers() {
     prompt.allow_always = false;
     prompt.shell_rule = None;
     assert_eq!(permission_key_answer(&prompt, KeyCode::Char('a')), None);
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('!')), None);
     assert_eq!(permission_key_answer(&prompt, KeyCode::Char('p')), None);
 }
 
@@ -584,5 +589,101 @@ fn windows_key_release_events_are_ignored_by_is_key_and_evaluate_quit_key() {
     assert!(
         armed_at.is_some(),
         "key release must not clear or consume the armed quit state"
+    );
+}
+
+#[test]
+fn forgiving_slash_commands_resolve_typos_and_aliases() {
+    assert_eq!(
+        resolve_forgiving_slash_command("/halp"),
+        ("/help", Some("/help"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/stauts"),
+        ("/status", Some("/status"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/yol"),
+        ("/yolo", Some("/yolo"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/rb"),
+        ("/rollback", Some("/rollback"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/nudge"),
+        ("/unstuck", Some("/unstuck"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/docker"),
+        ("/sandbox", Some("/sandbox"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/que"),
+        ("/queue", Some("/queue"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/ram"),
+        ("/memory", Some("/memory"))
+    );
+    assert_eq!(resolve_forgiving_slash_command("/help"), ("/help", None));
+}
+
+#[test]
+fn permission_modal_exclamation_enables_yolo_for_session() {
+    use crate::safety::confirm_view::{PermissionAnswer, PermissionPrompt, RiskTag};
+    let prompt = PermissionPrompt {
+        tool_name: "shell_exec".to_string(),
+        risk: RiskTag::WritesWorkspace,
+        reason: None,
+        body: vec![],
+        allow_always: true,
+        shell_rule: None,
+        full_view: None,
+    };
+    assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Char('!')),
+        Some(PermissionAnswer::EnableYolo)
+    );
+}
+
+#[test]
+fn task_control_queues_drops_and_drains_live_messages_and_toggles_sandbox() {
+    let control = crate::lifecycle::control::TaskControl::new(std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    assert_eq!(control.queued_message_count(), 0);
+    assert!(!control.is_sandbox_enabled());
+
+    control.set_sandbox_enabled(true);
+    assert!(control.is_sandbox_enabled());
+
+    assert_eq!(control.enqueue_user_message("first request"), 1);
+    assert_eq!(control.enqueue_user_message("second request"), 2);
+    assert_eq!(control.enqueue_user_message("   "), 2);
+    assert_eq!(
+        control.list_queued_messages(),
+        vec!["first request".to_string(), "second request".to_string()]
+    );
+
+    assert_eq!(
+        control.drop_queued_message(0).as_deref(),
+        Some("first request")
+    );
+    assert_eq!(control.queued_message_count(), 1);
+
+    let drained = control.take_queued_messages();
+    assert_eq!(drained, vec!["second request".to_string()]);
+    assert_eq!(control.queued_message_count(), 0);
+}
+
+#[test]
+fn dashboard_state_defaults_to_yolo_and_refreshes_memory_footprint() {
+    let mut state = DashboardState::default();
+    assert_eq!(state.execution_mode, crate::config::ExecutionMode::Yolo);
+    state.refresh_memory_stats();
+    assert!(
+        state.system_mem_total_gb > 0.0,
+        "system total RAM should be measured"
     );
 }

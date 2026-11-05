@@ -1807,8 +1807,93 @@ async fn run_multi_chat_tui(
     Ok(())
 }
 
+/// Interactive surfaces (TUI dashboard and `selfware chat`) default to YOLO
+/// mode when the operator has not explicitly set a mode via CLI flag (`-m
+/// normal`), `SELFWARE_MODE`, or a trusted config file.
+pub(crate) fn apply_interactive_default_yolo(config: &mut Config) {
+    if config.source_of("execution_mode") == crate::config::ConfigSource::Default {
+        config.execution_mode = crate::config::ExecutionMode::Yolo;
+    }
+}
+
+/// Run a shell command inside a hardened, network-isolated container (`docker`
+/// or `podman`) mounting the current workspace at `/workspace`.
 #[cfg(feature = "tui")]
-async fn run_live_agent_tui(config: Config) -> Result<()> {
+async fn execute_container_sandbox_command(shell_cmd: &str) -> String {
+    let Some(runtime) = crate::ui::tui::detect_container_runtime() else {
+        return "📦 Container sandbox error: neither `docker` nor `podman` was found on PATH. Install Docker or Podman, or run `/sandbox off` to run commands on the host.".to_string();
+    };
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
+    let image = std::env::var("SELFWARE_SANDBOX_IMAGE").unwrap_or_else(|_| {
+        if std::path::Path::new("Cargo.toml").is_file() {
+            "rust:slim".to_string()
+        } else {
+            "ubuntu:24.04".to_string()
+        }
+    });
+    let mount_arg = format!("{cwd}:/workspace:rw");
+    let mut cmd = tokio::process::Command::new(runtime);
+    crate::safety::process_env::sanitize_command_env_preserve(
+        &mut cmd,
+        crate::safety::process_env::CONTAINER_RUNTIME_ENV,
+    );
+    let output = cmd
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--memory",
+            "4g",
+            "--cpus",
+            "2",
+            "--pids-limit",
+            "256",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            &mount_arg,
+            "-w",
+            "/workspace",
+            &image,
+            "sh",
+            "-lc",
+            shell_cmd,
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let status = out.status.code().unwrap_or(-1);
+            let mut combined = format!(
+                "📦 [{runtime} sandbox ({image}, net=none, 4GB, 2CPU) · exit {status}] $ {shell_cmd}"
+            );
+            if !stdout.trim().is_empty() {
+                combined.push('\n');
+                combined.push_str(stdout.trim_end());
+            }
+            if !stderr.trim().is_empty() {
+                combined.push_str("\n[stderr]\n");
+                combined.push_str(stderr.trim_end());
+            }
+            combined
+        }
+        Err(e) => format!("📦 Failed to launch {runtime} container sandbox: {e}"),
+    }
+}
+
+#[cfg(feature = "tui")]
+async fn run_live_agent_tui(mut config: Config) -> Result<()> {
+    apply_interactive_default_yolo(&mut config);
+
     let (event_tx, event_rx) = mpsc::channel();
     let (user_input_tx, user_input_rx) = mpsc::channel();
     let (permission_tx, permission_rx) = mpsc::channel();
@@ -1831,6 +1916,10 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     let tui_task_control = task_control.clone();
 
     let shared_state = crate::ui::tui::SharedDashboardState::default();
+    if let Ok(mut state) = shared_state.lock() {
+        state.model = config.model.clone();
+        state.execution_mode = config.execution_mode;
+    }
     let model = config.model.clone();
 
     // Suppress ALL direct stdout/stderr from the agent — the TUI
@@ -1875,13 +1964,19 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
 
                 // Shell passthrough (gemini/aider `!cmd`): run the command,
                 // show the output, and push it into the conversation as
-                // context so the next task sees it.
+                // context so the next task sees it. When container sandbox
+                // isolation is enabled (`Ctrl+K` or `/sandbox on`), execute
+                // inside the isolated container instead of on the host.
                 if let Some(cmd) = input.strip_prefix('!').map(str::trim) {
                     if cmd.is_empty() {
                         log_line("usage: !<command>".to_string());
                         continue;
                     }
-                    let rendered = agent.shell_passthrough(cmd).await;
+                    let rendered = if task_control.is_sandbox_enabled() {
+                        execute_container_sandbox_command(cmd).await
+                    } else {
+                        agent.shell_passthrough(cmd).await
+                    };
                     log_line(rendered);
                     continue;
                 }
@@ -1908,6 +2003,53 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 if input == "/modify" {
                     agent.clear_plan();
                     agent.set_plan_mode(false);
+                    continue;
+                }
+                if input == "/yolo" || input.starts_with("/yolo ") {
+                    let arg = input.strip_prefix("/yolo").map(str::trim).unwrap_or("");
+                    let next_mode = match arg.to_ascii_lowercase().as_str() {
+                        "" | "toggle" => match agent.execution_mode() {
+                            crate::config::ExecutionMode::Yolo => {
+                                Some(crate::config::ExecutionMode::Normal)
+                            }
+                            _ => Some(crate::config::ExecutionMode::Yolo),
+                        },
+                        "on" | "true" | "1" | "enable" => Some(crate::config::ExecutionMode::Yolo),
+                        "off" | "false" | "0" | "disable" | "normal" => {
+                            Some(crate::config::ExecutionMode::Normal)
+                        }
+                        _ => None,
+                    };
+                    match next_mode {
+                        Some(mode) => {
+                            agent.set_execution_mode(mode);
+                            let _ = bridge_event_tx
+                                .send(crate::ui::tui::TuiEvent::ModeChangeRequested { mode });
+                        }
+                        None => {
+                            log_line("Usage: /yolo [on|off] — toggle or set YOLO mode".to_string())
+                        }
+                    }
+                    continue;
+                }
+                if input == "/mode" || input.starts_with("/mode ") {
+                    let arg = input.strip_prefix("/mode").map(str::trim).unwrap_or("");
+                    let next_mode = if arg.is_empty() {
+                        Some(agent.cycle_execution_mode())
+                    } else {
+                        crate::config::ExecutionMode::parse_user_arg(arg).inspect(|&m| {
+                            agent.set_execution_mode(m);
+                        })
+                    };
+                    match next_mode {
+                        Some(mode) => {
+                            let _ = bridge_event_tx
+                                .send(crate::ui::tui::TuiEvent::ModeChangeRequested { mode });
+                        }
+                        None => log_line(format!(
+                            "/mode: unknown mode '{arg}' (valid: normal, auto-edit, yolo, daemon)"
+                        )),
+                    }
                     continue;
                 }
                 // Session slash commands (harness-alignment round E). All of
@@ -2003,6 +2145,151 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 }
                 if input == "/redo" {
                     log_line(agent.redo_last_edit().await);
+                    continue;
+                }
+                if input == "/rollback" || input.starts_with("/rollback ") {
+                    use crate::safety::git_exec::{GitScope, SanitizedGitExt};
+                    let sub = input
+                        .strip_prefix("/rollback")
+                        .map(str::trim)
+                        .unwrap_or("edit");
+                    match sub {
+                        "" | "edit" | "undo" => {
+                            let undo_out = agent.undo_last_edit().await;
+                            log_line(format!("/rollback edit: {undo_out}"));
+                        }
+                        "stash" => {
+                            let res = std::process::Command::new("git")
+                                .sanitized_git(".", GitScope::Internal)
+                                .args(["stash", "push", "-u", "-m", "selfware-tui-rollback"])
+                                .output();
+                            match res {
+                                Ok(out) => {
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    let msg = if !stdout.trim().is_empty() {
+                                        stdout.trim().to_string()
+                                    } else {
+                                        stderr.trim().to_string()
+                                    };
+                                    log_line(format!(
+                                        "/rollback stash: {msg} (recover anytime with `!git stash pop`)"
+                                    ));
+                                }
+                                Err(e) => log_line(format!("/rollback stash failed: {e}")),
+                            }
+                        }
+                        "status" => {
+                            let git_stat = std::process::Command::new("git")
+                                .sanitized_git(".", GitScope::Internal)
+                                .args(["status", "--short", "--branch"])
+                                .output()
+                                .ok()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                .unwrap_or_else(|| "(git status unavailable)".to_string());
+                            log_line(format!(
+                                "/rollback status:\n{git_stat}\n{}",
+                                journal_entries_text(5)
+                            ));
+                        }
+                        other => log_line(format!(
+                            "/rollback: unknown mode '{other}' (use: /rollback [edit|stash|status])"
+                        )),
+                    }
+                    continue;
+                }
+                if input == "/unstuck" || input.starts_with("/unstuck ") {
+                    let sub = input.strip_prefix("/unstuck").map(str::trim).unwrap_or("");
+                    let before = agent.message_count();
+                    let target = agent.compaction_threshold();
+                    agent.compress_to_structured_summary(target);
+                    let after = agent.message_count();
+                    if sub.eq_ignore_ascii_case("reset") {
+                        agent.reset_cancellation();
+                        log_line(format!(
+                            "/unstuck reset: cleared cancellation latch and compacted context ({before} → {after} messages)"
+                        ));
+                    } else {
+                        let note = if sub.is_empty() || sub.eq_ignore_ascii_case("nudge") {
+                            "Unstuck recovery activated: compacted stale turns. Ready for your next instruction."
+                        } else {
+                            sub
+                        };
+                        let _ = task_control.enqueue_user_message(note);
+                        log_line(format!(
+                            "/unstuck: compacted context ({before} → {after} messages) and queued recovery directive"
+                        ));
+                    }
+                    continue;
+                }
+                if input == "/sandbox" || input.starts_with("/sandbox ") {
+                    let sub = input.strip_prefix("/sandbox").map(str::trim).unwrap_or("");
+                    let sub_lower = sub.to_ascii_lowercase();
+                    match sub_lower.as_str() {
+                        "" | "status" => {
+                            let rt = crate::ui::tui::detect_container_runtime()
+                                .unwrap_or("none detected");
+                            log_line(format!(
+                                "/sandbox: {} (container runtime: {rt})",
+                                if task_control.is_sandbox_enabled() {
+                                    "ON"
+                                } else {
+                                    "OFF"
+                                }
+                            ));
+                        }
+                        "on" | "true" | "1" | "enable" => {
+                            task_control.set_sandbox_enabled(true);
+                            let rt = crate::ui::tui::detect_container_runtime()
+                                .unwrap_or("none detected");
+                            log_line(format!(
+                                "/sandbox: container isolation ENABLED (runtime: {rt})"
+                            ));
+                        }
+                        "off" | "false" | "0" | "disable" => {
+                            task_control.set_sandbox_enabled(false);
+                            log_line("/sandbox: container isolation DISABLED".to_string());
+                        }
+                        _ if sub_lower.starts_with("run ") => {
+                            let cmd_str = sub[4..].trim();
+                            if cmd_str.is_empty() {
+                                log_line("Usage: /sandbox run <command>".to_string());
+                            } else {
+                                let out = execute_container_sandbox_command(cmd_str).await;
+                                log_line(out);
+                            }
+                        }
+                        _ => log_line(
+                            "Usage: /sandbox [on|off|status|run <cmd>] (or Ctrl+K in TUI)"
+                                .to_string(),
+                        ),
+                    }
+                    continue;
+                }
+                if input == "/queue" || input.starts_with("/queue ") {
+                    let sub = input.strip_prefix("/queue").map(str::trim).unwrap_or("");
+                    match sub {
+                        "" | "list" | "ls" => {
+                            let items = task_control.list_queued_messages();
+                            if items.is_empty() {
+                                log_line("/queue: empty".to_string());
+                            } else {
+                                log_line(format!(
+                                    "/queue ({} pending): {}",
+                                    items.len(),
+                                    items.join(" | ")
+                                ));
+                            }
+                        }
+                        "clear" | "flush" => {
+                            let n = task_control.clear_queued_messages();
+                            log_line(format!("/queue: cleared {n} message(s)"));
+                        }
+                        other => {
+                            let n = task_control.enqueue_user_message(other);
+                            log_line(format!("/queue: queued message #{n}"));
+                        }
+                    }
                     continue;
                 }
                 if input == "/agents" {
@@ -2196,6 +2483,29 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::RunOutcome {
                     summary: tui_run_outcome_text(&agent, &run_result),
                 });
+
+                // If the user queued follow-up messages during the final step
+                // (after the last `task_control_safe_point` check), drain and
+                // execute them immediately so nothing sits stranded in the queue.
+                loop {
+                    let remaining_queued = task_control.take_queued_messages();
+                    if remaining_queued.is_empty() {
+                        break;
+                    }
+                    let follow_up = remaining_queued.join("\n\n");
+                    log_line(format!(
+                        "▶ Running {} queued follow-up message(s)…",
+                        remaining_queued.len()
+                    ));
+                    agent.reset_cancellation();
+                    let follow_result = agent.run_task(&follow_up).await;
+                    if let Err(e) = &follow_result {
+                        warn!("Agent failed to run queued follow-up task: {}", e);
+                    }
+                    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::RunOutcome {
+                        summary: tui_run_outcome_text(&agent, &follow_result),
+                    });
+                }
             }
             _ => break,
         }
@@ -2528,6 +2838,8 @@ async fn handle_command(
     match command {
         Commands::Chat => {
             crate::safety::killswitch::check_killswitch(None)?;
+            let mut config = config;
+            apply_interactive_default_yolo(&mut config);
             // The REPL prints the one (compact) welcome itself; the workshop
             // banner + greeting here made two greetings back to back.
             let mut agent = Agent::new(config).await?;
@@ -4118,6 +4430,12 @@ pub(crate) fn slash_help_text() -> String {
         "  /compact         — compress context now (structured summary pass)",
         "  /cost            — token totals and cost (when the endpoint bills)",
         "  /model [name]    — show current model/endpoint; with a name, hot-switch the session model",
+        "  /yolo [on|off]   — toggle or set YOLO mode (auto-approve tools; Ctrl+Y in TUI)",
+        "  /mode [mode]     — cycle or set execution mode (normal|auto-edit|yolo|daemon)",
+        "  /queue [cmd]     — list, clear, drop, or add messages queued while agent is running",
+        "  /unstuck [mode]  — nudge a looping agent or `/unstuck reset` to recover (Ctrl+U in TUI)",
+        "  /rollback [mode] — undo last edit (`edit`), stash dirty tree (`stash`), or inspect (`status`) (Ctrl+Z)",
+        "  /sandbox [mode]  — toggle safe container isolation (`on|off|status|run <cmd>`) (Ctrl+K in TUI)",
         "  /doctor          — run environment diagnostics inline",
         "  /mcp             — list configured MCP servers",
         "  /clear           — reset the conversation",
@@ -4294,7 +4612,7 @@ pub(crate) fn permissions_text(agent: &crate::agent::Agent) -> String {
         crate::config::ExecutionMode::Daemon => "daemon — permanent yolo",
     };
     format!(
-        "approval mode: {description}\nchange with: `-m normal|auto-edit|yolo`, `--yolo`, or SELFWARE_MODE env var"
+        "approval mode: {description}\nchange with: `/yolo [on|off]`, `/mode [normal|auto-edit|yolo|daemon]`, `Ctrl+Y`, `-m`, `--yolo`, or SELFWARE_MODE env var"
     )
 }
 

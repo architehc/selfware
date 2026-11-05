@@ -3806,3 +3806,29 @@ fn write_selfware_artifact_checked_rejects_symlinks() {
     );
     assert!(!outside_dir.join("active_policy.json").exists());
 }
+
+#[test]
+fn interactive_surfaces_default_to_yolo_unless_explicitly_overridden() {
+    let mut cfg = Config::default();
+    apply_interactive_default_yolo(&mut cfg);
+    assert_eq!(cfg.execution_mode, ExecutionMode::Yolo);
+
+    let mut explicit_normal = Config {
+        execution_mode: ExecutionMode::Normal,
+        ..Default::default()
+    };
+    explicit_normal.sources.set(
+        "execution_mode",
+        crate::config::ConfigSource::CliArg("--mode".into()),
+    );
+    apply_interactive_default_yolo(&mut explicit_normal);
+    assert_eq!(
+        explicit_normal.execution_mode,
+        ExecutionMode::Normal,
+        "explicit -m normal must be respected"
+    );
+
+    let help = slash_help_text();
+    assert!(help.contains("/yolo"), "{help}");
+    assert!(help.contains("/mode"), "{help}");
+}

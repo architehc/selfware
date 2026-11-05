@@ -511,9 +511,17 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
+    /// Whether the chat input buffer accepts typing/paste right now.
+    /// Allows typing both when idle (`Chatting`) and while a task is running
+    /// (`RunningTask`) so the operator is never blocked from queuing follow-up
+    /// requests or running slash commands mid-task.
+    pub fn is_input_editable(&self) -> bool {
+        matches!(self.state, AppState::Chatting | AppState::RunningTask)
+    }
+
     /// Handle character input
     pub fn on_char(&mut self, c: char) {
-        if self.state == AppState::Chatting {
+        if self.is_input_editable() {
             let byte_idx = self.cursor_byte_offset();
             self.input.insert(byte_idx, c);
             self.cursor += 1;
@@ -522,9 +530,41 @@ impl App {
         }
     }
 
+    /// Paste a block of text into the current input buffer (or palette filter),
+    /// normalizing embedded newlines/CRs into spaces so multi-line pastes never
+    /// prematurely submit partial lines. Returns the number of characters inserted.
+    pub fn on_paste(&mut self, text: &str) -> usize {
+        let normalized: String = text
+            .chars()
+            .map(|ch| match ch {
+                '\r' | '\n' | '\t' => ' ',
+                c if c.is_control() => ' ',
+                c => c,
+            })
+            .collect();
+        let trimmed = normalized.trim_matches('\0');
+        if trimmed.is_empty() {
+            return 0;
+        }
+        if self.state == AppState::Palette {
+            for ch in trimmed.chars() {
+                self.palette.on_char(ch);
+            }
+            trimmed.chars().count()
+        } else if self.is_input_editable() {
+            let byte_idx = self.cursor_byte_offset();
+            self.input.insert_str(byte_idx, trimmed);
+            let count = trimmed.chars().count();
+            self.cursor += count;
+            count
+        } else {
+            0
+        }
+    }
+
     /// Handle backspace
     pub fn on_backspace(&mut self) {
-        if self.state == AppState::Chatting && self.cursor > 0 {
+        if self.is_input_editable() && self.cursor > 0 {
             self.cursor -= 1;
             let byte_idx = self.cursor_byte_offset();
             self.input.remove(byte_idx);

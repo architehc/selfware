@@ -375,6 +375,8 @@ fn test_routine_dev_tools_always_on() {
         "git_status",
         "git_diff",
         "symbol_search",
+        "http_request",
+        "browser_fetch",
     ];
 
     let critical_names: std::collections::HashSet<&str> =

@@ -411,6 +411,9 @@ pub const CRITICAL_TOOLS: &[&str] = &[
     "cargo_test",
     "git_status",
     "git_diff",
+    // Network & web access - always on so agents can fetch URLs/APIs out of the box
+    "http_request",
+    "browser_fetch",
     // Tool search - essential for discovering deferred tools
     "tool_search",
 ];
@@ -518,8 +521,8 @@ impl ToolRegistry {
             PtyShellTool::new()
         });
 
-        // Deferred: HTTP/Web operations
-        registry.register_deferred(HttpRequest);
+        // Critical: HTTP/Web operations (always on so default sessions can access the internet)
+        registry.register_critical(HttpRequest);
 
         // Deferred: Process management operations
         registry.register_deferred(ProcessStart);
@@ -582,8 +585,8 @@ impl ToolRegistry {
         registry.register_deferred(VisionAnalyze);
         registry.register_deferred(VisionCompare);
 
-        // Deferred: Browser automation
-        registry.register_deferred(BrowserFetch);
+        // Critical: Web page fetching (other browser automation tools stay deferred)
+        registry.register_critical(BrowserFetch);
         registry.register_deferred(BrowserScreenshot);
         registry.register_deferred(BrowserPdf);
         registry.register_deferred(BrowserEval);

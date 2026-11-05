@@ -13517,6 +13517,7 @@ cc = "1.0"
                             Some(PermissionAnswer::Once) => "once",
                             Some(PermissionAnswer::AlwaysTool) => "always_tool",
                             Some(PermissionAnswer::ShellRule) => "shell_rule",
+                            Some(PermissionAnswer::EnableYolo) => "enable_yolo",
                             Some(PermissionAnswer::Deny) => "deny",
                             None => "none",
                         };

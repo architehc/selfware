@@ -33,6 +33,41 @@ impl std::fmt::Display for ExecutionMode {
     }
 }
 
+impl ExecutionMode {
+    /// Parse a user-facing mode token (`normal`, `auto-edit`, `auto`, `yolo`, `daemon`).
+    pub fn parse_user_arg(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some(Self::Normal),
+            "auto-edit" | "auto_edit" | "autoedit" | "auto" => Some(Self::AutoEdit),
+            "yolo" => Some(Self::Yolo),
+            "daemon" => Some(Self::Daemon),
+            _ => None,
+        }
+    }
+
+    /// Cycle to the next execution mode (`Normal -> AutoEdit -> Yolo -> Daemon -> Normal`).
+    pub fn next_mode(self) -> Self {
+        match self {
+            Self::Normal => Self::AutoEdit,
+            Self::AutoEdit => Self::Yolo,
+            Self::Yolo => Self::Daemon,
+            Self::Daemon => Self::Normal,
+        }
+    }
+
+    /// Human-readable description of what this mode approves.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal — asks before writes/commands/network; reads & checks run",
+            Self::AutoEdit => "Auto-Edit — auto-approves file operations",
+            Self::Yolo => {
+                "YOLO — executes all tools without confirmation (hard safety floor still enforced)"
+            }
+            Self::Daemon => "Daemon — permanent autonomous YOLO mode",
+        }
+    }
+}
+
 /// UI configuration for themes, animations, and output
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {

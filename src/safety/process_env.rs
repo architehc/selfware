@@ -207,6 +207,11 @@ const DEFAULT_KEEP: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "TMPDIR",
@@ -217,6 +222,8 @@ const DEFAULT_KEEP: &[&str] = &[
     "RUSTUP_HOME",
     // Windows system & runtime environment variables required for Winsock2
     // (`mswsock.dll` / `ws2_32.dll` socket creation in `llama-server.exe`),
+    // Schannel/CryptoAPI root certificate store resolution (`ALLUSERSPROFILE`),
+    // PowerShell module loading (`PSModulePath` for `Invoke-WebRequest`),
     // OpenMP thread detection (`libomp.dll`), and standard command resolution.
     "SystemRoot",
     "SYSTEMROOT",
@@ -228,13 +235,23 @@ const DEFAULT_KEEP: &[&str] = &[
     "ComSpec",
     "PATHEXT",
     "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "COMPUTERNAME",
+    "PUBLIC",
+    "ALLUSERSPROFILE",
     "APPDATA",
     "LOCALAPPDATA",
     "PROGRAMDATA",
     "ProgramData",
     "ProgramFiles",
     "ProgramFiles(x86)",
+    "ProgramW6432",
     "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "PSModulePath",
     "NUMBER_OF_PROCESSORS",
     "PROCESSOR_ARCHITECTURE",
     "OS",
@@ -271,7 +288,12 @@ fn sanitize_kept_value(
     value: &std::ffi::OsString,
     forward_proxy_credentials: bool,
 ) -> std::ffi::OsString {
-    if !forward_proxy_credentials && matches!(key, "HTTP_PROXY" | "HTTPS_PROXY") {
+    if !forward_proxy_credentials
+        && matches!(
+            key,
+            "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "http_proxy" | "https_proxy" | "all_proxy"
+        )
+    {
         if let Some(s) = value.to_str() {
             if let Some(stripped) = strip_proxy_userinfo(s) {
                 return std::ffi::OsString::from(stripped);

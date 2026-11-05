@@ -2186,6 +2186,37 @@ async fn test_headless_auto_edit_readonly_approval_classifier() {
         None,
         "an unparseable shell call fails closed to the normal policy"
     );
+    // Read-only safe network fetches (GET http_request, browser_fetch) are
+    // approved in headless harnesses; POST/body or secret-carrying URLs are not.
+    assert_eq!(
+        approve(
+            "http_request",
+            r#"{"url":"https://example.com","method":"GET"}"#
+        ),
+        Some(true),
+        "safe GET http_request must be approved in headless harness"
+    );
+    assert_eq!(
+        approve("browser_fetch", r#"{"url":"https://example.com"}"#),
+        Some(true),
+        "safe browser_fetch must be approved in headless harness"
+    );
+    assert_eq!(
+        approve(
+            "http_request",
+            r#"{"url":"https://example.com","method":"POST","body":"x"}"#
+        ),
+        None,
+        "POST http_request must stay confirm-gated in headless AutoEdit"
+    );
+    assert_eq!(
+        approve(
+            "http_request",
+            r#"{"url":"https://example.com/?k=ghp_abcdef1234567890"}"#
+        ),
+        None,
+        "credential-shaped URL must never be auto-approved"
+    );
 
     server.stop().await;
 }

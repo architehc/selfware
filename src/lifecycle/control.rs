@@ -188,6 +188,11 @@ struct Inner {
     edit: Option<TaskEdit>,
     /// (parent, description) of forks queued to run next.
     forks: Vec<(String, String)>,
+    /// Operator messages queued while a task is running (injected at the next
+    /// step safe point or executed immediately after the current task finishes).
+    queued_messages: std::collections::VecDeque<String>,
+    /// Whether container sandbox isolation is enabled for shell commands.
+    sandbox_enabled: bool,
 }
 
 /// Shared handle; cheap to clone.
@@ -353,6 +358,60 @@ impl TaskControl {
         let mut inner = self.lock();
         let pos = inner.forks.iter().position(|(_, d)| d == description)?;
         Some(inner.forks.remove(pos).0)
+    }
+
+    /// Enqueue a live operator message while a task is running. Returns the
+    /// total number of queued messages.
+    pub fn enqueue_user_message(&self, message: impl Into<String>) -> usize {
+        let trimmed = message.into().trim().to_string();
+        let mut inner = self.lock();
+        if trimmed.is_empty() {
+            return inner.queued_messages.len();
+        }
+        if inner.queued_messages.len() >= 100 {
+            inner.queued_messages.pop_front();
+        }
+        inner.queued_messages.push_back(trimmed);
+        inner.queued_messages.len()
+    }
+
+    /// Number of operator messages currently queued.
+    pub fn queued_message_count(&self) -> usize {
+        self.lock().queued_messages.len()
+    }
+
+    /// Snapshot of currently queued operator messages.
+    pub fn list_queued_messages(&self) -> Vec<String> {
+        self.lock().queued_messages.iter().cloned().collect()
+    }
+
+    /// Clear all queued operator messages, returning how many were removed.
+    pub fn clear_queued_messages(&self) -> usize {
+        let mut inner = self.lock();
+        let count = inner.queued_messages.len();
+        inner.queued_messages.clear();
+        count
+    }
+
+    /// Remove a queued operator message by 0-based index.
+    pub fn drop_queued_message(&self, index: usize) -> Option<String> {
+        self.lock().queued_messages.remove(index)
+    }
+
+    /// Drain all queued operator messages in FIFO order.
+    pub fn take_queued_messages(&self) -> Vec<String> {
+        self.lock().queued_messages.drain(..).collect()
+    }
+
+    /// Enable or disable container sandbox isolation for shell execution.
+    pub fn set_sandbox_enabled(&self, enabled: bool) {
+        self.lock().sandbox_enabled = enabled;
+        crate::tools::shell_exec::set_container_sandbox_enabled(enabled);
+    }
+
+    /// Whether container sandbox isolation is currently enabled.
+    pub fn is_sandbox_enabled(&self) -> bool {
+        self.lock().sandbox_enabled || crate::tools::shell_exec::is_container_sandbox_enabled()
     }
 }
 

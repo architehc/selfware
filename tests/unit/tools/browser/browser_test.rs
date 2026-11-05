@@ -258,6 +258,23 @@ fn test_browser_type_debug() {
     let curl = BrowserType::Curl;
     let debug_str = format!("{:?}", curl);
     assert!(debug_str.contains("Curl"));
+
+    let native_http = BrowserType::NativeHttp;
+    let debug_str = format!("{:?}", native_http);
+    assert!(debug_str.contains("NativeHttp"));
+}
+
+#[test]
+fn test_chrome_candidates_include_windows_chrome_and_edge() {
+    let candidates = chrome_candidates();
+    assert!(candidates.contains(&"chrome.exe"));
+    assert!(candidates.contains(&"msedge.exe"));
+    assert!(candidates
+        .iter()
+        .any(|c| c.contains(r"Google\Chrome\Application\chrome.exe")));
+    assert!(candidates
+        .iter()
+        .any(|c| c.contains(r"Microsoft\Edge\Application\msedge.exe")));
 }
 
 #[test]
