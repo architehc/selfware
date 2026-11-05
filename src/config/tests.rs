@@ -4535,3 +4535,21 @@ env = { GITHUB_TOKEN = "env-debug-leak" }
     assert!(debug.contains("top_p"), "{debug}");
     assert!(debug.contains("npx"), "{debug}");
 }
+
+#[test]
+fn test_selfware_example_toml_loads_when_copied_to_untrusted_selfware_toml() {
+    let _env_guard = clear_selfware_env_vars();
+    let example_toml = include_str!("../../selfware.example.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    std::fs::write(&config_path, example_toml).unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).expect(
+        "selfware.example.toml copied to selfware.toml in an untrusted directory must load cleanly",
+    );
+    assert_eq!(config.endpoint, "http://127.0.0.1:8787/v1");
+    assert_eq!(config.model, "boot-assistant");
+    assert_eq!(config.context_length, 32768);
+    assert_eq!(config.max_tokens, 4096);
+    assert!(config.validate().is_ok());
+}

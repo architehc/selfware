@@ -4013,6 +4013,42 @@ To call a tool, use this EXACT XML structure:
         Ok(previous)
     }
 
+    /// Hot-switch the session model, automatically downloading and starting (or
+    /// restarting) the bundled local `llama-server` when `model` matches one of
+    /// the pinned local CPU models (`boot-assistant`, `functiongemma-270m-it`,
+    /// `lfm3-1.7b-gsq-1gb`, `lfm3-1.7b-gsq-128k`, `lfm3-1.7b-gsq-256k`,
+    /// `lfm3-1.7b-gsq-slq`).
+    pub async fn switch_model_with_local_boot(&mut self, model: &str) -> Result<String> {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "model name must not be empty (it overrides the `model` config key)"
+        );
+        if crate::boot::model::find_boot_model_spec(model).is_some() {
+            let target_ctx = if model.eq_ignore_ascii_case("boot-assistant") {
+                crate::boot::model::FUNCTIONGEMMA_CTX_32K
+            } else {
+                crate::boot::model::resolve_boot_model_context(Some(model), None)
+            };
+            let base_url =
+                crate::boot::model::ensure_background_boot_server_for_model_with_context(
+                    Some(model),
+                    Some(target_ctx),
+                )
+                .await?;
+            let previous = self.config.model.clone();
+            let mut config = self.config.clone();
+            config.endpoint = base_url;
+            config.apply_cli_model_override(model.to_string());
+            config.context_length = target_ctx;
+            config.sync_default_model_profile();
+            self.install_config(config)?;
+            crate::token_count::set_configured_model(&self.config.model);
+            return Ok(previous);
+        }
+        self.switch_model(model)
+    }
+
     /// Replace the session configuration and rebuild the API client from it
     /// (the usage ledger, wall-budget anchor and progress emitter carry
     /// over), so limits the client enforces itself and the context window

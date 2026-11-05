@@ -236,8 +236,46 @@ pub fn load_arena_profile(workspace_root: &Path) -> PhiArenaProfile {
     }
     #[cfg(not(unix))]
     {
-        let _ = workspace_root;
-        PhiArenaProfile::default()
+        let Ok(canon) = workspace_root.canonicalize() else {
+            return PhiArenaProfile::default();
+        };
+        let selfware_path = canon.join(".selfware");
+        let phi_path = selfware_path.join("phi");
+        for dir in [&selfware_path, &phi_path] {
+            let Ok(meta) = std::fs::symlink_metadata(dir) else {
+                return PhiArenaProfile::default();
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return PhiArenaProfile::default();
+            }
+        }
+        let target = phi_path.join("arena_profile.json");
+        let Ok(meta) = std::fs::symlink_metadata(&target) else {
+            return PhiArenaProfile::default();
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_PROFILE_BYTES {
+            return PhiArenaProfile::default();
+        }
+        let Ok(file) = File::open(&target) else {
+            return PhiArenaProfile::default();
+        };
+        let mut buf = Vec::new();
+        if file
+            .take(MAX_PROFILE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || (buf.len() as u64) > MAX_PROFILE_BYTES
+        {
+            return PhiArenaProfile::default();
+        }
+        let Ok(mut parsed) = serde_json::from_slice::<PhiArenaProfile>(&buf) else {
+            return PhiArenaProfile::default();
+        };
+        if parsed.schema_version != 1 {
+            return PhiArenaProfile::default();
+        }
+        parsed.level = 1 + (parsed.xp / 100) as u32;
+        parsed
     }
 }
 
@@ -1266,7 +1304,30 @@ pub fn read_rsi_umbrella_summary(workspace_root: &Path) -> Value {
         serde_json::from_slice::<Value>(&buf).ok()
     };
     #[cfg(not(unix))]
-    let read_selfware_json = |_file_name: &str| -> Option<Value> { None };
+    let read_selfware_json = |file_name: &str| -> Option<Value> {
+        let canon = workspace_root.canonicalize().ok()?;
+        let selfware_path = canon.join(".selfware");
+        let dir_meta = std::fs::symlink_metadata(&selfware_path).ok()?;
+        if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+            return None;
+        }
+        let target = selfware_path.join(file_name);
+        let meta = std::fs::symlink_metadata(&target).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_PROFILE_BYTES {
+            return None;
+        }
+        let file = File::open(&target).ok()?;
+        let mut buf = Vec::new();
+        if file
+            .take(MAX_PROFILE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || (buf.len() as u64) > MAX_PROFILE_BYTES
+        {
+            return None;
+        }
+        serde_json::from_slice::<Value>(&buf).ok()
+    };
 
     let rsi_state = read_selfware_json("rsi_state.json");
     let active_policy = read_selfware_json("active_policy.json");

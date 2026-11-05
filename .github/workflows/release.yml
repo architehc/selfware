@@ -158,6 +158,7 @@ jobs:
           cp target/${{ matrix.target }}/release/selfware dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
           cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
+          cp selfware.example.toml dist/selfware.example.toml 2>/dev/null || true
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
             mkdir -p dist/bin
             LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz"
@@ -166,6 +167,7 @@ jobs:
             echo "${LLAMA_SHA}  llama-linux.tar.gz" | sha256sum -c -
             tar -xzf llama-linux.tar.gz --strip-components=1 -C dist/bin
             ./dist/selfware --version
+            ./dist/selfware --config dist/selfware.toml.example --validate-config
             ./dist/selfware boot --cards >/dev/null
             ./dist/bin/llama-server --version
           fi
@@ -180,6 +182,7 @@ jobs:
           cp target/${{ matrix.target }}/release/selfware dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
           cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
+          cp selfware.example.toml dist/selfware.example.toml 2>/dev/null || true
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
             LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-macos-arm64.tar.gz"
             LLAMA_SHA="4f5b8de12e0b9516658ca6a5764c6ffb3d7c659c3dd538556b1413c7b4050662"
@@ -192,6 +195,7 @@ jobs:
           tar -xzf llama-macos.tar.gz --strip-components=1 -C dist/bin
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
             ./dist/selfware --version
+            ./dist/selfware --config dist/selfware.toml.example --validate-config
             ./dist/selfware boot --cards >/dev/null
             ./dist/bin/llama-server --version
           fi
@@ -210,6 +214,7 @@ jobs:
           Copy-Item "README.md" -Destination "dist/" -ErrorAction SilentlyContinue
           Copy-Item "LICENSE" -Destination "dist/" -ErrorAction SilentlyContinue
           Copy-Item "selfware.example.toml" -Destination "dist/selfware.toml.example" -ErrorAction SilentlyContinue
+          Copy-Item "selfware.example.toml" -Destination "dist/selfware.example.toml" -ErrorAction SilentlyContinue
 
           # Bundle llama-server.exe + CPU runtime DLLs (llama.cpp b12110)
           $llamaUrl = "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-cpu-x64.zip"
@@ -240,6 +245,8 @@ jobs:
           # Smoke-test packaged Windows executables and DLL linkage on windows-2022 before archiving
           & .\dist\selfware.exe --version
           if ($LASTEXITCODE -ne 0) { throw "selfware.exe --version failed" }
+          & .\dist\selfware.exe --config dist\selfware.toml.example --validate-config
+          if ($LASTEXITCODE -ne 0) { throw "selfware.exe --config dist\selfware.toml.example --validate-config failed" }
           & .\dist\selfware.exe boot --cards | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "selfware.exe boot --cards failed" }
           & .\dist\bin\llama-server.exe --version
@@ -260,6 +267,13 @@ jobs:
           if ($actualModelSha -ne $modelSha) {
             throw "Model SHA256 mismatch: expected $modelSha, got $actualModelSha"
           }
+
+          # End-to-end Windows smoke test: spawn llama-server.exe from selfware.exe, verify /health, round-trip chat, and llm-doctor
+          & .\dist\selfware.exe --config dist\selfware.toml.example boot --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "End-to-end Windows boot --check (llama-server.exe spawn + FunctionGemma 270M round-trip) failed"
+          }
+
           Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}.zip" -Force
 
       - name: Upload artifact

@@ -594,7 +594,7 @@ impl Agent {
                 if name.is_empty() {
                     println!("{}", crate::cli::model_status_text(self));
                 } else {
-                    match self.switch_model(name) {
+                    match self.switch_model_with_local_boot(name).await {
                         Ok(previous) => println!(
                             "/model: session model switched {previous} → {name} (config file unchanged)"
                         ),
@@ -3261,7 +3261,7 @@ impl Agent {
                 if name.is_empty() {
                     println!("{}", crate::cli::model_status_text(self));
                 } else {
-                    match self.switch_model(name) {
+                    match self.switch_model_with_local_boot(name).await {
                         Ok(previous) => println!(
                             "/model: session model switched {previous} → {name} (config file unchanged)"
                         ),

@@ -237,16 +237,24 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
         return true;
     }
 
-    // A remote (non-localhost) endpoint cannot be calibrated by scanning local
-    // ports — skip so we never overwrite a remote config (e.g. OpenRouter).
-    if !endpoint_is_local(&config.endpoint) {
-        return true;
-    }
-
     // Config already looks configured (non-default endpoint or model).
     let is_default_endpoint = config.endpoint == crate::config::default_endpoint();
     let is_default_model = config.model == crate::config::default_model();
     if !is_default_endpoint || !is_default_model {
+        return true;
+    }
+
+    // A remote (non-localhost) endpoint other than the built-in uncalibrated
+    // default cannot be calibrated by scanning local ports.
+    if !is_default_endpoint && !endpoint_is_local(&config.endpoint) {
+        return true;
+    }
+
+    // Skip if the user explicitly set endpoint or model via env/CLI even when
+    // the value matches the built-in default.
+    if config.source_of("endpoint") != crate::config::ConfigSource::Default
+        || config.source_of("model") != crate::config::ConfigSource::Default
+    {
         return true;
     }
 
@@ -1014,7 +1022,43 @@ pub async fn run() -> Result<()> {
     }
 
     apply_session_model_overrides(&cli, &mut config)?;
-    if crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
+    let skip_boot_autostart = cli.validate_config
+        || matches!(
+            cli.command,
+            Some(
+                Commands::Boot { .. }
+                    | Commands::Init { .. }
+                    | Commands::Config { .. }
+                    | Commands::Trust { .. }
+            )
+        );
+    if !skip_boot_autostart {
+        if crate::boot::model::find_boot_model_spec(&config.model).is_some()
+            && config.source_of("endpoint") == crate::config::ConfigSource::Default
+        {
+            let target_ctx = if config.model.eq_ignore_ascii_case("boot-assistant") {
+                crate::boot::model::FUNCTIONGEMMA_CTX_32K
+            } else {
+                crate::boot::model::resolve_boot_model_context(Some(&config.model), None)
+            };
+            config.endpoint = format!("http://127.0.0.1:{}/v1", crate::boot::model::SERVER_PORT);
+            if config.source_of("context_length") == crate::config::ConfigSource::Default {
+                config.context_length = target_ctx;
+            }
+            config.sync_default_model_profile();
+        } else if config.loaded_config_path().is_none()
+            && config.source_of("endpoint") == crate::config::ConfigSource::Default
+            && config.source_of("model") == crate::config::ConfigSource::Default
+            && !should_skip_calibration(&cli, &config)
+            && crate::boot::model::find_llama_server().is_some()
+        {
+            config.endpoint = format!("http://127.0.0.1:{}/v1", crate::boot::model::SERVER_PORT);
+            config.apply_cli_model_override(crate::boot::model::SHIPPED_BOOT_MODEL_ID.to_string());
+            config.context_length = crate::boot::model::FUNCTIONGEMMA_CTX_32K;
+            config.sync_default_model_profile();
+        }
+    }
+    if !skip_boot_autostart && crate::boot::model::is_boot_server_endpoint(&config.endpoint) {
         match crate::boot::model::ensure_background_boot_server_for_model_with_context(
             Some(&config.model),
             Some(config.context_length),
@@ -1023,6 +1067,7 @@ pub async fn run() -> Result<()> {
         {
             Ok(base_url) => {
                 config.endpoint = base_url;
+                config.sync_default_model_profile();
             }
             Err(e) => {
                 tracing::warn!("Failed to start bundled local boot server: {e:#}");
@@ -1916,7 +1961,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     if name.is_empty() {
                         log_line(model_status_text(&agent));
                     } else {
-                        match agent.switch_model(name) {
+                        match agent.switch_model_with_local_boot(name).await {
                             Ok(previous) => log_line(format!(
                                 "/model: session model switched {previous} → {name} (config file unchanged)"
                             )),

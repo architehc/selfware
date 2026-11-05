@@ -206,6 +206,16 @@ async fn check_round_trip(plan: RoundTripPlan) -> BootCheck {
 /// llm-doctor.
 async fn check_current_config(config: &Config) -> BootCheck {
     let mut effective_config = config.clone();
+    if effective_config.loaded_config_path().is_none()
+        && effective_config.source_of("endpoint") == crate::config::ConfigSource::Default
+        && effective_config.source_of("model") == crate::config::ConfigSource::Default
+        && model::find_llama_server().is_some()
+    {
+        effective_config.endpoint = format!("http://127.0.0.1:{}/v1", model::SERVER_PORT);
+        effective_config.apply_cli_model_override(model::SHIPPED_BOOT_MODEL_ID.to_string());
+        effective_config.context_length = model::FUNCTIONGEMMA_CTX_32K;
+        effective_config.sync_default_model_profile();
+    }
     if model::is_boot_server_endpoint(&effective_config.endpoint) {
         match model::ensure_background_boot_server_for_model_with_context(
             Some(&effective_config.model),
@@ -215,6 +225,7 @@ async fn check_current_config(config: &Config) -> BootCheck {
         {
             Ok(base_url) => {
                 effective_config.endpoint = base_url;
+                effective_config.sync_default_model_profile();
             }
             Err(e) => {
                 return BootCheck::fail("current config llm-doctor", format!("{:#}", e));

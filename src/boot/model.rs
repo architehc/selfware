@@ -1104,11 +1104,24 @@ pub fn check_model_resource_readiness(
         .and_then(find_boot_model_spec)
         .unwrap_or_else(shipped_boot_model_spec);
     let effective_ctx = resolve_boot_model_context(model_id.or(Some(spec.id)), ctx_size);
+    let has_sized_file = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .map(|m| {
+                !m.file_type().is_symlink() && m.file_type().is_file() && m.len() == spec.size_bytes
+            })
+            .unwrap_or(false)
+    };
     let model_path = dir.join(spec.file_name);
-    let model_already_downloaded = verify_model_file_spec(&model_path, spec).unwrap_or(false)
-        || find_bundled_model()
-            .and_then(|p| verify_model_file_spec(&p, spec).ok())
-            .unwrap_or(false);
+    let model_already_downloaded = has_sized_file(&model_path)
+        || bundled_model_candidates(
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+                .as_deref(),
+            std::env::var("SELFWARE_BOOT_MODEL").ok().as_deref(),
+        )
+        .into_iter()
+        .any(|p| has_sized_file(&p));
 
     let mem = measure_memory_snapshot();
     // If our own llama-server child is already holding the model in RAM, credit its

@@ -1,38 +1,59 @@
-# Selfware configuration
-# Copy this file to selfware.toml and adjust values for your setup.
+# Selfware Configuration
+# Copy this file to `selfware.toml` (or run `selfware` directly to start the
+# bundled local support-system engine automatically).
 #
 # UNATTENDED RUNS: selfware does NOT impose a token/wall-clock/cost cap by
 # default. For any long or unattended run, pass hard limits on the CLI:
 #   selfware --max-turns 200 --max-wall-secs 3600 --max-budget-tokens 2000000 ...
-# (These are the only hard run-bounding levers; there is no TOML equivalent and
-# they reset on resume, so re-pass them each launch.)
 
-# Default endpoint and model (calibrated via the built-in deepseek-v4 profile;
-# or point at a local vLLM/SGLang server such as http://127.0.0.1:8000/v1).
-endpoint = "https://llm.selfware.design/v1"
-api_key = "EMPTY"
-model = "deepseek-v4.1-flash"
-max_tokens = 65536
-context_length = 1048576
+# ── Tier 1 (Default): Bundled Support-System Engine (FunctionGemma 270M IT) ──
+# Starts `bin/llama-server` automatically on 127.0.0.1:8787 using
+# `functiongemma-270m-it-UD-Q6_K_XL.gguf` (273 MiB disk, ~476 MiB RSS, 32k ctx).
+endpoint = "http://127.0.0.1:8787/v1"
+model = "boot-assistant"
+max_tokens = 4096
+context_length = 32768
+temperature = 0.1
+
+# ── Tier 2: Local Coding & Long-Context Engine (LiquidAI LFM3-1.7B-GSQ 1GB) ──
+# Switch live in TUI/REPL with `/model lfm3-1.7b-gsq-1gb` (or `-128k` / `-256k`),
+# on the CLI with `selfware -M lfm3-1.7b-gsq-1gb`, or uncomment below:
+# endpoint = "http://127.0.0.1:8787/v1"
+# model = "lfm3-1.7b-gsq-1gb"   # or "lfm3-1.7b-gsq-128k" / "lfm3-1.7b-gsq-256k"
+# max_tokens = 4096
+# context_length = 65536        # 65536 (64k), 131072 (128k), or 262144 (256k)
+# temperature = 0.1
+
+# ── External Local Server (Ollama / LM Studio / vLLM / SGLang) ───────────────
+# endpoint = "http://127.0.0.1:11434/v1"
+# model = "qwen3-coder"
+# max_tokens = 8192
+# context_length = 65536
+
+# ── Remote / Cloud Endpoint (requires `selfware trust` if set in ./selfware.toml)
+# Set your API key via `export SELFWARE_API_KEY=...` or `selfware config set-key`.
+# endpoint = "https://openrouter.ai/api/v1"
+# model = "qwen/qwen3-coder"
+# max_tokens = 16384
+# context_length = 131072
 
 # Optional: override per-workload thinking or completion caps:
 # [workloads.planning]
 # enable_thinking = false
 # max_tokens = 16384
 
-[safety]
-# Scope filesystem access to the project directory by default. Only widen this
-# (e.g. add "~/**") if you genuinely need it — a wide scope lets an autonomous
-# run read/modify files far outside your project.
-allowed_paths = ["./**"]
-denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+# Safety defaults already scope access to `./**` and deny `.env`/`secrets`/`.ssh`.
+# Uncomment and run `selfware trust` only if you need to widen `allowed_paths`:
+# [safety]
+# allowed_paths = ["./**"]
+# denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 [agent]
 # Keep the iteration cap modest. Raise deliberately for large tasks rather than
 # shipping a five-figure default.
 max_iterations = 100
 step_timeout_secs = 600
-# Use XML-based tool calling for SGLang
+# Use XML/structured tool calling compatible with local llama-server & SGLang
 native_function_calling = false
 
 [continuous_work]
@@ -49,11 +70,11 @@ base_delay_ms = 1000
 max_delay_ms = 60000
 
 # Named model profiles route swarm/sub-agent traffic to a different endpoint:
-# a swarm agent built with .with_model("qwen38") resolves this section.
-# Verified 2026-08-24: 4-agent multi-chat fan-out, 23s, $0.0045.
-# [models.qwen38]
-# endpoint = "https://openrouter.ai/api/v1"
-# model = "qwen/qwen3.8-27b"
-# max_tokens = 8192
-# temperature = 0.0
-# context_length = 1000000
+# a swarm agent built with .with_model("lfm3") resolves this section.
+# [models.lfm3]
+# endpoint = "http://127.0.0.1:8787/v1"
+# model = "lfm3-1.7b-gsq-1gb"
+# max_tokens = 4096
+# temperature = 0.1
+# context_length = 65536
+

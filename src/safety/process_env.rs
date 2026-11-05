@@ -215,6 +215,29 @@ const DEFAULT_KEEP: &[&str] = &[
     "TERM",
     "CARGO_HOME",
     "RUSTUP_HOME",
+    // Windows system & runtime environment variables required for Winsock2
+    // (`mswsock.dll` / `ws2_32.dll` socket creation in `llama-server.exe`),
+    // OpenMP thread detection (`libomp.dll`), and standard command resolution.
+    "SystemRoot",
+    "SYSTEMROOT",
+    "SystemDrive",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "windir",
+    "COMSPEC",
+    "ComSpec",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "CommonProgramFiles",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
 ];
 
 /// The keep-list applied after `env_clear`: [`DEFAULT_KEEP`] plus any

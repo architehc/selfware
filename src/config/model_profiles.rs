@@ -943,6 +943,24 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             workload_quotas: None,
             measured: FUNCTIONGEMMA_MEASURED,
         },
+        ModelDefaultsProfile {
+            name: "functiongemma",
+            pattern: "boot-assistant",
+            native_function_calling: Some(false),
+            streaming: Some(true),
+            temperature: Some(0.1),
+            max_tokens: Some(4_096),
+            context_length: Some(32_768),
+            max_streams: Some(1),
+            max_global: Some(4),
+            max_call_secs: Some(300),
+            context_content_ratio: None,
+            context_growth_p99_tokens: None,
+            reasoning_effort_honored: false,
+            extra_body: Value::Null,
+            workload_quotas: None,
+            measured: FUNCTIONGEMMA_MEASURED,
+        },
     ]
 }
 
