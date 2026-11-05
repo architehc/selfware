@@ -58,6 +58,7 @@ pub enum PhiArenaAction {
     Close,
     Log(String),
     LaunchMission { label: String, prompt: String },
+    ScoutEndpoint,
 }
 
 /// Default Red-Team / Test Server primary and LAN fallback endpoints used by Phi Fox.
@@ -364,6 +365,14 @@ impl PhiArenaPane {
                 );
                 Some(PhiArenaAction::LaunchMission { label, prompt })
             }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                self.speak(
+                    "Loading FunctionGemma 270M to scout and switch to a live endpoint!",
+                    "working",
+                    None,
+                );
+                Some(PhiArenaAction::ScoutEndpoint)
+            }
             _ => None,
         }
     }
@@ -648,6 +657,8 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
         Span::raw(" Screen  "),
         Span::styled("[t]", Style::default().fg(Color::Rgb(56, 189, 248))),
         Span::raw(" Term  "),
+        Span::styled("[e]", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::raw(" Endpoint  "),
         Span::styled("[r]", Style::default().fg(Color::Rgb(245, 158, 11))),
         Span::raw(" Red?  "),
         Span::styled("[d]", Style::default().fg(Color::Rgb(245, 158, 11))),
@@ -889,5 +900,10 @@ mod tests {
             }
             other => panic!("unexpected action for [t]: {other:?}"),
         }
+
+        let e_action = pane
+            .on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .expect("e launches FunctionGemma endpoint scout");
+        assert_eq!(e_action, PhiArenaAction::ScoutEndpoint);
     }
 }

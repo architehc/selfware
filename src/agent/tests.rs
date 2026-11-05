@@ -2996,3 +2996,71 @@ fn test_gate_prompt_file_neutralises_hidden_unicode_like_a_tool_result() {
         content
     );
 }
+
+#[tokio::test]
+async fn test_apply_scouted_endpoint_switches_client_and_never_leaks_hosted_api_key() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_LOCAL_API_KEY"]);
+    std::env::remove_var("SELFWARE_LOCAL_API_KEY");
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut config = mock_agent_config("https://ivo.ngrok.dev/v1".to_string(), false);
+    config.api_key = Some(crate::config::RedactedString::new(
+        "sk-hosted-secret-must-not-leak",
+    ));
+    config.models.insert(
+        "lan".to_string(),
+        crate::config::ModelProfile {
+            endpoint: format!("{}/v1", server.url()),
+            model: "qwen3.8-27b".to_string(),
+            api_key: Some(crate::config::RedactedString::new("sk-lan-profile-key")),
+            max_tokens: 262144,
+            temperature: 0.7,
+            context_length: 524288,
+            extra_body: None,
+            ..Default::default()
+        },
+    );
+
+    let mut agent = Agent::new(config).await.expect("agent::new");
+
+    // 1. Switching to an unprofiled endpoint clears the hosted API key
+    let unprofiled = crate::boot::endpoint_scout::ScoutedEndpoint {
+        provider: "Local Ollama".to_string(),
+        endpoint: "http://localhost:11434/v1".to_string(),
+        model: "qwen2.5-coder:7b".to_string(),
+        context_length: 65536,
+        latency_ms: 4,
+        profile_name: None,
+    };
+    agent
+        .apply_scouted_endpoint(&unprofiled)
+        .expect("apply unprofiled scouted endpoint");
+    assert_eq!(agent.config.endpoint, "http://localhost:11434/v1");
+    assert_eq!(agent.config.model, "qwen2.5-coder:7b");
+    assert_eq!(agent.config.context_length, 65536);
+    assert!(
+        agent.config.api_key.is_none(),
+        "hosted api_key must never leak to an unprofiled fallback endpoint"
+    );
+
+    // 2. Switching to a configured `[models.lan]` profile uses that profile's own key
+    let profiled = crate::boot::endpoint_scout::ScoutedEndpoint {
+        provider: "Profile [lan]".to_string(),
+        endpoint: format!("{}/v1", server.url()),
+        model: "qwen3.8-27b".to_string(),
+        context_length: 524288,
+        latency_ms: 2,
+        profile_name: Some("lan".to_string()),
+    };
+    agent
+        .apply_scouted_endpoint(&profiled)
+        .expect("apply profiled scouted endpoint");
+    assert_eq!(agent.config.endpoint, format!("{}/v1", server.url()));
+    assert_eq!(agent.config.model, "qwen3.8-27b");
+    assert_eq!(agent.config.context_length, 524288);
+    assert_eq!(
+        agent.config.api_key.as_ref().map(|k| k.expose()),
+        Some("sk-lan-profile-key")
+    );
+
+    server.stop().await;
+}

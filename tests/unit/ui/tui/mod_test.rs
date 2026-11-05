@@ -797,6 +797,42 @@ fn phi_fox_meta_agent_slash_aliases_and_cross_env_helpers_work() {
         resolve_forgiving_slash_command("/phi-fox"),
         ("/phi", Some("/phi"))
     );
+    assert_eq!(
+        resolve_forgiving_slash_command("/ep"),
+        ("/endpoint", Some("/endpoint"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/scout"),
+        ("/endpoint", Some("/endpoint"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/gemma"),
+        ("/endpoint", Some("/endpoint"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/failover"),
+        ("/endpoint", Some("/endpoint"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/tricks"),
+        ("/tips", Some("/tips"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/guide"),
+        ("/tips", Some("/tips"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/tree"),
+        ("/garden", Some("/garden"))
+    );
+
+    let full_tips = App::format_tips_guide("");
+    assert!(full_tips.contains("Tips & Tricks Playbook"));
+    assert!(full_tips.contains("Interactive Garden View"));
+    assert!(full_tips.contains("FunctionGemma"));
+    let garden_tips = App::format_tips_guide("garden");
+    assert!(garden_tips.contains("Garden View Tips & Tricks"));
+    assert!(garden_tips.contains("Ctrl+G"));
 
     assert!(crate::agent::Agent::is_phi_meta_agent_task(
         "You are Phi Fox, the visual screen-reading and multi-terminal meta-agent."

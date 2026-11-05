@@ -274,3 +274,64 @@ fn test_growth_char_all_frames() {
         .collect();
     assert_eq!(chars, vec!["🌱", "🌿", "🍃", "✨"]);
 }
+
+#[test]
+fn test_garden_view_expand_collapse_selected_and_all() {
+    let mut view = GardenView::new();
+    let garden = create_test_garden();
+    view.set_garden(garden);
+    assert_eq!(view.selected_path(), Some("src"));
+
+    view.expand_selected();
+    assert_eq!(view.items.len(), 3);
+
+    // Move selection to a child plant (`src/lib.rs`, largest first) and collapse parent bed
+    view.select_next();
+    assert_eq!(view.selected_path(), Some("src/lib.rs"));
+    view.collapse_selected();
+    assert_eq!(view.items.len(), 1);
+    assert_eq!(view.selected_path(), Some("src"));
+
+    // Expand all and collapse all
+    view.toggle_expand_all();
+    assert_eq!(view.items.len(), 3);
+    view.toggle_expand_all();
+    assert_eq!(view.items.len(), 1);
+
+    let report = view.summary_report();
+    assert!(report.contains("Digital Garden Status (`test-project`)"));
+    assert!(report.contains("2 files (350 lines)"));
+}
+
+#[test]
+fn test_garden_view_renders_compact_and_full_modes() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut view = GardenView::new();
+    view.set_garden(create_test_garden());
+    view.expand_selected();
+    view.set_focused(true);
+
+    // 1. Compact Dashboard widget mode (44x10)
+    let compact_backend = TestBackend::new(44, 10);
+    let mut compact_term = Terminal::new(compact_backend).unwrap();
+    compact_term
+        .draw(|frame| view.render(frame, frame.area()))
+        .unwrap();
+    let compact_buf = compact_term.backend().buffer();
+    let compact_text: String = compact_buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(compact_text.contains("Garden View"));
+    assert!(compact_text.contains("src"));
+
+    // 2. Full / Zoomed Garden Explorer mode (100x28)
+    let full_backend = TestBackend::new(100, 28);
+    let mut full_term = Terminal::new(full_backend).unwrap();
+    full_term
+        .draw(|frame| view.render(frame, frame.area()))
+        .unwrap();
+    let full_buf = full_term.backend().buffer();
+    let full_text: String = full_buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(full_text.contains("Garden Controls"));
+    assert!(full_text.contains("Details"));
+    assert!(full_text.contains("lib.rs"));
+}

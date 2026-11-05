@@ -2768,6 +2768,7 @@ impl Agent {
                         let mut planning_step_down: Option<crate::api::client::ReasoningStepDown> =
                             None;
                         let mut planning_gateway_step_down = false;
+                        let mut planning_endpoint_scout_used = false;
                         loop {
                             let thinking =
                                 if planning_step_down.is_some() || planning_gateway_step_down {
@@ -2782,6 +2783,34 @@ impl Agent {
                             match self.plan_with_thinking(thinking).await {
                                 Ok(has_tool_calls) => break has_tool_calls,
                                 Err(e) => {
+                                    if !planning_endpoint_scout_used
+                                        && !self.is_cancelled()
+                                        && crate::boot::endpoint_scout::is_endpoint_down_error(
+                                            &format!("{e:#}"),
+                                        )
+                                        && std::env::var("SELFWARE_FUNCTIONGEMMA_SCOUT")
+                                            .ok()
+                                            .is_some_and(|v| {
+                                                matches!(
+                                                    v.trim().to_ascii_lowercase().as_str(),
+                                                    "1" | "true" | "yes" | "on"
+                                                )
+                                            })
+                                    {
+                                        planning_endpoint_scout_used = true;
+                                        if let Ok(Some(report)) = self
+                                            .recover_unreachable_endpoint_with_functiongemma(true)
+                                            .await
+                                        {
+                                            let summary = report.summary_line();
+                                            warn!("{summary}");
+                                            cli_println!("{} {}", "🦊".cyan(), summary);
+                                            self.emit_event(AgentEvent::Status {
+                                                message: summary,
+                                            });
+                                            continue;
+                                        }
+                                    }
                                     if (crate::errors::is_gateway_timeout_error(&e)
                                         || crate::errors::is_stream_truncated_error(&e)
                                         || (crate::errors::is_call_time_budget_error(&e)
@@ -3506,6 +3535,36 @@ impl Agent {
                                     }
                                 }
                                 Err(e) => {
+                                    let scout_opted_in =
+                                        std::env::var("SELFWARE_FUNCTIONGEMMA_SCOUT")
+                                            .or_else(|_| {
+                                                std::env::var("SELFWARE_ENDPOINT_FALLBACK")
+                                            })
+                                            .ok()
+                                            .is_some_and(|v| {
+                                                matches!(v.trim(), "1" | "true" | "yes" | "on")
+                                            });
+                                    if scout_opted_in
+                                        && crate::boot::endpoint_scout::is_endpoint_down_error(
+                                            &error,
+                                        )
+                                    {
+                                        if let Ok(Some(report)) = self
+                                            .recover_unreachable_endpoint_with_functiongemma(true)
+                                            .await
+                                        {
+                                            let summary = report.summary_line();
+                                            tracing::info!("{summary}");
+                                            self.emit_event(AgentEvent::Status {
+                                                message: summary,
+                                            });
+                                            record_state_transition("ErrorRecovery", "Executing");
+                                            self.set_loop_state(AgentState::Executing {
+                                                step: self.loop_control.current_step(),
+                                            })?;
+                                            continue;
+                                        }
+                                    }
                                     tracing::warn!(
                                         "Auto-recovery action failed to apply (kind={:?}): {} — entering rigor mode",
                                         kind,

@@ -104,6 +104,24 @@ impl CommandPalette {
                 shortcut: Some("F1".into()),
             },
             PaletteCommand {
+                name: "Tips & Tricks Playbook".into(),
+                description:
+                    "Learn how to use Selfware UI Chat, Garden View, Phi Fox, and shortcuts (`/tips`)"
+                        .into(),
+                command: "/tips".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Open Interactive Garden Explorer".into(),
+                description:
+                    "Browse codebase beds & files, health metrics, and inspect in chat (`/garden`)"
+                        .into(),
+                command: "/garden".into(),
+                category: CommandCategory::Navigation,
+                shortcut: Some("Ctrl+G".into()),
+            },
+            PaletteCommand {
                 name: "Show status".into(),
                 description: "Display agent status and memory".into(),
                 command: "/status".into(),
@@ -136,6 +154,15 @@ impl CommandPalette {
                 description: "Current model/endpoint; `/model <name>` hot-switches".into(),
                 command: "/model".into(),
                 category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Scout live endpoint (FunctionGemma 270M)".into(),
+                description:
+                    "Load FunctionGemma 270M to find & switch to a live endpoint (`/endpoint scout`)"
+                        .into(),
+                command: "/endpoint scout".into(),
+                category: CommandCategory::Settings,
                 shortcut: None,
             },
             PaletteCommand {

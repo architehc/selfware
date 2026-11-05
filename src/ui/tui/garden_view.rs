@@ -267,6 +267,144 @@ impl GardenView {
         self.items.get(self.selected)
     }
 
+    /// Return the relative path of the currently selected bed or plant.
+    pub fn selected_path(&self) -> Option<&str> {
+        match self.selected_item()? {
+            GardenItem::Bed { path, .. } => Some(path.as_str()),
+            GardenItem::Plant { plant, .. } => Some(plant.path.as_str()),
+        }
+    }
+
+    /// Expand the currently selected item if it is a collapsed bed.
+    pub fn expand_selected(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let selected = self.selected.min(self.items.len() - 1);
+        if let GardenItem::Bed {
+            path,
+            expanded: false,
+            ..
+        } = &self.items[selected]
+        {
+            let path = path.clone();
+            self.expand_bed(selected, &path);
+        }
+    }
+
+    /// Collapse the currently selected bed, or jump to and collapse the parent
+    /// bed if a plant is currently selected.
+    pub fn collapse_selected(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let selected = self.selected.min(self.items.len() - 1);
+        match &self.items[selected] {
+            GardenItem::Bed { expanded: true, .. } => {
+                self.collapse_bed(selected);
+            }
+            GardenItem::Plant { .. } => {
+                // Find the parent bed above `selected`
+                for idx in (0..selected).rev() {
+                    if self.items[idx].is_bed() {
+                        self.selected = idx;
+                        self.list_state.select(Some(idx));
+                        self.collapse_bed(idx);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Toggle all beds between expanded and collapsed.
+    pub fn toggle_expand_all(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let any_collapsed = self.items.iter().any(|item| {
+            matches!(
+                item,
+                GardenItem::Bed {
+                    expanded: false,
+                    ..
+                }
+            )
+        });
+        if any_collapsed {
+            let mut idx = 0;
+            while idx < self.items.len() {
+                if let GardenItem::Bed {
+                    path,
+                    expanded: false,
+                    ..
+                } = &self.items[idx]
+                {
+                    let path = path.clone();
+                    self.expand_bed(idx, &path);
+                }
+                idx += 1;
+            }
+        } else {
+            self.rebuild_items();
+            self.selected = 0;
+            self.list_state.select(Some(0));
+        }
+    }
+
+    /// Generate a formatted text report of all garden beds and codebase health
+    /// for `/garden status` in TUI Chat.
+    pub fn summary_report(&self) -> String {
+        let Some(garden) = &self.garden else {
+            return "🌱 Garden View: no workspace scan available yet. Run `/garden rescan`."
+                .to_string();
+        };
+        let mut beds: Vec<_> = garden.beds.values().collect();
+        beds.sort_by_key(|b| std::cmp::Reverse(b.total_lines));
+
+        let overall_pct = garden
+            .tended_fraction()
+            .map(|h| format!("{:.0}%", h * 100.0))
+            .unwrap_or_else(|| "n/a".to_string());
+
+        let mut out = format!(
+            "🌳 Digital Garden Status (`{}`):\n  \
+             • Season: {} {}\n  \
+             • Total:  {} files ({} lines) across {} beds · {} active (changed ≤90d)\n  \
+             • Top Garden Beds (Directories):\n",
+            garden.project_name,
+            garden.season.glyph(),
+            garden.season.description(),
+            garden.total_plants,
+            garden.total_lines,
+            beds.len(),
+            overall_pct,
+        );
+
+        for bed in beds.iter().take(10) {
+            let icon = if bed.health_score > 0.8 {
+                "🌸"
+            } else if bed.health_score > 0.5 {
+                "🌿"
+            } else {
+                "🥀"
+            };
+            out.push_str(&format!(
+                "    {} {:<22} {:>4} files · {:>7} lines · {:>3.0}% active\n",
+                icon,
+                bed.path,
+                bed.plants.len(),
+                bed.total_lines,
+                bed.health_score * 100.0
+            ));
+        }
+        out.push_str(
+            "  • Tip: Press `Ctrl+G` (or run `/garden`) to open the interactive Garden Explorer (`↑/↓/j/k` move, `Enter` expand, `a` expand all, `i` inspect in chat).",
+        );
+        out
+    }
+
     /// Set focused state
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
@@ -297,8 +435,14 @@ impl GardenView {
             .any(|p| p.contains(path) || path.contains(p))
     }
 
-    /// Render the garden view
+    /// Render the garden view (adapts automatically between compact dashboard
+    /// widget and full-screen / zoomed interactive explorer).
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if area.width < 10 || area.height < 3 {
+            return;
+        }
+        frame.render_widget(ratatui::widgets::Clear, area);
+
         let border_style = if self.focused {
             TuiPalette::title_style()
         } else {
@@ -306,20 +450,35 @@ impl GardenView {
         };
 
         // Get season and stats from garden
-        let (season_glyph, season_desc, total_plants, total_lines) = self
+        let (season_glyph, season_desc, total_plants, total_lines, tended_pct) = self
             .garden
             .as_ref()
             .map(|g| {
+                let pct = g
+                    .tended_fraction()
+                    .map(|h| (h * 100.0).round() as u8)
+                    .unwrap_or(0);
                 (
                     g.season.glyph(),
                     g.season.description(),
                     g.total_plants,
                     g.total_lines,
+                    pct,
                 )
             })
-            .unwrap_or(("🌱", "unknown", 0, 0));
+            .unwrap_or(("🌱", "unknown", 0, 0, 0));
 
-        let title = format!(" 🌳 Garden View {} ", season_glyph);
+        let title = if self.focused {
+            format!(
+                " 🌳 Garden View {} [FOCUSED · ↑↓/jk · Enter expand · a all · i inspect · Esc chat] ",
+                season_glyph
+            )
+        } else {
+            format!(
+                " 🌳 Garden View {} ({} files · Ctrl+G or /garden to explore) ",
+                season_glyph, total_plants
+            )
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -329,24 +488,145 @@ impl GardenView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
         if self.items.is_empty() {
-            let empty = Paragraph::new("  No garden data. Run a scan to see your codebase.")
-                .style(TuiPalette::muted_style());
+            let empty = Paragraph::new(
+                "  🌱 No garden data scanned yet.\n  Press [r] or run `/garden rescan` in chat.",
+            )
+            .style(TuiPalette::muted_style());
             frame.render_widget(empty, inner);
             return;
         }
 
-        // Split into tree view (70%) and details (30%)
+        // Compact mode when embedded in the right-hand Dashboard column (`width < 68` or `height < 12`):
+        // avoid a 70/30 horizontal split that crushes the Details panel into ~10 columns.
+        if inner.width < 68 || inner.height < 12 {
+            let has_footer = inner.height >= 6;
+            let constraints = if has_footer {
+                vec![
+                    Constraint::Length(1),
+                    Constraint::Min(2),
+                    Constraint::Length(2),
+                ]
+            } else {
+                vec![Constraint::Length(1), Constraint::Min(1)]
+            };
+            let vchunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(inner);
+
+            let header_line = Line::from(vec![
+                Span::styled(
+                    format!(" {} {} files", season_glyph, total_plants),
+                    Style::default()
+                        .fg(TuiPalette::AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {} lines · {}% ≤90d", total_lines, tended_pct),
+                    TuiPalette::muted_style(),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(header_line), vchunks[0]);
+
+            self.render_tree(frame, vchunks[1]);
+
+            if has_footer {
+                let selected_summary = match self.selected_item() {
+                    Some(GardenItem::Bed {
+                        path,
+                        plant_count,
+                        health,
+                        expanded,
+                        ..
+                    }) => format!(
+                        " 📁 {} ({} files, {:.0}% ≤90d) — {}",
+                        path,
+                        plant_count,
+                        health * 100.0,
+                        if *expanded {
+                            "Enter: collapse"
+                        } else {
+                            "Enter: expand"
+                        }
+                    ),
+                    Some(GardenItem::Plant { plant, .. }) => format!(
+                        " 📄 {} ({} lines, {} {})",
+                        plant.path,
+                        plant.lines,
+                        plant.growth_stage.glyph(),
+                        plant.growth_stage.description()
+                    ),
+                    None => " Select a bed or file".to_string(),
+                };
+                let footer_lines = vec![
+                    Line::from(Span::styled(
+                        selected_summary,
+                        Style::default().fg(TuiPalette::BLOOM),
+                    )),
+                    Line::from(Span::styled(
+                        " Keys: Ctrl+G zoom · Tab focus · ↑↓/jk move · Enter expand · a all · i inspect",
+                        TuiPalette::muted_style(),
+                    )),
+                ];
+                frame.render_widget(Paragraph::new(footer_lines), vchunks[2]);
+            }
+            return;
+        }
+
+        // Full / Zoomed mode (`inner.width >= 68 && inner.height >= 12`):
+        // Split vertically into main body (Tree 58% | Details 42%) + 2-row interactive key bar.
+        let vchunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(2)])
+            .split(inner);
+
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(inner);
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(vchunks[0]);
 
         // Render tree view
         self.render_tree(frame, chunks[0]);
 
         // Render details panel
         self.render_details(frame, chunks[1], season_desc, total_plants, total_lines);
+
+        // Render interactive key legend at the bottom
+        let footer = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    " 🧭 Garden Controls: ",
+                    Style::default()
+                        .fg(TuiPalette::AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("[↑/↓/j/k]", Style::default().fg(TuiPalette::BLOOM)),
+                Span::raw(" Navigate  "),
+                Span::styled("[Enter/Space]", Style::default().fg(TuiPalette::BLOOM)),
+                Span::raw(" Expand/Collapse Bed  "),
+                Span::styled("[a]", Style::default().fg(TuiPalette::BLOOM)),
+                Span::raw(" Expand/Collapse All  "),
+                Span::styled("[r]", Style::default().fg(TuiPalette::BLOOM)),
+                Span::raw(" Rescan  "),
+                Span::styled("[i]", Style::default().fg(TuiPalette::BLOOM)),
+                Span::raw(" Inspect in Chat  "),
+                Span::styled("[Ctrl+G / Esc]", Style::default().fg(TuiPalette::AMBER)),
+                Span::raw(" Return to Chat"),
+            ]),
+            Line::from(Span::styled(
+                format!(
+                    " 📊 Workspace: {} files · {} total lines · {}% changed in last 90 days · Season: {} {}",
+                    total_plants, total_lines, tended_pct, season_glyph, season_desc
+                ),
+                TuiPalette::muted_style(),
+            )),
+        ]);
+        frame.render_widget(footer, vchunks[1]);
     }
 
     /// Render the tree view
@@ -392,7 +672,12 @@ impl GardenView {
                             Span::styled(format!("{} ", health_icon), style),
                             Span::styled(name, style.add_modifier(Modifier::BOLD)),
                             Span::styled(
-                                format!(" ({} plants){}", plant_count, growth_anim),
+                                format!(
+                                    " ({} files · {:.0}% ≤90d){}",
+                                    plant_count,
+                                    health * 100.0,
+                                    growth_anim
+                                ),
                                 TuiPalette::muted_style(),
                             ),
                         ]))
@@ -525,7 +810,21 @@ impl GardenView {
                                 .fg(TuiPalette::SAGE)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(" to expand/collapse", TuiPalette::muted_style()),
+                        Span::styled(" expand/collapse · ", TuiPalette::muted_style()),
+                        Span::styled(
+                            "a",
+                            Style::default()
+                                .fg(TuiPalette::SAGE)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" all · ", TuiPalette::muted_style()),
+                        Span::styled(
+                            "i",
+                            Style::default()
+                                .fg(TuiPalette::SAGE)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" inspect", TuiPalette::muted_style()),
                     ]),
                 ]
             }
@@ -550,6 +849,7 @@ impl GardenView {
                         Span::styled("📄 Plant: ", TuiPalette::muted_style()),
                         Span::styled(&plant.name, TuiPalette::title_style()),
                     ]),
+                    Line::from(Span::styled(&plant.path, TuiPalette::path_style())),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Type: ", TuiPalette::muted_style()),
@@ -592,6 +892,16 @@ impl GardenView {
                             },
                         ),
                     ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            "Press [i]",
+                            Style::default()
+                                .fg(TuiPalette::SAGE)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" to analyze in Chat", TuiPalette::muted_style()),
+                    ]),
                 ]
             }
             None => {
@@ -626,7 +936,7 @@ impl GardenView {
             }
         };
 
-        let paragraph = Paragraph::new(details);
+        let paragraph = Paragraph::new(details).wrap(ratatui::widgets::Wrap { trim: false });
         frame.render_widget(paragraph, inner);
     }
 

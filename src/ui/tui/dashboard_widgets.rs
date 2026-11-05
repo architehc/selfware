@@ -584,18 +584,22 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
         },
     ));
 
+    let paragraph = Paragraph::new(Line::from(spans));
+    if area.height < 3 {
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
         .title(Span::styled(
-            " 🦊 Selfware Dashboard ",
+            " 🦊 Selfware Dashboard (Ctrl+P Palette · /tips Guide · Ctrl+G Garden · ? Keys) ",
             TuiPalette::title_style(),
         ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let paragraph = Paragraph::new(Line::from(spans));
     frame.render_widget(paragraph, inner);
 }
 
@@ -744,51 +748,58 @@ pub fn render_logs(frame: &mut Frame, area: Rect, state: &DashboardState) {
 
 /// Render keyboard help overlay
 pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    // Center the help box
-    let width = 50.min(area.width.saturating_sub(4));
-    let height = 15.min(area.height.saturating_sub(4));
-    let x = area.width.saturating_sub(width) / 2;
-    let y = area.height.saturating_sub(height) / 2;
+    let shortcuts = [
+        ("Enter", "Send message (or queue while agent runs)"),
+        ("Ctrl+P", "Open fuzzy Command Palette"),
+        ("/tips", "Show Tips & Tricks Playbook in chat"),
+        ("Ctrl+G", "Open / zoom interactive Garden View"),
+        ("Ctrl+F", "Open Phi Fox Arena & Meta-Agent Hub"),
+        ("Ctrl+T", "Tasks: open, edit, pause, cancel"),
+        ("Ctrl+Y", "Toggle YOLO mode (auto-approve tools)"),
+        ("Ctrl+K", "Toggle container sandbox isolation"),
+        ("Ctrl+U", "Unstuck / nudge stalled running task"),
+        ("Ctrl+Z", "Undo / rollback last file edit"),
+        ("Ctrl+V", "Paste from system clipboard"),
+        ("Ctrl+D", "Toggle Dashboard / Focus chat view"),
+        ("Ctrl+L", "Focus & zoom Logs pane"),
+        ("Tab / S-Tab", "Cycle focus between panes"),
+        ("z", "Toggle full-screen zoom on focused pane"),
+        ("Space", "Hold / resume display updates"),
+        ("Esc", "Cancel task / unzoom / close overlay"),
+        ("Alt+1-6", "Switch layout presets"),
+        ("?", "Toggle this shortcuts overlay"),
+        ("q / Ctrl+C", "Quit (press q twice or Ctrl+C)"),
+    ];
+
+    let desired_h = (shortcuts.len() as u16).saturating_add(2);
+    let width = 66.min(area.width.saturating_sub(2)).max(area.width.min(20));
+    let height = desired_h
+        .min(area.height.saturating_sub(2))
+        .max(area.height.min(6));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
 
     let help_area = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, help_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::title_style())
         .style(Style::default().bg(TuiPalette::INK))
         .title(Span::styled(
-            " ❓ Keyboard Shortcuts ",
+            " ❓ Keyboard Shortcuts & Tips (Esc or ? to close) ",
             TuiPalette::title_style(),
         ));
 
     let inner = block.inner(help_area);
     frame.render_widget(block, help_area);
 
-    let shortcuts = vec![
-        ("q / Ctrl+C", "Quit (q twice)"),
-        ("?", "Toggle this help"),
-        ("Ctrl+Y", "Toggle YOLO mode (auto-approve tools)"),
-        ("Ctrl+V", "Paste from system clipboard"),
-        ("Ctrl+U", "Unstuck / nudge running task"),
-        ("Ctrl+Z", "Undo / rollback last file edit"),
-        ("Ctrl+K", "Toggle container sandbox isolation"),
-        ("Ctrl+D", "Toggle dashboard view"),
-        ("Ctrl+G", "Toggle garden view"),
-        ("Ctrl+L", "Toggle log view"),
-        ("Ctrl+T", "Tasks: open, edit, pause, cancel"),
-        ("Tab", "Cycle focus between panes"),
-        ("Space", "Hold display updates"),
-        ("z", "Toggle zoom on focused pane"),
-        ("Esc", "Cancel task / close overlay"),
-        ("Alt+1-6", "Quick layout presets"),
-    ];
-
     let items: Vec<ListItem> = shortcuts
         .iter()
         .map(|(key, action)| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {:12} ", key),
+                    format!(" {:13} ", key),
                     Style::default()
                         .fg(TuiPalette::AMBER)
                         .add_modifier(Modifier::BOLD),

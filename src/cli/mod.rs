@@ -1920,6 +1920,7 @@ async fn run_live_agent_tui(mut config: Config) -> Result<()> {
         state.model = config.model.clone();
         state.execution_mode = config.execution_mode;
     }
+    let bridge_shared_state = std::sync::Arc::clone(&shared_state);
     let model = config.model.clone();
 
     // Suppress ALL direct stdout/stderr from the agent — the TUI
@@ -2104,10 +2105,124 @@ async fn run_live_agent_tui(mut config: Config) -> Result<()> {
                         log_line(model_status_text(&agent));
                     } else {
                         match agent.switch_model_with_local_boot(name).await {
-                            Ok(previous) => log_line(format!(
-                                "/model: session model switched {previous} → {name} (config file unchanged)"
-                            )),
+                            Ok(previous) => {
+                                if let Ok(mut state) = bridge_shared_state.lock() {
+                                    state.model = agent.config().model.clone();
+                                    state.connected = true;
+                                }
+                                log_line(format!(
+                                    "/model: session model switched {previous} → {} @ {} (config file unchanged)",
+                                    agent.config().model,
+                                    crate::config::redact_endpoint(&agent.config().endpoint)
+                                ));
+                            }
                             Err(e) => log_line(format!("/model failed: {e}")),
+                        }
+                    }
+                    continue;
+                }
+                if input == "/endpoint" || input.starts_with("/endpoint ") {
+                    let sub = input.strip_prefix("/endpoint").map(str::trim).unwrap_or("");
+                    let sub_lower = sub.to_ascii_lowercase();
+                    match sub_lower.as_str() {
+                        "" | "status" => {
+                            let gemma_online = crate::boot::model::is_boot_server_healthy(
+                                crate::boot::model::SERVER_PORT,
+                            )
+                            .await;
+                            log_line(format!(
+                                "/endpoint: {} · model: {} · ctx: {} · FunctionGemma 270M scout (:8787): {} (use `/endpoint scout` to find a live endpoint)",
+                                crate::config::redact_endpoint(&agent.config().endpoint),
+                                agent.config().model,
+                                agent.config().context_length,
+                                if gemma_online { "online" } else { "standby" }
+                            ));
+                        }
+                        "scout" | "gemma" | "find" | "auto" | "recover" => {
+                            let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::StatusUpdate {
+                                message: "🦊 Loading FunctionGemma 270M & scouting live endpoints…"
+                                    .to_string(),
+                            });
+                            match agent
+                                .recover_unreachable_endpoint_with_functiongemma(true)
+                                .await
+                            {
+                                Ok(Some(report)) => {
+                                    if let Ok(mut state) = bridge_shared_state.lock() {
+                                        state.model = agent.config().model.clone();
+                                        state.connected = true;
+                                    }
+                                    let summary = report.summary_line();
+                                    let _ = bridge_event_tx
+                                        .send(crate::ui::tui::TuiEvent::RunOutcome { summary });
+                                }
+                                Ok(None) => {
+                                    log_line(
+                                        "⚠️ Endpoint Scout: no live fallback endpoints responded."
+                                            .to_string(),
+                                    );
+                                }
+                                Err(e) => {
+                                    log_line(format!("⚠️ Endpoint Scout failed: {e}"));
+                                }
+                            }
+                        }
+                        _ if sub.starts_with("http://") || sub.starts_with("https://") => {
+                            let target_url = sub.trim();
+                            let probed = crate::boot::endpoint_scout::probe_openai_endpoint(
+                                target_url,
+                                "User Endpoint",
+                                None,
+                                Some(&agent.config().model),
+                                Some(agent.config().context_length),
+                                None,
+                                std::time::Duration::from_millis(3000),
+                            )
+                            .await;
+                            let probe_verified = probed.is_some();
+                            let chosen =
+                                probed.unwrap_or(crate::boot::endpoint_scout::ScoutedEndpoint {
+                                    provider: "User Endpoint".to_string(),
+                                    endpoint: target_url.to_string(),
+                                    model: agent.config().model.clone(),
+                                    context_length: agent.config().context_length,
+                                    latency_ms: 0,
+                                    profile_name: None,
+                                });
+                            match agent.apply_scouted_endpoint(&chosen) {
+                                Ok(()) => {
+                                    if let Ok(mut state) = bridge_shared_state.lock() {
+                                        state.model = agent.config().model.clone();
+                                        state.connected = probe_verified;
+                                    }
+                                    let msg = if probe_verified {
+                                        format!(
+                                            "🦊 Switched session endpoint to `{}` (model `{}` · ctx {} · verified via `/models` in {}ms)",
+                                            crate::config::redact_endpoint(&agent.config().endpoint),
+                                            agent.config().model,
+                                            agent.config().context_length,
+                                            chosen.latency_ms
+                                        )
+                                    } else {
+                                        format!(
+                                            "⚠️ Switched session endpoint to `{}` (model `{}` · ctx {}) — warning: `/models` probe did not respond",
+                                            crate::config::redact_endpoint(&agent.config().endpoint),
+                                            agent.config().model,
+                                            agent.config().context_length
+                                        )
+                                    };
+                                    let _ = bridge_event_tx.send(
+                                        crate::ui::tui::TuiEvent::RunOutcome { summary: msg },
+                                    );
+                                }
+                                Err(e) => log_line(format!("/endpoint switch failed: {e}")),
+                            }
+                        }
+                        _ => {
+                            log_line(
+                                "Usage: `/endpoint [status | scout | gemma | <http(s)://host:port/v1>]`"
+                                    .to_string(),
+                            );
                         }
                     }
                     continue;
@@ -2477,6 +2592,47 @@ async fn run_live_agent_tui(mut config: Config) -> Result<()> {
                 let mut run_result = agent.run_task(&task).await;
                 if let Err(e) = &run_result {
                     warn!("Agent failed to run task: {}", e);
+                }
+
+                // If the configured endpoint is down / unreachable, load local
+                // FunctionGemma 270M IT (`functiongemma-270m-it` on 127.0.0.1:8787),
+                // scout candidate LAN/local/cloud endpoints, switch to the best
+                // verified live endpoint, and retry the task automatically.
+                if let Err(ref err) = run_result {
+                    let err_text = format!("{err:#}");
+                    if !agent.is_cancelled()
+                        && crate::boot::endpoint_scout::is_endpoint_down_error(&err_text)
+                    {
+                        if let Ok(mut state) = bridge_shared_state.lock() {
+                            state.connected = false;
+                        }
+                        log_line(format!(
+                            "⚠️ Endpoint `{}` is down — loading FunctionGemma 270M to scout a live endpoint…",
+                            crate::config::redact_endpoint(&agent.config().endpoint)
+                        ));
+                        let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::StatusUpdate {
+                            message:
+                                "🦊 Endpoint down — loading FunctionGemma 270M to find a live endpoint…"
+                                    .to_string(),
+                        });
+                        if let Ok(Some(report)) = agent
+                            .recover_unreachable_endpoint_with_functiongemma(true)
+                            .await
+                        {
+                            if let Ok(mut state) = bridge_shared_state.lock() {
+                                state.model = agent.config().model.clone();
+                                state.connected = true;
+                            }
+                            let summary = report.summary_line();
+                            let _ = bridge_event_tx
+                                .send(crate::ui::tui::TuiEvent::RunOutcome { summary });
+                            agent.reset_cancellation();
+                            run_result = agent.run_task(&task).await;
+                            if let Err(e) = &run_result {
+                                warn!("Agent failed after FunctionGemma endpoint failover: {}", e);
+                            }
+                        }
+                    }
                 }
 
                 // If a single turn hit CALL_TIME_CAP (agent.max_call_secs) and the

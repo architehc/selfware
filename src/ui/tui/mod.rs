@@ -644,6 +644,13 @@ pub(crate) fn resolve_forgiving_slash_command(cmd: &str) -> (&str, Option<&'stat
         "/context" => ("/ctx", Some("/ctx")),
         "/tokens" | "/usage" => ("/cost", Some("/cost")),
         "/fox" | "/meta" | "/phi-fox" | "/phifox" => ("/phi", Some("/phi")),
+        "/ep" | "/endpoints" | "/failover" | "/scout" | "/gemma" | "/functiongemma" => {
+            ("/endpoint", Some("/endpoint"))
+        }
+        "/tip" | "/tricks" | "/guide" | "/quickstart" | "/onboarding" | "/tutorial" | "/how" => {
+            ("/tips", Some("/tips"))
+        }
+        "/tree" | "/beds" | "/plants" => ("/garden", Some("/garden")),
         _ => (cmd, None),
     }
 }
@@ -1109,6 +1116,19 @@ pub fn run_tui_dashboard_with_events(
                                 ));
                             }
                         }
+                        Some(phi_arena::PhiArenaAction::ScoutEndpoint) => {
+                            phi_arena_pane = None;
+                            app.add_system_message(
+                                "🦊 Phi Fox loading FunctionGemma 270M to scout and switch to a live endpoint...",
+                            );
+                            let _ = user_input_tx.send("/endpoint scout".to_string());
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(
+                                    LogLevel::Info,
+                                    "Phi Arena: launched FunctionGemma endpoint scout",
+                                );
+                            });
+                        }
                         None => {}
                     }
                     continue;
@@ -1153,8 +1173,105 @@ pub fn run_tui_dashboard_with_events(
                 }
             }
 
-            let in_input_mode =
-                (app.is_input_editable() || app.state == AppState::Palette) && !show_help;
+            let garden_focused = layout_engine
+                .focused()
+                .and_then(|id| layout_engine.get_pane(id))
+                .is_some_and(|p| p.pane_type == PaneType::GardenView);
+
+            // When the Garden View pane has focus (via Ctrl+G, /garden, or Tab),
+            // route navigation and action keys directly to `garden_view` instead
+            // of swallowing them into the Chat input buffer.
+            if garden_focused
+                && app.state != AppState::Palette
+                && !show_help
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        garden_view.select_prev();
+                        continue;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        garden_view.select_next();
+                        continue;
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        garden_view.toggle_expand();
+                        continue;
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        garden_view.expand_selected();
+                        continue;
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        garden_view.collapse_selected();
+                        continue;
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        garden_view.toggle_expand_all();
+                        continue;
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        let scanned = crate::ui::garden::scan_directory(&cwd);
+                        let tended = scanned.tended_fraction();
+                        let total_plants = scanned.total_plants;
+                        garden_view.set_garden(scanned);
+                        with_dashboard_state(&shared_state, |state| {
+                            if let Some(health) = tended {
+                                state.process_event(TuiEvent::GardenHealthUpdate { health });
+                            }
+                            state.log(
+                                LogLevel::Info,
+                                &format!("Rescanned garden: {} files", total_plants),
+                            );
+                        });
+                        continue;
+                    }
+                    KeyCode::Char('i') | KeyCode::Char('I') => {
+                        if let Some(path) = garden_view.selected_path().map(str::to_string) {
+                            if layout_engine.is_zoomed() {
+                                layout_engine.toggle_zoom();
+                            }
+                            for pane_id in layout_engine.pane_ids() {
+                                if layout_engine
+                                    .get_pane(pane_id)
+                                    .is_some_and(|p| p.pane_type == PaneType::Chat)
+                                {
+                                    layout_engine.set_focus(pane_id);
+                                    break;
+                                }
+                            }
+                            app.input = format!("/analyze {path}");
+                            app.cursor = app.input.chars().count();
+                            app.add_system_message(&format!(
+                                "🌱 Selected `{path}` from Garden View — press Enter to run `/analyze {path}` or type your question."
+                            ));
+                        }
+                        continue;
+                    }
+                    KeyCode::Esc => {
+                        if layout_engine.is_zoomed() {
+                            layout_engine.toggle_zoom();
+                        }
+                        for pane_id in layout_engine.pane_ids() {
+                            if layout_engine
+                                .get_pane(pane_id)
+                                .is_some_and(|p| p.pane_type == PaneType::Chat)
+                            {
+                                layout_engine.set_focus(pane_id);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            let in_input_mode = ((app.is_input_editable() && !garden_focused)
+                || app.state == AppState::Palette)
+                && !show_help;
             let allow_q_quit =
                 !in_input_mode || (app.state != AppState::Palette && app.input.is_empty());
 
@@ -1309,15 +1426,45 @@ pub fn run_tui_dashboard_with_events(
                     }
                 }
                 KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
-                    for pane_id in layout_engine.pane_ids() {
-                        if let Some(pane) = layout_engine.get_pane(pane_id) {
-                            if pane.pane_type == PaneType::GardenView {
+                    let already_in_garden = garden_focused && layout_engine.is_zoomed();
+                    if already_in_garden {
+                        layout_engine.toggle_zoom();
+                        for pane_id in layout_engine.pane_ids() {
+                            if layout_engine
+                                .get_pane(pane_id)
+                                .is_some_and(|p| p.pane_type == PaneType::Chat)
+                            {
                                 layout_engine.set_focus(pane_id);
-                                layout_engine.toggle_zoom();
-                                with_dashboard_state(&shared_state, |state| {
-                                    state.log(LogLevel::Info, "Toggled garden view");
-                                });
                                 break;
+                            }
+                        }
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Info, "Returned from Garden View to Chat");
+                        });
+                    } else {
+                        if !layout_engine.pane_ids().iter().any(|id| {
+                            layout_engine
+                                .get_pane(*id)
+                                .is_some_and(|p| p.pane_type == PaneType::GardenView)
+                        }) {
+                            layout_engine.apply_preset(LayoutPreset::Dashboard);
+                        }
+                        for pane_id in layout_engine.pane_ids() {
+                            if let Some(pane) = layout_engine.get_pane(pane_id) {
+                                if pane.pane_type == PaneType::GardenView {
+                                    layout_engine.set_focus(pane_id);
+                                    if !layout_engine.is_zoomed() {
+                                        layout_engine.toggle_zoom();
+                                    }
+                                    garden_view.expand_selected();
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(
+                                            LogLevel::Info,
+                                            "Opened Garden View (↑↓/jk move, Enter expand, a all, i inspect, Esc/Ctrl+G chat)",
+                                        );
+                                    });
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1436,11 +1583,92 @@ pub fn run_tui_dashboard_with_events(
                                 });
                             }
                             let forwarded_input = if arg.is_empty() {
-                                cmd.to_string()
+                                if matches!(
+                                    raw_cmd,
+                                    "/scout" | "/gemma" | "/functiongemma" | "/failover"
+                                ) {
+                                    "/endpoint scout".to_string()
+                                } else {
+                                    cmd.to_string()
+                                }
                             } else {
                                 format!("{cmd} {arg}")
                             };
                             match cmd {
+                                "/tips" => {
+                                    let guide = App::format_tips_guide(arg);
+                                    app.add_system_message(&guide);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed Tips & Tricks guide");
+                                    });
+                                }
+                                "/garden" => {
+                                    let sub = arg.trim().to_ascii_lowercase();
+                                    match sub.as_str() {
+                                        "status" | "summary" | "report" => {
+                                            app.add_system_message(&garden_view.summary_report());
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    "Displayed Garden View status report",
+                                                );
+                                            });
+                                        }
+                                        "rescan" | "scan" | "refresh" => {
+                                            let scanned = crate::ui::garden::scan_directory(&cwd);
+                                            let tended = scanned.tended_fraction();
+                                            garden_view.set_garden(scanned);
+                                            if let Some(health) = tended {
+                                                with_dashboard_state(&shared_state, |state| {
+                                                    state.process_event(
+                                                        TuiEvent::GardenHealthUpdate { health },
+                                                    );
+                                                });
+                                            }
+                                            app.add_system_message(&garden_view.summary_report());
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    "Rescanned workspace garden",
+                                                );
+                                            });
+                                        }
+                                        _ => {
+                                            if sub == "expand" || sub == "all" {
+                                                garden_view.toggle_expand_all();
+                                            } else {
+                                                garden_view.expand_selected();
+                                            }
+                                            if !layout_engine.pane_ids().iter().any(|id| {
+                                                layout_engine.get_pane(*id).is_some_and(|p| {
+                                                    p.pane_type == PaneType::GardenView
+                                                })
+                                            }) {
+                                                layout_engine.apply_preset(LayoutPreset::Dashboard);
+                                            }
+                                            for pane_id in layout_engine.pane_ids() {
+                                                if layout_engine.get_pane(pane_id).is_some_and(
+                                                    |p| p.pane_type == PaneType::GardenView,
+                                                ) {
+                                                    layout_engine.set_focus(pane_id);
+                                                    if !layout_engine.is_zoomed() {
+                                                        layout_engine.toggle_zoom();
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                            app.add_system_message(
+                                                "🌳 Opened interactive Garden Explorer (`↑/↓/j/k` navigate · `Enter` expand/collapse · `a` expand all · `i` inspect in chat · `r` rescan · `Esc`/`Ctrl+G` return to chat). Run `/garden status` for a text report.",
+                                            );
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    "Opened interactive Garden View",
+                                                );
+                                            });
+                                        }
+                                    }
+                                }
                                 "/clear" => {
                                     app.clear_chat();
                                     // Also reset the Agent's model conversation so a
@@ -1467,6 +1695,8 @@ pub fn run_tui_dashboard_with_events(
                                              \n\
                                              Session & Queue:\n  \
                                                /help                    -- Show this help\n  \
+                                               /tips [chat|garden|phi|safety] -- Interactive Tips & Tricks Playbook\n  \
+                                               /garden [open|status|rescan|expand] -- Interactive Codebase Garden Explorer (Ctrl+G)\n  \
                                                /quit, /exit, /q         -- Quit the TUI\n  \
                                                /clear                   -- Clear chat history\n  \
                                                /status                  -- Show agent, memory & sandbox status\n  \
@@ -1481,7 +1711,9 @@ pub fn run_tui_dashboard_with_events(
                                                /unstuck [nudge|reset]   -- Nudge or recover a stuck/looping agent (Ctrl+U)\n  \
                                                /rollback [edit|stash|status] -- Undo last edit or git stash recovery (Ctrl+Z)\n  \
                                                /sandbox [on|off|status|run <cmd>] -- Safe container isolation for code dev (Ctrl+K)\n  \
-                                               /phi [hunt|screen|terminal|arena|status] -- Phi Fox visual & multi-terminal meta-agent (Ctrl+F)\n\
+                                               /endpoint [status|scout|gemma|<url>] -- Scout & failover to live endpoint via FunctionGemma\n  \
+                                               /model [<name>]          -- Show or hot-switch model profile\n  \
+                                               /phi [hunt|screen|terminal|endpoint|arena|status] -- Phi Fox visual & multi-terminal meta-agent (Ctrl+F)\n\
                                              \n\
                                              Plan Mode:\n  \
                                                /plan                    -- Enter plan mode (read-only tools only)\n  \
@@ -2297,11 +2529,31 @@ pub fn run_tui_dashboard_with_events(
                                                `/phi hunt [focus]`     — Launch Cross-Environment Visual & Terminal Bug Hunt\n    \
                                                `/phi screen [focus]`   — Capture screen & run visual window/UI audit\n    \
                                                `/phi terminal [focus]` — Enumerate & orchestrate PTY terminal sessions\n    \
+                                               `/phi endpoint`         — Load FunctionGemma 270M to scout & switch to a live endpoint\n    \
                                                `/phi arena`            — Open interactive Phi Fox Arena (`Ctrl+F`)",
                                             phi_arena::PHI_TEST_ENDPOINT_PRIMARY,
                                             phi_arena::PHI_TEST_ENDPOINT_LAN,
                                             phi_arena::PHI_TEST_MODEL,
                                         ));
+                                    } else if matches!(
+                                        sub_lower.as_str(),
+                                        "endpoint"
+                                            | "endpoints"
+                                            | "scout"
+                                            | "gemma"
+                                            | "functiongemma"
+                                            | "failover"
+                                    ) {
+                                        app.add_system_message(
+                                            "🦊 Phi Fox loading FunctionGemma 270M to scout and switch to a live endpoint...",
+                                        );
+                                        let _ = user_input_tx.send("/endpoint scout".to_string());
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(
+                                                LogLevel::Info,
+                                                "Phi Fox launched FunctionGemma endpoint scout",
+                                            );
+                                        });
                                     } else if sub_lower.is_empty() {
                                         phi_arena_refreshed = Instant::now();
                                         phi_arena_pane =
@@ -2370,12 +2622,27 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                                 // Agent-bridged slash commands handled in run_live_agent_tui
-                                "/doctor" | "/model" | "/undo" | "/redo" | "/resume"
-                                | "/review" | "/analyze" | "/explain" | "/scan" | "/mcp"
-                                | "/permissions" | "/bug" | "/agents" | "/journal" | "/garden"
+                                "/doctor" | "/model" | "/endpoint" | "/undo" | "/redo"
+                                | "/resume" | "/review" | "/analyze" | "/explain" | "/scan"
+                                | "/mcp" | "/permissions" | "/bug" | "/agents" | "/journal"
                                 | "/memory" | "/tools" => {
-                                    let _ = user_input_tx.send(forwarded_input);
-                                    app.add_system_message(&format!("{} → log panel", cmd));
+                                    let _ = user_input_tx.send(forwarded_input.clone());
+                                    if cmd == "/endpoint" {
+                                        if forwarded_input == "/endpoint"
+                                            || forwarded_input
+                                                .eq_ignore_ascii_case("/endpoint status")
+                                        {
+                                            app.add_system_message(
+                                                "🔌 Checking endpoint & model profiles → chat & log panel",
+                                            );
+                                        } else {
+                                            app.add_system_message(
+                                                "🦊 Scouting / switching endpoints → chat & log panel",
+                                            );
+                                        }
+                                    } else {
+                                        app.add_system_message(&format!("{} → log panel", cmd));
+                                    }
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(
                                             LogLevel::Info,
@@ -2844,7 +3111,7 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     let input_title = if app.state == AppState::RunningTask {
         " Input (⏳ Running — Enter to queue/steer, Ctrl+V paste, Ctrl+U unstuck, Esc cancel) "
     } else {
-        " Input (Enter to send, Ctrl+V paste, Ctrl+Y YOLO, /help) "
+        " Input (Enter to send, /tips Guide, Ctrl+G Garden, Ctrl+F Phi Fox, Ctrl+P Palette, /help) "
     };
     let input_block = Block::default()
         .borders(Borders::ALL)

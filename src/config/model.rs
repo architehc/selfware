@@ -220,6 +220,24 @@ pub struct ModelProfile {
     pub response_timeout_floor_secs: Option<u64>,
 }
 
+impl Default for ModelProfile {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            model: String::new(),
+            api_key: None,
+            max_tokens: default_max_tokens(),
+            temperature: default_temperature(),
+            modalities: default_modalities(),
+            context_length: default_context_length(),
+            extra_body: None,
+            native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
+        }
+    }
+}
+
 impl ModelProfile {
     /// Returns `true` if this model profile lists `"vision"` among its modalities.
     pub fn supports_vision(&self) -> bool {

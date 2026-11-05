@@ -105,13 +105,81 @@ pub struct App {
 }
 
 impl App {
+    /// Build the interactive Tips & Tricks guide for `/tips [topic]` in TUI Chat.
+    pub fn format_tips_guide(topic: &str) -> String {
+        match topic.trim().to_ascii_lowercase().as_str() {
+            "garden" | "tree" | "explorer" => {
+                "🌳 **Garden View Tips & Tricks (`/garden` | `Ctrl+G`)**:\n  \
+                 • **Open / Zoom**: Press `Ctrl+G` (or run `/garden`) to focus and zoom the interactive Garden Explorer full-screen.\n  \
+                 • **Navigate**: Use `↑`/`↓` or `j`/`k` to move through directories (beds) and files (plants).\n  \
+                 • **Expand / Collapse**: Press `Enter` or `Space` (or `→`/`l` and `←`/`h`) to expand or collapse a directory bed.\n  \
+                 • **Expand All**: Press `a` inside Garden View (or run `/garden expand`) to expand or collapse all beds at once.\n  \
+                 • **Inspect in Chat**: Press `i` on any selected file or directory to jump back to Chat and analyze it.\n  \
+                 • **Rescan & Status**: Press `r` (or run `/garden rescan`) to refresh file metrics; run `/garden status` for a text summary in chat.\n  \
+                 • **Return to Chat**: Press `Esc`, `Ctrl+G`, or `Tab` to return focus to the Chat input."
+                    .to_string()
+            }
+            "chat" | "queue" | "input" => {
+                "💬 **Chat & Live Steering Tips**:\n  \
+                 • **Type & Queue Anytime**: You never have to wait for a run to finish! Type a follow-up instruction while the agent is working and press `Enter` to queue it (`📨 /queue list`, `/queue clear`).\n  \
+                 • **Clipboard Paste**: Press `Ctrl+V` (or terminal paste) to paste multi-line snippets or stack traces.\n  \
+                 • **Scroll Chat History**: Use `↑`/`↓` when Chat is focused to scroll through earlier messages.\n  \
+                 • **Command Palette**: Press `Ctrl+P` to fuzzy-search all slash commands and actions.\n  \
+                 • **Context & Memory**: Use `/ctx`, `/memory`, `/cost`, `/compact` (to compress long history), or `/clear` (to start fresh)."
+                    .to_string()
+            }
+            "phi" | "fox" | "endpoint" | "gemma" | "failover" => {
+                "🦊 **Phi Fox Meta-Agent & FunctionGemma Endpoint Failover**:\n  \
+                 • **Phi Fox Arena (`Ctrl+F` or `/phi`)**: Interactive HUD with `[m]` Cross-Env Bug Hunt, `[s]` Visual Screen Audit, `[t]` Multi-Terminal PTY Manager, `[e]` FunctionGemma Endpoint Scout, `[b]` Boss Drill, and `[v]` Lean 4 Proof Drill.\n  \
+                 • **Direct Missions**: Run `/phi hunt [focus]`, `/phi screen`, or `/phi terminal` directly from Chat.\n  \
+                 • **FunctionGemma 270M Endpoint Scout (`/endpoint scout` | `/scout` | `/gemma`)**: When your primary endpoint is down, Selfware loads local FunctionGemma 270M IT (`:8787`), probes candidate LAN/local/profile endpoints concurrently, and switches to the best verified live server automatically."
+                    .to_string()
+            }
+            "safety" | "sandbox" | "recovery" | "unstuck" => {
+                "🛡️ **Recovery, Safety & Container Sandbox Tips**:\n  \
+                 • **YOLO vs Normal Mode (`Ctrl+Y` or `/yolo`)**: Toggle auto-approval of tools (hard safety floor is always active).\n  \
+                 • **Unstuck a Stalled Task (`Ctrl+U` or `/unstuck`)**: Nudge the agent if a step stalls, or run `/unstuck reset` to clear progress state.\n  \
+                 • **Undo / Rollback (`Ctrl+Z` or `/rollback`)**: Immediately revert the last agent file edit or inspect git recovery checkpoints.\n  \
+                 • **Container Sandbox (`Ctrl+K` or `/sandbox on`)**: Isolate command execution inside Docker/Podman (`--network none --cap-drop ALL`).\n  \
+                 • **Cancel Task (`Esc`)**: Press `Esc` with an empty input box to cancel the in-flight task."
+                    .to_string()
+            }
+            _ => {
+                "💡 **Selfware UI Chat — Tips & Tricks Playbook** (`/tips [chat|garden|phi|safety]`):\n\
+                 \n\
+                 1. 💬 **Chat & Live Steering**:\n  \
+                    • Type a prompt and press `Enter`. While a task is running, keep typing and press `Enter` to **queue/steer** follow-up instructions (`📨 /queue`).\n  \
+                    • Press `Ctrl+P` to open the fuzzy **Command Palette**, or `Ctrl+V` to paste from the system clipboard.\n\
+                 \n\
+                 2. 🌳 **Interactive Garden View (`Ctrl+G` or `/garden`)**:\n  \
+                    • Press `Ctrl+G` (or run `/garden`) to zoom the codebase **Garden Explorer**.\n  \
+                    • Inside Garden View: `↑/↓` or `j/k` to navigate · `Enter`/`Space` to expand/collapse a directory bed · `a` to expand/collapse all · `i` to inspect the selected file/bed in Chat · `r` to rescan · `Esc`/`Ctrl+G` to return to Chat.\n  \
+                    • Run `/garden status` for a quick codebase health & directory table right in Chat.\n\
+                 \n\
+                 3. 🦊 **Phi Fox & FunctionGemma Endpoint Failover (`Ctrl+F`, `/phi`, `/endpoint`)**:\n  \
+                    • Press `Ctrl+F` (or `/phi`) for the **Phi Fox Arena**: `[m]` Bug Hunt · `[s]` Screen Audit · `[t]` Multi-Terminal · `[e]` Endpoint Scout.\n  \
+                    • Endpoint down? Run `/endpoint scout` (or `/gemma`) to load local **FunctionGemma 270M** and automatically switch to a verified live LAN/local endpoint.\n\
+                 \n\
+                 4. 🛡️ **Recovery, Undo & Container Isolation**:\n  \
+                    • `Ctrl+Y` (`/yolo`) toggle auto-approval · `Ctrl+K` (`/sandbox`) toggle container isolation · `Ctrl+U` (`/unstuck`) nudge stalled task · `Ctrl+Z` (`/rollback`) undo last edit · `Esc` cancel run.\n\
+                 \n\
+                 5. 📐 **Layouts & Panes**:\n  \
+                    • `Tab` / `Shift+Tab` cycle focus between panes · `z` zoom focused pane · `Ctrl+D` toggle Dashboard/Focus chat · `Ctrl+T` Tasks manager · `?` keyboard shortcuts."
+                    .to_string()
+            }
+        }
+    }
+
     /// Create a new app instance
     pub fn new(model: &str) -> Self {
         Self {
             state: AppState::Chatting,
             messages: vec![ChatMessage {
                 role: MessageRole::System,
-                content: "Welcome to your workshop. How can I help you tend your garden today?"
+                content: "Welcome to your Selfware workshop! 🦊🌱\n\
+                          • Quick Start: Type any coding task and press Enter (while running, press Enter to queue follow-ups).\n\
+                          • Power Keys:  Ctrl+P Palette · Ctrl+G Garden Explorer · Ctrl+F Phi Fox Arena · Ctrl+Y YOLO · Ctrl+K Sandbox · ? Help\n\
+                          • Commands:    /tips (Tips & Tricks) · /garden (Codebase Tree) · /endpoint scout (FunctionGemma Failover) · /phi hunt · /workflow"
                     .into(),
                 timestamp: chrono::Local::now().format("%H:%M").to_string(),
             }],

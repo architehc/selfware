@@ -8,12 +8,19 @@
 pub mod cards;
 pub mod chat;
 pub mod check;
+pub mod endpoint_scout;
 pub mod model;
 pub mod wizard;
 
 pub use cards::{find_card, RecipeCard, CARDS};
 pub use chat::{retrieve_bundled_snippet, retrieve_snippet};
 pub use check::{BootCheck, BootCheckStatus};
+pub use endpoint_scout::{
+    build_functiongemma_scout_prompt, candidate_endpoints_for_config,
+    ensure_functiongemma_scout_server, is_endpoint_down_error, parse_functiongemma_selected_index,
+    probe_openai_endpoint, rank_best_candidate_index, scout_and_select_endpoint,
+    EndpointScoutReport, ScoutedEndpoint,
+};
 pub use model::{
     boot_dir, build_server_args_with_context, bundled_llama_server_candidates,
     bundled_model_candidates, current_platform_llama_runtime_spec, ensure_background_boot_server,

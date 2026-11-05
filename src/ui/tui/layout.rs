@@ -478,7 +478,19 @@ impl LayoutEngine {
                         (first_rect, second_rect)
                     }
                     SplitDirection::Vertical => {
-                        let first_height = (area.height as f32 * ratio) as u16;
+                        let is_status_bar = match first.as_ref() {
+                            LayoutNode::Pane(id) => self
+                                .panes
+                                .get(id)
+                                .is_some_and(|p| p.pane_type == PaneType::StatusBar),
+                            _ => false,
+                        };
+                        let raw_first = (area.height as f32 * ratio) as u16;
+                        let first_height = if is_status_bar && area.height >= 6 {
+                            raw_first.max(3).min(area.height)
+                        } else {
+                            raw_first.max(1).min(area.height)
+                        };
                         let second_height = area.height.saturating_sub(first_height);
 
                         let first_rect = Rect::new(area.x, area.y, area.width, first_height);

@@ -2470,9 +2470,24 @@ To call a tool, use this EXACT XML structure:
                     let profile = match profiles.as_slice() {
                         [profile] => profile.clone(),
                         [] if crate::config::is_local_endpoint(target) => {
-                            let model = std::env::var("SELFWARE_LOCAL_MODEL").ok()
+                            let model = match std::env::var("SELFWARE_LOCAL_MODEL")
+                                .ok()
                                 .filter(|value| !value.trim().is_empty())
-                                .ok_or_else(|| anyhow::anyhow!("Endpoint fallback needs a complete [models.fallback] profile for '{redacted_target}', or SELFWARE_LOCAL_MODEL for a local server; the current provider's model and credentials cannot be reused"))?;
+                            {
+                                Some(m) => m,
+                                None => crate::boot::endpoint_scout::probe_openai_endpoint(
+                                    target,
+                                    "Local Fallback",
+                                    std::env::var("SELFWARE_LOCAL_API_KEY").ok().as_deref(),
+                                    None,
+                                    None,
+                                    None,
+                                    std::time::Duration::from_millis(2000),
+                                )
+                                .await
+                                .map(|s| s.model)
+                                .ok_or_else(|| anyhow::anyhow!("Endpoint fallback needs a complete [models.fallback] profile for '{redacted_target}', or SELFWARE_LOCAL_MODEL for a local server; the current provider's model and credentials cannot be reused"))?,
+                            };
                             let defaults = crate::config::Config::default();
                             let matched = crate::config::match_profile(&model);
                             let context_length = matched
@@ -4105,6 +4120,103 @@ To call a tool, use this EXACT XML structure:
             return Ok(previous);
         }
         self.switch_model(model)
+    }
+
+    /// Apply a verified [`crate::boot::endpoint_scout::ScoutedEndpoint`] to this
+    /// session, preserving credential isolation (never forwarding the previous
+    /// origin's `api_key` to an unconfigured third-party endpoint) and updating
+    /// context window budgets.
+    pub fn apply_scouted_endpoint(
+        &mut self,
+        scouted: &crate::boot::endpoint_scout::ScoutedEndpoint,
+    ) -> Result<()> {
+        let defaults = crate::config::Config::default();
+        let matched = crate::config::match_profile(&scouted.model);
+        let profile = if let Some(existing) = scouted
+            .profile_name
+            .as_deref()
+            .and_then(|name| self.config.models.get(name))
+            .cloned()
+        {
+            let mut p = existing;
+            p.endpoint = scouted.endpoint.clone();
+            p.model = scouted.model.clone();
+            if scouted.context_length > 0 {
+                p.context_length = scouted.context_length;
+            }
+            p
+        } else {
+            let context_length = if scouted.context_length > 0 {
+                scouted.context_length
+            } else {
+                matched
+                    .as_ref()
+                    .and_then(|p| p.context_length)
+                    .unwrap_or(crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH)
+            };
+            let max_tokens = matched
+                .as_ref()
+                .and_then(|p| p.max_tokens)
+                .unwrap_or(8192)
+                .min(context_length / 2)
+                .max(1024);
+            let temperature = matched
+                .as_ref()
+                .and_then(|p| p.temperature)
+                .unwrap_or(defaults.temperature);
+            let native_function_calling = matched.and_then(|p| p.native_function_calling);
+            let api_key = if crate::config::is_local_endpoint(&scouted.endpoint) {
+                std::env::var("SELFWARE_LOCAL_API_KEY")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(crate::config::RedactedString::new)
+            } else {
+                None
+            };
+            crate::config::ModelProfile {
+                endpoint: scouted.endpoint.clone(),
+                model: scouted.model.clone(),
+                api_key,
+                max_tokens,
+                temperature,
+                context_length,
+                modalities: vec!["text".to_string()],
+                extra_body: None,
+                native_function_calling,
+                max_retries: None,
+                response_timeout_floor_secs: None,
+            }
+        };
+
+        let mut config = self.config.clone();
+        config.endpoint = profile.endpoint.clone();
+        config.model = profile.model.clone();
+        config.api_key = profile.api_key.clone();
+        config.max_tokens = profile.max_tokens;
+        config.temperature = profile.temperature;
+        config.context_length = profile.context_length;
+        config.extra_body = profile.extra_body.clone();
+        config.agent.native_function_calling =
+            profile.effective_native_function_calling(config.agent.native_function_calling);
+        config.models.insert("default".to_string(), profile);
+        self.install_config(config)
+    }
+
+    /// When the primary LLM endpoint is down, load local FunctionGemma 270M IT
+    /// (`functiongemma-270m-it` on `127.0.0.1:8787`), probe candidate endpoints,
+    /// use FunctionGemma to pick the best live endpoint, and switch the session to it.
+    pub async fn recover_unreachable_endpoint_with_functiongemma(
+        &mut self,
+        allow_boot_spawn: bool,
+    ) -> Result<Option<crate::boot::endpoint_scout::EndpointScoutReport>> {
+        let report =
+            crate::boot::endpoint_scout::scout_and_select_endpoint(&self.config, allow_boot_spawn)
+                .await;
+        if let Some(chosen) = report.selected() {
+            self.apply_scouted_endpoint(chosen)?;
+            return Ok(Some(report));
+        }
+        Ok(None)
     }
 
     /// Replace the session configuration and rebuild the API client from it
