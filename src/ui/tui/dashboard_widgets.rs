@@ -256,11 +256,13 @@ impl DashboardState {
             }
             TuiEvent::AgentCompleted { message } => {
                 self.connected = true;
+                self.active_tools.clear();
                 self.status_message = "Ready".to_string();
                 self.log(LogLevel::Success, &format!("Completed: {}", message));
             }
             TuiEvent::AgentError { message } => {
                 self.connected = false;
+                self.active_tools.clear();
                 self.status_message = format!("Error: {}", truncate_for_display(&message, 30));
                 self.log(LogLevel::Error, &message);
             }
@@ -353,9 +355,14 @@ impl DashboardState {
                 );
             }
             TuiEvent::RunOutcome { summary } => {
+                self.active_tools.clear();
                 let level = if summary.starts_with('✅') {
+                    self.status_message = "Ready".to_string();
                     LogLevel::Success
                 } else {
+                    if let Some(first_line) = summary.lines().find(|l| !l.trim().is_empty()) {
+                        self.status_message = truncate_for_display(first_line.trim(), 48);
+                    }
                     LogLevel::Warning
                 };
                 for line in summary.lines().filter(|l| !l.trim().is_empty()) {

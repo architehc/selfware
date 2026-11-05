@@ -108,7 +108,8 @@ impl ScreenCapture {
 
         let monitor = monitors
             .into_iter()
-            .next()
+            .find(|m| m.is_primary())
+            .or_else(|| xcap::Monitor::all().ok().and_then(|m| m.into_iter().next()))
             .ok_or_else(|| anyhow::anyhow!("No monitors found"))?;
 
         let image = monitor
@@ -125,8 +126,8 @@ impl ScreenCapture {
             .save(&tmp_path)
             .map_err(|e| anyhow::anyhow!("PNG encoding failed: {}", e))?;
 
-        // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
-        let png_data = tokio::task::block_in_place(|| std::fs::read(&tmp_path))?;
+        // Use run_blocking so current-thread Tokio runtimes do not panic on block_in_place
+        let png_data = crate::tools::screen_capture::run_blocking(|| std::fs::read(&tmp_path))?;
         use base64::Engine as _;
         let base64_png = base64::engine::general_purpose::STANDARD.encode(&png_data);
 
@@ -147,7 +148,11 @@ impl ScreenCapture {
         std::fs::write(script.path(), Self::windows_capture_script())
             .context("Failed to write temporary PowerShell script")?;
 
-        let windows_script_path = Self::wsl_to_windows_path(script.path())?;
+        let windows_script_path = if cfg!(target_os = "windows") {
+            script.path().to_string_lossy().to_string()
+        } else {
+            Self::wsl_to_windows_path(script.path())?
+        };
         let mut cmd = Command::new("powershell.exe");
         crate::safety::process_env::sanitize_std_command_env_preserve(
             &mut cmd,
@@ -264,8 +269,8 @@ $stream.Dispose()
     }
 
     fn can_use_wsl_windows_capture() -> bool {
-        Self::is_wsl_environment()
-            && Self::command_succeeds("wslpath", &["-w", "/tmp"])
+        (cfg!(target_os = "windows")
+            || (Self::is_wsl_environment() && Self::command_succeeds("wslpath", &["-w", "/tmp"])))
             && Self::command_succeeds(
                 "powershell.exe",
                 &["-NoProfile", "-Command", "Write-Output ok"],

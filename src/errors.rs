@@ -576,6 +576,13 @@ pub fn is_gateway_timeout_error(e: &anyhow::Error) -> bool {
         .any(|cause| matches!(as_api_error(cause), Some(ApiError::GatewayTimeout { .. })))
 }
 
+/// True when the error chain carries a per-call wall-time cap stop
+/// ([`crate::api::client::CallTimeBudgetExceeded`], i.e. `CALL_TIME_CAP`).
+pub fn is_call_time_budget_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| cause.is::<crate::api::client::CallTimeBudgetExceeded>())
+}
+
 /// True when a streamed response produced SSE chunks (`content`, `reasoning`,
 /// or `tool_calls`) and was then cut mid-stream before reaching `[DONE]` or
 /// `finish_reason`. Because SSE streaming already worked on this call, falling

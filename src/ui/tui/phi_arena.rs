@@ -57,6 +57,64 @@ pub struct PhiArenaPane {
 pub enum PhiArenaAction {
     Close,
     Log(String),
+    LaunchMission { label: String, prompt: String },
+}
+
+/// Default Red-Team / Test Server primary and LAN fallback endpoints used by Phi Fox.
+pub const PHI_TEST_ENDPOINT_PRIMARY: &str = "https://ivo.ngrok.dev/v1";
+pub const PHI_TEST_ENDPOINT_LAN: &str = "http://192.168.1.224:8000/v1";
+pub const PHI_TEST_MODEL: &str = "qwen3.8-27b";
+
+/// Build a structured Phi Fox Meta-Agent mission prompt (`(label, prompt)`).
+///
+/// Supported modes:
+/// - `"hunt"` (default): Cross-environment bug hunt combining `pty_shell`,
+///   `screen_capture` + `vision_analyze`, container checks, and test-server probes.
+/// - `"screen"`: Visual screen & window reader mission (`screen_capture`,
+///   `computer_window`, `vision_analyze`, `pty_shell`).
+/// - `"terminal"`: Multi-terminal & background process manager mission (`pty_shell`
+///   `list`/`start`/`send`/`read`/`status`/`close` + `process_list`).
+pub fn build_phi_meta_agent_mission(mode: &str, extra_focus: Option<&str>) -> (String, String) {
+    let focus_suffix = extra_focus
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\n\nAdditional user focus: {s}"))
+        .unwrap_or_default();
+
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "screen" | "visual" | "vision" => (
+            "Phi Fox Meta-Agent: Visual Screen & Window Audit".to_string(),
+            format!(
+                "You are **Phi Fox (`🦊`)**, the visual & multi-terminal meta-agent.\n\
+                 Execute a Visual Screen & Terminal Audit:\n\
+                 1. Call `pty_shell` with `{{\"action\": \"list\"}}` and `computer_window` with `{{\"action\": \"list\"}}` to inventory active terminals and desktop windows.\n\
+                 2. Call `screen_capture` to capture the live screen (falling back gracefully if running on a headless display) and inspect the resulting screenshot with `vision_analyze`.\n\
+                 3. Report any frozen UI states, clipped terminal regions, layout anomalies, or cross-platform screen capture issues with exact `file:line` citations.{focus_suffix}"
+            ),
+        ),
+        "terminal" | "terminals" | "pty" => (
+            "Phi Fox Meta-Agent: Multi-Terminal Orchestrator".to_string(),
+            format!(
+                "You are **Phi Fox (`🦊`)**, the visual & multi-terminal meta-agent.\n\
+                 Execute a Multi-Terminal & Process Orchestration pass:\n\
+                 1. Call `pty_shell` with `{{\"action\": \"list\"}}` and `process_list` to enumerate all active PTY terminals and managed background processes.\n\
+                 2. Start or inspect a diagnostic terminal session with `pty_shell` (`start` -> `send` -> `read` -> `status`) to verify shell health, working directory, and environment variables across the current OS.\n\
+                 3. Summarize active terminal states, diagnose any stuck or failing commands, and clean up temporary sessions with `pty_shell` `{{\"action\": \"close\"}}`.{focus_suffix}"
+            ),
+        ),
+        _ => (
+            "Phi Fox Meta-Agent: Cross-Environment Visual & Terminal Bug Hunt".to_string(),
+            format!(
+                "You are **Phi Fox (`🦊`)**, the visual screen-reading and multi-terminal meta-agent.\n\
+                 Your starter mission is to **find cross-environment bugs** across Windows, macOS, Linux, and container sandboxes while using the configured test server endpoint (`{PHI_TEST_ENDPOINT_PRIMARY}` or LAN `{PHI_TEST_ENDPOINT_LAN}`, model `{PHI_TEST_MODEL}`).\n\n\
+                 Execute the following workflow:\n\
+                 1. **Multi-Terminal & Environment Probe**: Use `pty_shell` (`{{\"action\": \"list\"}}`, then `{{\"action\": \"start\"}}` / `{{\"action\": \"send\"}}` / `{{\"action\": \"read\"}}`) and `process_list` to inspect the runtime OS, shell, display server, container availability, and test endpoint connectivity.\n\
+                 2. **Visual Screen Perception**: Use `screen_capture` (and `computer_window` / `vision_analyze` when a display is present) to visually verify terminal/UI state or confirm clean headless fallback behavior.\n\
+                 3. **Cross-Environment Bug Hunt**: Audit and test code paths where Windows (`cmd.exe`/PowerShell, drive-letter paths `C:\\...`, `KeyEventKind::Release`, non-Unix PTY sessions), macOS, Linux (X11/Wayland/headless), and containers diverge.\n\
+                 4. **Grounded Report**: Present every discovered bug or verified invariant with exact `file:line` citations, reproduction steps, and concrete fixes.{focus_suffix}"
+            ),
+        ),
+    }
 }
 
 impl PhiArenaPane {
@@ -278,6 +336,33 @@ impl PhiArenaPane {
                 let emo = if self.god_mode { "god_mode" } else { "curious" };
                 self.speak(msg, emo, None);
                 None
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                let (label, prompt) = build_phi_meta_agent_mission("hunt", None);
+                self.speak(
+                    "Launching Phi Fox Meta-Agent cross-environment bug hunt!",
+                    "working",
+                    None,
+                );
+                Some(PhiArenaAction::LaunchMission { label, prompt })
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                let (label, prompt) = build_phi_meta_agent_mission("screen", None);
+                self.speak(
+                    "Launching Phi Fox Visual Screen & Window Audit!",
+                    "working",
+                    None,
+                );
+                Some(PhiArenaAction::LaunchMission { label, prompt })
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                let (label, prompt) = build_phi_meta_agent_mission("terminal", None);
+                self.speak(
+                    "Launching Phi Fox Multi-Terminal Orchestrator!",
+                    "working",
+                    None,
+                );
+                Some(PhiArenaAction::LaunchMission { label, prompt })
             }
             _ => None,
         }
@@ -557,6 +642,12 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
     // 4. Hotkey Footer
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(" Keys: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("[m]", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::raw(" Meta-Hunt  "),
+        Span::styled("[s]", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::raw(" Screen  "),
+        Span::styled("[t]", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::raw(" Term  "),
         Span::styled("[r]", Style::default().fg(Color::Rgb(245, 158, 11))),
         Span::raw(" Red?  "),
         Span::styled("[d]", Style::default().fg(Color::Rgb(245, 158, 11))),
@@ -564,13 +655,13 @@ pub fn render_phi_arena(frame: &mut Frame, area: Rect, pane: &mut PhiArenaPane, 
         Span::styled("[h]", Style::default().fg(Color::Rgb(245, 158, 11))),
         Span::raw(" Hunt  "),
         Span::styled("[b]", Style::default().fg(Color::Rgb(245, 158, 11))),
-        Span::raw(" Boss Drill  "),
+        Span::raw(" Boss  "),
         Span::styled("[v]", Style::default().fg(Color::Rgb(56, 189, 248))),
-        Span::raw(" Proof Drill  "),
+        Span::raw(" Proof  "),
         Span::styled("[1-3]", Style::default().fg(Color::Rgb(56, 189, 248))),
         Span::raw(" Strike  "),
         Span::styled("[g]", Style::default().fg(Color::Rgb(245, 158, 11))),
-        Span::raw(" GodMode  "),
+        Span::raw(" God  "),
         Span::styled("[Esc/q]", Style::default().fg(Color::Rgb(245, 158, 11))),
         Span::raw(" Close"),
     ]));
@@ -754,5 +845,49 @@ mod tests {
                 crossterm::event::KeyEventKind::Release,
             ))
             .is_none());
+    }
+
+    #[test]
+    fn phi_fox_meta_agent_hotkeys_launch_cross_env_screen_and_terminal_missions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pane = PhiArenaPane::new(dir.path().to_path_buf());
+
+        let m_action = pane
+            .on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+            .expect("m launches meta-agent mission");
+        match m_action {
+            PhiArenaAction::LaunchMission { label, prompt } => {
+                assert!(label.contains("Cross-Environment"));
+                assert!(prompt.contains(PHI_TEST_ENDPOINT_PRIMARY));
+                assert!(prompt.contains(PHI_TEST_MODEL));
+                assert!(prompt.contains("pty_shell"));
+                assert!(prompt.contains("screen_capture"));
+            }
+            other => panic!("unexpected action for [m]: {other:?}"),
+        }
+
+        let s_action = pane
+            .on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .expect("s launches visual screen mission");
+        match s_action {
+            PhiArenaAction::LaunchMission { label, prompt } => {
+                assert!(label.contains("Visual Screen"));
+                assert!(prompt.contains("screen_capture"));
+                assert!(prompt.contains("vision_analyze"));
+            }
+            other => panic!("unexpected action for [s]: {other:?}"),
+        }
+
+        let t_action = pane
+            .on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))
+            .expect("t launches terminal mission");
+        match t_action {
+            PhiArenaAction::LaunchMission { label, prompt } => {
+                assert!(label.contains("Multi-Terminal"));
+                assert!(prompt.contains("pty_shell"));
+                assert!(prompt.contains("process_list"));
+            }
+            other => panic!("unexpected action for [t]: {other:?}"),
+        }
     }
 }

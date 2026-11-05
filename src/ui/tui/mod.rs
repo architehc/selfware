@@ -451,11 +451,13 @@ fn apply_agent_event(
                 app.add_assistant_message(message);
             }
             app.clear_progress();
+            *pending_permission = None;
         }
         TuiEvent::AgentError { message } => {
             app.clear_streaming();
             app.add_system_message(&format!("Error: {}", message));
             app.clear_progress();
+            *pending_permission = None;
         }
         TuiEvent::AgentStarted => {
             app.set_progress(TaskProgress {
@@ -500,6 +502,8 @@ fn apply_agent_event(
         TuiEvent::RunOutcome { summary } => {
             app.commit_streaming();
             app.add_system_message(summary);
+            app.clear_progress();
+            *pending_permission = None;
         }
         _ => {}
     }
@@ -639,6 +643,7 @@ pub(crate) fn resolve_forgiving_slash_command(cmd: &str) -> (&str, Option<&'stat
         "/cmp" | "/compress" => ("/compact", Some("/compact")),
         "/context" => ("/ctx", Some("/ctx")),
         "/tokens" | "/usage" => ("/cost", Some("/cost")),
+        "/fox" | "/meta" | "/phi-fox" | "/phifox" => ("/phi", Some("/phi")),
         _ => (cmd, None),
     }
 }
@@ -840,10 +845,24 @@ pub fn run_tui_dashboard_with_events(
             match event_rx.try_recv() {
                 Ok(event) => {
                     // While the display is paused, hold pure display events
-                    // and replay them on resume. Permission prompts are NEVER
-                    // held: the agent blocks until it gets an answer, so
-                    // holding one would deadlock the run.
-                    if paused && !matches!(event, TuiEvent::PermissionRequested { .. }) {
+                    // and replay them on resume. Permission prompts and
+                    // terminal run events (AgentCompleted, AgentError,
+                    // RunOutcome) are NEVER held behind pause — holding them
+                    // would either deadlock a permission prompt or leave a
+                    // finished/aborted task looking frozen on screen.
+                    let is_terminal_event = matches!(
+                        event,
+                        TuiEvent::AgentCompleted { .. }
+                            | TuiEvent::AgentError { .. }
+                            | TuiEvent::RunOutcome { .. }
+                    );
+                    if paused && is_terminal_event {
+                        paused = false;
+                        for held in held_events.drain(..) {
+                            apply_agent_event(&mut app, &mut pending_permission, &held);
+                            with_dashboard_state(&shared_state, |state| state.process_event(held));
+                        }
+                    } else if paused && !matches!(event, TuiEvent::PermissionRequested { .. }) {
                         held_events.push(event);
                         continue;
                     }
@@ -861,6 +880,19 @@ pub fn run_tui_dashboard_with_events(
                     break;
                 }
             }
+        }
+
+        // Self-heal if the task lifecycle already reached a terminal state
+        // (e.g. TimedOut / CALL_TIME_CAP / Failed / Cancelled / Succeeded)
+        // while `app.state` was still `RunningTask`.
+        if app.state == AppState::RunningTask
+            && task_control
+                .snapshot()
+                .is_some_and(|live| live.state.is_terminal())
+        {
+            app.clear_progress();
+            pending_permission = None;
+            needs_redraw = true;
         }
 
         // Only redraw if enough time has passed and something changed
@@ -1050,6 +1082,32 @@ pub fn run_tui_dashboard_with_events(
                             with_dashboard_state(&shared_state, |state| {
                                 state.log(LogLevel::Info, &msg);
                             });
+                        }
+                        Some(phi_arena::PhiArenaAction::LaunchMission { label, prompt }) => {
+                            phi_arena_pane = None;
+                            let task_terminal = task_control
+                                .snapshot()
+                                .is_some_and(|live| live.state.is_terminal());
+                            if app.state != AppState::RunningTask || task_terminal {
+                                app.add_system_message(&format!(
+                                    "🦊 Launching {label} (visual screen + PTY terminals + container tools pre-activated)..."
+                                ));
+                                app.add_user_message(&prompt);
+                                app.state = AppState::RunningTask;
+                                let _ = user_input_tx.send(prompt);
+                            } else {
+                                let queued_total = task_control.enqueue_user_message(prompt);
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.queued_count = queued_total;
+                                    state.log(
+                                        LogLevel::Info,
+                                        &format!("Queued {label} (#{queued_total})"),
+                                    );
+                                });
+                                app.add_system_message(&format!(
+                                    "🦊 Queued {label} (#{queued_total} in `/queue`)."
+                                ));
+                            }
                         }
                         None => {}
                     }
@@ -1422,7 +1480,8 @@ pub fn run_tui_dashboard_with_events(
                                                /mode [mode]             -- Cycle or set mode (normal|yolo|auto-edit|daemon)\n  \
                                                /unstuck [nudge|reset]   -- Nudge or recover a stuck/looping agent (Ctrl+U)\n  \
                                                /rollback [edit|stash|status] -- Undo last edit or git stash recovery (Ctrl+Z)\n  \
-                                               /sandbox [on|off|status|run <cmd>] -- Safe container isolation for code dev (Ctrl+K)\n\
+                                               /sandbox [on|off|status|run <cmd>] -- Safe container isolation for code dev (Ctrl+K)\n  \
+                                               /phi [hunt|screen|terminal|arena|status] -- Phi Fox visual & multi-terminal meta-agent (Ctrl+F)\n\
                                              \n\
                                              Plan Mode:\n  \
                                                /plan                    -- Enter plan mode (read-only tools only)\n  \
@@ -1434,7 +1493,7 @@ pub fn run_tui_dashboard_with_events(
                                                /git                     -- Show git status\n  \
                                                /skills                  -- List available skills (/<skill> to run)\n\
                                              \n\
-                                             Keyboard: Enter (send, or queue while running), Ctrl+V (paste clipboard), Ctrl+Y (YOLO), Ctrl+U (unstuck), Ctrl+Z (rollback), Ctrl+K (container sandbox), Esc (cancel task), Ctrl+T (tasks), Tab (cycle panes)"
+                                             Keyboard: Enter (send, or queue while running), Ctrl+V (paste clipboard), Ctrl+Y (YOLO), Ctrl+U (unstuck), Ctrl+Z (rollback), Ctrl+K (container sandbox), Ctrl+F (Phi Fox Arena), Esc (cancel task), Ctrl+T (tasks), Tab (cycle panes)"
                                         );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Displayed help text");
@@ -1770,6 +1829,7 @@ pub fn run_tui_dashboard_with_events(
                                                    `/workflow bugfix <goal>`        — Stage 1: Reproduce & root-cause → Stage 2: Fix → Stage 3: Regression test\n    \
                                                    `/workflow contained-dev <goal>` — Enables 📦 Container Sandbox (`--network none --cap-drop ALL`) + Plan → Code → Verify\n    \
                                                    `/workflow redteam <goal>`       — Stage 1: Threat surface → Stage 2: Exploit/Safety check → Stage 3: Harden\n    \
+                                                   `/workflow phi <goal>`           — 🦊 Phi Fox Meta-Agent: Visual Screen + Multi-Terminal + Cross-Environment Bug Hunt\n    \
                                                    `/workflow ship <goal>`          — Stage 1: fmt/clippy/test gate → Stage 2: Docs/changelog → Stage 3: Release check\n  \
                                                  • Workspace SWL/YAML workflows: {}\n  \
                                                  • Scaffold new SWL workflow: `/workflow init <name>`\n  \
@@ -1810,8 +1870,8 @@ pub fn run_tui_dashboard_with_events(
                                                 }
                                             }
                                         }
-                                        "tdd" | "bugfix" | "contained-dev" | "redteam" | "ship"
-                                        | "preset" => {
+                                        "tdd" | "bugfix" | "contained-dev" | "redteam" | "phi"
+                                        | "ship" | "preset" => {
                                             let (preset_name, goal) = if verb_lower == "preset" {
                                                 rest.trim()
                                                     .split_once(' ')
@@ -1819,11 +1879,16 @@ pub fn run_tui_dashboard_with_events(
                                             } else {
                                                 (verb_lower.as_str(), rest.trim())
                                             };
-                                            if goal.is_empty() {
+                                            if goal.is_empty() && preset_name != "phi" {
                                                 app.add_system_message(&format!(
                                                     "Usage: `/workflow {preset_name} <goal>` — e.g. `/workflow {preset_name} fix timeout handling in client`"
                                                 ));
                                             } else {
+                                                let effective_goal = if goal.is_empty() {
+                                                    "find cross-environment bugs across terminals, visual screen capture, and container sandboxes"
+                                                } else {
+                                                    goal
+                                                };
                                                 if preset_name == "contained-dev" {
                                                     task_control.set_sandbox_enabled(true);
                                                     with_dashboard_state(&shared_state, |state| {
@@ -1833,29 +1898,34 @@ pub fn run_tui_dashboard_with_events(
                                                 }
                                                 let stages: Vec<String> = match preset_name {
                                                     "tdd" => vec![
-                                                        format!("[Workflow: TDD — Stage 1/3 (Red)] Write or identify a focused failing test for: {goal}"),
-                                                        format!("[Workflow: TDD — Stage 2/3 (Green)] Implement the minimal code change to make the test pass for: {goal}"),
-                                                        format!("[Workflow: TDD — Stage 3/3 (Refactor & Verify)] Run tests, check edge cases, and summarize verification for: {goal}"),
+                                                        format!("[Workflow: TDD — Stage 1/3 (Red)] Write or identify a focused failing test for: {effective_goal}"),
+                                                        format!("[Workflow: TDD — Stage 2/3 (Green)] Implement the minimal code change to make the test pass for: {effective_goal}"),
+                                                        format!("[Workflow: TDD — Stage 3/3 (Refactor & Verify)] Run tests, check edge cases, and summarize verification for: {effective_goal}"),
                                                     ],
                                                     "bugfix" => vec![
-                                                        format!("[Workflow: Bugfix — Stage 1/3 (Diagnose)] Locate the root cause and cite exact file:line for: {goal}"),
-                                                        format!("[Workflow: Bugfix — Stage 2/3 (Fix)] Apply the minimal fix and sweep sibling files for the same bug class: {goal}"),
-                                                        format!("[Workflow: Bugfix — Stage 3/3 (Verify)] Run unit tests and confirm no regressions for: {goal}"),
+                                                        format!("[Workflow: Bugfix — Stage 1/3 (Diagnose)] Locate the root cause and cite exact file:line for: {effective_goal}"),
+                                                        format!("[Workflow: Bugfix — Stage 2/3 (Fix)] Apply the minimal fix and sweep sibling files for the same bug class: {effective_goal}"),
+                                                        format!("[Workflow: Bugfix — Stage 3/3 (Verify)] Run unit tests and confirm no regressions for: {effective_goal}"),
                                                     ],
                                                     "contained-dev" => vec![
-                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 1/3 (Plan)] Inspect files and design a safe implementation plan for: {goal}"),
-                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 2/3 (Implement)] Implement changes and run shell verification inside the isolated container for: {goal}"),
-                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 3/3 (Audit)] Verify git diff and summarize changes (use `/rollback` if needed) for: {goal}"),
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 1/3 (Plan)] Inspect files and design a safe implementation plan for: {effective_goal}"),
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 2/3 (Implement)] Implement changes and run shell verification inside the isolated container for: {effective_goal}"),
+                                                        format!("[Workflow: Contained-Dev (📦 Container Sandbox ON) — Stage 3/3 (Audit)] Verify git diff and summarize changes (use `/rollback` if needed) for: {effective_goal}"),
                                                     ],
                                                     "redteam" => vec![
-                                                        format!("[Workflow: Red-Team — Stage 1/3 (Surface)] Map trust boundaries, inputs, and safety gates for: {goal}"),
-                                                        format!("[Workflow: Red-Team — Stage 2/3 (Probe)] Test boundary conditions, injection vectors, and denied paths for: {goal}"),
-                                                        format!("[Workflow: Red-Team — Stage 3/3 (Harden)] Propose or apply hardening fixes and regression tests for: {goal}"),
+                                                        format!("[Workflow: Red-Team — Stage 1/3 (Surface)] Map trust boundaries, inputs, and safety gates for: {effective_goal}"),
+                                                        format!("[Workflow: Red-Team — Stage 2/3 (Probe)] Test boundary conditions, injection vectors, and denied paths for: {effective_goal}"),
+                                                        format!("[Workflow: Red-Team — Stage 3/3 (Harden)] Propose or apply hardening fixes and regression tests for: {effective_goal}"),
+                                                    ],
+                                                    "phi" => vec![
+                                                        phi_arena::build_phi_meta_agent_mission("hunt", Some(effective_goal)).1,
+                                                        format!("Phi Fox Meta-Agent — Stage 2/3 (Cross-Environment Fix & Hardening): Apply fixes or regression tests for any cross-environment issues discovered for: {effective_goal}"),
+                                                        format!("Phi Fox Meta-Agent — Stage 3/3 (Visual & Multi-Terminal Verification): Verify terminal state via `pty_shell` (`list`/`status`), run targeted unit tests, and summarize grounded findings for: {effective_goal}"),
                                                     ],
                                                     _ => vec![
-                                                        format!("[Workflow: Ship — Stage 1/3 (Gate)] Verify formatting, clippy, and unit tests for: {goal}"),
-                                                        format!("[Workflow: Ship — Stage 2/3 (Polish)] Check docs, config examples, and edge cases for: {goal}"),
-                                                        format!("[Workflow: Ship — Stage 3/3 (Summary)] Provide a concise release readiness summary for: {goal}"),
+                                                        format!("[Workflow: Ship — Stage 1/3 (Gate)] Verify formatting, clippy, and unit tests for: {effective_goal}"),
+                                                        format!("[Workflow: Ship — Stage 2/3 (Polish)] Check docs, config examples, and edge cases for: {effective_goal}"),
+                                                        format!("[Workflow: Ship — Stage 3/3 (Summary)] Provide a concise release readiness summary for: {effective_goal}"),
                                                     ],
                                                 };
                                                 let mut iter = stages.into_iter();
@@ -2200,15 +2270,86 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                                 "/phi" | "/arena" => {
-                                    phi_arena_refreshed = Instant::now();
-                                    phi_arena_pane =
-                                        Some(phi_arena::PhiArenaPane::new(cwd.clone()));
-                                    app.add_system_message(
-                                        "🦊 Opened Phi Fox Arena & Debt Slayer (Ctrl+F or Esc to close).",
-                                    );
-                                    with_dashboard_state(&shared_state, |state| {
-                                        state.log(LogLevel::Info, "Opened Phi Fox Arena");
-                                    });
+                                    let sub = arg.trim();
+                                    let (sub_verb, sub_rest) =
+                                        sub.split_once(' ').unwrap_or((sub, ""));
+                                    let sub_lower = sub_verb.to_ascii_lowercase();
+                                    if cmd == "/arena" || sub_lower == "arena" {
+                                        phi_arena_refreshed = Instant::now();
+                                        phi_arena_pane =
+                                            Some(phi_arena::PhiArenaPane::new(cwd.clone()));
+                                        app.add_system_message(
+                                            "🦊 Opened Phi Fox Arena & Meta-Agent Hub (Keys: [m] Meta-Hunt, [s] Screen Audit, [t] Multi-Terminal, [b] Boss Drill, [v] Proof Drill, Esc to close).",
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Opened Phi Fox Arena");
+                                        });
+                                    } else if sub_lower == "status" || sub_lower == "help" {
+                                        let runtime =
+                                            detect_container_runtime().unwrap_or("unavailable");
+                                        app.add_system_message(&format!(
+                                            "🦊 Phi Fox Meta-Agent (`/phi` | `/fox` | `/meta` | `Ctrl+F`):\n  \
+                                             • Visual & Screen Tools: `screen_capture`, `vision_analyze`, `vision_compare`, `computer_screen`, `computer_window`\n  \
+                                             • Multi-Terminal Tools:  `pty_shell` (`list`/`start`/`send`/`read`/`status`/`close`), `process_start`, `process_list`, `process_logs`\n  \
+                                             • Container Runtime:     {runtime} (`container_run`, `container_exec`, `/sandbox on`)\n  \
+                                             • Red-Team Test Server:  `{}` (LAN `{}` · model `{}`)\n  \
+                                             • Commands:\n    \
+                                               `/phi hunt [focus]`     — Launch Cross-Environment Visual & Terminal Bug Hunt\n    \
+                                               `/phi screen [focus]`   — Capture screen & run visual window/UI audit\n    \
+                                               `/phi terminal [focus]` — Enumerate & orchestrate PTY terminal sessions\n    \
+                                               `/phi arena`            — Open interactive Phi Fox Arena (`Ctrl+F`)",
+                                            phi_arena::PHI_TEST_ENDPOINT_PRIMARY,
+                                            phi_arena::PHI_TEST_ENDPOINT_LAN,
+                                            phi_arena::PHI_TEST_MODEL,
+                                        ));
+                                    } else if sub_lower.is_empty() {
+                                        phi_arena_refreshed = Instant::now();
+                                        phi_arena_pane =
+                                            Some(phi_arena::PhiArenaPane::new(cwd.clone()));
+                                        app.add_system_message(
+                                            "🦊 Opened Phi Fox Arena & Meta-Agent Hub (`Ctrl+F`). Press `[m]` for Cross-Environment Bug Hunt, `[s]` for Visual Screen Audit, `[t]` for Multi-Terminal Orchestrator, or run `/phi hunt`, `/phi screen`, `/phi terminal`, `/phi status`.",
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Opened Phi Fox Arena");
+                                        });
+                                    } else {
+                                        let (mode, focus) = match sub_lower.as_str() {
+                                            "hunt" | "bugs" | "env" => ("hunt", Some(sub_rest)),
+                                            "screen" | "visual" | "vision" => {
+                                                ("screen", Some(sub_rest))
+                                            }
+                                            "terminal" | "terminals" | "pty" => {
+                                                ("terminal", Some(sub_rest))
+                                            }
+                                            _ => ("hunt", Some(sub)),
+                                        };
+                                        let (label, prompt) =
+                                            phi_arena::build_phi_meta_agent_mission(mode, focus);
+                                        let task_terminal = task_control
+                                            .snapshot()
+                                            .is_some_and(|live| live.state.is_terminal());
+                                        if app.state != AppState::RunningTask || task_terminal {
+                                            app.add_system_message(&format!(
+                                                "🦊 Launching {label} (visual screen + PTY terminals + container tools pre-activated)..."
+                                            ));
+                                            app.add_user_message(&prompt);
+                                            app.state = AppState::RunningTask;
+                                            let _ = user_input_tx.send(prompt);
+                                        } else {
+                                            let queued_total =
+                                                task_control.enqueue_user_message(prompt);
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.queued_count = queued_total;
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    &format!("Queued {label} (#{queued_total})"),
+                                                );
+                                            });
+                                            app.add_system_message(&format!(
+                                                "🦊 Queued {label} (#{queued_total} in `/queue`)."
+                                            ));
+                                        }
+                                    }
                                 }
                                 "/execute" => {
                                     let _ = user_input_tx.send("/execute".to_string());
@@ -2311,7 +2452,11 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                             }
-                        } else if app.state == AppState::RunningTask {
+                        } else if app.state == AppState::RunningTask
+                            && !task_control
+                                .snapshot()
+                                .is_some_and(|live| live.state.is_terminal())
+                        {
                             // Non-blocking message queue while the agent is processing!
                             app.add_user_message(&input);
                             let count = task_control.enqueue_user_message(&input);
@@ -2329,6 +2474,9 @@ pub fn run_tui_dashboard_with_events(
                                 );
                             });
                         } else {
+                            if app.state == AppState::RunningTask {
+                                app.clear_progress();
+                            }
                             app.add_user_message(&input);
                             let _ = user_input_tx.send(input.clone());
                             with_dashboard_state(&shared_state, |state| {
@@ -2355,16 +2503,31 @@ pub fn run_tui_dashboard_with_events(
                     } else if layout_engine.is_zoomed() {
                         layout_engine.toggle_zoom();
                     } else if app.state == AppState::RunningTask {
-                        // Cancel the in-flight agent task for real: the token
-                        // is shared with the Agent (wired in
-                        // `run_live_agent_tui`) and every cancellation check
-                        // in the agent/tool/streaming paths observes it. The
-                        // bridge resets it before the next task.
-                        cancel_token.store(true, Ordering::Relaxed);
-                        app.add_system_message("⏹ Cancelling current task…");
-                        with_dashboard_state(&shared_state, |state| {
-                            state.log(LogLevel::Warning, "Task cancellation requested (Esc)");
-                        });
+                        if !app.input.is_empty() {
+                            app.input.clear();
+                            app.cursor = 0;
+                            app.status = "Input cleared".into();
+                        } else {
+                            // Cancel the in-flight agent task for real: the token
+                            // is shared with the Agent (wired in
+                            // `run_live_agent_tui`) and every cancellation check
+                            // in the agent/tool/streaming paths observes it. The
+                            // bridge resets it before the next task.
+                            cancel_token.store(true, Ordering::Relaxed);
+                            if task_control
+                                .snapshot()
+                                .is_some_and(|live| live.state.is_terminal())
+                            {
+                                app.clear_progress();
+                            }
+                            app.add_system_message("⏹ Cancelling current task…");
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(LogLevel::Warning, "Task cancellation requested (Esc)");
+                            });
+                        }
+                    } else if app.state == AppState::Chatting && app.input.is_empty() {
+                        quit_armed_at = None;
+                        app.status = "Ready (press q twice or Ctrl+C to quit)".into();
                     } else {
                         app.on_escape();
                     }

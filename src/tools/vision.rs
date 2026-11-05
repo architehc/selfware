@@ -493,6 +493,16 @@ fn resolve_image_data_uri(args: &Value) -> Result<String> {
 /// Validate a file path with tool path policy, open via `O_NONBLOCK | O_NOFOLLOW`
 /// descriptor check, enforce the 20MB size cap, and verify image magic bytes.
 fn read_image_bytes_checked(path: &str, safety: &crate::config::SafetyConfig) -> Result<Vec<u8>> {
+    if crate::tools::screen_capture::is_session_screenshot_path(path) {
+        let meta = std::fs::symlink_metadata(path)
+            .with_context(|| format!("Image file not found: {}", path))?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            anyhow::bail!("Session screenshot path is not a regular file: {}", path);
+        }
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("Failed to open session screenshot: {}", path))?;
+        return read_checked_image_handle(file, path);
+    }
     crate::tools::file::validate_tool_path(path, safety)?;
     let file = crate::tools::file::open_checked_regular(path, safety)?;
     read_checked_image_handle(file, path)

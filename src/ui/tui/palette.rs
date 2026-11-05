@@ -184,9 +184,45 @@ impl CommandPalette {
             PaletteCommand {
                 name: "Agentic workflows".into(),
                 description:
-                    "List SWL/YAML workflows, queue presets (tdd/bugfix/contained-dev), or scaffold (`/workflow`)"
+                    "List SWL/YAML workflows, queue presets (tdd/bugfix/contained-dev/phi), or scaffold (`/workflow`)"
                         .into(),
                 command: "/workflow".into(),
+                category: CommandCategory::Tool,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Phi Fox Arena & Meta-Agent Hub".into(),
+                description:
+                    "Open interactive Phi Fox Arena (`Ctrl+F`) or launch visual/terminal missions (`/phi`)"
+                        .into(),
+                command: "/phi".into(),
+                category: CommandCategory::Tool,
+                shortcut: Some("Ctrl+F".into()),
+            },
+            PaletteCommand {
+                name: "Phi Fox: Cross-Environment Bug Hunt".into(),
+                description:
+                    "Visual screen reader + multi-terminal + container + test-server bug hunt (`/phi hunt`)"
+                        .into(),
+                command: "/phi hunt".into(),
+                category: CommandCategory::Tool,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Phi Fox: Visual Screen & Window Audit".into(),
+                description:
+                    "Capture screen, list windows, and run vision analysis (`/phi screen`)"
+                        .into(),
+                command: "/phi screen".into(),
+                category: CommandCategory::Tool,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Phi Fox: Multi-Terminal Orchestrator".into(),
+                description:
+                    "Enumerate and manage PTY terminal sessions & processes (`/phi terminal`)"
+                        .into(),
+                command: "/phi terminal".into(),
                 category: CommandCategory::Tool,
                 shortcut: None,
             },

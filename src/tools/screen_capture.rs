@@ -154,6 +154,38 @@ pub(crate) fn screenshot_session_dir_in(base: Option<PathBuf>) -> PathBuf {
         .join(session)
 }
 
+/// True when `path` is a regular PNG file directly inside this process's
+/// [`screenshot_session_dir`], with no parent-dir (`..`) traversal or symlink
+/// indirection. Allows `vision_analyze` and `vision_compare` to read default
+/// `screen_capture` / `computer_screen` outputs without requiring the user or
+/// agent to copy them into the workspace first.
+pub(crate) fn is_session_screenshot_path(path: &str) -> bool {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return false;
+    }
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let session_dir = screenshot_session_dir();
+    if candidate.parent() != Some(session_dir.as_path()) {
+        return false;
+    }
+    let Some(name) = candidate.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !name.ends_with(".png") {
+        return false;
+    }
+    match std::fs::symlink_metadata(candidate) {
+        Ok(meta) => meta.file_type().is_file() && !meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
 /// Write `png` to a fresh file in `dir` (created 0700 on Unix; screenshots
 /// can contain anything on screen) and return its path.
 fn write_to_session_dir(dir: &Path, tool: &str, png: &[u8]) -> Result<PathBuf> {
@@ -368,17 +400,115 @@ impl Tool for ScreenCapture {
     }
 }
 
-/// Capture the primary monitor.
+/// Capture the primary monitor, with OS CLI fallbacks if `xcap` fails.
 fn capture_screen() -> Result<image::RgbaImage> {
-    let monitors = xcap::Monitor::all().context("Failed to enumerate monitors")?;
-    let monitor = monitors
-        .into_iter()
-        .find(|m| m.is_primary())
-        .or_else(|| xcap::Monitor::all().ok().and_then(|m| m.into_iter().next()))
-        .context("No monitors found")?;
-    monitor
-        .capture_image()
-        .context("Failed to capture screen image")
+    let xcap_attempt = (|| -> Result<image::RgbaImage> {
+        let monitors = xcap::Monitor::all().context("Failed to enumerate monitors")?;
+        let monitor = monitors
+            .into_iter()
+            .find(|m| m.is_primary())
+            .or_else(|| xcap::Monitor::all().ok().and_then(|m| m.into_iter().next()))
+            .context("No monitors found")?;
+        monitor
+            .capture_image()
+            .context("Failed to capture screen image")
+    })();
+    match xcap_attempt {
+        Ok(img) => Ok(img),
+        Err(xcap_err) => capture_screen_cli_fallback().map_err(|fallback_err| {
+            anyhow::anyhow!(
+                "Failed to capture screen via xcap ({xcap_err}) and OS CLI fallback ({fallback_err})"
+            )
+        }),
+    }
+}
+
+/// OS CLI fallback when `xcap` cannot access the display server directly
+/// (e.g. macOS `screencapture`, Linux `grim`/`scrot`/`import`, Windows PowerShell).
+fn capture_screen_cli_fallback() -> Result<image::RgbaImage> {
+    let tmp = tempfile::Builder::new()
+        .prefix("selfware-cap-")
+        .suffix(".png")
+        .tempfile()
+        .context("Failed to create temporary file for CLI screen capture")?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            crate::computer::SESSION_ENV_VARS,
+        );
+        let status = cmd
+            .arg("-x")
+            .arg(&tmp_path)
+            .status()
+            .context("Failed to execute /usr/sbin/screencapture")?;
+        if !status.success() {
+            anyhow::bail!("/usr/sbin/screencapture exited with {}", status);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let path_str = tmp_path.to_string_lossy().to_string();
+        let candidates: [(&str, &[&str]); 3] = [
+            ("grim", &[&path_str]),
+            ("scrot", &["-o", &path_str]),
+            ("import", &["-window", "root", &path_str]),
+        ];
+        let mut captured = false;
+        for (bin, args) in candidates {
+            let mut cmd = std::process::Command::new(bin);
+            crate::safety::process_env::sanitize_std_command_env_preserve(
+                &mut cmd,
+                crate::computer::SESSION_ENV_VARS,
+            );
+            if let Ok(status) = cmd.args(args).status() {
+                if status.success() && tmp_path.exists() {
+                    captured = true;
+                    break;
+                }
+            }
+        }
+        if !captured {
+            anyhow::bail!("No Linux CLI screenshot tool (grim, scrot, import) succeeded");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = tmp_path.to_string_lossy().replace('\'', "''");
+        let ps_script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             Add-Type -AssemblyName System.Drawing; \
+             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
+             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
+             $g = [System.Drawing.Graphics]::FromImage($bmp); \
+             $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); \
+             $bmp.Save('{escaped}', [System.Drawing.Imaging.ImageFormat]::Png); \
+             $g.Dispose(); $bmp.Dispose();"
+        );
+        let mut cmd = std::process::Command::new("powershell.exe");
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            crate::computer::SESSION_ENV_VARS,
+        );
+        let status = cmd
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+            .status()
+            .context("Failed to execute powershell.exe screen capture")?;
+        if !status.success() {
+            anyhow::bail!("powershell.exe screen capture exited with {}", status);
+        }
+    }
+
+    let bytes = std::fs::read(&tmp_path).context("Failed to read CLI screenshot output")?;
+    let decoded = image::load_from_memory(&bytes)
+        .context("Failed to decode CLI screenshot PNG")?
+        .to_rgba8();
+    Ok(decoded)
 }
 
 /// Capture a window whose title contains `name_substr`.

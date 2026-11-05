@@ -1364,6 +1364,61 @@ impl Agent {
         }
     }
 
+    /// Returns `true` when `task` invokes the Phi Fox meta-agent, visual screen
+    /// reader, or multi-terminal / cross-environment bug hunter so its deferred
+    /// visual, terminal, and container tools are pre-activated in the schema.
+    pub fn is_phi_meta_agent_task(task: &str) -> bool {
+        let lower = task.to_ascii_lowercase();
+        lower.contains("phi fox")
+            || lower.contains("phi meta-agent")
+            || lower.contains("meta-agent")
+            || lower.contains("meta agent")
+            || lower.contains("screen_capture")
+            || lower.contains("vision_analyze")
+            || lower.contains("vision_compare")
+            || lower.contains("pty_shell")
+            || lower.contains("computer_screen")
+            || lower.contains("computer_window")
+            || (lower.contains("phi")
+                && (lower.contains("screen")
+                    || lower.contains("visual")
+                    || lower.contains("terminal")
+                    || lower.contains("environment")
+                    || lower.contains("hunt")))
+    }
+
+    /// Pre-activates the Phi Fox meta-agent tool suite (visual screen capture,
+    /// vision analysis, desktop window/input control, persistent PTY terminals,
+    /// background process management, and container sandboxes).
+    pub fn activate_phi_meta_agent_tools(&mut self) {
+        const PHI_META_AGENT_TOOLS: &[&str] = &[
+            "screen_capture",
+            "vision_analyze",
+            "vision_compare",
+            "computer_screen",
+            "computer_window",
+            "computer_mouse",
+            "computer_keyboard",
+            "browser_screenshot",
+            "pty_shell",
+            "process_start",
+            "process_stop",
+            "process_list",
+            "process_logs",
+            "process_restart",
+            "port_check",
+            "container_run",
+            "container_exec",
+            "container_list",
+            "container_logs",
+            "container_stop",
+            "container_images",
+        ];
+        for tool_name in PHI_META_AGENT_TOOLS {
+            self.tools.activate(tool_name);
+        }
+    }
+
     async fn run_task_in_root(&mut self, task: &str) -> Result<()> {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
@@ -1480,6 +1535,9 @@ impl Agent {
         self.required_task_tools = explicit_task_tools.clone();
         for tool_name in &explicit_task_tools {
             self.tools.activate(tool_name);
+        }
+        if Self::is_phi_meta_agent_task(&task_description) {
+            self.activate_phi_meta_agent_tools();
         }
 
         // Signal ownership lives solely in `main` (the single SIGINT/SIGTERM
@@ -2633,21 +2691,23 @@ impl Agent {
                 }
             }
             self.trim_message_history();
-            // Safe point for the Tasks pane: a requested pause/edit happens
-            // here, between steps, never inside a model or tool call.
-            self.task_control_safe_point().await;
+            if !matches!(state, AgentState::Failed { .. }) {
+                // Safe point for the Tasks pane: a requested pause/edit happens
+                // here, between steps, never inside a model or tool call.
+                self.task_control_safe_point().await;
 
-            // Surface the current step in the live TUI status bar so a
-            // converging run is distinguishable from a stalled one (the TUI had
-            // no step signal — step/iteration never reached it). Reuses the
-            // existing Status event path; a no-op when there is no TUI emitter.
-            // "Step N" only: max_iterations is a safety cap, not the task's
-            // total, so "Step 2/400" read as 0.5% done (TUI log pane, 0.9.1).
-            self.emit_event(AgentEvent::Status {
-                message: step_status_message(self.loop_control.current_step()),
-            });
-            // Hard limits: token budget, USD cost, and wall-clock timeout
-            self.enforce_hard_budgets(task_description).await?;
+                // Surface the current step in the live TUI status bar so a
+                // converging run is distinguishable from a stalled one (the TUI had
+                // no step signal — step/iteration never reached it). Reuses the
+                // existing Status event path; a no-op when there is no TUI emitter.
+                // "Step N" only: max_iterations is a safety cap, not the task's
+                // total, so "Step 2/400" read as 0.5% done (TUI log pane, 0.9.1).
+                self.emit_event(AgentEvent::Status {
+                    message: step_status_message(self.loop_control.current_step()),
+                });
+                // Hard limits: token budget, USD cost, and wall-clock timeout
+                self.enforce_hard_budgets(task_description).await?;
+            }
 
             if self.is_cancelled() {
                 // One shared mapping (AgentError::for_current_shutdown) for
@@ -2723,7 +2783,9 @@ impl Agent {
                                 Ok(has_tool_calls) => break has_tool_calls,
                                 Err(e) => {
                                     if (crate::errors::is_gateway_timeout_error(&e)
-                                        || crate::errors::is_stream_truncated_error(&e))
+                                        || crate::errors::is_stream_truncated_error(&e)
+                                        || (crate::errors::is_call_time_budget_error(&e)
+                                            && self.has_explicit_reasoning_to_step_down()))
                                         && !self.is_cancelled()
                                         && !planning_gateway_step_down
                                     {

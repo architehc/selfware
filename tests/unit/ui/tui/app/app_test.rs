@@ -593,3 +593,26 @@ fn input_is_editable_and_paste_works_while_running_task() {
     assert!(app.input.is_empty());
     assert_eq!(app.cursor, 0);
 }
+
+#[test]
+fn escape_confirmation_state_never_locks_out_typing_paste_or_enter() {
+    let mut app = App::new("qwen3.8-27b");
+    app.on_escape();
+    assert!(matches!(app.state, AppState::Confirming(_)));
+    assert!(app.is_input_editable());
+
+    // Typing a character immediately recovers to Chatting and inserts it.
+    app.on_char('r');
+    assert_eq!(app.state, AppState::Chatting);
+    assert_eq!(app.input, "r");
+
+    // Re-enter Confirming via Esc on empty input, then test paste recovery.
+    app.on_escape();
+    assert!(app.input.is_empty());
+    app.on_escape();
+    assert!(matches!(app.state, AppState::Confirming(_)));
+    let count = app.on_paste("retry task");
+    assert_eq!(count, 10);
+    assert_eq!(app.state, AppState::Chatting);
+    assert_eq!(app.on_enter().as_deref(), Some("retry task"));
+}

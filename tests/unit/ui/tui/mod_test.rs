@@ -687,3 +687,132 @@ fn dashboard_state_defaults_to_yolo_and_refreshes_memory_footprint() {
         "system total RAM should be measured"
     );
 }
+
+#[test]
+fn call_time_cap_abort_alert_sequence_never_freezes_tui_or_locks_input() {
+    use crate::safety::confirm_view::{PermissionPrompt, RiskTag};
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new("qwen3.8-27b");
+    let mut dashboard = DashboardState::default();
+    let mut pending_permission = Some(PermissionPrompt {
+        tool_name: "shell_exec".to_string(),
+        risk: RiskTag::RunsCommand,
+        reason: None,
+        body: vec![],
+        allow_always: true,
+        shell_rule: None,
+        full_view: None,
+    });
+
+    // Simulate an active multi-step autonomous run that hits CALL_TIME_CAP.
+    let events = vec![
+        TuiEvent::AgentStarted,
+        TuiEvent::StatusUpdate {
+            message: "Step 1".to_string(),
+        },
+        TuiEvent::ToolStarted {
+            name: "shell_exec".to_string(),
+        },
+        TuiEvent::AssistantDelta {
+            text: "Investigating workspace...".to_string(),
+        },
+        TuiEvent::AgentError {
+            message:
+                "Step 1 failed: Single model call exceeded agent.max_call_secs=1200s (elapsed 1200s)"
+                    .to_string(),
+        },
+        // Even if a late/out-of-order Step status arrived before RunOutcome,
+        // RunOutcome must leave the TUI in Chatting with progress cleared.
+        TuiEvent::StatusUpdate {
+            message: "Step 1".to_string(),
+        },
+        TuiEvent::RunOutcome {
+            summary: "⚠️ Task aborted (CALL_TIME_CAP): Single model call exceeded agent.max_call_secs=1200s (elapsed 1200s)\n  hint: raise agent.max_call_secs in selfware.toml\n── Run summary ──\n  outcome: failed (CALL_TIME_CAP)".to_string(),
+        },
+    ];
+
+    for ev in events {
+        apply_agent_event(&mut app, &mut pending_permission, &ev);
+        dashboard.process_event(ev);
+    }
+
+    // 1. State must be Chatting, with no dangling progress, permission modal, or active tools.
+    assert_eq!(app.state, AppState::Chatting);
+    assert!(app.task_progress.is_none());
+    assert!(pending_permission.is_none());
+    assert!(dashboard.active_tools.is_empty());
+    assert!(
+        dashboard.status_message.contains("CALL_TIME_CAP"),
+        "dashboard status should surface CALL_TIME_CAP: {}",
+        dashboard.status_message
+    );
+
+    // 2. Render the chat pane to verify the alert is visible and rendering never panics.
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_chat_pane(frame, Rect::new(0, 0, 100, 30), &app, true))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            rendered.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(
+        rendered.contains("CALL_TIME_CAP"),
+        "rendered chat pane must display the CALL_TIME_CAP alert:\n{rendered}"
+    );
+
+    // 3. Pressing Esc after the alert must NEVER lock out keyboard typing, paste, or Enter.
+    app.on_escape();
+    assert!(
+        app.is_input_editable(),
+        "input must remain editable even after Esc"
+    );
+    for ch in "continue".chars() {
+        app.on_char(ch);
+    }
+    assert_eq!(app.state, AppState::Chatting);
+    assert_eq!(app.input, "continue");
+    app.on_paste(" workflow");
+    assert_eq!(app.input, "continue workflow");
+    assert_eq!(app.on_enter().as_deref(), Some("continue workflow"));
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn phi_fox_meta_agent_slash_aliases_and_cross_env_helpers_work() {
+    assert_eq!(
+        resolve_forgiving_slash_command("/fox"),
+        ("/phi", Some("/phi"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/meta"),
+        ("/phi", Some("/phi"))
+    );
+    assert_eq!(
+        resolve_forgiving_slash_command("/phi-fox"),
+        ("/phi", Some("/phi"))
+    );
+
+    assert!(crate::agent::Agent::is_phi_meta_agent_task(
+        "You are Phi Fox, the visual screen-reading and multi-terminal meta-agent."
+    ));
+    assert!(crate::agent::Agent::is_phi_meta_agent_task(
+        "Use screen_capture and pty_shell to inspect terminals"
+    ));
+    assert!(!crate::agent::Agent::is_phi_meta_agent_task(
+        "Rename variable foo to bar in src/lib.rs"
+    ));
+
+    // Windows drive-letter volume mounts in container validation
+    assert!(crate::tools::container::validate_volume_spec(
+        r"C:\Users\ivo\project:/workspace:ro"
+    ));
+    assert!(!crate::tools::container::validate_volume_spec(
+        r"C:\Users\ivo\..\secrets:/workspace"
+    ));
+}

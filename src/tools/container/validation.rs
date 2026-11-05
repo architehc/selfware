@@ -52,14 +52,31 @@ pub fn validate_volume_spec(spec: &str) -> bool {
     if spec.contains(SHELL_METACHARACTERS) {
         return false;
     }
-    let parts: Vec<&str> = spec.splitn(3, ':').collect();
-    let (host, container, opts_valid) = match parts.len() {
-        2 => (parts[0], parts[1], true),
-        3 => (
-            parts[0],
-            parts[1],
+    // Support Windows drive-letter host paths (e.g. `C:\host:/container[:ro]`).
+    let bytes = spec.as_bytes();
+    let has_win_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let (host, rest) = if has_win_drive {
+        let Some(sep_offset) = spec[2..].find(':') else {
+            return false;
+        };
+        let split_at = 2 + sep_offset;
+        (&spec[..split_at], &spec[split_at + 1..])
+    } else {
+        let Some(sep_offset) = spec.find(':') else {
+            return false;
+        };
+        (&spec[..sep_offset], &spec[sep_offset + 1..])
+    };
+    let rest_parts: Vec<&str> = rest.splitn(2, ':').collect();
+    let (container, opts_valid) = match rest_parts.len() {
+        1 => (rest_parts[0], true),
+        2 => (
+            rest_parts[0],
             matches!(
-                parts[2],
+                rest_parts[1],
                 "ro" | "rw" | "z" | "Z" | "ro,z" | "rw,z" | "ro,Z" | "rw,Z"
             ),
         ),
@@ -79,8 +96,8 @@ pub fn is_safe_host_mount(host: &str) -> bool {
         return false;
     }
 
-    // Disallow relative traversal components
-    for seg in clean.split('/') {
+    // Disallow relative traversal components (both Unix `/` and Windows `\`)
+    for seg in clean.split(['/', '\\']) {
         if seg == ".." {
             return false;
         }

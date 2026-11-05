@@ -49,6 +49,8 @@ pub struct MockToolCall {
 pub enum MockResponse {
     /// Return a plain assistant text message.
     Text(String),
+    /// Return a plain assistant text message after a per-response delay.
+    DelayedText { text: String, latency_ms: u64 },
     /// Return an assistant text message with reasoning content.
     TextWithReasoning { content: String, reasoning: String },
     /// Return a response containing tool calls.
@@ -219,6 +221,15 @@ impl MockLlmServerBuilder {
     /// Queue a plain text response. Responses are served in FIFO order.
     pub fn with_response(mut self, text: impl Into<String>) -> Self {
         self.config.responses.push(MockResponse::Text(text.into()));
+        self
+    }
+
+    /// Queue a plain text response with a specific per-response artificial latency (ms).
+    pub fn with_delayed_response(mut self, text: impl Into<String>, latency_ms: u64) -> Self {
+        self.config.responses.push(MockResponse::DelayedText {
+            text: text.into(),
+            latency_ms,
+        });
         self
     }
 
@@ -474,6 +485,17 @@ async fn handle_connection(
 
     match mock_response {
         MockResponse::Text(text) => {
+            if is_streaming {
+                write_sse_text_response(&mut stream, &text, None, config.usage).await?;
+            } else {
+                let body = format_chat_response(&config.model, &text, None, None, config.usage);
+                write_http_response(&mut stream, 200, &body, &[]).await?;
+            }
+        }
+        MockResponse::DelayedText { text, latency_ms } => {
+            if latency_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(latency_ms)).await;
+            }
             if is_streaming {
                 write_sse_text_response(&mut stream, &text, None, config.usage).await?;
             } else {

@@ -2474,10 +2474,42 @@ async fn run_live_agent_tui(mut config: Config) -> Result<()> {
                     format!("{}{}", input, render_attachments(&attachments))
                 };
                 // Run the task — this will emit events to the TUI through event_tx
-                let run_result = agent.run_task(&task).await;
+                let mut run_result = agent.run_task(&task).await;
                 if let Err(e) = &run_result {
                     warn!("Agent failed to run task: {}", e);
                 }
+
+                // If a single turn hit CALL_TIME_CAP (agent.max_call_secs) and the
+                // operator did not cancel the run, automatically compact context
+                // and run one recovery continuation so an autonomous workflow
+                // does not die on a single over-long model call.
+                if run_result.is_err()
+                    && !agent.is_cancelled()
+                    && agent.last_run_failure_mode().is_some_and(|fm| {
+                        fm.kind == crate::agent::failure_mode::FailureKind::CallTimeCap
+                    })
+                {
+                    log_line(
+                        "⚡ CALL_TIME_CAP hit on a single model turn — compacting context and auto-continuing autonomous workflow…".to_string(),
+                    );
+                    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::StatusUpdate {
+                        message: "⚡ Auto-recovering from CALL_TIME_CAP…".to_string(),
+                    });
+                    let target = agent.compaction_threshold();
+                    agent.compress_to_structured_summary(target);
+                    agent.reset_cancellation();
+                    let recovery_task = format!(
+                        "Continue the autonomous workflow for the task below from the current workspace state. \
+                         The previous turn hit the per-call time cap (CALL_TIME_CAP / agent.max_call_secs). \
+                         Keep each turn concise and execute one direct tool call at a time without over-long single-turn generation.\n\n\
+                         Original task:\n{task}"
+                    );
+                    run_result = agent.run_task(&recovery_task).await;
+                    if let Err(e) = &run_result {
+                        warn!("Agent failed on CALL_TIME_CAP recovery continuation: {}", e);
+                    }
+                }
+
                 // End-of-task outcome in the chat + logs, like the CLI's
                 // ✅/⚠️ banner and run summary (the TUI showed none).
                 let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::RunOutcome {

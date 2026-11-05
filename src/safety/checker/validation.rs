@@ -1296,7 +1296,9 @@ impl SafetyChecker {
                 }
                 for key in &["image_path", "image_a", "image_b"] {
                     if let Some(p) = args.get(*key).and_then(|v| v.as_str()) {
-                        self.check_path(p)?;
+                        if !crate::tools::screen_capture::is_session_screenshot_path(p) {
+                            self.check_path(p)?;
+                        }
                     }
                 }
             }
@@ -1307,7 +1309,14 @@ impl SafetyChecker {
                 }
             }
             "computer_screen" => {
-                // Screen capture returns base64 PNG in-memory
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(output_path) = args
+                    .get("output_path")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    self.check_path(output_path)?;
+                }
             }
             "computer_window" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;

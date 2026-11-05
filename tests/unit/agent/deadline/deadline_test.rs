@@ -272,6 +272,50 @@ async fn per_call_cap_abort_is_labelled_call_time_cap_through_the_loop() {
     server.stop().await;
 }
 
+/// When explicit reasoning/thinking is configured in `extra_body` (e.g.
+/// `enable_thinking = true`, `reasoning_effort = "xhigh"`), a single turn that
+/// hits `agent.max_call_secs` (`CALL_TIME_CAP`) automatically steps down
+/// reasoning and retries the turn once so the autonomous workflow completes
+/// without aborting.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn per_call_cap_with_explicit_thinking_steps_down_and_completes_autonomous_workflow() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_delayed_response("too slow first turn", 5_000)
+        .with_response("Completed parser fix cleanly.")
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_call_secs = Some(1);
+    config.agent.streaming = false;
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({
+            "enable_thinking": true,
+            "reasoning_effort": "xhigh"
+        }),
+    );
+    config.extra_body = Some(extra);
+
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent.run_task("Explain the parser fix.").await;
+    assert!(
+        result.is_ok(),
+        "autonomous workflow should recover from single CALL_TIME_CAP turn via step-down retry: {result:?}"
+    );
+    assert_ne!(
+        agent.last_run_failure_mode().map(|fm| fm.kind.clone()),
+        Some(FailureKind::CallTimeCap),
+        "recovered workflow must not end with CALL_TIME_CAP failure mode"
+    );
+    server.stop().await;
+}
+
 // ── completion gates vs the deadline (val083 b2_350000) ──────────────────
 
 /// Rule-5 sweep: the requirements audit is itself a model call. Inside the

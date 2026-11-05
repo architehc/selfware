@@ -512,15 +512,22 @@ impl App {
     }
 
     /// Whether the chat input buffer accepts typing/paste right now.
-    /// Allows typing both when idle (`Chatting`) and while a task is running
-    /// (`RunningTask`) so the operator is never blocked from queuing follow-up
-    /// requests or running slash commands mid-task.
+    /// Allows typing both when idle (`Chatting`), while a task is running
+    /// (`RunningTask`), and if an exit confirmation (`Confirming`) was
+    /// triggered by `Esc`, so the operator is never locked out of typing.
     pub fn is_input_editable(&self) -> bool {
-        matches!(self.state, AppState::Chatting | AppState::RunningTask)
+        matches!(
+            self.state,
+            AppState::Chatting | AppState::RunningTask | AppState::Confirming(_)
+        )
     }
 
     /// Handle character input
     pub fn on_char(&mut self, c: char) {
+        if matches!(self.state, AppState::Confirming(_)) {
+            self.state = AppState::Chatting;
+            self.status = "Ready".into();
+        }
         if self.is_input_editable() {
             let byte_idx = self.cursor_byte_offset();
             self.input.insert(byte_idx, c);
@@ -534,6 +541,10 @@ impl App {
     /// normalizing embedded newlines/CRs into spaces so multi-line pastes never
     /// prematurely submit partial lines. Returns the number of characters inserted.
     pub fn on_paste(&mut self, text: &str) -> usize {
+        if matches!(self.state, AppState::Confirming(_)) {
+            self.state = AppState::Chatting;
+            self.status = "Ready".into();
+        }
         let normalized: String = text
             .chars()
             .map(|ch| match ch {
@@ -564,6 +575,10 @@ impl App {
 
     /// Handle backspace
     pub fn on_backspace(&mut self) {
+        if matches!(self.state, AppState::Confirming(_)) {
+            self.state = AppState::Chatting;
+            self.status = "Ready".into();
+        }
         if self.is_input_editable() && self.cursor > 0 {
             self.cursor -= 1;
             let byte_idx = self.cursor_byte_offset();
@@ -608,6 +623,10 @@ impl App {
 
     /// Handle enter key
     pub fn on_enter(&mut self) -> Option<String> {
+        if matches!(self.state, AppState::Confirming(_)) {
+            self.state = AppState::Chatting;
+            self.status = "Ready".into();
+        }
         if self.state == AppState::Palette {
             if let Some(cmd) = self.palette.selected_command() {
                 self.state = AppState::Chatting;

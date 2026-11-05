@@ -790,7 +790,9 @@ impl Agent {
             Err(e) => e,
         };
         if (crate::errors::is_gateway_timeout_error(&first_err)
-            || crate::errors::is_stream_truncated_error(&first_err))
+            || crate::errors::is_stream_truncated_error(&first_err)
+            || (crate::errors::is_call_time_budget_error(&first_err)
+                && self.has_explicit_reasoning_to_step_down()))
             && !self.is_cancelled()
         {
             self.force_non_streaming = false;
@@ -912,6 +914,18 @@ impl Agent {
         let mut probe =
             serde_json::Value::Object(self.config.extra_body.clone().unwrap_or_default());
         crate::api::client::apply_reasoning_step_down(&mut probe, &self.config.model)
+    }
+
+    /// True when the session explicitly configured `extra_body` reasoning/thinking
+    /// settings (e.g. `enable_thinking = true` or `reasoning_effort = "xhigh"`)
+    /// that `ThinkingMode::StepDown` can lower or disable after a single turn
+    /// hits `CallTimeBudgetExceeded` (`CALL_TIME_CAP`).
+    pub(super) fn has_explicit_reasoning_to_step_down(&self) -> bool {
+        self.config
+            .extra_body
+            .as_ref()
+            .is_some_and(|eb| !eb.is_empty())
+            && self.reasoning_step_down_plan().is_some()
     }
 
     /// One model call for the main turn (streaming with non-streaming

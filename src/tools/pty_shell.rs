@@ -109,6 +109,9 @@ pub struct PtySession {
     /// Terminal dimensions (informational only; no real PTY resize).
     cols: u16,
     rows: u16,
+    /// Snapshot of the last command's combined output so `action: "read"` can
+    /// inspect the latest terminal buffer even on non-Unix per-command spawns.
+    last_output: String,
 }
 
 impl PtySession {
@@ -266,6 +269,7 @@ impl PtySession {
             last_activity: now,
             cols: 80,
             rows: 24,
+            last_output: String::new(),
         };
 
         // Synchronize the trusted Unix supervisor before accepting commands.
@@ -519,9 +523,20 @@ impl PtySession {
         self.drain_stderr_into(&mut stderr_bytes, &mut stderr_truncated)
             .await;
 
+        let stdout_str = format_captured_output(&stdout_bytes, stdout_truncated, None);
+        let stderr_str =
+            format_captured_output(&stderr_bytes, stderr_truncated, Some(MAX_STDERR_LINES));
+        self.last_output = if stderr_str.is_empty() {
+            stdout_str.clone()
+        } else if stdout_str.is_empty() {
+            format!("[stderr] {stderr_str}")
+        } else {
+            format!("{stdout_str}\n[stderr] {stderr_str}")
+        };
+
         Ok(CommandOutput {
-            stdout: format_captured_output(&stdout_bytes, stdout_truncated, None),
-            stderr: format_captured_output(&stderr_bytes, stderr_truncated, Some(MAX_STDERR_LINES)),
+            stdout: stdout_str,
+            stderr: stderr_str,
             exit_code,
             timed_out: false,
         })
@@ -690,9 +705,18 @@ impl PtySession {
             }
         };
 
+        let stdout_str = format_bounded_output(&stdout);
+        let stderr_str = format_bounded_output(&stderr);
+        self.last_output = if stderr_str.is_empty() {
+            stdout_str.clone()
+        } else if stdout_str.is_empty() {
+            format!("[stderr] {stderr_str}")
+        } else {
+            format!("{stdout_str}\n[stderr] {stderr_str}")
+        };
         Ok(CommandOutput {
-            stdout: format_bounded_output(&stdout),
-            stderr: format_bounded_output(&stderr),
+            stdout: stdout_str,
+            stderr: stderr_str,
             exit_code: status.code().unwrap_or(-1),
             timed_out: false,
         })
@@ -863,6 +887,9 @@ impl PtySession {
         if !stderr.is_empty() {
             output.push_str("\n[stderr] ");
             output.push_str(&stderr);
+        }
+        if output.is_empty() && !self.last_output.is_empty() {
+            return Ok(std::mem::take(&mut self.last_output));
         }
         Ok(output)
     }
@@ -1378,7 +1405,7 @@ impl Tool for PtyShellTool {
          working directory; each other command runs in an isolated child shell, so environment, \
          aliases, functions and traps do not carry into later calls. \
          Supports multiple concurrent sessions with automatic idle cleanup. \
-         Actions: start, send, read, resize, status, close."
+         Actions: start, send, read, resize, status, list, close."
     }
 
     fn schema(&self) -> Value {
@@ -1387,12 +1414,12 @@ impl Tool for PtyShellTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "send", "read", "resize", "status", "close"],
-                    "description": "Action to perform on the session"
+                    "enum": ["start", "send", "read", "resize", "status", "list", "close"],
+                    "description": "Action to perform on the session ('list' returns all active sessions)"
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Session ID (required for all actions except 'start')"
+                    "description": "Session ID (required for all actions except 'start' and 'list')"
                 },
                 "command": {
                     "type": "string",
@@ -1432,6 +1459,7 @@ impl Tool for PtyShellTool {
             "read" => self.handle_read(args).await,
             "resize" => self.handle_resize(args).await,
             "status" => self.handle_status(args).await,
+            "list" => self.handle_list().await,
             "close" => self.handle_close(args).await,
             other => bail!("Unknown pty_shell action: {}", other),
         }
@@ -1630,6 +1658,41 @@ impl PtyShellTool {
             "cwd": session.cwd.display().to_string(),
             "cols": session.cols,
             "rows": session.rows
+        }))
+    }
+
+    async fn handle_list(&self) -> Result<Value> {
+        let entries: Vec<(String, SharedPtySession)> = {
+            let sessions = SESSIONS.read().await;
+            sessions
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        let mut list = Vec::with_capacity(entries.len());
+        for (session_id, shared) in entries {
+            if let Ok(mut session) = shared.try_lock() {
+                list.push(serde_json::json!({
+                    "session_id": session_id,
+                    "alive": session.is_alive(),
+                    "idle_secs": session.last_activity.elapsed().as_secs(),
+                    "age_secs": session.created_at.elapsed().as_secs(),
+                    "cwd": session.cwd.display().to_string(),
+                    "cols": session.cols,
+                    "rows": session.rows,
+                    "busy": false
+                }));
+            } else {
+                list.push(serde_json::json!({
+                    "session_id": session_id,
+                    "busy": true
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "active_sessions": list.len(),
+            "max_sessions": MAX_SESSIONS,
+            "sessions": list
         }))
     }
 

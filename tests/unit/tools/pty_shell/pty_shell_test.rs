@@ -1212,3 +1212,39 @@ async fn pty_git_in_an_untrusted_repository_runs_nothing_it_configured() {
         .execute(serde_json::json!({ "action": "close", "session_id": &session_id }))
         .await;
 }
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn test_list_action_enumerates_active_sessions() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool::new();
+    let empty_list = tool
+        .execute(serde_json::json!({ "action": "list" }))
+        .await
+        .unwrap();
+    assert_eq!(empty_list["active_sessions"], 0);
+    assert_eq!(empty_list["sessions"].as_array().unwrap().len(), 0);
+
+    let started = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+
+    let list_after_start = tool
+        .execute(serde_json::json!({ "action": "list" }))
+        .await
+        .unwrap();
+    assert_eq!(list_after_start["active_sessions"], 1);
+    let sessions = list_after_start["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session_id"], session_id);
+    assert_eq!(sessions[0]["alive"], true);
+    assert_eq!(sessions[0]["busy"], false);
+
+    let _ = tool
+        .execute(serde_json::json!({ "action": "close", "session_id": &session_id }))
+        .await;
+}
