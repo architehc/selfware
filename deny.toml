@@ -28,16 +28,9 @@ ignore = [
     "RUSTSEC-2024-0436",
     # (withdrawn) advisory no longer in RustSec DB; added when ignoring unmaintained transitive deps
     "RUSTSEC-2025-0435",
-    # quinn-proto DoS via invalid QUIC transport parameters (CVE-2026-31812); patched in >= 0.11.14
-    "RUSTSEC-2026-0037",
     # rand 0.9.x/0.10.x: unsound only with a custom logger calling rand::rng().
     # We do not invoke rand from a custom logger; not exploitable in our use.
     "RUSTSEC-2026-0097",
-    # quick-xml 0.30: only a BUILD dependency of xcb (parses xcb's own
-    # bundled protocol XML at build time; not attacker-controlled input).
-    # The runtime quick-xml via plist/syntect is 0.41.0 (fixed).
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
     # h2 0.3.27 (empty DATA frames DoS, low severity): only reachable via
     # hyper 0.14/axum 0.6/tonic 0.9 from opentelemetry-otlp 0.14; patched
     # solely in h2 >= 0.4.16 and our 0.4 copy is now 0.4.19. Dropping the
